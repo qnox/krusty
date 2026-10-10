@@ -150,6 +150,18 @@ prints them: a value as it is, and a free-form map's key as written in the file,
 quotes, neither escaped (`tests/cases/settings/hostile-strings.case`). Keys are matched as written
 too: a quoted key keeps its escapes.
 
+Whole commands are compared too: `tests/support/command.rs` runs `krusty-toolchain` and `kotlin`
+with the same arguments in the same case and requires the same exit status, stdout and stderr,
+byte for byte, once each run's project directory is replaced by one placeholder. `show modules`
+(`tests/project_cases.rs`) is compared on a clean project in each format, a warning, an error in the
+project file, an error in a module file and two modules with one name; `show settings`
+(`tests/settings_cases.rs`) on a clean project with and without `-m`, warnings, errors, and
+`--all-modules`, `-m`, no selection and an unknown module among several. This holds krusty-toolchain
+to the toolchain's rendering (`src/report.rs`, after its `RichTerminalProblemReporter`): a problem at
+a place is a box quoting the source with the place marked, files are named as they are while the
+project file is read and relative to the project root after, and a command that stops says why on
+a last `ERROR:` line set apart by a blank line.
+
 `tests/cases/dependencies/*.case` are checked with `kotlin show dependencies --all-modules
 --include-tests` on a project that resolves from a local Maven repository (`mavenLocal`):
 `tests/cases/dependencies/repository` (the standard library and the test framework) with the
@@ -159,7 +171,8 @@ and an unreachable proxy, so every artifact a case resolves is in that repositor
 `tests/dependency_cases.rs` runs `krusty-toolchain` in the same layout and requires the same exit
 status, stdout and stderr, byte for byte, once each run's own directory is replaced by the same
 placeholder. Where krusty-toolchain refuses an artifact it cannot read completely, the case's
-`--- krusty-refusal` section holds its errors, `error` and a tab before each rendered line: they
+`--- krusty-refusal` section holds its errors, `error` and a tab before each one in the form the
+toolchain's problems are read back in (`tests/support/rendering.rs`): read back the same way, they
 must be its complete stderr, with exit status 1 and nothing on stdout.
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's

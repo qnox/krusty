@@ -3,13 +3,13 @@
 //! Commands read the project as JetBrains' `kotlin` command reads it and report the same problems;
 //! what krusty-toolchain does not implement is refused by name rather than approximated.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use krusty_toolchain::configuration;
 use krusty_toolchain::dependencies;
 use krusty_toolchain::diagnostic::{Diagnostics, Severity};
-use krusty_toolchain::model::{self, Model, Start};
+use krusty_toolchain::model::{self, Model, Problems, Start, Stopped};
+use krusty_toolchain::report;
 use krusty_toolchain::show;
 
 const USAGE: &str =
@@ -126,22 +126,40 @@ fn parse(arguments: &[String]) -> Result<Command, String> {
     }
 }
 
-fn run(command: Command) -> Result<bool, String> {
+/// Why a command failed, as the toolchain says it.
+enum Failure {
+    /// The problems reported say why; the toolchain prints nothing more.
+    Reported,
+    /// The project file has errors, reported above.
+    ProjectFile,
+    /// A module file or a module's configuration has errors, reported above.
+    Model,
+    /// A mistake by the user that is not a problem in a file, such as an unknown module name.
+    User(String),
+}
+
+fn run(command: Command) -> Result<(), Failure> {
     let current = std::env::current_dir()
-        .map_err(|error| format!("cannot read the current directory: {error}"))?;
+        .map_err(|error| Failure::User(format!("cannot read the current directory: {error}")))?;
     let start = match &command.project_dir {
         Some(root) => Start::Root(root),
         None => Start::Discover(&current),
     };
-    let mut diagnostics = Diagnostics::default();
-    let model = model::read(start, &mut diagnostics);
-    report(&diagnostics);
-    let Some(model) = model? else {
-        if !diagnostics.has_errors() {
-            return Err("no Kotlin project found in the current directory or above: no project.yaml or module.yaml".to_string());
-        }
-        return Ok(false);
-    };
+    let mut problems = Problems::default();
+    let read = model::read(start, &mut problems);
+    // The project file is read before the project's root is known, so its files are named as they
+    // are; the modules' are named relative to the root.
+    report(&problems.project_file, None);
+    report(&problems.modules, problems.root.as_deref());
+    let model = read.map_err(|stopped| match stopped {
+        Stopped::NoProject => Failure::User(
+            "no Kotlin project found in the current directory or above: no project.yaml or module.yaml".to_string(),
+        ),
+        Stopped::ProjectFile => Failure::ProjectFile,
+        Stopped::Modules => Failure::Model,
+        Stopped::NotUnique(message) | Stopped::Failed(message) => Failure::User(message),
+    })?;
+    let root = model.project.root.clone();
     match command.show {
         Show::Modules(Format::Table) => print!("{}", show::modules_table(&model.modules)),
         Show::Modules(Format::Plain) => {
@@ -149,48 +167,69 @@ fn run(command: Command) -> Result<bool, String> {
                 println!("{name}");
             }
         }
-        Show::Settings(selection) => return show_settings(&model, &selection),
+        Show::Settings(selection) => {
+            let shown = selected(&model, &selection)?;
+            print!(
+                "{}",
+                show::modules_settings(&model.modules, &model.configured, |module| {
+                    shown.contains(&module.name.as_str())
+                })
+            );
+        }
         Show::Dependencies {
             modules,
             include_tests,
-        } => return show_dependencies(&model, &modules, include_tests),
+        } => {
+            let shown = selected(&model, &modules)?;
+            let mut diagnostics = Diagnostics::default();
+            let output = dependencies::show(
+                &model,
+                |module| shown.contains(&module.name.as_str()),
+                include_tests,
+                &mut diagnostics,
+            )
+            .map_err(Failure::User)?;
+            report(&diagnostics, Some(&root));
+            if diagnostics.has_errors() {
+                return Err(Failure::Reported);
+            }
+            print!("{output}");
+        }
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Print problems where the toolchain prints them: errors on stderr, warnings on stdout before the
-/// command's result.
-fn report(diagnostics: &Diagnostics) {
+/// command's result. Files are named relative to `root` when it is given.
+fn report(diagnostics: &Diagnostics, root: Option<&Path>) {
     for diagnostic in diagnostics.iter() {
+        let rendered = report::render(diagnostic, root);
         match diagnostic.severity {
-            Severity::Error => eprintln!("{diagnostic}"),
-            Severity::Warning | Severity::WeakWarning => println!("{diagnostic}"),
+            Severity::Error => eprintln!("{rendered}"),
+            Severity::Warning | Severity::WeakWarning => println!("{rendered}"),
         }
     }
 }
 
 /// The modules `selection` names (every module when `all`, or when there is only one), in the
 /// project's order.
-fn selected<'m>(model: &'m Model, selection: &Selection) -> Result<Vec<&'m str>, String> {
+fn selected<'m>(model: &'m Model, selection: &Selection) -> Result<Vec<&'m str>, Failure> {
     let Selection { names, all } = selection;
     if names.is_empty() && !all && model.modules.len() > 1 {
-        return Err("Please specify the module(s) to inspect with -m, or use --all-modules to inspect all modules".to_string());
+        return Err(Failure::User("Please specify the module(s) to inspect with --module, or use --all-modules to inspect all modules".to_string()));
     }
-    let unknown: Vec<&String> = names
+    let unknown: Vec<&str> = names
         .iter()
         .filter(|name| !model.modules.iter().any(|module| module.name == **name))
+        .map(String::as_str)
         .collect();
     if !unknown.is_empty() {
         let available = show::module_names(&model.modules);
-        return Err(format!(
+        return Err(Failure::User(format!(
             "Couldn't find module(s) named: {}\nAvailable modules: - {}",
-            unknown
-                .iter()
-                .map(|name| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
+            unknown.join(", "),
             available.join("\n- ")
-        ));
+        )));
     }
     Ok(model
         .modules
@@ -198,53 +237,6 @@ fn selected<'m>(model: &'m Model, selection: &Selection) -> Result<Vec<&'m str>,
         .filter(|module| *all || names.is_empty() || names.contains(&module.name))
         .map(|module| module.name.as_str())
         .collect())
-}
-
-/// Print the settings of the selected modules.
-fn show_settings(model: &Model, selection: &Selection) -> Result<bool, String> {
-    let shown = selected(model, selection)?;
-    let mut diagnostics = Diagnostics::default();
-    let configured =
-        configuration::configure(&model.project.root, &model.modules, &mut diagnostics);
-    let output = show::modules_settings(&model.modules, &configured, |module| {
-        shown.contains(&module.name.as_str())
-    });
-    report(&diagnostics);
-    if diagnostics.has_errors() {
-        return Ok(false);
-    }
-    print!("{output}");
-    Ok(true)
-}
-
-/// Print the resolved dependency graphs of the selected modules: main, then with `include_tests`
-/// test, each for the compile and the runtime classpath.
-fn show_dependencies(
-    model: &Model,
-    selection: &Selection,
-    include_tests: bool,
-) -> Result<bool, String> {
-    let shown = selected(model, selection)?;
-    let mut diagnostics = Diagnostics::default();
-    let configured =
-        configuration::configure(&model.project.root, &model.modules, &mut diagnostics);
-    if diagnostics.has_errors() {
-        report(&diagnostics);
-        return Ok(false);
-    }
-    let output = dependencies::show(
-        model,
-        &configured,
-        |module| shown.contains(&module.name.as_str()),
-        include_tests,
-        &mut diagnostics,
-    )?;
-    report(&diagnostics);
-    if diagnostics.has_errors() {
-        return Ok(false);
-    }
-    print!("{output}");
-    Ok(true)
 }
 
 fn main() -> ExitCode {
@@ -256,12 +248,19 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(command) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
-        Err(message) => {
-            eprintln!("ERROR: {message}");
-            ExitCode::FAILURE
+    let Err(failure) = run(command) else {
+        return ExitCode::SUCCESS;
+    };
+    // The toolchain sets the line saying why it stopped apart from what it printed before.
+    match failure {
+        Failure::Reported => {}
+        Failure::ProjectFile => eprintln!(
+            "\nERROR: Aborting because there were errors in the Kotlin project file, please see above."
+        ),
+        Failure::Model => {
+            eprintln!("\nERROR: failed to read Kotlin project model, refer to the errors above")
         }
+        Failure::User(message) => eprintln!("\nERROR: {message}"),
     }
+    ExitCode::FAILURE
 }

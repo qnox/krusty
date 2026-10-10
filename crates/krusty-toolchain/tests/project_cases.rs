@@ -4,27 +4,17 @@
 //! are in `tests/cases/projects`; the toolchain's output comes from the cached oracle
 //! (`tests/support/oracle.rs`).
 
+#[path = "support/command.rs"]
+mod command;
 #[path = "support/reported.rs"]
 mod reported;
 mod support;
 
-use std::path::Path;
-use std::process::{Command, Output};
-
-use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{model, show};
-use reported::reported;
+use reported::reported_reading;
 use support::kotlin::{self, Invocation};
 use support::rendering::problems;
 use support::{ExpectedDiagnostic, ExpectedSeverity, KrustyExpected};
-
-fn run_toolchain(root: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"))
-        .arg(format!("--project-dir={}", root.display()))
-        .args(["show", "modules"])
-        .output()
-        .expect("run krusty-toolchain")
-}
 
 #[test]
 fn every_project_case_is_read_as_the_toolchain_reads_it() {
@@ -53,10 +43,9 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
         let (warnings, result) = problems(&toolchain.root, &toolchain.stdout);
         let temp = support::TempDir::new(&format!("project-case-{name}"));
         let root = support::materialize(&temp, &case.files);
-        let mut diagnostics = Diagnostics::default();
-        let model = model::read(model::Start::Discover(&root), &mut diagnostics)
-            .unwrap_or_else(|error| panic!("{name}: {error}"));
-        let actual = reported(&root, &diagnostics);
+        let mut problems = model::Problems::default();
+        let read = model::read(model::Start::Discover(&root), &mut problems);
+        let actual = reported_reading(&root, &problems, read.as_ref().err());
         match &case.krusty {
             Some(krusty) => {
                 let expected = match krusty {
@@ -102,7 +91,8 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
                     ));
                 }
                 // The command's result, byte for byte: the module table, or nothing.
-                let printed = model
+                let printed = read
+                    .ok()
                     .map(|model| show::modules_table(&model.modules).into_bytes())
                     .unwrap_or_default();
                 if printed != result {
@@ -118,54 +108,21 @@ fn every_project_case_is_read_as_the_toolchain_reads_it() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// `show modules` run whole does what `kotlin show modules` does: a clean success in each
+/// format, a success with a warning before the table, a failure in the project file, a failure in
+/// a module file and two modules with one name (`support/command.rs`).
 #[test]
-fn the_command_routes_warnings_before_its_result_on_stdout() {
-    let temp = support::TempDir::new("command-warning-stream");
-    let root = support::materialize(
-        &temp,
-        &[("project.yaml".to_string(), "modules: []\n".to_string())],
-    );
-
-    let output = run_toolchain(&root);
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stderr, b"");
-    assert_eq!(
-        output.stdout,
-        format!(
-            "{}:1:1: WARNING: Project has no modules: no root module file and no modules listed in the project file\n{}",
-            root.join("project.yaml").display(),
-            show::modules_table(&[])
-        )
-        .into_bytes()
-    );
-}
-
-#[test]
-fn the_command_routes_errors_to_stderr_and_fails_without_a_result() {
-    let temp = support::TempDir::new("command-error-stream");
-    let root = support::materialize(
-        &temp,
+fn every_modules_command_does_what_the_toolchain_does() {
+    let differences = command::differences(
+        "projects",
         &[
-            (
-                "project.yaml".to_string(),
-                "modules: [a]\nunknown: value\n".to_string(),
-            ),
-            (
-                "a/module.yaml".to_string(),
-                "product: jvm/lib\n".to_string(),
-            ),
+            ("plain-paths", &["show", "modules"]),
+            ("plain-paths", &["show", "modules", "--format=plain"]),
+            ("empty-modules-list", &["show", "modules"]),
+            ("module-and-project-errors", &["show", "modules"]),
+            ("module-unknown-product", &["show", "modules"]),
+            ("duplicate-names", &["show", "modules"]),
         ],
     );
-
-    let output = run_toolchain(&root);
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(output.stdout, b"");
-    assert_eq!(
-        output.stderr,
-        format!(
-            "{}:2:1: ERROR: Unknown property `unknown`\n",
-            root.join("project.yaml").display()
-        )
-        .into_bytes()
-    );
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
 }

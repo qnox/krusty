@@ -64,6 +64,14 @@ fn position(marker: saphyr_parser::Marker) -> Position {
 }
 
 impl Span {
+    /// The empty range at `position`, for a problem a parser places at one point.
+    pub fn point(position: Position) -> Self {
+        Span {
+            start: position,
+            end: position,
+        }
+    }
+
     fn from_parser(span: ParserSpan) -> Self {
         Span {
             start: position(span.start),
@@ -543,9 +551,26 @@ impl Builder<'_> {
             Open::Sequence(id, items) => (id, NodeKind::Sequence(items)),
             Open::Mapping(id, entries, _) => (id, NodeKind::Mapping(entries)),
         };
+        let event = Span::from_parser(span);
+        // A flow collection's end event starts at its closing bracket, where it ends. A block
+        // collection's is empty and stands at the next token, past blank lines and comments: it
+        // ends with its last entry.
+        let last = match &kind {
+            NodeKind::Sequence(items) => items.last().copied(),
+            NodeKind::Mapping(entries) => entries.last().map(|&(_, value)| value),
+            NodeKind::Scalar { .. } => None,
+        };
+        let end = match last {
+            Some(last) if event.start == event.end => self.nodes[last.0 as usize].span.end,
+            _ if event.start == event.end => event.end,
+            _ => Position {
+                line: event.start.line,
+                column: event.start.column + 1,
+            },
+        };
         let node = &mut self.nodes[id.0 as usize];
         node.kind = kind;
-        node.span.end = Span::from_parser(span).end;
+        node.span.end = end;
         self.attach(id)
     }
 }
@@ -611,6 +636,29 @@ mod tests {
             document.node(items[1]).span.start,
             Position { line: 4, column: 5 }
         );
+    }
+
+    /// A block collection ends where its last entry ends, as the toolchain marks it, not at the
+    /// next line; a flow collection ends after its closing bracket.
+    #[test]
+    fn a_collection_ends_where_its_text_ends() {
+        let end = |text: &str| {
+            let document = parse(text).unwrap().document;
+            document.node(document.root().unwrap()).span.end
+        };
+        assert_eq!(
+            end("modules: []\n"),
+            Position {
+                line: 1,
+                column: 12
+            }
+        );
+        assert_eq!(
+            end("a:\n  b: 1\n\n# done\n"),
+            Position { line: 2, column: 7 }
+        );
+        assert_eq!(end("- x\n- [y, z]   \n"), Position { line: 2, column: 9 });
+        assert_eq!(end("{a: 1}\n"), Position { line: 1, column: 7 });
     }
 
     #[test]

@@ -116,7 +116,7 @@ impl ModuleFiles {
                 continue;
             }
             let message = conflicts::message(conflict, selected, &self.files);
-            reported.push(Diagnostic::project_error(message), diagnostics);
+            reported.push(Diagnostic::conflict(message), diagnostics);
         }
         tree::resolve(&mut refined);
         let mut missing = Diagnostics::default();

@@ -55,13 +55,13 @@ pub(super) fn read(
             };
             if !path.is_file() {
                 let shown = path.strip_prefix(&base).unwrap_or(&path).to_path_buf();
-                let position = match trace {
-                    Trace::File { position, .. } => Some(position),
+                let span = match trace {
+                    Trace::File { span, .. } => Some(span),
                     _ => None,
                 };
                 diagnostics.push(Diagnostic::error(
                     files.path(file),
-                    position,
+                    span,
                     format!("Cannot find template file `{}`", shown.display()),
                 ));
                 continue;

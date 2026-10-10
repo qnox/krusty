@@ -228,11 +228,11 @@ fn product_type(reader: &mut FileReader<'_>, node: NodeId) -> Option<ProductType
             if let Err(error) = &plugin_file {
                 reader.error(node, error.to_string());
             } else if plugin_file.ok().flatten() != Some(Kind::File) {
-                let position = reader.position(node);
+                let span = reader.span(node);
                 reader.diagnostics.push(Diagnostic::warning(
                     Severity::Warning,
                     &reader.file,
-                    Some(position),
+                    Some(span),
                     "`plugin.yaml` file is missing in the plugins module directory, so it will have no effect when enabled",
                 ));
             }

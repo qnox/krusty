@@ -106,19 +106,16 @@ pub fn load(start: &Path, diagnostics: &mut Diagnostics) -> Result<Option<Projec
     Ok(Some(project))
 }
 
-/// A module is named after its directory, and no two modules may share a name.
-pub fn check_unique_names(project: &Project, diagnostics: &mut Diagnostics) {
+/// A module is named after its directory, and no two modules may share a name: the message for
+/// the first name two share.
+pub fn check_unique_names(project: &Project) -> Result<(), String> {
     let name = |file: &PathBuf| {
         file.parent()
             .and_then(Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
     };
-    let mut reported: Vec<String> = Vec::new();
     for file in &project.modules {
         let Some(module) = name(file) else { continue };
-        if reported.contains(&module) {
-            continue;
-        }
         let declared: Vec<String> = project
             .modules
             .iter()
@@ -126,13 +123,13 @@ pub fn check_unique_names(project: &Project, diagnostics: &mut Diagnostics) {
             .map(|other| other.display().to_string())
             .collect();
         if declared.len() > 1 {
-            diagnostics.push(Diagnostic::project_error(format!(
+            return Err(format!(
                 "Module name '{module}' is not unique, it's declared in:\n{}",
                 declared.join("\n")
-            )));
-            reported.push(module);
+            ));
         }
     }
+    Ok(())
 }
 
 /// Read the project whose root is `root` (`--project-dir`), without looking above it. `Ok(None)`
@@ -210,12 +207,12 @@ fn read_project(root: &Path, diagnostics: &mut Diagnostics) -> Result<Project, S
             }
         }
     }
-    let file_position = document.root().map(|top| reader.position(top));
+    let file_span = document.root().map(|top| reader.span(top));
     if modules.is_empty() {
         reader.diagnostics.push(Diagnostic::warning(
             Severity::Warning,
             &project_file,
-            file_position,
+            file_span,
             "Project has no modules: no root module file and no modules listed in the project file",
         ));
     }
@@ -226,11 +223,11 @@ fn read_project(root: &Path, diagnostics: &mut Diagnostics) -> Result<Project, S
     let mut sorted = listed.clone();
     sorted.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
     if let Some(node) = modules_node.filter(|_| sorted != listed) {
-        let position = reader.position(node);
+        let span = reader.span(node);
         reader.diagnostics.push(Diagnostic::warning(
             Severity::WeakWarning,
             &project_file,
-            Some(position),
+            Some(span),
             "It is recommended to sort the `modules` list alphabetically. This reduces the chance of Git conflicts and makes it easier to visually locate a module in the list.",
         ));
     }
@@ -371,11 +368,11 @@ fn resolve_entry(
         return Ok(Vec::new());
     }
     if directory == root {
-        let position = reader.position(node);
+        let span = reader.span(node);
         reader.diagnostics.push(Diagnostic::warning(
             Severity::WeakWarning,
             &reader.file,
-            Some(position),
+            Some(span),
             "The root module is included by default",
         ));
         return Ok(Vec::new());
@@ -491,11 +488,11 @@ fn resolve_glob(
         }
     }
     if found.is_empty() {
-        let position = reader.position(node);
+        let span = reader.span(node);
         reader.diagnostics.push(Diagnostic::warning(
             Severity::WeakWarning,
             &reader.file,
-            Some(position),
+            Some(span),
             format!("Glob pattern `{entry}` doesn't match any Kotlin module directory under the project root"),
         ));
     }

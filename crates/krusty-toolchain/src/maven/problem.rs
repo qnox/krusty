@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::Diagnostic;
-use crate::yaml::Position;
+use crate::yaml::{Position, Span};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Problem {
@@ -36,7 +36,7 @@ impl Problem {
     /// The error a command reports for it.
     pub fn diagnostic(&self) -> Diagnostic {
         match &self.file {
-            Some(file) => Diagnostic::error(file, self.position, &self.message),
+            Some(file) => Diagnostic::error(file, self.position.map(Span::point), &self.message),
             None => Diagnostic::project_error(&self.message),
         }
     }

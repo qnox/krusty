@@ -7,7 +7,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::yaml::Position;
+use crate::yaml::Span;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -33,16 +33,20 @@ pub struct Diagnostic {
     /// The file the problem is in; `None` for a problem with the project as a whole.
     pub file: Option<PathBuf>,
     /// Where in `file`; `None` for a problem with the file as a whole.
-    pub position: Option<Position>,
+    pub span: Option<Span>,
+    /// Whether the problem is printed as its message alone, without a severity or a place: a
+    /// conflict between values, which lists the values and their places itself.
+    pub bare: bool,
 }
 
 impl Diagnostic {
-    pub fn error(file: &Path, position: Option<Position>, message: impl Into<String>) -> Self {
+    pub fn error(file: &Path, span: Option<Span>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
             message: message.into(),
             file: Some(file.to_path_buf()),
-            position,
+            span,
+            bare: false,
         }
     }
 
@@ -52,21 +56,31 @@ impl Diagnostic {
             severity: Severity::Error,
             message: message.into(),
             file: None,
-            position: None,
+            span: None,
+            bare: false,
+        }
+    }
+
+    /// A conflict between values: an error printed as its message alone.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            bare: true,
+            ..Self::project_error(message)
         }
     }
 
     pub fn warning(
         severity: Severity,
         file: &Path,
-        position: Option<Position>,
+        span: Option<Span>,
         message: impl Into<String>,
     ) -> Self {
         Self {
             severity,
             message: message.into(),
             file: Some(file.to_path_buf()),
-            position,
+            span,
+            bare: false,
         }
     }
 }
@@ -77,8 +91,8 @@ impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(file) = &self.file {
             write!(f, "{}", file.display())?;
-            if let Some(position) = self.position {
-                write!(f, ":{}:{}", position.line, position.column)?;
+            if let Some(span) = self.span {
+                write!(f, ":{}:{}", span.start.line, span.start.column)?;
             }
             f.write_str(": ")?;
         }

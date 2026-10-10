@@ -8,8 +8,9 @@
 //! Where an artifact cannot be read completely (it is in no repository, its metadata is not
 //! well-formed, no variant or more than one matches, its coordinates name no file), the toolchain
 //! downloads, or logs and prints the graph anyway; krusty-toolchain refuses. Such a case's
-//! `krusty-refusal` section holds the errors krusty-toolchain reports, which must be all it prints:
-//! its complete stderr, with exit status 1, and not what the toolchain does.
+//! `krusty-refusal` section holds the errors krusty-toolchain reports, read back from its rendering
+//! as the toolchain's problems are, which must be all it prints: its complete stderr, with exit
+//! status 1, and not what the toolchain does.
 
 mod support;
 
@@ -48,9 +49,10 @@ fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
     }
 }
 
-/// What krusty-toolchain does for a case, laid out as the oracle lays out `kotlin`'s run.
-fn krusty_toolchain(name: &str, inputs: &Inputs) -> Output {
-    let temp = support::TempDir::new(&format!("dependency-case-{name}"));
+/// What krusty-toolchain does for a case, laid out as the oracle lays out `kotlin`'s run, in a
+/// directory named after `run`: the tests run at once, each in its own directories.
+fn krusty_toolchain(run: &str, inputs: &Inputs) -> Output {
+    let temp = support::TempDir::new(&format!("dependency-{run}"));
     let directory: PathBuf = temp.0.clone();
     let root = support::materialize(&temp, &inputs.project);
     Resolving::write_repository(&directory, &inputs.repository);
@@ -79,6 +81,23 @@ fn placed(directory: &str, bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace(directory, PLACEHOLDER)
 }
 
+/// The problems krusty-toolchain refused with, read back as the toolchain's are, each run's
+/// directory replaced by the placeholder; `None` unless it exited 1 with nothing on stdout and
+/// nothing but problems on stderr.
+fn refusal(actual: &Output) -> Option<Vec<ExpectedDiagnostic>> {
+    let project_root = format!("{}/{}", actual.root, Resolving::PROJECT);
+    let (refused, unread) = problems(&project_root, &actual.stderr);
+    (actual.code == 1 && actual.stdout.is_empty() && unread.is_empty()).then(|| {
+        refused
+            .into_iter()
+            .map(|problem| ExpectedDiagnostic {
+                rendered: placed(&actual.root, problem.rendered.as_bytes()),
+                ..problem
+            })
+            .collect()
+    })
+}
+
 /// krusty-toolchain refusals are repository-owned behavior and remain runnable without the cached
 /// external oracle. Their complete status and streams still have to match the typed case ledger.
 #[test]
@@ -104,35 +123,20 @@ fn every_dependency_refusal_is_exact() {
             }
         }
         let actual = krusty_toolchain(
-            &case.name,
+            &format!("refusal-{}", case.name),
             &Inputs {
                 project,
                 repository,
             },
         );
-        let project = format!("/{}/", Resolving::PROJECT);
-        let relative = |bytes: &[u8]| {
-            placed(
-                &actual.root,
-                String::from_utf8_lossy(bytes)
-                    .replace(&project, "/")
-                    .as_bytes(),
-            )
-        };
-        let expected_stderr: String = refused
-            .iter()
-            .map(|problem| format!("{}\n", problem.rendered))
-            .collect();
-        let expected = (1, String::new(), expected_stderr);
-        let printed = (
-            actual.code,
-            relative(&actual.stdout),
-            relative(&actual.stderr),
-        );
-        if printed != expected {
+        let read = refusal(&actual);
+        if read.as_ref() != Some(refused) {
             failures.push(format!(
-                "{}: got status {} with stdout\n{}stderr\n{}expected status 1 with no stdout and stderr\n{}",
-                case.name, printed.0, printed.1, printed.2, expected.2
+                "{}: got status {} with stdout\n{}stderr\n{}read back as {read:#?}\nexpected status 1, no stdout and {refused:#?}",
+                case.name,
+                actual.code,
+                placed(&actual.root, &actual.stdout),
+                placed(&actual.root, &actual.stderr),
             ));
         }
         let severities: Vec<ExpectedSeverity> =
@@ -189,7 +193,7 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
     let mut failures = Vec::new();
     for ((case, inputs), toolchain) in cases.iter().zip(&inputs).zip(outputs) {
         let name = &case.name;
-        let actual = krusty_toolchain(name, inputs);
+        let actual = krusty_toolchain(&format!("case-{name}"), inputs);
         // The toolchain's problems, read back from its rendering: errors on stderr, which holds
         // nothing else, and warnings on stdout before the graphs.
         let project_root = format!("{}/{}", toolchain.root, Resolving::PROJECT);
@@ -201,7 +205,7 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
             ));
             continue;
         }
-        let (warnings, result) = problems(&project_root, &toolchain.stdout);
+        let (warnings, _) = problems(&project_root, &toolchain.stdout);
         // Each stream holds one kind of problem.
         let mixed: Vec<&ExpectedDiagnostic> = errors
             .iter()
@@ -218,39 +222,23 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
             ));
             continue;
         }
-        let lines = |problems: &[ExpectedDiagnostic]| -> String {
-            problems
-                .iter()
-                .map(|problem| format!("{}\n", problem.rendered))
-                .collect()
-        };
         let expected = (
             toolchain.code,
-            format!("{}{}", lines(&warnings), placed(&toolchain.root, result)),
-            lines(&errors),
+            placed(&toolchain.root, &toolchain.stdout),
+            placed(&toolchain.root, &toolchain.stderr),
         );
-        // krusty-toolchain's, with paths relative to the project as the toolchain's are read back.
-        let relative = |bytes: &[u8]| {
-            let project = format!("{}/{}/", actual.root, Resolving::PROJECT);
-            placed(
-                &actual.root,
-                String::from_utf8_lossy(bytes)
-                    .replace(&project, "")
-                    .as_bytes(),
-            )
-        };
         let printed = (
             actual.code,
-            relative(&actual.stdout),
-            relative(&actual.stderr),
+            placed(&actual.root, &actual.stdout),
+            placed(&actual.root, &actual.stderr),
         );
         match &case.krusty {
             Some(KrustyExpected::Refusal(refused)) => {
-                let refusal = (1, String::new(), lines(refused));
-                if printed != refusal {
+                let read = refusal(&actual);
+                if read.as_ref() != Some(refused) {
                     failures.push(format!(
-                        "{name}: krusty-toolchain exited {} with stdout\n{}\nstderr\n{}\nthe `krusty-refusal` section expects exit 1, no stdout and stderr\n{}",
-                        printed.0, printed.1, printed.2, refusal.2
+                        "{name}: krusty-toolchain exited {} with stdout\n{}\nstderr\n{}\nread back as {read:#?}\nthe `krusty-refusal` section expects exit 1, no stdout and {refused:#?}",
+                        printed.0, printed.1, printed.2
                     ));
                 }
                 let not_errors: Vec<&ExpectedDiagnostic> = refused
@@ -262,7 +250,7 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
                         "{name}: the `krusty-refusal` section must be errors only: {refused:#?}"
                     ));
                 }
-                if expected == refusal {
+                if expected == printed {
                     failures.push(format!(
                         "{name}: the `krusty-refusal` section is what the toolchain does"
                     ));

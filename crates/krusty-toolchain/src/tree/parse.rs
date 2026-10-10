@@ -14,7 +14,7 @@ use crate::schema::dependency_types::{
     UNSCOPED_EXTERNAL_MAVEN, UNSCOPED_MODULE,
 };
 use crate::schema::{render, DependencyKind, EnumType, ObjectType, Property, Type};
-use crate::yaml::{Document, NodeId, NodeKind, Position, Style};
+use crate::yaml::{Document, NodeId, NodeKind, Position, Span, Style};
 
 const WRONG_SCOPED: &str = "Wrong scoped dependency syntax. Possible syntax includes: \n1. `<external-notation>` - a string with the format `<groupId>:<artifactId>:<version>` \n2. `<local-notation>` - a path to another module (starting with the `//` for paths relative to the project root, e.g. `//foo`, or with the `.` for paths relative to the containing directory, e.g. `../foo`) \n3. `<catalog-notation>` - a special reference to the version catalog, starting with the `$` symbol, e.g. `$libs.foo` \n4. `bom: <catalog-notation> | <external-notation>` - BOM dependency \n Additional dependency attributes (not for BOM) can be customized after the `:`, making it a single key-value mapping, e.g., `<external-notation>: exported` or `<local-notation>: compile-only`, etc. A full form may also be used, e.g. `<notation>: '{' exported: true, scope: compile-only '}'`";
 const WRONG_UNSCOPED: &str = "Wrong dependency syntax. Possible syntax includes: \n1. `<external-notation>` - a string with the format `<groupId>:<artifactId>:<version>` \n2. `<local-notation>` - a path to another module (starting with the `//` for paths relative to the project root, e.g. `//foo`, or with the `.` for paths relative to the containing directory, e.g. `../foo`) \n3. `<catalog-notation>` - a special reference to the version catalog, starting with the `$` symbol, e.g. `$libs.foo` \n4. `bom: <external-notation> | <catalog-notation>` - BOM dependency \nDependency scope (`exported`, `compile-only`, etc.) is not applicable here.";
@@ -59,7 +59,7 @@ pub fn read(
             },
             Trace::File {
                 file,
-                position: Position { line: 1, column: 1 },
+                span: Span::point(Position { line: 1, column: 1 }),
             },
             contexts,
         ),
@@ -111,14 +111,14 @@ impl Parser<'_, '_> {
     fn trace(&self, node: NodeId) -> Trace {
         Trace::File {
             file: self.file,
-            position: self.reader.position(node),
+            span: self.reader.span(node),
         }
     }
 
-    fn report(&mut self, position: Position, severity: Severity, message: impl Into<String>) {
+    fn report(&mut self, span: Span, severity: Severity, message: impl Into<String>) {
         let diagnostic = match severity {
-            Severity::Error => Diagnostic::error(&self.reader.file, Some(position), message),
-            severity => Diagnostic::warning(severity, &self.reader.file, Some(position), message),
+            Severity::Error => Diagnostic::error(&self.reader.file, Some(span), message),
+            severity => Diagnostic::warning(severity, &self.reader.file, Some(span), message),
         };
         self.reader.diagnostics.push(diagnostic);
     }
@@ -169,8 +169,8 @@ impl Parser<'_, '_> {
         }
         if let Yaml::Scalar(text) = self.reader.value(node) {
             if contains_reference(text) {
-                let position = self.reader.position(node);
-                self.report(position, Severity::Warning, REFERENCE);
+                let span = self.reader.span(node);
+                self.report(span, Severity::Warning, REFERENCE);
             }
         }
         match (ty, self.reader.value(node)) {
@@ -280,13 +280,18 @@ impl Parser<'_, '_> {
         }
     }
 
-    /// The column of character `offset` of a scalar's value, for a problem inside it.
-    fn inside(&self, node: NodeId, offset: usize) -> Position {
-        let start = self.reader.position(node);
+    /// The `length` characters of a scalar's value from character `offset`, for a problem inside
+    /// it.
+    fn inside(&self, node: NodeId, offset: usize, length: usize) -> Span {
+        let start = self.reader.span(node).start;
         let quote = usize::from(!self.is_plain(node));
-        Position {
+        let at = |column: usize| Position {
             line: start.line,
-            column: start.column + quote + offset,
+            column: start.column + quote + column,
+        };
+        Span {
+            start: at(offset),
+            end: at(offset + length),
         }
     }
 
@@ -295,9 +300,9 @@ impl Parser<'_, '_> {
         let mut valid = true;
         for (offset, _) in text.char_indices().filter(|(_, c)| *c == '\\') {
             valid = false;
-            let position = self.inside(node, text[..offset].chars().count());
+            let span = self.inside(node, text[..offset].chars().count(), 1);
             self.report(
-                position,
+                span,
                 Severity::Error,
                 "Backslash `\\` is not permitted in the path value, use forward slashes `/` instead",
             );
@@ -310,9 +315,9 @@ impl Parser<'_, '_> {
             for segment in rooted.split('/') {
                 if segment == "." || segment == ".." {
                     valid = false;
-                    let position = self.inside(node, offset);
+                    let span = self.inside(node, offset, segment.chars().count());
                     self.report(
-                        position,
+                        span,
                         Severity::Error,
                         "`'.'` and `'..'` are not permitted in `//`-paths",
                     );
@@ -346,8 +351,8 @@ impl Parser<'_, '_> {
             return None;
         }
         if contains_reference(text) {
-            let position = self.reader.position(key);
-            self.report(position, Severity::Warning, REFERENCE_KEY);
+            let span = self.reader.span(key);
+            self.report(span, Severity::Warning, REFERENCE_KEY);
         }
         Some(text.to_string())
     }
@@ -896,8 +901,8 @@ impl Parser<'_, '_> {
             }
             Yaml::Scalar(text) => {
                 if contains_reference(text) {
-                    let position = self.reader.position(node);
-                    self.report(position, Severity::Warning, REFERENCE);
+                    let span = self.reader.span(node);
+                    self.report(span, Severity::Warning, REFERENCE);
                 }
                 let value = if !self.is_plain(node) {
                     Value::String(text.to_string())
@@ -998,11 +1003,11 @@ fn report_unknown_properties(node: &Node, path: &Path, diagnostics: &mut Diagnos
                         meant.join(" or ")
                     )
                 };
-                let position = match entry.key_trace {
-                    Trace::File { position, .. } => Some(position),
+                let span = match entry.key_trace {
+                    Trace::File { span, .. } => Some(span),
                     _ => None,
                 };
-                diagnostics.push(Diagnostic::error(path, position, message));
+                diagnostics.push(Diagnostic::error(path, span, message));
             }
         }
         _ => {}
@@ -1011,8 +1016,8 @@ fn report_unknown_properties(node: &Node, path: &Path, diagnostics: &mut Diagnos
 
 /// `diagnoseDeprecatedDeclarations`: properties and enum values the schema retired.
 fn report_deprecations(node: &Node, path: &Path, diagnostics: &mut Diagnostics) {
-    let position = |trace: &Trace| match trace {
-        Trace::File { position, .. } => Some(*position),
+    let span = |trace: &Trace| match trace {
+        Trace::File { span, .. } => Some(*span),
         _ => None,
     };
     match &node.value {
@@ -1025,7 +1030,7 @@ fn report_deprecations(node: &Node, path: &Path, diagnostics: &mut Diagnostics) 
             for entry in entries {
                 if let Some(deprecation) = entry.property.and_then(|property| property.deprecation)
                 {
-                    let at = position(&entry.key_trace);
+                    let at = span(&entry.key_trace);
                     diagnostics.push(if deprecation.error {
                         Diagnostic::error(path, at, deprecation.message)
                     } else {
@@ -1039,7 +1044,7 @@ fn report_deprecations(node: &Node, path: &Path, diagnostics: &mut Diagnostics) 
         }
         Value::Enum(enumeration, value) => {
             if let Some(message) = enumeration.retirement(value) {
-                diagnostics.push(Diagnostic::error(path, position(&node.trace), message));
+                diagnostics.push(Diagnostic::error(path, span(&node.trace), message));
             }
         }
         _ => {}

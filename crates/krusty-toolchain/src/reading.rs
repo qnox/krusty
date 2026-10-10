@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::inventory;
-use crate::yaml::{Document, Limits, NodeId, NodeKind, Position, Style};
+use crate::yaml::{Document, Limits, NodeId, NodeKind, Span, Style};
 
 /// Read a file of at most `limit` bytes as UTF-8, never through a symbolic link, or report why
 /// not.
@@ -33,14 +33,18 @@ pub fn read_document(path: &Path, diagnostics: &mut Diagnostics) -> Option<Docum
             for problem in parsed.problems {
                 diagnostics.push(Diagnostic::error(
                     path,
-                    Some(problem.position),
+                    Some(Span::point(problem.position)),
                     problem.message,
                 ));
             }
             Some(parsed.document)
         }
         Err(error) => {
-            diagnostics.push(Diagnostic::error(path, Some(error.position), error.message));
+            diagnostics.push(Diagnostic::error(
+                path,
+                Some(Span::point(error.position)),
+                error.message,
+            ));
             None
         }
     }
@@ -91,7 +95,7 @@ impl<'a> FileReader<'a> {
         }
         self.diagnostics.push(Diagnostic::error(
             &self.file,
-            Some(position),
+            Some(Span::point(position)),
             "Unexpected custom YAML type tag",
         ));
     }
@@ -116,8 +120,8 @@ impl<'a> FileReader<'a> {
         }
     }
 
-    pub fn position(&self, node: NodeId) -> Position {
-        self.document.node(node).span.start
+    pub fn span(&self, node: NodeId) -> Span {
+        self.document.node(node).span
     }
 
     /// What `node` holds, met by the reader: a custom tag on it is refused.
@@ -155,9 +159,9 @@ impl<'a> FileReader<'a> {
     }
 
     pub fn error(&mut self, node: NodeId, message: impl Into<String>) {
-        let position = self.position(node);
+        let span = self.span(node);
         self.diagnostics
-            .push(Diagnostic::error(&self.file, Some(position), message));
+            .push(Diagnostic::error(&self.file, Some(span), message));
     }
 
     /// Report that `node` does not hold a value of `expected` (rendered as the toolchain renders the

@@ -17,14 +17,14 @@ pub(super) fn message(conflict: &Conflict, selected: Contexts, files: &Files) ->
     }
     let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
     for (value, trace) in &conflict.values {
-        let Trace::File { file, position } = trace else {
+        let Trace::File { file, span } = trace else {
             continue;
         };
         let place = format!(
             "{}:{}:{}",
             files.path(*file).display(),
-            position.line,
-            position.column
+            span.start.line,
+            span.start.column
         );
         match groups.iter_mut().find(|(known, _)| known == value) {
             Some((_, places)) => places.push(place),

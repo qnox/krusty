@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::contexts::Contexts;
 use crate::schema::{Derivation, EnumType, ObjectType, Property};
-use crate::yaml::Position;
+use crate::yaml::Span;
 
 /// A file the tree was read from, by index into [`Files`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -51,7 +51,7 @@ pub enum Trace {
     /// The schema's default.
     Default,
     /// Written in a file.
-    File { file: FileId, position: Position },
+    File { file: FileId, span: Span },
     /// Copied or derived from another value: how, and the file that value is written in.
     Derived {
         description: String,

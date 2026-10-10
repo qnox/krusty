@@ -18,7 +18,7 @@ pub(super) fn check(
     match &node.value {
         Value::Mapping { entries, .. } => {
             for entry in entries {
-                let (Some(property), Trace::File { file, position }) =
+                let (Some(property), Trace::File { file, span }) =
                     (entry.property, &entry.key_trace)
                 else {
                     continue;
@@ -32,10 +32,7 @@ pub(super) fn check(
                     let message = format!(
                         "Setting `{key}` can only be used without any @platform qualifier."
                     );
-                    reported.push(
-                        Diagnostic::error(path, Some(*position), message),
-                        diagnostics,
-                    );
+                    reported.push(Diagnostic::error(path, Some(*span), message), diagnostics);
                 }
                 if !property.platforms.includes_jvm() {
                     let message = format!(
@@ -43,7 +40,7 @@ pub(super) fn check(
                         property.platforms.listed()
                     );
                     let warning =
-                        Diagnostic::warning(Severity::Warning, path, Some(*position), message);
+                        Diagnostic::warning(Severity::Warning, path, Some(*span), message);
                     reported.push(warning, diagnostics);
                 }
                 if property.jvm_app_only && product != ProductType::App {
@@ -52,7 +49,7 @@ pub(super) fn check(
                         product.name()
                     );
                     let warning =
-                        Diagnostic::warning(Severity::Warning, path, Some(*position), message);
+                        Diagnostic::warning(Severity::Warning, path, Some(*span), message);
                     reported.push(warning, diagnostics);
                 }
             }

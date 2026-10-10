@@ -5,7 +5,7 @@
 //! The toolchain draws a problem in a file as a box: `╭─ SEVERITY: message`, more message lines
 //! `│ text`, the location `│ → file:line:column`, the quoted source, and `╰─`. A problem with a
 //! whole file is a `SEVERITY: message` line followed by ` ╰→ file`; one with the project as a whole
-//! is a `SEVERITY: message` line whose message runs to the next blank line. The closing line saying
+//! is a `SEVERITY: message` line whose message runs to the next blank line or problem. The closing line saying
 //! the command stopped is not a problem. The toolchain writes errors to stderr and warnings, before
 //! the command's result, to stdout. A conflict between two values is printed as its message alone,
 //! values and places on the indented lines after it; it is an error.
@@ -118,13 +118,15 @@ pub fn problems<'o>(root: &str, output: &'o [u8]) -> (Vec<ExpectedDiagnostic>, &
                     rendered: format!("{file}: {severity}: {first}"),
                 });
             } else {
-                // The message runs to the next blank line, which ends it.
+                // The message runs to the next blank line, which ends it, or to the next problem.
                 let mut message = vec![first.to_string()];
-                while let Some(next) = text(index).filter(|next| !next.trim().is_empty()) {
+                while let Some(next) =
+                    text(index).filter(|next| !next.trim().is_empty() && !starts_problem(next))
+                {
                     index += 1;
                     message.push(next.replace(&format!("{root}/"), ""));
                 }
-                if text(index).is_some() {
+                if text(index).is_some_and(|next| next.trim().is_empty()) {
                     index += 1;
                 }
                 problems.push(ExpectedDiagnostic {

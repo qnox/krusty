@@ -8,6 +8,7 @@ pub mod configuration;
 pub mod dependencies;
 pub mod diagnostic;
 pub mod model;
+pub mod report;
 pub mod show;
 
 mod glob;

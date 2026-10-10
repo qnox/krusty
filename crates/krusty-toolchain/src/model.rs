@@ -1,8 +1,9 @@
-//! The project model a command works on: the project and its modules, read in the toolchain's
-//! order, stopping where it stops.
+//! The project model a command works on: the project, its modules and their configuration, read
+//! in the toolchain's order, stopping where it stops.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::configuration::{self, Configuration};
 use crate::diagnostic::Diagnostics;
 use crate::module::{self, ModuleHeader};
 use crate::project::{self, Project};
@@ -18,28 +19,66 @@ pub enum Start<'a> {
 pub struct Model {
     pub project: Project,
     pub modules: Vec<ModuleHeader>,
+    /// Each module's configuration, in the modules' order.
+    pub configured: Vec<Configuration>,
 }
 
-/// Read the project `start` names. Problems go to `diagnostics`; `Ok(None)` when there is no
-/// project or when an error was reported. The project file is read first, and its errors stop
-/// before any module file is read; module files' errors stop before module names are compared.
-pub fn read(start: Start<'_>, diagnostics: &mut Diagnostics) -> Result<Option<Model>, String> {
+/// The problems found reading a model, by the step that found them: the toolchain reports the
+/// project file's before the project root is known, naming files as they are, and the modules'
+/// relative to the root.
+#[derive(Default)]
+pub struct Problems {
+    pub project_file: Diagnostics,
+    pub modules: Diagnostics,
+    /// The project's root, once the project file is read.
+    pub root: Option<PathBuf>,
+}
+
+/// Why no model was read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// Neither a project file nor a module file at or above the start.
+    NoProject,
+    /// The project file has errors, so no module file was read.
+    ProjectFile,
+    /// A module file or a module's configuration has errors.
+    Modules,
+    /// Two modules share a name; the message names them.
+    NotUnique(String),
+    /// Something other than the project's files went wrong: the message says what.
+    Failed(String),
+}
+
+/// Read the project `start` names. The project file is read first, and its errors stop before any
+/// module file is read; module files' and configurations' errors stop before module names are
+/// compared.
+pub fn read(start: Start<'_>, problems: &mut Problems) -> Result<Model, Stopped> {
     let project = match start {
-        Start::Discover(directory) => project::load(directory, diagnostics)?,
-        Start::Root(root) => project::load_root(root, diagnostics)?,
-    };
+        Start::Discover(directory) => project::load(directory, &mut problems.project_file),
+        Start::Root(root) => project::load_root(root, &mut problems.project_file),
+    }
+    .map_err(Stopped::Failed)?;
     let Some(project) = project else {
-        return Ok(None);
+        return Err(if problems.project_file.has_errors() {
+            Stopped::ProjectFile
+        } else {
+            Stopped::NoProject
+        });
     };
-    if diagnostics.has_errors() {
-        return Ok(None);
+    if problems.project_file.has_errors() {
+        return Err(Stopped::ProjectFile);
     }
-    let Some(modules) = module::read_headers(&project.modules, diagnostics) else {
-        return Ok(None);
-    };
-    project::check_unique_names(&project, diagnostics);
-    if diagnostics.has_errors() {
-        return Ok(None);
+    problems.root = Some(project.root.clone());
+    let modules =
+        module::read_headers(&project.modules, &mut problems.modules).ok_or(Stopped::Modules)?;
+    let configured = configuration::configure(&project.root, &modules, &mut problems.modules);
+    if problems.modules.has_errors() {
+        return Err(Stopped::Modules);
     }
-    Ok(Some(Model { project, modules }))
+    project::check_unique_names(&project).map_err(Stopped::NotUnique)?;
+    Ok(Model {
+        project,
+        modules,
+        configured,
+    })
 }

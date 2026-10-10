@@ -71,11 +71,11 @@ pub fn complete(node: &Node, path: &Path, diagnostics: &mut Diagnostics) -> Opti
                     [single] => format!("No value for required property {single}."),
                     _ => format!("No value for required properties: {}.", names.join(", ")),
                 };
-                let position = match node.trace {
-                    Trace::File { position, .. } => Some(position),
+                let span = match node.trace {
+                    Trace::File { span, .. } => Some(span),
                     _ => None,
                 };
-                diagnostics.push(Diagnostic::error(path, position, message));
+                diagnostics.push(Diagnostic::error(path, span, message));
             }
             if incomplete {
                 return None;
