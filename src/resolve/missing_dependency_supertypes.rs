@@ -247,7 +247,8 @@ impl Checker<'_> {
     }
 
     /// The qualified accesses a statement makes without an expression of their own: a member
-    /// property write, each destructuring `componentN`, and a `for` loop's iterator protocol.
+    /// property write, each destructuring `componentN`, a `for` loop's range operator or iterator
+    /// protocol, and an increment or decrement.
     pub(super) fn check_statement_missing_supertypes(&mut self, statement: StmtId) {
         if self.discover_anonymous_captures {
             return;
@@ -280,6 +281,58 @@ impl Checker<'_> {
                         .resolved_destructure_components
                         .get(&(statement, index))
                         .and_then(|call| self.selected_call_access(call, entry.name_span))
+                    {
+                        accesses.push(access);
+                    }
+                }
+            }
+            Stmt::For { range, .. } => {
+                if let Some(operator) = SyntheticOperatorCall::from_name(range.kind.operator_name())
+                {
+                    let span = self.binary_range_span(
+                        Span::new(self.span(range.start).lo, self.span(range.end).hi),
+                        range.start,
+                        range.operator_span,
+                    );
+                    if let Some(access) = self
+                        .resolved_stmt_operator_calls
+                        .get(&(statement, operator))
+                        .and_then(|call| self.selected_call_access(call, span))
+                        .or_else(|| {
+                            self.resolved_stmt_builtin_operator_accesses
+                                .get(&(statement, operator))
+                                .map(|access| Self::selected_builtin_operator_access(*access, span))
+                        })
+                    {
+                        accesses.push(access);
+                    }
+                }
+            }
+            Stmt::IncDec { dec, prefix, .. } => {
+                if self
+                    .resolved_inc_dec
+                    .contains_key(&IncDecSite::Statement(statement))
+                {
+                    let span = self.file.stmt_spans[statement.0 as usize];
+                    let span = if *prefix {
+                        Span::new(span.lo, span.lo.saturating_add(2))
+                    } else {
+                        Span::new(span.hi.saturating_sub(2), span.hi)
+                    };
+                    let operator = if *dec {
+                        SyntheticOperatorCall::Dec
+                    } else {
+                        SyntheticOperatorCall::Inc
+                    };
+                    if let Some(access) = self
+                        .resolved_stmt_operator_calls
+                        .get(&(statement, operator))
+                        .and_then(|call| self.selected_call_access(call, span))
+                        .or_else(|| {
+                            self.resolved_stmt_builtin_operator_accesses
+                                .get(&(statement, operator))
+                                .map(|access| Self::selected_builtin_operator_access(*access, span))
+                        })
                     {
                         accesses.push(access);
                     }
@@ -334,7 +387,12 @@ impl Checker<'_> {
         let class_of = |ty: Ty| ty.non_null().kotlin_class_internal();
         match self.file.expr(expression) {
             Expr::Call { callee, .. } => {
-                let span = self.missing_supertype_callee_span(*callee);
+                let mut span = self.missing_supertype_callee_span(*callee);
+                if self.file.infix_calls.contains(&expression.0) {
+                    if let Expr::Member { receiver, .. } = self.file.expr(*callee) {
+                        span = self.binary_operator_span(expression, *receiver, span);
+                    }
+                }
                 if let Some(constructor) = self.resolved_constructors.get(&expression) {
                     return Some(SelectedAccess {
                         span,
@@ -367,11 +425,73 @@ impl Checker<'_> {
                 }
             }
             Expr::Binary {
-                op, operator_span, ..
+                op,
+                lhs,
+                operator_span,
+                ..
             } => {
-                let operator = SyntheticOperatorCall::from_name(op.arith_operator_name()?)?;
-                let call = self.resolved_operator_calls.get(&(expression, operator))?;
-                self.selected_call_access(call, *operator_span)
+                let operator = match op {
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        SyntheticOperatorCall::CompareTo
+                    }
+                    _ => SyntheticOperatorCall::from_name(op.arith_operator_name()?)?,
+                };
+                let span = self.binary_operator_span(expression, *lhs, *operator_span);
+                self.operator_access(expression, operator, span)
+            }
+            Expr::Unary { op, operand } => {
+                // A recorded token is the `!in` of `value !in container`, a binary expression.
+                let span = match self.file.operator_token_spans.get(&expression.0) {
+                    Some(span) => match self.file.expr(*operand) {
+                        Expr::Call { args, .. } => {
+                            self.binary_operator_span(expression, args[0], *span)
+                        }
+                        _ => *span,
+                    },
+                    None => {
+                        let span = self.span(expression);
+                        Span::new(span.lo, span.lo.saturating_add(1))
+                    }
+                };
+                let operator = SyntheticOperatorCall::from_name(op.operator_name())?;
+                self.operator_access(expression, operator, span)
+            }
+            Expr::IncDec {
+                target,
+                dec,
+                prefix,
+            } => {
+                let span = self.span(expression);
+                let span = if *prefix {
+                    Span::new(span.lo, span.lo.saturating_add(2))
+                } else {
+                    Span::new(span.hi.saturating_sub(2), span.hi)
+                };
+                let operator = if *dec {
+                    SyntheticOperatorCall::Dec
+                } else {
+                    SyntheticOperatorCall::Inc
+                };
+                self.operator_access(expression, operator, span)
+            }
+            // `lo..hi` and `value in lo..hi`: the range operator the bound selects.
+            Expr::RangeTo { lo, kind, .. } => {
+                let operator = *self.file.operator_token_spans.get(&expression.0)?;
+                let span = self.binary_operator_span(expression, *lo, operator);
+                let operator = SyntheticOperatorCall::from_name(kind.operator_name())?;
+                self.operator_access(expression, operator, span)
+            }
+            Expr::InRange {
+                start: lo,
+                end,
+                kind,
+                ..
+            } => {
+                let operator = *self.file.operator_token_spans.get(&expression.0)?;
+                let range = Span::new(self.span(*lo).lo, self.span(*end).hi);
+                let span = self.binary_range_span(range, *lo, operator);
+                let operator = SyntheticOperatorCall::from_name(kind.operator_name())?;
+                self.operator_access(expression, operator, span)
             }
             // `value[indices]` selected as a `get` operator.
             Expr::Index { .. } => self
@@ -400,6 +520,47 @@ impl Checker<'_> {
             }
             _ => None,
         }
+    }
+
+    /// An operator convention at `span`, consuming only the exact callable or builtin access that
+    /// checking selected. Missing records are not reconstructed from syntax or expression types.
+    fn operator_access(
+        &self,
+        expression: ExprId,
+        operator: SyntheticOperatorCall,
+        span: Span,
+    ) -> Option<SelectedAccess> {
+        if let Some(call) = self.resolved_operator_calls.get(&(expression, operator)) {
+            return self.selected_call_access(call, span);
+        }
+        self.resolved_builtin_operator_accesses
+            .get(&(expression, operator))
+            .map(|access| Self::selected_builtin_operator_access(*access, span))
+    }
+
+    fn selected_builtin_operator_access(
+        access: SelectedBuiltinOperatorAccess,
+        span: Span,
+    ) -> SelectedAccess {
+        SelectedAccess {
+            dispatch_receiver: access.dispatch_receiver,
+            owner: access.owner,
+            extension_receiver: access.extension_receiver,
+            ..SelectedAccess::at(span)
+        }
+    }
+
+    /// Where kotlinc marks the operator token `operator` of the binary expression `expression`.
+    fn binary_operator_span(&self, expression: ExprId, first: ExprId, operator: Span) -> Span {
+        self.binary_range_span(self.span(expression), first, operator)
+    }
+
+    /// Where kotlinc marks the operator token `operator` of the binary expression spanning
+    /// `node`, whose first operand is `first`: see [`crate::ast::BinaryReferenceTokens`].
+    fn binary_range_span(&self, node: Span, first: ExprId, operator: Span) -> Span {
+        self.file
+            .binary_reference_tokens
+            .binary_reference_span(node, self.span(first), operator)
     }
 
     fn missing_supertype_callee_span(&self, callee: ExprId) -> Span {

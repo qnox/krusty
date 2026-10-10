@@ -516,9 +516,13 @@ mod tests {
         assert!(!layered
             .features
             .has("EnableNameBasedDestructuringShortForm"));
-        // A comma is part of a `-XXLanguage` feature name, as in kotlinc; a feature krusty does not
-        // implement is refused at startup.
-        assert!(parse(&["-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange"]).is_err());
+        // Release-known raw settings use the same catalog as the command line; the LSP must not
+        // retain an older hardcoded rejection after that catalog admits the setting.
+        let raw = parse(&["-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange"]).unwrap();
+        assert!(raw
+            .language_settings()
+            .features
+            .has("ErrorAboutDataClassCopyVisibilityChange"));
         assert!(parse(&["-language-version"]).is_err());
         assert!(parse(&["Main.kt"]).is_err());
         assert!(parse(&["-d", "out"]).is_err());

@@ -12247,17 +12247,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `<package>.<anonymous>`), at a type parameter whose bound inherits one (an inline bound with
   the parameter, a `where` bound at the parameter name), and at each qualified access: the
   selected name of a call, property read or write, callable reference, `componentN`, the
-  operator of a binary operator, a whole index expression, the iterable of a `for` loop. An
+  operator token of an operator convention (binary, comparison, unary, `!in`, `++`/`--`, `..`,
+  `..<`, and a `for` range's `until`/`downTo`), a whole index expression, the iterable of a `for`
+  loop. A binary operator expression (including `!in`, `..` and an infix call) follows kotlinc's
+  default light-tree positioning, which searches its tokens: an augmented assignment inside it
+  (in a lambda) is marked instead, else any `=` inside it outside a nested `fun` (a named
+  argument, an assignment or initializer in a lambda) marks its first operand with its
+  parentheses. A builtin operator on a primitive is that primitive classifier's member. An
   access checks its dispatch receiver, then the selected member's owner and an extension's
   declared receiver, each classifier once; an unresolved call checks its explicit receiver and
   is reported ahead of the unresolved reference. A constructor call, or an access whose dispatch
   receiver already reported, is kotlinc's eager check: the warning `… This may be forbidden soon.
   Check the module classpath for missing or conflicting dependencies.`, an error under
-  `AllowEagerSupertypeAccessibilityChecks`. This includes `-no-jdk`: platform supertypes absent
-  from that deliberately restricted classpath are reported exactly as kotlinc reports them.
+  `AllowEagerSupertypeAccessibilityChecks`. A JVM compilation with no JDK on its classpath gets
+  no exemption, as with kotlinc `-no-jdk`: `java.io.Serializable`, which kotlinc adds to arrays
+  and to every mapped builtin whose Java class implements it (`String`, `Throwable`, `Number`,
+  `Enum` and the eight primitives) whether or not a JDK is present, is then missing, and so is
+  every JDK supertype of a library classifier (`Pair`, `Result`). A builtin's modality comes from
+  its `.kotlin_builtins` declaration there, so `Throwable` stays open.
   (`tests/missing_dependency_supertypes_e2e.rs` builds the library chain with krusty and compares
   exit code, every diagnostic's file, line, column, message and order, and the output tree with
-  kotlinc, with and without the feature.)
+  kotlinc, with and without the feature, and without a JDK.)
 - **`-Xjdk-release` compiles against the selected JDK's own API.** As in kotlinc's
   `configureJvmTargetAndRelease`, the release names the JVM target (`8` is `1.8`; `6`/`7` require
   an explicit `-jvm-target 1.8`), an explicit `-jvm-target` must equal it (or be `1.8` for 6–8),

@@ -2977,11 +2977,17 @@ impl Classpath {
         crate::libraries::TypeKind,
         crate::libraries::ClassifierAccess,
         bool,
+        u16,
     )> {
         let file = self.builtins_file_for_package(Self::builtins_package_for(internal));
         let canonical = file.canonical_name(internal)?;
         let class = file.get_name(canonical)?;
-        Some((class.kind, class.visibility.into(), class.is_nested))
+        Some((
+            class.kind,
+            class.visibility.into(),
+            class.is_nested,
+            class.access,
+        ))
     }
 
     /// Canonical semantic identity of a classifier declared in `.kotlin_builtins`. Nested source

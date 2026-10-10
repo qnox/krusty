@@ -32,6 +32,7 @@ mod properties;
 mod return_labels;
 mod value_parameters;
 use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
+use declaration_modifiers::{modality_from_modifiers, modality_of};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
 use lexical_type_parameters::LexicalTypeParameters;
@@ -106,6 +107,8 @@ fn parse_with_features_and_script(
     hoist_local_classes(&mut p.file, script_scope);
     fixup_parenless_base_classes(&mut p.file);
     debug_lines::attach(&mut p.file, src);
+    p.file.binary_reference_tokens =
+        crate::ast::BinaryReferenceTokens::new(tokens, std::mem::take(&mut p.function_spans));
     if !p.diags.has_errors() {
         if let Err(error) = p.file.validate_integrity(src) {
             p.diags
@@ -113,30 +116,6 @@ fn parse_with_features_and_script(
         }
     }
     p.file
-}
-
-/// Map the parsed class modifiers to a [`Modality`]. `sealed` wins (it implies abstract+open), then
-/// `abstract`, then `open`, else `final`.
-fn modality_of(is_open: bool, is_abstract: bool, is_sealed: bool) -> crate::ast::Modality {
-    use crate::ast::Modality;
-    if is_sealed {
-        Modality::Sealed
-    } else if is_abstract {
-        Modality::Abstract
-    } else if is_open {
-        Modality::Open
-    } else {
-        Modality::Final
-    }
-}
-
-fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
-    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
-    modality_of(
-        sealed || modifiers.iter().any(|modifier| modifier == "open"),
-        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
-        sealed,
-    )
 }
 
 /// The degraded result of a tripped declaration-nesting guard: an empty final class named
@@ -821,6 +800,8 @@ struct Parser<'a> {
     /// (a trailing argument of `f`) from `(f()) { ... }` (an `invoke` on the value returned by
     /// `f`). This state is parser-local and disappears with the parser.
     parenthesized_expressions: std::collections::HashSet<u32>,
+    /// Each function parsed so far in this unit, for [`crate::ast::BinaryReferenceTokens`].
+    function_spans: Vec<Span>,
     lambda_label_scopes: lambda_literals::LambdaLabelScopes,
 }
 
@@ -924,6 +905,7 @@ impl<'a> Parser<'a> {
             stmt_depth: 0,
             parsing_anonymous_function_receiver: false,
             parenthesized_expressions: Default::default(),
+            function_spans: Vec::new(),
             lambda_label_scopes: Default::default(),
         }
     }
@@ -2775,6 +2757,7 @@ impl<'a> Parser<'a> {
         };
         let end = self.t[self.i.saturating_sub(1)].span;
         self.pop_lexical_type_params(lexical_type_param_lens);
+        self.function_spans.push(Span::new(start.lo, end.hi));
         FunDecl {
             name,
             receiver,

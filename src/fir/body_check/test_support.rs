@@ -20,7 +20,7 @@ pub(super) fn checked_source_set_function_body(
 ) -> (FirBody, ResolvedModuleIndex) {
     let inputs = sources
         .iter()
-        .map(|source| SourceInput::kotlin(*source))
+        .map(|source| SourceInput::kotlin(source))
         .collect::<Vec<_>>();
     try_checked_source_set_function_body_rewriting(
         &inputs,
@@ -218,7 +218,7 @@ pub(super) fn root_expression(body: &FirBody) -> FirExprId {
 pub(super) fn jvm_semantics() -> Box<dyn SemanticPlatform> {
     Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_REFLECT",
             )),
         ))

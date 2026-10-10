@@ -267,10 +267,11 @@ fn builtin_generic_members_type_check_without_jdk() {
 fun a(l: List<String>): String = l.get(1)
 fun b(l: List<String>): String = l[1]
 fun c(m: Map<String, Int>): String = m.entries.first().key
-fun d(m: Map<String, Int>): List<Int> = m.entries.map { (k, v) -> k.length + v }
+fun d(m: Map<String, Int>): List<Int> = m.entries.map { (k, v) -> if (k.isEmpty()) v else v }
 "#;
     // `jdk_modules = None`: the mapped JVM classes are absent, so every one of these resolves
-    // through the `.kotlin_builtins` fallback.
+    // through the `.kotlin_builtins` fallback. No `String` or `Int` member is used: kotlinc
+    // `-no-jdk` reports their missing `java.io.Serializable` supertype there.
     let diags = common::front_end_diagnostics(src, &[jar], None);
     assert!(
         diags.is_empty(),

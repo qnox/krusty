@@ -34,6 +34,12 @@ pub fn stdlib_jar() -> Option<PathBuf> {
     (!cp.scan_types().is_empty()).then_some(jar)
 }
 
+/// A `Classpath` containing the located stdlib jar and the JDK, as kotlinc compiles against them
+/// without `-no-jdk`.
+pub fn stdlib_and_jdk_classpath() -> Classpath {
+    Classpath::new(stdlib_jar().into_iter().chain(jdk_modules()).collect())
+}
+
 /// A `Classpath` containing the located stdlib jar, or empty if none was found.
 pub fn stdlib_classpath() -> Classpath {
     match stdlib_jar() {
@@ -342,6 +348,15 @@ fn publish_maven_download(download: &Path, file: &Path) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// The classpath kotlinc compiles a box test's source against: its [`classpath_jars_for`] jars and
+/// the JDK, which kotlinc adds unless `-no-jdk` is given. Without the JDK, `java.io.Serializable`
+/// and every other JDK supertype is a missing dependency.
+pub fn jvm_classpath_jars_for(src: &str) -> Vec<PathBuf> {
+    let mut jars = classpath_jars_for(src);
+    jars.extend(jdk_modules());
+    jars
 }
 
 /// The set of `-classpath` jars a box test needs, formed from its directives — mirroring kotlinc's

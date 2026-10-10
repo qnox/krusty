@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 
 use krusty::backend::Artifact;
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -49,8 +48,10 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && krusty::toolchain::stdlib_jar().is_some())
-        .then_some(target)
+    (krusty::native::can_link(target)
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some())
+    .then_some(target)
 }
 
 /// Compile `sources` with the Cranelift backend for `target`.
@@ -63,8 +64,8 @@ fn objects_of(artifacts: &[Artifact]) -> Vec<&[u8]> {
 }
 
 fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Vec<String>) {
-    let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    // The JVM front end resolves against the classpath kotlinc would: the stdlib and the JDK.
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -190,8 +191,8 @@ fn elf_machine(image: &[u8]) -> u16 {
 
 #[test]
 fn one_host_links_a_static_executable_for_every_supported_architecture() {
-    if krusty::toolchain::stdlib_jar().is_none() {
-        eprintln!("skipping: needs the Kotlin stdlib");
+    if krusty::toolchain::stdlib_jar().is_none() || krusty::toolchain::jdk_modules().is_none() {
+        eprintln!("skipping: needs the Kotlin stdlib and a JDK");
         return;
     }
     // The Go property, now with nothing but krusty in the loop: the code generator emits each
