@@ -12361,6 +12361,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, object member or parameter is "'R|pkg/NAME|' is not a valid invocation kind." (object
   members as `Q|Owner|.R|/Owner.NAME|`, parameters as `R|<local>/name|`). Verified against kotlinc
   2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)
+- **An implicit extension call's not-null contract narrows that receiver.**
+  `returns(true) implies (this@f != null)` on `fun T?.f()` applies when the call is written
+  without a receiver (`f() && this.member`). The proof is the extension receiver the call
+  selected, so the right operand of `&&` and a later explicit `this` see the non-null type. An
+  explicit receiver (`x.f()`) still narrows `x`. Among competing implicit receivers the proof
+  belongs only to the receiver overload selection bound (the nearest applicable one); another
+  receiver of the same nullable shape stays nullable, read bare or as `this@label`.
+  (`tests/contract_user_e2e.rs::implicit_extension_receiver_not_null_contract_narrows_the_conjunction`,
+  `implicit_receiver_contract_narrows_only_the_selected_receiver`,
+  `implicit_receiver_contract_selected_receiver_runs`.)
+- **A labeled `this` reads its receiver's flow type.** `this@f` denotes the same receiver-tower
+  coordinate as the bare `this` it labels, so `if (this@f != null)`, `if (this != null)` and
+  `if (this@f is C)` narrow a later `this@f` read, including an outer receiver read inside a
+  receiver lambda. Verified against kotlinc 2.4.20.
+  (`tests/this_smartcast_e2e.rs::a_labeled_this_reads_the_narrowed_receiver`.)
 - **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
   once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
   receives as a parameter is read again for the setter, and so is every `this` receiver, including
