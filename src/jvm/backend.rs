@@ -88,10 +88,12 @@ pub(crate) struct BackendPassFacts {
 /// miscompiles the gate never saw); a unit test below bans direct calls to the individual passes.
 ///
 /// Runs, in order:
-/// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
-///    declarations from the file's annotations; no-op without a trigger annotation.
-///    Once their output is final, freeze any exact dependency identity selected by a generated
-///    `super` call, then realize all checked super calls from those frozen facts.
+/// 1. `plugins::complete_enabled` — compiler-extension plugins (kotlinx.serialization) realize
+///    the declarations they generated at the handoff: bodies, storage and JVM helpers; no-op
+///    without a trigger annotation. The members the JVM publishes beyond the handoff's join each
+///    class's declaration record. Once their output is final, freeze any exact dependency identity
+///    selected by a generated `super` call, then realize all checked super calls from those
+///    frozen facts.
 ///
 /// 2. `realize_top_level_jvm_fields` — select public field storage for eligible top-level
 ///    `@JvmField` declarations through stable property/layout identities.
@@ -152,13 +154,16 @@ pub(crate) fn run_backend_passes(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(
+    crate::plugins::complete_enabled(
         ir,
         plugins.native_plugins,
         plugins.module_name,
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    // The JVM publishes members kotlinc's plugins generate only in IR (serialization's
+    // `write$Self`); they join each class's record before any lowering rewrites one.
+    crate::metadata::class_declarations::add_target_generated_functions(ir);
     // Plugins run after the frontend/backend handoff and may append checked calls selected by an
     // exact dependency identity. Freeze those provider-normalized records now, once plugin output
     // is final and before any realization consumes them. Existing facts remain the original copy.
@@ -1838,7 +1843,7 @@ mod tests {
                 ],
             ),
             (
-                "run_enabled(",
+                "complete_enabled(",
                 &["src/plugins/mod.rs", "src/jvm/backend.rs"],
             ),
             (

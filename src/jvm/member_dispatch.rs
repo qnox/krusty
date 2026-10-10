@@ -38,7 +38,7 @@ impl<'a> CheckedDispatchClassifiers<'a> {
         let mut file = std::collections::HashMap::new();
         let mut published_by = std::collections::HashMap::new();
         for (class_id, class) in ir.classes.iter().enumerate().filter(|(_, class)| {
-            !class.is_source_declared || crate::jvm::local_classifiers::is_local(ir, class)
+            !class.is_source_declared || crate::metadata::local_classifiers::is_local(ir, class)
         }) {
             let identity = class.fq_name_id();
             let mut supertypes = Vec::new();
