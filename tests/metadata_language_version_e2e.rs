@@ -59,7 +59,7 @@ fn stamped(metadata_version: Option<[i32; 3]>) -> Vec<(String, Vec<u8>)> {
     common::compile_in_process_files_metadata_version(
         &[("Holder.kt", SRC)],
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
         metadata_version,
     )
     .expect("krusty compiles the fixture")
@@ -242,7 +242,7 @@ fn regenerated_inline_object_takes_the_caller_metadata_stamp() {
     let actual = common::compile_in_process_files_metadata_version(
         &[("Caller.kt", INLINE_CALLER)],
         &[lib_out, stdlib],
-        None,
+        Some(&common::jdk_modules()),
         Some([2, 2, 0]),
     )
     .expect("krusty compiles the caller");
@@ -317,7 +317,7 @@ fn language_version_2_2_omits_annotation_records_like_kotlinc() {
     let gated = common::compile_in_process_files_language_settings(
         &[("Ann.kt", ANNOTATED_SRC)],
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
         &language_2_2,
         Some([2, 2, 0]),
     )
@@ -329,7 +329,7 @@ fn language_version_2_2_omits_annotation_records_like_kotlinc() {
     let old_language_new_stamp = common::compile_in_process_files_language_settings(
         &[("Ann.kt", ANNOTATED_SRC)],
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
         &language_2_2,
         Some([2, 4, 0]),
     )
@@ -355,7 +355,7 @@ fn language_version_2_2_omits_annotation_records_like_kotlinc() {
     let default = common::compile_in_process_files_metadata_version(
         &[("Ann.kt", ANNOTATED_SRC)],
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
         None,
     )
     .expect("krusty compiles the annotated fixture at the default stamp");

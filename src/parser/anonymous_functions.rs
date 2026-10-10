@@ -87,6 +87,7 @@ impl Parser<'_> {
             self.parse_block_expr(false)
         };
         let end = self.file.expr_spans[body.0 as usize];
+        self.function_spans.push(Span::new(start.lo, end.hi));
         let lam = self
             .file
             .add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi));

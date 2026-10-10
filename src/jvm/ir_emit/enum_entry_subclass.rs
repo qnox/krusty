@@ -232,7 +232,7 @@ pub(super) fn emit_enum_entry_subclass(
         .then(|| build_class_metadata(ir, c, opts, env))
         .flatten()
     {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     env.run.finish_class(cw)
 }

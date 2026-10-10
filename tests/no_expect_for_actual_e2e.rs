@@ -64,7 +64,7 @@ fn both_reports(
             args.multiplatform
                 .then_some("-XXLanguage:+MultiPlatformProjects")
                 .into_iter()
-                .chain(["-no-stdlib", "-no-jdk", "-cp"]),
+                .chain(["-no-stdlib", "-cp"]),
         )
         .arg(common::stdlib_jar())
         .arg("-d")
@@ -714,12 +714,7 @@ fn a_member_names_its_own_file_when_several_are_compiled() {
     .expect("reference kotlinc available");
 
     let out = std::process::Command::new(common::krusty_binary())
-        .args([
-            "-XXLanguage:+MultiPlatformProjects",
-            "-no-stdlib",
-            "-no-jdk",
-            "-cp",
-        ])
+        .args(["-XXLanguage:+MultiPlatformProjects", "-no-stdlib", "-cp"])
         .arg(common::stdlib_jar())
         .arg("-d")
         .arg(dir.join("multi-krusty"))
@@ -792,12 +787,7 @@ fn a_member_that_actualizes_nothing_under_a_matched_owner_is_reported() {
     .expect("reference kotlinc available");
 
     let out = std::process::Command::new(common::krusty_binary())
-        .args([
-            "-XXLanguage:+MultiPlatformProjects",
-            "-no-stdlib",
-            "-no-jdk",
-            "-cp",
-        ])
+        .args(["-XXLanguage:+MultiPlatformProjects", "-no-stdlib", "-cp"])
         .arg(common::stdlib_jar())
         .arg("-d")
         .arg(dir.join("split-krusty"))
@@ -912,12 +902,7 @@ fn members_that_tie_on_the_child_key_still_actualize() {
     .expect("reference kotlinc available");
 
     let out = std::process::Command::new(common::krusty_binary())
-        .args([
-            "-XXLanguage:+MultiPlatformProjects",
-            "-no-stdlib",
-            "-no-jdk",
-            "-cp",
-        ])
+        .args(["-XXLanguage:+MultiPlatformProjects", "-no-stdlib", "-cp"])
         .arg(common::stdlib_jar())
         .arg("-d")
         .arg(dir.join("tied-krusty"))

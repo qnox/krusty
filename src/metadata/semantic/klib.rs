@@ -1540,11 +1540,11 @@ fn semantic_property(
     Ok((member, property))
 }
 
-fn validate_type_alias(
+fn semantic_type_alias(
     body: &[u8],
     tables: &SemanticTables<'_>,
     inherited: &TypeParameterScope,
-) -> Result<(), PackageFragmentDecodeError> {
+) -> Result<metadata::KotlinTypeAlias, PackageFragmentDecodeError> {
     validate_annotation_fields(
         body,
         &[8],
@@ -1553,9 +1553,10 @@ fn validate_type_alias(
         "type-alias declaration",
     )?;
     let parameter_bodies = message_bodies(body, 3, "type-alias declaration")?;
-    let (_, type_parameters) =
+    let (formals, type_parameters) =
         tables.type_parameters(&parameter_bodies, inherited, "type-alias declaration")?;
     let mut cursor = Cursor::new(body, 0);
+    let mut flags = 6;
     let mut name = None;
     let mut underlying_body = None;
     let mut underlying_id = None;
@@ -1564,6 +1565,7 @@ fn validate_type_alias(
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "type-alias declaration")?;
         match (number, wire) {
+            (1, 0) => flags = cursor.varint("type-alias flags")?,
             (2, 0) => name = Some(cursor.varint("type-alias name")?),
             (4, 2) => {
                 underlying_body = Some(cursor.length_delimited("type-alias underlying type")?.0)
@@ -1574,7 +1576,7 @@ fn validate_type_alias(
             (_, wire) => cursor.skip(wire, "type-alias declaration")?,
         }
     }
-    semantic_string(
+    let name = semantic_string(
         tables.strings,
         name.ok_or_else(|| semantic_error("type alias has no name"))?,
         "type-alias declaration",
@@ -1585,13 +1587,18 @@ fn validate_type_alias(
         &type_parameters,
         "type-alias underlying type",
     )?;
-    tables.type_ref(
+    let expansion = tables.type_ref(
         expanded_body,
         expanded_id,
         &type_parameters,
         "type-alias expanded type",
     )?;
-    Ok(())
+    Ok(metadata::KotlinTypeAlias {
+        name,
+        formals,
+        expansion,
+        visibility: metadata::declaration_visibility(flags),
+    })
 }
 
 fn semantic_enum_entry(
@@ -1856,9 +1863,10 @@ fn semantic_class(
         members.push(member);
         property_declarations.push(declaration);
     }
-    for body in type_aliases {
-        validate_type_alias(body, &tables, &type_parameters)?;
-    }
+    let type_aliases = type_aliases
+        .into_iter()
+        .map(|body| semantic_type_alias(body, &tables, &type_parameters))
+        .collect::<Result<Vec<_>, _>>()?;
     let is_nested = fq_name
         .rsplit('/')
         .next()
@@ -1871,6 +1879,7 @@ fn semantic_class(
             members,
             functions: function_declarations,
             properties: property_declarations,
+            type_aliases,
             constructors,
             companion_name,
             type_params,
@@ -1932,7 +1941,11 @@ pub(super) fn parse(
             result.properties.push(property);
         }
         for body in message_bodies(package, 5, "package declaration")? {
-            validate_type_alias(body, &tables, &TypeParameterScope::default())?;
+            result.type_aliases.push(semantic_type_alias(
+                body,
+                &tables,
+                &TypeParameterScope::default(),
+            )?);
         }
     }
     let class_headers = classes

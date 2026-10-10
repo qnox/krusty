@@ -25,7 +25,7 @@ fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'conformance shard settings must stay retired' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'conformance shard settings must stay retired' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -41,7 +41,7 @@ fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 1800, 600]);
+    assert_eq!(values, [120, 120, 1800, 600, 1800]);
 }
 
 #[cfg(unix)]
@@ -407,9 +407,12 @@ fn prebuilt_conformance_regressions_skip_the_box_suites() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
         ),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -454,9 +457,12 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
         ),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -487,7 +493,7 @@ fn prebuilt_conformance_regressions_keep_an_explicit_cli() {
         .output()
         .expect("run conformance regressions");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"bin=/opt/krusty\n");
+    assert_eq!(output.stdout, b"bin=/opt/krusty\nbin=/opt/krusty\n");
     fs::remove_dir_all(temp).expect("remove regressions fixture");
 }
 
@@ -573,7 +579,7 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]",
+            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
@@ -608,9 +614,40 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
             && workflow.contains("if: matrix.target != 'jvm'"),
         "a Native or Wasm row must not race to publish the JVM row's broader immutable cache"
     );
+    for key in [
+        "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
+        "key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
+    ] {
+        assert!(
+            workflow.contains(key),
+            "every box corpus cache must use the key versioned for its mock JDK and CLI corpus inputs ({key})"
+        );
+    }
     assert!(
-        workflow.contains("box-corpus-mock-jdk-${{ matrix.version }}-"),
-        "the box corpus cache must not reuse an immutable key from before its mock JDK input"
+        !workflow.contains("box-corpus-mock-jdk-"),
+        "no box corpus cache may restore an immutable entry from before the CLI corpus input"
+    );
+    assert_eq!(
+        workflow.matches("path: target/cache/box-corpus").count(),
+        2,
+        "only the coverage and conformance lanes read the box and CLI corpus; the KLIB lane caches none"
+    );
+    let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
+    let klib_recipe = justfile
+        .split("\nklib-semantics ")
+        .nth(1)
+        .and_then(|recipe| recipe.split("\n\n").next())
+        .expect("justfile has a klib-semantics recipe");
+    assert!(
+        klib_recipe.contains("KRUSTY_PROVISION_BOX_CORPUS=0 "),
+        "the KLIB lane caches no corpus, so its harness run must not provision one"
+    );
+    assert_eq!(
+        workflow
+            .matches("if: steps.box-corpus.outputs.cache-hit == 'true'\n        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> \"$GITHUB_ENV\"")
+            .count(),
+        2,
+        "a restored box corpus must be complete, so every lane forbids fetching after a hit"
     );
     assert!(
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),

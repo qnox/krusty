@@ -582,7 +582,14 @@ pub fn compile_in_process_metadata_cp_module_target(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
+    // kotlinc's reference compile has its stdlib and the JDK on its classpath by default.
+    let mut jars = cp_jars.to_vec();
+    for default in [stdlib_jar(), jdk_modules()] {
+        if !jars.contains(&default) {
+            jars.push(default);
+        }
+    }
+    let cp = std::rc::Rc::new(Classpath::new(jars));
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),

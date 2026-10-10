@@ -10,7 +10,7 @@ mod stdlib {
     pub(super) fn lower(source: &str, stem: &str) -> crate::ir::IrFile {
         let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-                crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                     "// WITH_STDLIB",
                 )),
             ))

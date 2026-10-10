@@ -3,7 +3,7 @@
 //! Every hook answers from KLIB declarations or from Kotlin's own language classifiers, so the
 //! same provider serves each target that reads its libraries from KLIBs.
 
-use crate::libraries::{function_classifiers, LibraryCallable, SemanticPlatform};
+use crate::libraries::{function_classifiers, AliasExpansion, LibraryCallable, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
@@ -32,6 +32,10 @@ impl SemanticPlatform for KlibLibraries {
         }
         self.classifier(ty.obj_internal()?)
             .and_then(|classifier| classifier.value_underlying)
+    }
+
+    fn type_alias_expansion(&self, internal: TypeName) -> Option<AliasExpansion> {
+        self.inventory.type_alias(internal).cloned()
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {

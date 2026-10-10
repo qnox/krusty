@@ -4624,7 +4624,8 @@ code is the one the code generator already names: provider-owned bodies through 
   member or constructor (an enum's, an object's) a public signature.
 - **Platform (done).** `KlibLibraries::open` publishes the KLIBs a compilation selects, zipped or
   unpacked, and is a `SemanticPlatform`; each caller names its own target's libraries (Native's
-  `klib/common/stdlib`; `toolchain::kotlin_stdlib_klib` names each target's). `for_compilation` starts another
+  `klib/common/stdlib`; `toolchain::kotlin_stdlib_klib` names each target's).
+  `for_compilation` starts another
   compilation over the same signed declarations. Its hooks are target-neutral: the language's
   `FunctionN`/`SuspendFunctionN`/`KFunctionN` classifiers (no KLIB serializes them), function and
   reference types, `KClass`, value-class underlyings, and the contract intrinsic and DSL members,

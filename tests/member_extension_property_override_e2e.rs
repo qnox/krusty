@@ -20,8 +20,13 @@ fn assert_same_method(name: &str, lib: &str, src: &str, class: &str, method: &st
 }
 
 fn assert_box_ok(stem: &str, src: &str) {
-    let output = common::compile_and_run_box(src, stem, &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        src,
+        stem,
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }
 

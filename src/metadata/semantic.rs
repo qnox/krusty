@@ -211,6 +211,16 @@ pub struct KotlinPackage {
     pub class_order: Vec<String>,
     pub functions: Vec<KotlinFunction>,
     pub properties: Vec<KotlinProperty>,
+    pub type_aliases: Vec<KotlinTypeAlias>,
+}
+
+/// One Kotlin type-alias declaration, before a provider publishes its qualified identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KotlinTypeAlias {
+    pub name: String,
+    pub formals: Vec<KotlinTypeParameter>,
+    pub expansion: KotlinType,
+    pub visibility: Visibility,
 }
 
 /// One Kotlin property: a top-level one, or a member of the class that lists it.
@@ -284,6 +294,8 @@ pub struct KotlinClass {
     pub functions: Vec<KotlinFunction>,
     /// The properties the class declares, as complete declarations in metadata order.
     pub properties: Vec<KotlinProperty>,
+    /// Type aliases declared in this classifier's namespace, in metadata order.
+    pub type_aliases: Vec<KotlinTypeAlias>,
     pub constructors: Vec<KotlinConstructor>,
     pub companion_name: Option<String>,
     pub type_params: Vec<KotlinTypeParameter>,
