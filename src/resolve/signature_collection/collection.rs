@@ -776,6 +776,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .iter()
                             .map(|parameter| parameter.inline_modifier)
                             .collect(),
+                        reified_type_parameter_ordinals: reified_type_parameter_ordinals(
+                            &callable_header,
+                        ),
                         visibility: function_visibility,
                         context_count: callable_header.context_count,
                         source_decl: Some(d),
@@ -1284,14 +1287,19 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let value_representation = c.value_modifier_span.map(|value_keyword| {
                         ValueClassDeclaration {
                             value_keyword,
-                            parameters: c.primary_constructor_parameters_span,
+                            constructor: c.primary_constructor_span,
                             parameter_count: classifier_header.primary_parameters.len(),
                             jvm_inline: has_jvm_inline,
                             final_class: classifier_flags.has(ClassFlags::FINAL),
+                            expect: file
+                                .expect_decls
+                                .iter()
+                                .any(|expect| expect.declaration == d),
                         }
                         .representation(
                             target,
                             file.full_value_classes,
+                            &file.language_gates.value_classes,
                             diags,
                         )
                     });
@@ -2683,8 +2691,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             extension_receiver,
                         });
                         if let Some(receiver_ty) = extension_receiver {
-                            let reified_type_parameter_ordinals =
-                                reified_type_parameter_ordinals(&method_header);
                             member_ext_funs
                                 .entry(method_header.name.clone())
                                 .or_default()
@@ -2692,7 +2698,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     signature,
                                     receiver_ty,
                                     &method_header.name,
-                                    reified_type_parameter_ordinals,
                                 ));
                         } else {
                             methods
@@ -2759,6 +2764,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 lambda_param_types: vec![Vec::new(); parameter_count],
                                 lambda_recv: vec![false; parameter_count],
                                 inline_modifiers: Vec::new(),
+                                reified_type_parameter_ordinals: Vec::new(),
                                 visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
@@ -2835,6 +2841,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
                                     inline_modifiers: Vec::new(),
+                                    reified_type_parameter_ordinals: Vec::new(),
                                     visibility: property.visibility,
                                     context_count: 0,
                                     source_decl: None,
@@ -2890,6 +2897,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 lambda_param_types: Vec::new(),
                                 lambda_recv: Vec::new(),
                                 inline_modifiers: Vec::new(),
+                                reified_type_parameter_ordinals: Vec::new(),
                                 visibility: Visibility::Public,
                                 context_count: 0,
                                 source_decl: None,
@@ -3066,6 +3074,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             lambda_param_types: vec![],
                             lambda_recv: vec![],
                             inline_modifiers: Vec::new(),
+                            reified_type_parameter_ordinals: Vec::new(),
                             visibility: Visibility::Public,
                             context_count: 0,
                             source_decl: None,

@@ -1,416 +1,416 @@
-# name	sinceVersion	sinceApiVersion	progressive	forcesPreReleaseBinaries	forcesPreReleaseBinariesBefore	testOnly	behaviorAfterSinceVersion	hintUrl	flag	presentableName
-TypeAliases	1.1	1.0					CannotBeDisabled			type aliases
-BoundCallableReferences	1.1	1.1					CannotBeDisabled			bound callable references
-LocalDelegatedProperties	1.1	1.1					CannotBeDisabled			local delegated properties
-TopLevelSealedInheritance	1.1	1.0					CannotBeDisabled			top level sealed inheritance
-AdditionalBuiltInsMembers	1.1	1.0					CannotBeDisabled			additional built ins members
-DataClassInheritance	1.1	1.0					CannotBeDisabled			data class inheritance
-InlineProperties	1.1	1.0					CannotBeDisabled			inline properties
-DestructuringLambdaParameters	1.1	1.0					CannotBeDisabled			destructuring lambda parameters
-SingleUnderscoreForParameterName	1.1	1.0					CannotBeDisabled			single underscore for parameter name
-DslMarkersSupport	1.1	1.0					CannotBeDisabled			dsl markers support
-UnderscoresInNumericLiterals	1.1	1.0					CannotBeDisabled			underscores in numeric literals
-DivisionByZeroInConstantExpressions	1.1	1.0					CannotBeDisabled			division by zero in constant expressions
-InlineConstVals	1.1	1.0					CannotBeDisabled			inline const vals
-OperatorProvideDelegate	1.1	1.0					CannotBeDisabled			operator provide delegate
-ShortSyntaxForPropertyGetters	1.1	1.0					CannotBeDisabled			short syntax for property getters
-RefinedSamAdaptersPriority	1.1	1.0					CannotBeDisabled			refined sam adapters priority
-SafeCallBoundSmartCasts	1.1	1.0					CannotBeDisabled			safe call bound smart casts
-TypeInferenceOnGenericsForCallableReferences	1.1	1.0					CannotBeDisabled			type inference on generics for callable references
-NoDelegationToJavaDefaultInterfaceMembers	1.1	1.0					CannotBeDisabled			no delegation to java default interface members
-Coroutines	1.1	1.1					CannotBeDisabled			coroutines
-InlineDefaultFunctionalParameters	1.2	1.0					CannotBeDisabled			inline default functional parameters
-SoundSmartCastsAfterTry	1.2	1.0					CannotBeDisabled			sound smart casts after try
-NullabilityAssertionOnExtensionReceiver	1.2	1.0					CannotBeDisabled			nullability assertion on extension receiver
-SafeCastCheckBoundSmartCasts	1.2	1.0					CannotBeDisabled			safe cast check bound smart casts
-CapturedInClosureSmartCasts	1.2	1.0					CannotBeDisabled			captured in closure smart casts
-LateinitTopLevelProperties	1.2	1.0					CannotBeDisabled			lateinit top level properties
-LateinitLocalVariables	1.2	1.0					CannotBeDisabled			lateinit local variables
-InnerClassInEnumEntryClass	1.2	1.0					CannotBeDisabled			inner class in enum entry class
-CallableReferencesToClassMembersWithEmptyLHS	1.2	1.0					CannotBeDisabled			callable references to class members with empty l h s
-JvmPackageName	1.2	1.0					CannotBeDisabled			jvm package name
-AssigningArraysToVarargsInNamedFormInAnnotations	1.2	1.0					CannotBeDisabled			assigning arrays to varargs in named form in annotations
-ExpectedTypeFromCast	1.2	1.0					CannotBeDisabled			expected type from cast
-RestrictionOfValReassignmentViaBackingField	1.3	1.0	progressive				CannotBeDisabled			restriction of val reassignment via backing field
-NestedClassesInEnumEntryShouldBeInner	1.3	1.0	progressive				CannotBeDisabled			nested classes in enum entry should be inner
-ProhibitDataClassesOverridingCopy	1.3	1.0	progressive				CannotBeDisabled			prohibit data classes overriding copy
-RestrictionOfWrongAnnotationsWithUseSiteTargetsOnTypes	1.3	1.0	progressive				CannotBeDisabled			restriction of wrong annotations with use site targets on types
-ProhibitInnerClassesOfGenericClassExtendingThrowable	1.3	1.0	progressive				CannotBeDisabled			prohibit inner classes of generic class extending throwable
-ProperForInArrayLoopRangeVariableAssignmentSemantic	1.3	1.0	progressive				CannotBeDisabled			proper for in array loop range variable assignment semantic
-NestedClassesInAnnotations	1.3	1.0					CannotBeDisabled			nested classes in annotations
-JvmStaticInInterface	1.3	1.0		prerelease			CannotBeDisabled			jvm static in interface
-JvmFieldInInterface	1.3	1.0		prerelease			CannotBeDisabled			jvm field in interface
-ProhibitVisibilityOfNestedClassifiersFromSupertypesOfCompanion	1.3	1.0	progressive				CannotBeDisabled			prohibit visibility of nested classifiers from supertypes of companion
-ProhibitNonConstValuesAsVarargsInAnnotations	1.3	1.0	progressive				CannotBeDisabled			prohibit non const values as varargs in annotations
-ReleaseCoroutines	1.3	1.0		prerelease			CannotBeDisabled			release coroutines
-ReadDeserializedContracts	1.3	1.0					CannotBeDisabled			read deserialized contracts
-UseReturnsEffect	1.3	1.0					CannotBeDisabled			use returns effect
-UseCallsInPlaceEffect	1.3	1.0					CannotBeDisabled			use calls in place effect
-AllowContractsForCustomFunctions	1.3	1.0					CannotBeDisabled			allow contracts for custom functions
-VariableDeclarationInWhenSubject	1.3	1.0					CannotBeDisabled			variable declaration in when subject
-ProhibitLocalAnnotations	1.3	1.0	progressive				CannotBeDisabled			prohibit local annotations
-ProhibitSmartcastsOnLocalDelegatedProperty	1.3	1.0	progressive				CannotBeDisabled			prohibit smartcasts on local delegated property
-ProhibitAssigningSingleElementsToVarargsInNamedForm	1.3	1.0	progressive				CannotBeDisabled			prohibit assigning single elements to varargs in named form
-FunctionTypesWithBigArity	1.3	1.3					CannotBeDisabled			function types with big arity
-RestrictRetentionForExpressionAnnotations	1.3	1.0	progressive				CannotBeDisabled			restrict retention for expression annotations
-StrictJavaNullabilityAssertions	1.3	1.0	progressive				CannotBeDisabled			strict java nullability assertions
-SoundSmartcastForEnumEntries	1.3	1.0	progressive				CannotBeDisabled			sound smartcast for enum entries
-ProhibitErroneousExpressionsInAnnotationsWithUseSiteTargets	1.3	1.0	progressive				CannotBeDisabled			prohibit erroneous expressions in annotations with use site targets
-NewCapturedReceiverFieldNamingConvention	1.3	1.0	progressive				CannotBeDisabled			new captured receiver field naming convention
-ExtendedMainConvention	1.3	1.0					CannotBeDisabled			extended main convention
-ExperimentalBuilderInference	1.3	1.0					CannotBeDisabled			experimental builder inference
-InlineClasses	1.3	1.0		prerelease			CannotBeDisabled		-Xinline-classes	inline classes
-DslMarkerOnFunctionTypeReceiver	1.4	1.0	progressive				CannotBeDisabled			dsl marker on function type receiver
-RestrictReturnStatementTarget	1.4	1.0	progressive				CannotBeDisabled			restrict return statement target
-WarningOnMainUnusedParameter	1.4	1.0					CannotBeDisabled			warning on main unused parameter
-PolymorphicSignature	1.4	1.0					CannotBeDisabled			polymorphic signature
-ProhibitConcurrentHashMapContains	1.4	1.0	progressive				CannotBeDisabled			prohibit concurrent hash map contains
-ProhibitTypeParametersForLocalVariables	1.4	1.0	progressive				CannotBeDisabled			prohibit type parameters for local variables
-ProhibitJvmOverloadsOnConstructorsOfAnnotationClasses	1.4	1.0	progressive				CannotBeDisabled			prohibit jvm overloads on constructors of annotation classes
-ProhibitTypeParametersInAnonymousObjects	1.4	1.0	progressive				CannotBeDisabled			prohibit type parameters in anonymous objects
-ProhibitRepeatedUseSiteTargetAnnotations	1.4	1.0	progressive				CannotBeDisabled			prohibit repeated use site target annotations
-ProhibitUseSiteTargetAnnotationsOnSuperTypes	1.4	1.0	progressive				CannotBeDisabled			prohibit use site target annotations on super types
-ProhibitTypeParametersInClassLiteralsInAnnotationArguments	1.4	1.0	progressive				CannotBeDisabled			prohibit type parameters in class literals in annotation arguments
-ProhibitComparisonOfIncompatibleEnums	1.4	1.0	progressive				CannotBeDisabled			prohibit comparison of incompatible enums
-BareArrayClassLiteral	1.4	1.0					CannotBeDisabled			bare array class literal
-ProhibitGenericArrayClassLiteral	1.4	1.0					CannotBeDisabled			prohibit generic array class literal
-NonParenthesizedAnnotationsOnFunctionalTypes	1.4	1.0					CannotBeDisabled			non parenthesized annotations on functional types
-UseGetterNameForPropertyAnnotationsMethodOnJvm	1.4	1.0					CannotBeDisabled			use getter name for property annotations method on jvm
-AllowBreakAndContinueInsideWhen	1.4	1.0					CannotBeDisabled			allow break and continue inside when
-MixedNamedArgumentsInTheirOwnPosition	1.4	1.0					CannotBeDisabled			mixed named arguments in their own position
-ProhibitTailrecOnVirtualMember	1.4	1.0	progressive				CannotBeDisabled			prohibit tailrec on virtual member
-ProperComputationOrderOfTailrecDefaultParameters	1.4	1.0					CannotBeDisabled			proper computation order of tailrec default parameters
-TrailingCommas	1.4	1.0					CannotBeDisabled			trailing commas
-ProhibitProtectedCallFromInline	1.4	1.0	progressive				CannotBeDisabled			prohibit protected call from inline
-ProperFinally	1.4	1.0	progressive				CannotBeDisabled			proper finally
-AllowAssigningArrayElementsToVarargsInNamedFormForFunctions	1.4	1.0					CannotBeDisabled			allow assigning array elements to varargs in named form for functions
-AllowNullOperatorsForResult	1.4	1.0					CannotBeDisabled			allow null operators for result
-PreferJavaFieldOverload	1.4	1.0					CannotBeDisabled			prefer java field overload
-AllowContractsForNonOverridableMembers	1.4	1.0					CannotBeDisabled			allow contracts for non overridable members
-AllowReifiedGenericsInContracts	1.4	1.0					CannotBeDisabled			allow reified generics in contracts
-ProperVisibilityForCompanionObjectInstanceField	1.4	1.0	progressive				CannotBeDisabled			proper visibility for companion object instance field
-DoNotGenerateThrowsForDelegatedKotlinMembers	1.4	1.0					CannotBeDisabled			do not generate throws for delegated kotlin members
-ProperIeee754Comparisons	1.4	1.0	progressive				CannotBeDisabled			proper ieee754 comparisons
-FunctionalInterfaceConversion	1.4	1.0		prerelease			CannotBeDisabled			functional interface conversion
-GenerateJvmOverloadsAsFinal	1.4	1.0					CannotBeDisabled			generate jvm overloads as final
-MangleClassMembersReturningInlineClasses	1.4	1.0					CannotBeDisabled			mangle class members returning inline classes
-ImproveReportingDiagnosticsOnProtectedMembersOfBaseClass	1.4	1.0	progressive				CannotBeDisabled			improve reporting diagnostics on protected members of base class
-NewInference	1.4	1.0					CannotBeDisabled		-Xnew-inference	new inference
-SamConversionForKotlinFunctions	1.4	1.0					CannotBeDisabled			sam conversion for kotlin functions
-SamConversionPerArgument	1.4	1.0					CannotBeDisabled		-Xnew-inference	sam conversion per argument
-FunctionReferenceWithDefaultValueAsOtherType	1.4	1.0					CannotBeDisabled		-Xnew-inference	function reference with default value as other type
-OverloadResolutionByLambdaReturnType	1.4	1.0					CannotBeDisabled			overload resolution by lambda return type
-ContractsOnCallsWithImplicitReceiver	1.4	1.0					CannotBeDisabled			contracts on calls with implicit receiver
-ProhibitSpreadOnSignaturePolymorphicCall	1.5	1.0	progressive				CannotBeDisabled			prohibit spread on signature polymorphic call
-ProhibitInvisibleAbstractMethodsInSuperclasses	1.5	1.0	progressive				CannotBeDisabled			prohibit invisible abstract methods in superclasses
-ProhibitNonReifiedArraysAsReifiedTypeArguments	1.5	1.0	progressive				CannotBeDisabled			prohibit non reified arrays as reified type arguments
-ProhibitVarargAsArrayAfterSamArgument	1.5	1.0	progressive				CannotBeDisabled			prohibit vararg as array after sam argument
-CorrectSourceMappingSyntax	1.5	1.0		prerelease			CannotBeDisabled			correct source mapping syntax
-RequiredPrimaryConstructorDelegationCallInEnums	1.5	1.0	progressive				CannotBeDisabled			required primary constructor delegation call in enums
-ApproximateAnonymousReturnTypesInPrivateInlineFunctions	1.5	1.0	progressive				CannotBeDisabled			approximate anonymous return types in private inline functions
-ForbidReferencingToUnderscoreNamedParameterOfCatchBlock	1.5	1.0	progressive				CannotBeDisabled			forbid referencing to underscore named parameter of catch block
-UseCorrectExecutionOrderForVarargArguments	1.5	1.0	progressive				CannotBeDisabled			use correct execution order for vararg arguments
-JvmRecordSupport	1.5	1.0					CannotBeDisabled			jvm record support
-AllowNullOperatorsForResultAndResultReturnTypeByDefault	1.5	1.0					CannotBeDisabled			allow null operators for result and result return type by default
-AllowSealedInheritorsInDifferentFilesOfSamePackage	1.5	1.0					CannotBeDisabled			allow sealed inheritors in different files of same package
-SealedInterfaces	1.5	1.0					CannotBeDisabled			sealed interfaces
-JvmInlineValueClasses	1.5	1.0					CannotBeDisabled			jvm inline value classes
-SuspendFunctionsInFunInterfaces	1.5	1.0					CannotBeDisabled			suspend functions in fun interfaces
-SamWrapperClassesAreSynthetic	1.5	1.0	progressive				CannotBeDisabled			sam wrapper classes are synthetic
-StrictOnlyInputTypesChecks	1.5	1.0					CannotBeDisabled			strict only input types checks
-ProhibitJvmFieldOnOverrideFromInterfaceInPrimaryConstructor	1.6	1.0	progressive				CannotBeDisabled			prohibit jvm field on override from interface in primary constructor
-PrivateInFileEffectiveVisibility	1.6	1.0	progressive				CannotBeDisabled			private in file effective visibility
-ProhibitSelfCallsInNestedObjects	1.6	1.0	progressive				CannotBeDisabled			prohibit self calls in nested objects
-ProperCheckAnnotationsTargetInTypeUsePositions	1.6	1.0	progressive				CannotBeDisabled			proper check annotations target in type use positions
-SuspendFunctionAsSupertype	1.6	1.0					CannotBeDisabled			suspend function as supertype
-UnrestrictedBuilderInference	1.6	1.0					CannotBeDisabled		-Xunrestricted-builder-inference	unrestricted builder inference
-ClassTypeParameterAnnotations	1.6	1.0					CannotBeDisabled			class type parameter annotations
-WarnAboutNonExhaustiveWhenOnAlgebraicTypes	1.6	1.0	progressive				CannotBeDisabled			warn about non exhaustive when on algebraic types
-InstantiationOfAnnotationClasses	1.6	1.0					CannotBeDisabled			instantiation of annotation classes
-OptInContagiousSignatures	1.6	1.0	progressive				CannotBeDisabled			opt in contagious signatures
-RepeatableAnnotations	1.6	1.0					CannotBeDisabled			repeatable annotations
-RepeatableAnnotationContainerConstraints	1.6	1.0	progressive				CannotBeDisabled			repeatable annotation container constraints
-UseBuilderInferenceOnlyIfNeeded	1.6	1.0					CannotBeDisabled			use builder inference only if needed
-SuspendConversion	1.6	1.0					CannotBeDisabled			suspend conversion
-ProhibitSuperCallsFromPublicInline	1.6	1.0					CannotBeDisabled			prohibit super calls from public inline
-ProhibitProtectedConstructorCallFromPublicInline	1.6	1.0					CannotBeDisabled			prohibit protected constructor call from public inline
-TypeEnhancementImprovementsInStrictMode	1.7	1.0					CanStillBeDisabledForNow			type enhancement improvements in strict mode
-OptInRelease	1.7	1.0					CannotBeDisabled			opt in release
-ProhibitNonExhaustiveWhenOnAlgebraicTypes	1.7	1.0	progressive				CannotBeDisabled			prohibit non exhaustive when on algebraic types
-UseBuilderInferenceWithoutAnnotation	1.7	1.0					CannotBeDisabled			use builder inference without annotation
-ProhibitSmartcastsOnPropertyFromAlienBaseClass	1.7	1.0	progressive				CannotBeDisabled			prohibit smartcasts on property from alien base class
-ProhibitInvalidCharsInNativeIdentifiers	1.7	1.0	progressive				CannotBeDisabled			prohibit invalid chars in native identifiers
-DefinitelyNonNullableTypes	1.7	1.0					CannotBeDisabled			definitely non nullable types
-ProhibitSimplificationOfNonTrivialConstBooleanExpressions	1.7	1.0					CannotBeDisabled			prohibit simplification of non trivial const boolean expressions
-SafeCallsAreAlwaysNullable	1.7	1.0					CannotBeDisabled			safe calls are always nullable
-JvmPermittedSubclassesAttributeForSealed	1.7	1.0					CannotBeDisabled			jvm permitted subclasses attribute for sealed
-ProperTypeInferenceConstraintsProcessing	1.7	1.0	progressive				CannotBeDisabled			proper type inference constraints processing
-ForbidExposingTypesInPrimaryConstructorProperties	1.7	1.0	progressive				CannotBeDisabled			forbid exposing types in primary constructor properties
-PartiallySpecifiedTypeArguments	1.7	1.0					CannotBeDisabled			partially specified type arguments
-EliminateAmbiguitiesWithExternalTypeParameters	1.7	1.0					CannotBeDisabled			eliminate ambiguities with external type parameters
-EliminateAmbiguitiesOnInheritedSamInterfaces	1.7	1.0					CannotBeDisabled			eliminate ambiguities on inherited sam interfaces
-ProperInternalVisibilityCheckInImportingScope	1.7	1.0	progressive				CannotBeDisabled			proper internal visibility check in importing scope
-InlineClassImplementationByDelegation	1.7	1.0					CannotBeDisabled			inline class implementation by delegation
-QualifiedSupertypeMayBeExtendedByOtherSupertype	1.7	1.0					CannotBeDisabled			qualified supertype may be extended by other supertype
-YieldIsNoMoreReserved	1.7	1.0					CannotBeDisabled			yield is no more reserved
-NoDeprecationOnDeprecatedEnumEntries	1.7	1.0					CannotBeDisabled			no deprecation on deprecated enum entries
-ProhibitQualifiedAccessToUninitializedEnumEntry	1.7	1.0	progressive				CannotBeDisabled			prohibit qualified access to uninitialized enum entry
-ForbidRecursiveDelegateExpressions	1.7	1.0	progressive				CannotBeDisabled			forbid recursive delegate expressions
-KotlinFunInterfaceConstructorReference	1.7	1.0					CannotBeDisabled			kotlin fun interface constructor reference
-SuspendOnlySamConversions	1.7	1.0					CannotBeDisabled			suspend only sam conversions
-DontLoseDiagnosticsDuringOverloadResolutionByReturnType	1.8	1.0					CannotBeDisabled			dont lose diagnostics during overload resolution by return type
-ProhibitConfusingSyntaxInWhenBranches	1.8	1.0	progressive				CannotBeDisabled			prohibit confusing syntax in when branches
-UseConsistentRulesForPrivateConstructorsOfSealedClasses	1.8	1.0	progressive				CannotBeDisabled			use consistent rules for private constructors of sealed classes
-ProgressionsChangingResolve	1.8	1.0					CannotBeDisabled			progressions changing resolve
-AbstractClassMemberNotImplementedWithIntermediateAbstractClass	1.8	1.0	progressive				CannotBeDisabled			abstract class member not implemented with intermediate abstract class
-ForbidSuperDelegationToAbstractAnyMethod	1.8	1.0	progressive				CannotBeDisabled			forbid super delegation to abstract any method
-ProperEqualityChecksInBuilderInferenceCalls	1.8	1.0	progressive				CannotBeDisabled			proper equality checks in builder inference calls
-ProhibitNonExhaustiveIfInRhsOfElvis	1.8	1.0	progressive				CannotBeDisabled			prohibit non exhaustive if in rhs of elvis
-ReportMissingUpperBoundsViolatedErrorOnAbbreviationAtSupertypes	1.8	1.0	progressive				CannotBeDisabled			report missing upper bounds violated error on abbreviation at supertypes
-ForbidUsingExtensionPropertyTypeParameterInDelegate	1.8	1.0	progressive				CannotBeDisabled			forbid using extension property type parameter in delegate
-SynchronizedSuspendError	1.8	1.0	progressive				CannotBeDisabled			synchronized suspend error
-ReportNonVarargSpreadOnGenericCalls	1.8	1.0	progressive				CannotBeDisabled			report non vararg spread on generic calls
-RangeUntilOperator	1.8	1.0					CannotBeDisabled			range until operator
-GenericInlineClassParameter	1.8	1.0		prerelease			CannotBeDisabled			generic inline class parameter
-ProhibitIllegalValueParameterUsageInDefaultArguments	1.9	1.0	progressive				CannotBeDisabled			prohibit illegal value parameter usage in default arguments
-ProhibitConstructorCallOnFunctionalSupertype	1.9	1.0	progressive				CannotBeDisabled			prohibit constructor call on functional supertype
-ProhibitArrayLiteralsInCompanionOfAnnotation	1.9	1.0	progressive				CannotBeDisabled			prohibit array literals in companion of annotation
-ProhibitCyclesInAnnotations	1.9	1.0	progressive				CannotBeDisabled			prohibit cycles in annotations
-ForbidExtensionFunctionTypeOnNonFunctionTypes	1.9	1.0	progressive				CannotBeDisabled			forbid extension function type on non function types
-ProhibitEnumDeclaringClass	1.9	1.0	progressive				CannotBeDisabled			prohibit enum declaring class
-StopPropagatingDeprecationThroughOverrides	1.9	1.0	progressive				CannotBeDisabled			stop propagating deprecation through overrides
-ReportTypeVarianceConflictOnQualifierArguments	1.9	1.0	progressive				CannotBeDisabled			report type variance conflict on qualifier arguments
-ReportErrorsOnRecursiveTypeInsidePlusAssignment	1.9	1.0	progressive				CannotBeDisabled			report errors on recursive type inside plus assignment
-ForbidExtensionCallsOnInlineFunctionalParameters	1.9	1.0	progressive				CannotBeDisabled			forbid extension calls on inline functional parameters
-SkipStandaloneScriptsInSourceRoots	1.9	1.0					CannotBeDisabled		-Xallow-any-scripts-in-source-roots	skip standalone scripts in source roots
-ModifierNonBuiltinSuspendFunError	1.9	1.0	progressive				CannotBeDisabled			modifier non builtin suspend fun error
-EnumEntries	1.9	1.8		prerelease			CannotBeDisabled			enum entries
-ForbidSuperDelegationToAbstractFakeOverride	1.9	1.0	progressive				CannotBeDisabled			forbid super delegation to abstract fake override
-DataObjects	1.9	1.0					CannotBeDisabled			data objects
-ProhibitAccessToEnumCompanionMembersInEnumConstructorCall	1.9	1.0	progressive				CannotBeDisabled			prohibit access to enum companion members in enum constructor call
-RefineTypeCheckingOnAssignmentsToJavaFields	1.9	1.0	progressive				CannotBeDisabled			refine type checking on assignments to java fields
-ValueClassesSecondaryConstructorWithBody	1.9	1.0		prerelease			CannotBeDisabled			value classes secondary constructor with body
-NativeJsProhibitLateinitIsInitializedIntrinsicWithoutPrivateAccess	1.9	1.0	progressive				CannotBeDisabled			native js prohibit lateinit is initialized intrinsic without private access
-TakeIntoAccountEffectivelyFinalInMustBeInitializedCheck	1.9	1.0					CannotBeDisabled			take into account effectively final in must be initialized check
-ProhibitUsingNullableTypeParameterAgainstNotNullAnnotated	1.9	1.0					CannotBeDisabled			prohibit using nullable type parameter against not null annotated
-NoSourceCodeInNotNullAssertionExceptions	1.9	1.4					CannotBeDisabled			no source code in not null assertion exceptions
-MultiplatformRestrictions	1.9	1.0	progressive				CannotBeDisabled			multiplatform restrictions
-EnhanceNullabilityOfPrimitiveArrays	2.0	1.0	progressive				CannotBeDisabled			enhance nullability of primitive arrays
-AllowEmptyIntersectionsInResultTypeResolver	2.0	1.0					CannotBeDisabled			allow empty intersections in result type resolver
-ProhibitSmartcastsOnPropertyFromAlienBaseClassInheritedInInvisibleClass	2.0	1.0	progressive				CannotBeDisabled			prohibit smartcasts on property from alien base class inherited in invisible class
-ForbidInferringPostponedTypeVariableIntoDeclaredUpperBound	2.0	1.0	progressive				CannotBeDisabled			forbid inferring postponed type variable into declared upper bound
-ProhibitUseSiteGetTargetAnnotations	2.0	1.0	progressive				CannotBeDisabled			prohibit use site get target annotations
-KeepNullabilityWhenApproximatingLocalType	2.0	1.0	progressive				CannotBeDisabled			keep nullability when approximating local type
-ProhibitAccessToInvisibleSetterFromDerivedClass	2.0	1.0	progressive				CannotBeDisabled			prohibit access to invisible setter from derived class
-ProhibitOpenValDeferredInitialization	2.0	1.0	progressive				CannotBeDisabled			prohibit open val deferred initialization
-SupportEffectivelyFinalInExpectActualVisibilityCheck	2.0	1.0	progressive				CannotBeDisabled			support effectively final in expect actual visibility check
-ProhibitMissedMustBeInitializedWhenThereIsNoPrimaryConstructor	2.0	1.0	progressive				CannotBeDisabled			prohibit missed must be initialized when there is no primary constructor
-MangleCallsToJavaMethodsWithValueClasses	2.0	1.0					CannotBeDisabled			mangle calls to java methods with value classes
-ProhibitDefaultArgumentsInExpectActualizedByFakeOverride	2.0	1.0	progressive				CannotBeDisabled			prohibit default arguments in expect actualized by fake override
-DisableCompatibilityModeForNewInference	2.0	1.0					CannotBeDisabled		-Xnew-inference	disable compatibility mode for new inference
-DfaBooleanVariables	2.0	1.0					CannotBeDisabled			dfa boolean variables
-LightweightLambdas	2.0	1.0					CannotBeDisabled			lightweight lambdas
-ObjCSignatureOverrideAnnotation	2.0	2.0					CannotBeDisabled			obj c signature override annotation
-JsAllowValueClassesInExternals	2.0	1.0					CannotBeDisabled			js allow value classes in externals
-ProhibitImplementingVarByInheritedVal	2.1	1.0	progressive				CannotBeDisabled			prohibit implementing var by inherited val
-PrioritizedEnumEntries	2.1	1.0		prerelease			CannotBeDisabled			prioritized enum entries
-ProhibitInlineModifierOnPrimaryConstructorParameters	2.1	1.0	progressive				CannotBeDisabled			prohibit inline modifier on primary constructor parameters
-ProhibitSingleNamedFunctionAsExpression	2.1	1.0	progressive				CannotBeDisabled			prohibit single named function as expression
-ForbidLambdaParameterWithMissingDependencyType	2.1	1.0	progressive				CannotBeDisabled			forbid lambda parameter with missing dependency type
-JsAllowInvalidCharsIdentifiersEscaping	2.1	1.0					CannotBeDisabled			js allow invalid chars identifiers escaping
-SupportJavaErrorEnhancementOfArgumentsOfWarningLevelEnhanced	2.1	1.0	progressive				CannotBeDisabled			support java error enhancement of arguments of warning level enhanced
-ProhibitPrivateOperatorCallInInline	2.1	1.0	progressive				CannotBeDisabled			prohibit private operator call in inline
-ProhibitTypealiasAsCallableQualifierInImport	2.1	1.0	progressive				CannotBeDisabled			prohibit typealias as callable qualifier in import
-JsExternalPropertyParameters	2.1	1.0					CannotBeDisabled			js external property parameters
-CorrectSpecificityCheckForSignedAndUnsigned	2.1	1.0					CannotBeDisabled			correct specificity check for signed and unsigned
-AllowAccessToProtectedFieldFromSuperCompanion	2.1	1.0					CannotBeDisabled			allow access to protected field from super companion
-CheckLambdaAgainstTypeVariableContradictionInResolution	2.1	1.0					CannotBeDisabled			check lambda against type variable contradiction in resolution
-ProperUninitializedEnumEntryAccessAnalysis	2.1	1.0	progressive				CannotBeDisabled			proper uninitialized enum entry access analysis
-ImprovedCapturedTypeApproximationInInference	2.1	1.0					CannotBeDisabled			improved captured type approximation in inference
-ImprovedVarianceInCst	2.1	1.0					CannotBeDisabled			improved variance in cst
-InferMoreImplicationsFromBooleanExpressions	2.1	1.0					CannotBeDisabled			infer more implications from boolean expressions
-ImprovedExhaustivenessChecksIn21	2.1	1.0					CannotBeDisabled			improved exhaustiveness checks in21
-ProhibitSynchronizationByValueClassesAndPrimitives	2.1	1.0	progressive				CannotBeDisabled			prohibit synchronization by value classes and primitives
-AllowSuperCallToJavaInterface	2.1	1.0					CannotBeDisabled			allow super call to java interface
-ProhibitJavaClassInheritingPrivateKotlinClass	2.1	1.0	progressive				CannotBeDisabled			prohibit java class inheriting private kotlin class
-ProhibitReturningIncorrectNullabilityValuesFromSamConstructorLambdaOfJdkInterfaces	2.1	1.0	progressive				CannotBeDisabled			prohibit returning incorrect nullability values from sam constructor lambda of jdk interfaces
-ProhibitNothingAsCatchParameter	2.1	1.0	progressive				CannotBeDisabled			prohibit nothing as catch parameter
-NullableNothingInReifiedPosition	2.1	1.0		prerelease			CannotBeDisabled			nullable nothing in reified position
-ElvisInferenceImprovementsIn21	2.1	1.0					CannotBeDisabled			elvis inference improvements in21
-ConsiderForkPointsWhenCheckingContradictions	2.1	1.0					CannotBeDisabled			consider fork points when checking contradictions
-AvoidApproximationOfRecursiveCapturedTypesWithNoReason	2.1	1.0					CannotBeDisabled			avoid approximation of recursive captured types with no reason
-PCLAEnhancementsIn21	2.1	1.0					CannotBeDisabled			p c l a enhancements in21
-InferenceEnhancementsIn21	2.1	1.0					CannotBeDisabled			inference enhancements in21
-StricterConstraintIncorporationRecursionDetector	2.1	1.0					CannotBeDisabled			stricter constraint incorporation recursion detector
-ForkIsNotSuccessfulWhenNoBranchIsSuccessful	2.1	1.0					CannotBeDisabled			fork is not successful when no branch is successful
-BreakContinueInInlineLambdas	2.2	1.0					CannotBeDisabled		-Xnon-local-break-continue	break continue in inline lambdas
-ForbidUsingExpressionTypesWithInaccessibleContent	2.2	1.0	progressive				CannotBeDisabled			forbid using expression types with inaccessible content
-ReportExposedTypeForMoreCasesOfTypeParameterBounds	2.2	1.0	progressive				CannotBeDisabled			report exposed type for more cases of type parameter bounds
-ForbidReifiedTypeParametersOnTypeAliases	2.2	1.0	progressive				CannotBeDisabled			forbid reified type parameters on type aliases
-ForbidProjectionsInAnnotationProperties	2.2	1.0	progressive				CannotBeDisabled			forbid projections in annotation properties
-ForbidJvmAnnotationsOnAnnotationParameters	2.2	1.0	progressive				CannotBeDisabled			forbid jvm annotations on annotation parameters
-ForbidFieldAnnotationsOnAnnotationParameters	2.2	1.0	progressive				CannotBeDisabled			forbid field annotations on annotation parameters
-ProhibitConstructorAndSupertypeOnTypealiasWithTypeProjection	2.2	1.0	progressive				CannotBeDisabled			prohibit constructor and supertype on typealias with type projection
-CallableReferenceOverloadResolutionInLambda	2.2	1.0					CannotBeDisabled			callable reference overload resolution in lambda
-ProhibitGenericQualifiersOnConstructorCalls	2.2	1.0	progressive				CannotBeDisabled			prohibit generic qualifiers on constructor calls
-AvoidWrongOptimizationOfTypeOperatorsOnValueClasses	2.2	1.0					CannotBeDisabled			avoid wrong optimization of type operators on value classes
-ForbidSyntheticPropertiesWithoutBaseJavaGetter	2.2	1.0	progressive				CannotBeDisabled			forbid synthetic properties without base java getter
-AnnotationDefaultTargetMigrationWarning	2.2	1.0	progressive				CannotBeDisabled		-Xannotation-default-target={first-only-warn|first-only}	annotation default target migration warning
-AllowDnnTypeOverridingFlexibleType	2.2	1.0					CannotBeDisabled			allow dnn type overriding flexible type
-ForbidEnumEntryNamedEntries	2.2	1.0	progressive				CannotBeDisabled			forbid enum entry named entries
-WhenGuards	2.2	1.0					CannotBeDisabled		-Xwhen-guards	when guards
-MultiDollarInterpolation	2.2	1.0					CannotBeDisabled		-Xmulti-dollar-interpolation	multi dollar interpolation
-JvmDefaultEnableByDefault	2.2	1.0					CannotBeDisabled			jvm default enable by default
-ForbidExposureOfPrivateTypesInNonPrivateInlineFunctionsInKlibs	2.2	1.0	progressive				CannotBeDisabled			forbid exposure of private types in non private inline functions in klibs
-FixationEnhancementsIn22	2.2	1.0					CannotBeDisabled			fixation enhancements in22
-ForbidCrossFileIrFieldAccessInKlibs	2.2	1.0	progressive				CannotBeDisabled			forbid cross file ir field access in klibs
-AllowExpectDeclarationsInJsExport	2.2	1.0					CannotBeDisabled			allow expect declarations in js export
-DoNotRunSuspendConversionForLambdaReturnStatements	2.2	1.0	progressive				CannotBeDisabled			do not run suspend conversion for lambda return statements
-JvmNullOutSpilledCoroutineLocals	2.2	2.2					CannotBeDisabled			jvm null out spilled coroutine locals
-CapturedTypeApproximationReworked	2.2	1.0					CannotBeDisabled			captured type approximation reworked
-ForbidCompanionInLocalInnerClass	2.3	1.0	progressive				CannotBeDisabled			forbid companion in local inner class
-ForbidImplementationByDelegationWithDifferentGenericSignature	2.3	1.0	progressive				CannotBeDisabled			forbid implementation by delegation with different generic signature
-ForbidJvmSerializableLambdaOnInlinedFunctionLiterals	2.3	1.0	progressive				CannotBeDisabled			forbid jvm serializable lambda on inlined function literals
-ReportExposedTypeForInternalTypeParameterBounds	2.3	1.0	progressive				CannotBeDisabled			report exposed type for internal type parameter bounds
-EnableDfaWarningsInK2	2.3	1.0					CannotBeDisabled			enable dfa warnings in k2
-ResolveTopLevelLambdasAsSyntheticCallArgument	2.3	1.0					CannotBeDisabled			resolve top level lambdas as synthetic call argument
-DataFlowBasedExhaustiveness	2.3	1.0					CannotBeDisabled		-Xdata-flow-based-exhaustiveness	data flow based exhaustiveness
-UnstableSmartcastOnDelegatedProperties	2.3	1.0	progressive				CannotBeDisabled			unstable smartcast on delegated properties
-ForbidAnnotationsWithUseSiteTargetOnExpressions	2.3	1.0	progressive				CannotBeDisabled			forbid annotations with use site target on expressions
-ProhibitNullableTypeThroughTypealias	2.3	1.0	progressive				CannotBeDisabled			prohibit nullable type through typealias
-ForbidObjectDelegationToItself	2.3	1.0	progressive				CannotBeDisabled			forbid object delegation to itself
-JvmIndyAllowLambdasWithAnnotations	2.3	1.0					CannotBeDisabled			jvm indy allow lambdas with annotations
-NestedTypeAliases	2.3	1.0		prerelease			CannotBeDisabled		-Xnested-type-aliases	nested type aliases
-ProhibitIntersectionReifiedTypeParameter	2.3	1.0	progressive				CannotBeDisabled			prohibit intersection reified type parameter
-AllowCheckForErasedTypesInContracts	2.3	1.0					CannotBeDisabled		-Xallow-contracts-on-more-functions	allow check for erased types in contracts
-AllowContractsOnSomeOperators	2.3	1.0					CannotBeDisabled		-Xallow-contracts-on-more-functions	allow contracts on some operators
-AllowContractsOnPropertyAccessors	2.3	1.0					CannotBeDisabled		-Xallow-contracts-on-more-functions	allow contracts on property accessors
-ConditionImpliesReturnsContracts	2.3	1.0					CannotBeDisabled		-Xallow-condition-implies-returns-contracts	condition implies returns contracts
-HoldsInContracts	2.3	1.0					CannotBeDisabled		-Xallow-holdsin-contract	holds in contracts
-InferenceEnhancementsIn23	2.3	1.0					CannotBeDisabled			inference enhancements in23
-AllowReturnInExpressionBodyWithExplicitType	2.3	1.0					CannotBeDisabled			allow return in expression body with explicit type
-ParseLambdaWithSuspendModifier	2.3	1.0					CannotBeDisabled			parse lambda with suspend modifier
-JsAllowLongInExportedDeclarations	2.3	1.0					CannotBeDisabled			js allow long in exported declarations
-JsStaticInInterface	2.3	1.0					CannotBeDisabled			js static in interface
-IrRichCallableReferencesInKlibs	2.3	1.0					CannotBeDisabled			ir rich callable references in klibs
-AllowCallingJavaOpenSealedClassConstructor	2.3	1.0					CannotBeDisabled			allow calling java open sealed class constructor
-ImprovedExhaustivenessChecksIn23	2.3	1.0					CannotBeDisabled			improved exhaustiveness checks in23
-EqualityConstraintForOperatorsUnderAssignments	2.3	1.0					CannotBeDisabled			equality constraint for operators under assignments
-AnnotationsInMetadata	2.4	1.0					CannotBeDisabled			annotations in metadata
-ForbidExposingLessVisibleTypesInInline	2.4	1.0	progressive				CannotBeDisabled			forbid exposing less visible types in inline
-ForbidCaptureInlinableLambdasInJsCode	2.4	1.0	progressive				CannotBeDisabled			forbid capture inlinable lambdas in js code
-ForbidInitializationBeforeDeclarationInAnonymous	2.4	1.0	progressive				CannotBeDisabled			forbid initialization before declaration in anonymous
-ForbidPrivateToThisUnboundCallableReferences	2.4	1.0	progressive				CannotBeDisabled			forbid private to this unbound callable references
-AllowReifiedTypeInCatchClause	2.4	1.0					CannotBeDisabled		-Xallow-reified-type-in-catch	allow reified type in catch clause
-ApproximateLocalTypesInPublicDeclarations	2.4	1.0					CannotBeDisabled			approximate local types in public declarations
-LocalVariableTargetedAnnotationOnDestructuring	2.4	1.0					CannotBeDisabled			local variable targeted annotation on destructuring
-ForbidGetSetValueWithTooManyParameters	2.4	1.0	progressive				CannotBeDisabled			forbid get set value with too many parameters
-ForbidInlineEnumEntries	2.4	1.0	progressive				CannotBeDisabled			forbid inline enum entries
-TurnTypeCheckWarningsIntoErrors	2.4	1.0	progressive				CannotBeDisabled			turn type check warnings into errors
-ProhibitExtendingAnnotationClasses	2.4	1.0	progressive				CannotBeDisabled			prohibit extending annotation classes
-RefinedVarargConversionRulesForCallableReferences	2.4	1.0					CannotBeDisabled			refined vararg conversion rules for callable references
-CheckOptInOnPureEnumEntries	2.4	1.0	progressive				CannotBeDisabled			check opt in on pure enum entries
-ProperlyCheckUpperBoundsViolationsWhenCreatingFreshVariables	2.4	1.0	progressive				CannotBeDisabled			properly check upper bounds violations when creating fresh variables
-ReportUpperBoundViolatedInCallArgumentInteractions	2.4	1.0	progressive				CannotBeDisabled			report upper bound violated in call argument interactions
-CheckPackageInfoNullnessAnnotations	2.4	1.0	progressive				CannotBeDisabled			check package info nullness annotations
-ForbidTypeAliasWithMissingDependencyType	2.4	1.0	progressive				CannotBeDisabled			forbid type alias with missing dependency type
-ForbidImplicitTypeAnnotationWithMissingDependency	2.4	1.0	progressive				CannotBeDisabled			forbid implicit type annotation with missing dependency
-ProperExhaustivenessCheckForJavaOpenSealedClass	2.4	1.0	progressive				CannotBeDisabled			proper exhaustiveness check for java open sealed class
-DisableMaxTypeDepthFromInitialConstraints	2.4	1.0	progressive				CannotBeDisabled			disable max type depth from initial constraints
-JsAllowExportingSuspendFunctions	2.4	1.0					CannotBeDisabled			js allow exporting suspend functions
-ImprovedResolutionInSecondaryConstructors	2.4	1.0					CannotBeDisabled			improved resolution in secondary constructors
-CacheLocalVariableScopes	2.4	1.0					CannotBeDisabled			cache local variable scopes
-ContextParameters	2.4	1.0					CannotBeDisabled		-Xcontext-parameters	context parameters
-PropertyParamAnnotationDefaultTargetMode	2.4	1.0					CannotBeDisabled		-Xannotation-default-target={param-property|first-only|first-only-warn}	property param annotation default target mode
-AnnotationAllUseSiteTarget	2.4	1.0					CannotBeDisabled		-Xannotation-target-all	annotation all use site target
-OverloadResolutionSpecificityForEnhancedJvmPrimitiveWrappers	2.4	1.0					CannotBeDisabled			overload resolution specificity for enhanced jvm primitive wrappers
-ForbidTypeAliasToCompilerRequiredAnnotation	2.4	1.0	progressive				CannotBeDisabled			forbid type alias to compiler required annotation
-ForbidArrayLiteralsInNonAnnotationContexts	2.4	1.0	progressive				CannotBeDisabled			forbid array literals in non annotation contexts
-LexicographicVariableReadinessCalculation	2.4	1.0					CannotBeDisabled			lexicographic variable readiness calculation
-ForbidClassLiteralWithPotentiallyNullableReifiedLhs	2.4	1.0	progressive				CannotBeDisabled			forbid class literal with potentially nullable reified lhs
-ForbidOverriddenDefaultParametersInInline	2.4	1.0	progressive				CannotBeDisabled			forbid overridden default parameters in inline
-ForbidRootIdePackageInCli	2.4	1.0	progressive				CannotBeDisabled			forbid root ide package in cli
-ReportOptInUsageOnCompanionObjectAccesses	2.4	1.0	progressive				CannotBeDisabled			report opt in usage on companion object accesses
-ChangedIntersectionWithRecursiveCapturedType	2.4	1.0					CannotBeDisabled			changed intersection with recursive captured type
-FixedUninitializedEnumCompanionCheck	2.4	1.0					CannotBeDisabled			fixed uninitialized enum companion check
-SkipHiddenObjectsInResolution	2.4	1.0					CannotBeDisabled			skip hidden objects in resolution
-NoDeprecationOnImportStatements	2.4	1.0					CannotBeDisabled			no deprecation on import statements
-JvmEnhancedBridges	2.4	1.0					CannotBeDisabled			jvm enhanced bridges
-DiscriminateNothingAsNullabilityConstraintInInference	2.4	1.0					CannotBeDisabled			discriminate nothing as nullability constraint in inference
-ResolveEqualsRhsInDependentContextWithCompletion	2.4	1.0					CannotBeDisabled			resolve equals rhs in dependent context with completion
-IrIntraModuleInlinerBeforeKlibSerialization	2.4	2.3					CannotBeDisabled			ir intra module inliner before klib serialization
-ImprovedExhaustivenessCheckForSubjectVariable24	2.4	1.0					CannotBeDisabled			improved exhaustiveness check for subject variable24
-DontMakeExplicitNullableJavaTypeArgumentsFlexible	2.4	1.0					CannotBeDisabled			dont make explicit nullable java type arguments flexible
-ExplicitBackingFields	2.4	1.0					CannotBeDisabled		-Xexplicit-backing-fields	explicit backing fields
-ProhibitFunctionCallsInDefaultParametersOfInline	2.4	1.0	progressive				CannotBeDisabled			prohibit function calls in default parameters of inline
-AllowNamedCompanionForJsExport	2.4	1.0					CannotBeDisabled			allow named companion for js export
-AllowInterfaceNestedClassesInJsExport	2.4	1.0					CannotBeDisabled			allow interface nested classes in js export
-NativeTestProcessorBeforeSerialization	2.4	1.0					CannotBeDisabled			native test processor before serialization
-JsAllowExportingValueClasses	2.4	1.0					CannotBeDisabled			js allow exporting value classes
-DontCreateSyntheticPropertiesWithoutBaseJavaGetter	2.4	1.0					CannotBeDisabled			dont create synthetic properties without base java getter
-ErrorAboutDataClassCopyVisibilityChange	2.5	1.0	progressive				CannotBeDisabled			error about data class copy visibility change
-KlibAnnotationsInMetadata	2.5	1.0					CannotBeDisabled			klib annotations in metadata
-ForbidReturnInExpressionBodyWithoutExplicitTypeEdgeCases	2.5	1.0					CannotBeDisabled			forbid return in expression body without explicit type edge cases
-ForbidExternalEnumEntriesAndPrimaryConstructorProperties	2.5	1.0	progressive				CannotBeDisabled			forbid external enum entries and primary constructor properties
-ReportTypeVarianceConflictsInDnnAndFlexible	2.5	1.0	progressive				CannotBeDisabled			report type variance conflicts in dnn and flexible
-ProperSupportOfInnerClassesInCallableReferenceLHS	2.5	1.0					CannotBeDisabled			proper support of inner classes in callable reference l h s
-DontIgnoreUpperBoundViolatedOnImplicitArguments	2.5	1.0					CannotBeDisabled			dont ignore upper bound violated on implicit arguments
-ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds	2.5	1.0	progressive				CannotBeDisabled			forbid upper bounds violation on type operator and parameter bounds
-ForbidUselessTypeArgumentsIn25	2.5	1.0	progressive				CannotBeDisabled			forbid useless type arguments in25
-WrapContinuationForTailCallFunctions	2.5	2.5					CannotBeDisabled			wrap continuation for tail call functions
-EagerLambdaAnalysis	2.5	1.0					CannotBeDisabled			eager lambda analysis
-AllowReturnsResultOfContract	2.5	2.4		prerelease			CannotBeDisabled		-Xallow-returns-result-of	allow returns result of contract
-ExpectActualClasses		1.0					CannotBeDisabled			expect actual classes
-DataClassCopyRespectsConstructorVisibility		1.0					CannotBeDisabled		-Xconsistent-data-class-copy-visibility	data class copy respects constructor visibility
-ForbidParenthesizedLhsInAssignments		1.0					CannotBeDisabled			forbid parenthesized lhs in assignments
-DirectJavaActualization		1.0					CannotBeDisabled		-Xdirect-java-actualization	direct java actualization
-IgnoreNullabilityForErasedValueParameters		1.0					CannotBeDisabled			ignore nullability for erased value parameters
-NoBuilderInferenceWithoutAnnotationRestriction		1.0					CannotBeDisabled			no builder inference without annotation restriction
-ReportErrorsForComparisonOperators		1.0					CannotBeDisabled			report errors for comparison operators
-NoAdditionalErrorsInK1DiagnosticReporter		1.0					CannotBeDisabled			no additional errors in k1 diagnostic reporter
-ProhibitScriptTopLevelInnerClasses		1.0					CannotBeDisabled			prohibit script top level inner classes
-DisableSimplificationOfFlexibleUpperConstraintWithDnnLowerBound		1.0					CannotBeDisabled			disable simplification of flexible upper constraint with dnn lower bound
-PreciseSimplificationToFlexibleLowerConstraint		1.0					CannotBeDisabled			precise simplification to flexible lower constraint
-DiscriminateSuspendInOverloadResolution		1.0					CannotBeDisabled			discriminate suspend in overload resolution
-ExpectRefinement		1.0					CannotBeDisabled			expect refinement
-JsEnableExtensionFunctionInExternals		1.0					CannotBeDisabled			js enable extension function in externals
-PackagePrivateFileClassesWithAllPrivateMembers		1.0					CannotBeDisabled			package private file classes with all private members
-MultiPlatformProjects		1.0					CannotBeDisabled		-Xmulti-platform	multi platform projects
-ProhibitComparisonOfIncompatibleClasses		1.0					CannotBeDisabled			prohibit comparison of incompatible classes
-ProhibitAllMultipleDefaultsInheritedFromSupertypes		1.0					CannotBeDisabled			prohibit all multiple defaults inherited from supertypes
-FunctionalTypeWithExtensionAsSupertype		1.0					CannotBeDisabled			functional type with extension as supertype
-ContextReceivers		1.0					CannotBeDisabled		-Xcontext-receivers	context receivers
-ExplicitContextArguments		1.0					CannotBeDisabled		-Xexplicit-context-arguments	explicit context arguments
-JvmInlineMultiFieldValueClasses		1.0		prerelease			CannotBeDisabled			jvm inline multi field value classes
-JavaSamConversionEqualsHashCode		1.0		prerelease			CannotBeDisabled			java sam conversion equals hash code
-AllowAnyAsAnActualTypeForExpectInterface		1.0					CannotBeDisabled			allow any as an actual type for expect interface
-CompanionBlocksAndExtensions		1.0		prerelease			CannotBeDisabled			companion blocks and extensions
-NameBasedDestructuring		1.0					CannotBeDisabled		-Xname-based-destructuring={only-syntax|name-mismatch|complete}	name based destructuring
-DeprecateNameMismatchInShortDestructuringWithParentheses		1.0					CannotBeDisabled		-Xname-based-destructuring={name-mismatch|complete}	deprecate name mismatch in short destructuring with parentheses
-EnableNameBasedDestructuringShortForm		1.0					CannotBeDisabled		-Xname-based-destructuring=complete	enable name based destructuring short form
-LocalTypeAliases		1.0		prerelease			CannotBeDisabled		-Xlocal-type-aliases	local type aliases
-JsExposedNotExportedSuperInterfaceApiByExportedOne		1.0					CannotBeDisabled			js exposed not exported super interface api by exported one
-JsExportInterfacesInImplementableWay		1.0					CannotBeDisabled			js export interfaces in implementable way
-UnitConversionsOnArbitraryExpressions		1.0					CannotBeDisabled			unit conversions on arbitrary expressions
-JsAllowImplementingFunctionInterface		1.0					CannotBeDisabled			js allow implementing function interface
-CustomEqualsInValueClasses		1.0					CannotBeDisabled			custom equals in value classes
-ContractSyntaxV2		1.0		prerelease			CannotBeDisabled			contract syntax v2
-ReferencesToSyntheticJavaProperties		1.0				testOnly	CannotBeDisabled			references to synthetic java properties
-ImplicitSignedToUnsignedIntegerConversion		1.0				testOnly	CannotBeDisabled			implicit signed to unsigned integer conversion
-ForbidInferringTypeVariablesIntoEmptyIntersection		1.0					CannotBeDisabled			forbid inferring type variables into empty intersection
-IntrinsicConstEvaluation		1.0					CannotBeDisabled		-Xintrinsic-const-evaluation	intrinsic const evaluation
-DisableCheckingChangedProgressionsResolve		1.0					CannotBeDisabled			disable checking changed progressions resolve
-CollectionLiterals		1.0					CannotBeDisabled		-Xcollection-literals	collection literals
-ProperFieldAccessGenerationForFieldAccessShadowedByKotlinProperty		1.0					CannotBeDisabled			proper field access generation for field access shadowed by kotlin property
-IrCrossModuleInlinerBeforeKlibSerialization		2.3		prerelease			CannotBeDisabled			ir cross module inliner before klib serialization
-AllowEagerSupertypeAccessibilityChecks		1.0					CannotBeDisabled			allow eager supertype accessibility checks
-UnnamedLocalVariables		1.0					CannotBeDisabled			unnamed local variables
-ContextSensitiveResolutionUsingExpectedType		1.0					CannotBeDisabled		-Xcontext-sensitive-resolution	context sensitive resolution using expected type
-DisableWarningsForValueBasedJavaClasses		1.0					CannotBeDisabled			disable warnings for value based java classes
-DisableWarningsForIdentitySensitiveOperationsOnValueClassesAndPrimitives		1.0					CannotBeDisabled			disable warnings for identity sensitive operations on value classes and primitives
-ExportKlibToOlderAbiVersion		1.0		prerelease			CannotBeDisabled			export klib to older abi version
-ForbidInferOfInvisibleTypeAsReifiedVarargOrReturnType		1.0					CannotBeDisabled			forbid infer of invisible type as reified vararg or return type
-ForbidExposingPackagePrivateInInternal		1.0					CannotBeDisabled			forbid exposing package private in internal
-JvmLoadAnnotationsOnAnnotationProperties		1.0					CannotBeDisabled			jvm load annotations on annotation properties
-TreatProvideDelegateAsConventionName		1.0					CannotBeDisabled			treat provide delegate as convention name
-ExportKDocDocumentationToKlib		1.0					CannotBeDisabled			export k doc documentation to klib
+# name	sinceVersion	sinceApiVersion	progressive	forcesPreReleaseBinaries	forcesPreReleaseBinariesBefore	testOnly	behaviorAfterSinceVersion	hintUrl	flag	issue	presentableName
+TypeAliases	1.1	1.0					CannotBeDisabled				type aliases
+BoundCallableReferences	1.1	1.1					CannotBeDisabled				bound callable references
+LocalDelegatedProperties	1.1	1.1					CannotBeDisabled				local delegated properties
+TopLevelSealedInheritance	1.1	1.0					CannotBeDisabled				top level sealed inheritance
+AdditionalBuiltInsMembers	1.1	1.0					CannotBeDisabled				additional built ins members
+DataClassInheritance	1.1	1.0					CannotBeDisabled				data class inheritance
+InlineProperties	1.1	1.0					CannotBeDisabled				inline properties
+DestructuringLambdaParameters	1.1	1.0					CannotBeDisabled				destructuring lambda parameters
+SingleUnderscoreForParameterName	1.1	1.0					CannotBeDisabled				single underscore for parameter name
+DslMarkersSupport	1.1	1.0					CannotBeDisabled				dsl markers support
+UnderscoresInNumericLiterals	1.1	1.0					CannotBeDisabled				underscores in numeric literals
+DivisionByZeroInConstantExpressions	1.1	1.0					CannotBeDisabled				division by zero in constant expressions
+InlineConstVals	1.1	1.0					CannotBeDisabled				inline const vals
+OperatorProvideDelegate	1.1	1.0					CannotBeDisabled				operator provide delegate
+ShortSyntaxForPropertyGetters	1.1	1.0					CannotBeDisabled				short syntax for property getters
+RefinedSamAdaptersPriority	1.1	1.0					CannotBeDisabled				refined sam adapters priority
+SafeCallBoundSmartCasts	1.1	1.0					CannotBeDisabled				safe call bound smart casts
+TypeInferenceOnGenericsForCallableReferences	1.1	1.0					CannotBeDisabled				type inference on generics for callable references
+NoDelegationToJavaDefaultInterfaceMembers	1.1	1.0					CannotBeDisabled				no delegation to java default interface members
+Coroutines	1.1	1.1					CannotBeDisabled				coroutines
+InlineDefaultFunctionalParameters	1.2	1.0					CannotBeDisabled				inline default functional parameters
+SoundSmartCastsAfterTry	1.2	1.0					CannotBeDisabled				sound smart casts after try
+NullabilityAssertionOnExtensionReceiver	1.2	1.0					CannotBeDisabled				nullability assertion on extension receiver
+SafeCastCheckBoundSmartCasts	1.2	1.0					CannotBeDisabled				safe cast check bound smart casts
+CapturedInClosureSmartCasts	1.2	1.0					CannotBeDisabled				captured in closure smart casts
+LateinitTopLevelProperties	1.2	1.0					CannotBeDisabled				lateinit top level properties
+LateinitLocalVariables	1.2	1.0					CannotBeDisabled				lateinit local variables
+InnerClassInEnumEntryClass	1.2	1.0					CannotBeDisabled				inner class in enum entry class
+CallableReferencesToClassMembersWithEmptyLHS	1.2	1.0					CannotBeDisabled				callable references to class members with empty l h s
+JvmPackageName	1.2	1.0					CannotBeDisabled				jvm package name
+AssigningArraysToVarargsInNamedFormInAnnotations	1.2	1.0					CannotBeDisabled				assigning arrays to varargs in named form in annotations
+ExpectedTypeFromCast	1.2	1.0					CannotBeDisabled				expected type from cast
+RestrictionOfValReassignmentViaBackingField	1.3	1.0	progressive				CannotBeDisabled				restriction of val reassignment via backing field
+NestedClassesInEnumEntryShouldBeInner	1.3	1.0	progressive				CannotBeDisabled				nested classes in enum entry should be inner
+ProhibitDataClassesOverridingCopy	1.3	1.0	progressive				CannotBeDisabled				prohibit data classes overriding copy
+RestrictionOfWrongAnnotationsWithUseSiteTargetsOnTypes	1.3	1.0	progressive				CannotBeDisabled				restriction of wrong annotations with use site targets on types
+ProhibitInnerClassesOfGenericClassExtendingThrowable	1.3	1.0	progressive				CannotBeDisabled				prohibit inner classes of generic class extending throwable
+ProperForInArrayLoopRangeVariableAssignmentSemantic	1.3	1.0	progressive				CannotBeDisabled				proper for in array loop range variable assignment semantic
+NestedClassesInAnnotations	1.3	1.0					CannotBeDisabled				nested classes in annotations
+JvmStaticInInterface	1.3	1.0		prerelease			CannotBeDisabled				jvm static in interface
+JvmFieldInInterface	1.3	1.0		prerelease			CannotBeDisabled				jvm field in interface
+ProhibitVisibilityOfNestedClassifiersFromSupertypesOfCompanion	1.3	1.0	progressive				CannotBeDisabled				prohibit visibility of nested classifiers from supertypes of companion
+ProhibitNonConstValuesAsVarargsInAnnotations	1.3	1.0	progressive				CannotBeDisabled				prohibit non const values as varargs in annotations
+ReleaseCoroutines	1.3	1.0		prerelease			CannotBeDisabled				release coroutines
+ReadDeserializedContracts	1.3	1.0					CannotBeDisabled				read deserialized contracts
+UseReturnsEffect	1.3	1.0					CannotBeDisabled				use returns effect
+UseCallsInPlaceEffect	1.3	1.0					CannotBeDisabled				use calls in place effect
+AllowContractsForCustomFunctions	1.3	1.0					CannotBeDisabled				allow contracts for custom functions
+VariableDeclarationInWhenSubject	1.3	1.0					CannotBeDisabled				variable declaration in when subject
+ProhibitLocalAnnotations	1.3	1.0	progressive				CannotBeDisabled				prohibit local annotations
+ProhibitSmartcastsOnLocalDelegatedProperty	1.3	1.0	progressive				CannotBeDisabled				prohibit smartcasts on local delegated property
+ProhibitAssigningSingleElementsToVarargsInNamedForm	1.3	1.0	progressive				CannotBeDisabled				prohibit assigning single elements to varargs in named form
+FunctionTypesWithBigArity	1.3	1.3					CannotBeDisabled				function types with big arity
+RestrictRetentionForExpressionAnnotations	1.3	1.0	progressive				CannotBeDisabled				restrict retention for expression annotations
+StrictJavaNullabilityAssertions	1.3	1.0	progressive				CannotBeDisabled				strict java nullability assertions
+SoundSmartcastForEnumEntries	1.3	1.0	progressive				CannotBeDisabled				sound smartcast for enum entries
+ProhibitErroneousExpressionsInAnnotationsWithUseSiteTargets	1.3	1.0	progressive				CannotBeDisabled				prohibit erroneous expressions in annotations with use site targets
+NewCapturedReceiverFieldNamingConvention	1.3	1.0	progressive				CannotBeDisabled				new captured receiver field naming convention
+ExtendedMainConvention	1.3	1.0					CannotBeDisabled				extended main convention
+ExperimentalBuilderInference	1.3	1.0					CannotBeDisabled				experimental builder inference
+InlineClasses	1.3	1.0		prerelease			CannotBeDisabled		-Xinline-classes		inline classes
+DslMarkerOnFunctionTypeReceiver	1.4	1.0	progressive				CannotBeDisabled				dsl marker on function type receiver
+RestrictReturnStatementTarget	1.4	1.0	progressive				CannotBeDisabled				restrict return statement target
+WarningOnMainUnusedParameter	1.4	1.0					CannotBeDisabled				warning on main unused parameter
+PolymorphicSignature	1.4	1.0					CannotBeDisabled				polymorphic signature
+ProhibitConcurrentHashMapContains	1.4	1.0	progressive				CannotBeDisabled				prohibit concurrent hash map contains
+ProhibitTypeParametersForLocalVariables	1.4	1.0	progressive				CannotBeDisabled				prohibit type parameters for local variables
+ProhibitJvmOverloadsOnConstructorsOfAnnotationClasses	1.4	1.0	progressive				CannotBeDisabled				prohibit jvm overloads on constructors of annotation classes
+ProhibitTypeParametersInAnonymousObjects	1.4	1.0	progressive				CannotBeDisabled				prohibit type parameters in anonymous objects
+ProhibitRepeatedUseSiteTargetAnnotations	1.4	1.0	progressive				CannotBeDisabled				prohibit repeated use site target annotations
+ProhibitUseSiteTargetAnnotationsOnSuperTypes	1.4	1.0	progressive				CannotBeDisabled				prohibit use site target annotations on super types
+ProhibitTypeParametersInClassLiteralsInAnnotationArguments	1.4	1.0	progressive				CannotBeDisabled				prohibit type parameters in class literals in annotation arguments
+ProhibitComparisonOfIncompatibleEnums	1.4	1.0	progressive				CannotBeDisabled				prohibit comparison of incompatible enums
+BareArrayClassLiteral	1.4	1.0					CannotBeDisabled				bare array class literal
+ProhibitGenericArrayClassLiteral	1.4	1.0					CannotBeDisabled				prohibit generic array class literal
+NonParenthesizedAnnotationsOnFunctionalTypes	1.4	1.0					CannotBeDisabled				non parenthesized annotations on functional types
+UseGetterNameForPropertyAnnotationsMethodOnJvm	1.4	1.0					CannotBeDisabled				use getter name for property annotations method on jvm
+AllowBreakAndContinueInsideWhen	1.4	1.0					CannotBeDisabled				allow break and continue inside when
+MixedNamedArgumentsInTheirOwnPosition	1.4	1.0					CannotBeDisabled				mixed named arguments in their own position
+ProhibitTailrecOnVirtualMember	1.4	1.0	progressive				CannotBeDisabled				prohibit tailrec on virtual member
+ProperComputationOrderOfTailrecDefaultParameters	1.4	1.0					CannotBeDisabled				proper computation order of tailrec default parameters
+TrailingCommas	1.4	1.0					CannotBeDisabled				trailing commas
+ProhibitProtectedCallFromInline	1.4	1.0	progressive				CannotBeDisabled				prohibit protected call from inline
+ProperFinally	1.4	1.0	progressive				CannotBeDisabled				proper finally
+AllowAssigningArrayElementsToVarargsInNamedFormForFunctions	1.4	1.0					CannotBeDisabled				allow assigning array elements to varargs in named form for functions
+AllowNullOperatorsForResult	1.4	1.0					CannotBeDisabled				allow null operators for result
+PreferJavaFieldOverload	1.4	1.0					CannotBeDisabled				prefer java field overload
+AllowContractsForNonOverridableMembers	1.4	1.0					CannotBeDisabled				allow contracts for non overridable members
+AllowReifiedGenericsInContracts	1.4	1.0					CannotBeDisabled				allow reified generics in contracts
+ProperVisibilityForCompanionObjectInstanceField	1.4	1.0	progressive				CannotBeDisabled				proper visibility for companion object instance field
+DoNotGenerateThrowsForDelegatedKotlinMembers	1.4	1.0					CannotBeDisabled				do not generate throws for delegated kotlin members
+ProperIeee754Comparisons	1.4	1.0	progressive				CannotBeDisabled				proper ieee754 comparisons
+FunctionalInterfaceConversion	1.4	1.0		prerelease			CannotBeDisabled				functional interface conversion
+GenerateJvmOverloadsAsFinal	1.4	1.0					CannotBeDisabled				generate jvm overloads as final
+MangleClassMembersReturningInlineClasses	1.4	1.0					CannotBeDisabled				mangle class members returning inline classes
+ImproveReportingDiagnosticsOnProtectedMembersOfBaseClass	1.4	1.0	progressive				CannotBeDisabled				improve reporting diagnostics on protected members of base class
+NewInference	1.4	1.0					CannotBeDisabled		-Xnew-inference		new inference
+SamConversionForKotlinFunctions	1.4	1.0					CannotBeDisabled				sam conversion for kotlin functions
+SamConversionPerArgument	1.4	1.0					CannotBeDisabled		-Xnew-inference		sam conversion per argument
+FunctionReferenceWithDefaultValueAsOtherType	1.4	1.0					CannotBeDisabled		-Xnew-inference		function reference with default value as other type
+OverloadResolutionByLambdaReturnType	1.4	1.0					CannotBeDisabled				overload resolution by lambda return type
+ContractsOnCallsWithImplicitReceiver	1.4	1.0					CannotBeDisabled				contracts on calls with implicit receiver
+ProhibitSpreadOnSignaturePolymorphicCall	1.5	1.0	progressive				CannotBeDisabled				prohibit spread on signature polymorphic call
+ProhibitInvisibleAbstractMethodsInSuperclasses	1.5	1.0	progressive				CannotBeDisabled				prohibit invisible abstract methods in superclasses
+ProhibitNonReifiedArraysAsReifiedTypeArguments	1.5	1.0	progressive				CannotBeDisabled				prohibit non reified arrays as reified type arguments
+ProhibitVarargAsArrayAfterSamArgument	1.5	1.0	progressive				CannotBeDisabled				prohibit vararg as array after sam argument
+CorrectSourceMappingSyntax	1.5	1.0		prerelease			CannotBeDisabled				correct source mapping syntax
+RequiredPrimaryConstructorDelegationCallInEnums	1.5	1.0	progressive				CannotBeDisabled				required primary constructor delegation call in enums
+ApproximateAnonymousReturnTypesInPrivateInlineFunctions	1.5	1.0	progressive				CannotBeDisabled				approximate anonymous return types in private inline functions
+ForbidReferencingToUnderscoreNamedParameterOfCatchBlock	1.5	1.0	progressive				CannotBeDisabled				forbid referencing to underscore named parameter of catch block
+UseCorrectExecutionOrderForVarargArguments	1.5	1.0	progressive				CannotBeDisabled				use correct execution order for vararg arguments
+JvmRecordSupport	1.5	1.0					CannotBeDisabled				jvm record support
+AllowNullOperatorsForResultAndResultReturnTypeByDefault	1.5	1.0					CannotBeDisabled				allow null operators for result and result return type by default
+AllowSealedInheritorsInDifferentFilesOfSamePackage	1.5	1.0					CannotBeDisabled				allow sealed inheritors in different files of same package
+SealedInterfaces	1.5	1.0					CannotBeDisabled				sealed interfaces
+JvmInlineValueClasses	1.5	1.0					CannotBeDisabled				jvm inline value classes
+SuspendFunctionsInFunInterfaces	1.5	1.0					CannotBeDisabled				suspend functions in fun interfaces
+SamWrapperClassesAreSynthetic	1.5	1.0	progressive				CannotBeDisabled				sam wrapper classes are synthetic
+StrictOnlyInputTypesChecks	1.5	1.0					CannotBeDisabled				strict only input types checks
+ProhibitJvmFieldOnOverrideFromInterfaceInPrimaryConstructor	1.6	1.0	progressive				CannotBeDisabled				prohibit jvm field on override from interface in primary constructor
+PrivateInFileEffectiveVisibility	1.6	1.0	progressive				CannotBeDisabled				private in file effective visibility
+ProhibitSelfCallsInNestedObjects	1.6	1.0	progressive				CannotBeDisabled				prohibit self calls in nested objects
+ProperCheckAnnotationsTargetInTypeUsePositions	1.6	1.0	progressive				CannotBeDisabled				proper check annotations target in type use positions
+SuspendFunctionAsSupertype	1.6	1.0					CannotBeDisabled				suspend function as supertype
+UnrestrictedBuilderInference	1.6	1.0					CannotBeDisabled		-Xunrestricted-builder-inference		unrestricted builder inference
+ClassTypeParameterAnnotations	1.6	1.0					CannotBeDisabled				class type parameter annotations
+WarnAboutNonExhaustiveWhenOnAlgebraicTypes	1.6	1.0	progressive				CannotBeDisabled				warn about non exhaustive when on algebraic types
+InstantiationOfAnnotationClasses	1.6	1.0					CannotBeDisabled				instantiation of annotation classes
+OptInContagiousSignatures	1.6	1.0	progressive				CannotBeDisabled				opt in contagious signatures
+RepeatableAnnotations	1.6	1.0					CannotBeDisabled				repeatable annotations
+RepeatableAnnotationContainerConstraints	1.6	1.0	progressive				CannotBeDisabled				repeatable annotation container constraints
+UseBuilderInferenceOnlyIfNeeded	1.6	1.0					CannotBeDisabled				use builder inference only if needed
+SuspendConversion	1.6	1.0					CannotBeDisabled				suspend conversion
+ProhibitSuperCallsFromPublicInline	1.6	1.0					CannotBeDisabled				prohibit super calls from public inline
+ProhibitProtectedConstructorCallFromPublicInline	1.6	1.0					CannotBeDisabled				prohibit protected constructor call from public inline
+TypeEnhancementImprovementsInStrictMode	1.7	1.0					CanStillBeDisabledForNow				type enhancement improvements in strict mode
+OptInRelease	1.7	1.0					CannotBeDisabled				opt in release
+ProhibitNonExhaustiveWhenOnAlgebraicTypes	1.7	1.0	progressive				CannotBeDisabled				prohibit non exhaustive when on algebraic types
+UseBuilderInferenceWithoutAnnotation	1.7	1.0					CannotBeDisabled				use builder inference without annotation
+ProhibitSmartcastsOnPropertyFromAlienBaseClass	1.7	1.0	progressive				CannotBeDisabled				prohibit smartcasts on property from alien base class
+ProhibitInvalidCharsInNativeIdentifiers	1.7	1.0	progressive				CannotBeDisabled				prohibit invalid chars in native identifiers
+DefinitelyNonNullableTypes	1.7	1.0					CannotBeDisabled				definitely non nullable types
+ProhibitSimplificationOfNonTrivialConstBooleanExpressions	1.7	1.0					CannotBeDisabled				prohibit simplification of non trivial const boolean expressions
+SafeCallsAreAlwaysNullable	1.7	1.0					CannotBeDisabled				safe calls are always nullable
+JvmPermittedSubclassesAttributeForSealed	1.7	1.0					CannotBeDisabled				jvm permitted subclasses attribute for sealed
+ProperTypeInferenceConstraintsProcessing	1.7	1.0	progressive				CannotBeDisabled				proper type inference constraints processing
+ForbidExposingTypesInPrimaryConstructorProperties	1.7	1.0	progressive				CannotBeDisabled				forbid exposing types in primary constructor properties
+PartiallySpecifiedTypeArguments	1.7	1.0					CannotBeDisabled				partially specified type arguments
+EliminateAmbiguitiesWithExternalTypeParameters	1.7	1.0					CannotBeDisabled				eliminate ambiguities with external type parameters
+EliminateAmbiguitiesOnInheritedSamInterfaces	1.7	1.0					CannotBeDisabled				eliminate ambiguities on inherited sam interfaces
+ProperInternalVisibilityCheckInImportingScope	1.7	1.0	progressive				CannotBeDisabled				proper internal visibility check in importing scope
+InlineClassImplementationByDelegation	1.7	1.0					CannotBeDisabled				inline class implementation by delegation
+QualifiedSupertypeMayBeExtendedByOtherSupertype	1.7	1.0					CannotBeDisabled				qualified supertype may be extended by other supertype
+YieldIsNoMoreReserved	1.7	1.0					CannotBeDisabled				yield is no more reserved
+NoDeprecationOnDeprecatedEnumEntries	1.7	1.0					CannotBeDisabled			KT-37975	no deprecation on deprecated enum entries
+ProhibitQualifiedAccessToUninitializedEnumEntry	1.7	1.0	progressive				CannotBeDisabled			KT-41124	prohibit qualified access to uninitialized enum entry
+ForbidRecursiveDelegateExpressions	1.7	1.0	progressive				CannotBeDisabled				forbid recursive delegate expressions
+KotlinFunInterfaceConstructorReference	1.7	1.0					CannotBeDisabled				kotlin fun interface constructor reference
+SuspendOnlySamConversions	1.7	1.0					CannotBeDisabled				suspend only sam conversions
+DontLoseDiagnosticsDuringOverloadResolutionByReturnType	1.8	1.0					CannotBeDisabled				dont lose diagnostics during overload resolution by return type
+ProhibitConfusingSyntaxInWhenBranches	1.8	1.0	progressive				CannotBeDisabled			KT-48385	prohibit confusing syntax in when branches
+UseConsistentRulesForPrivateConstructorsOfSealedClasses	1.8	1.0	progressive				CannotBeDisabled			KT-44866	use consistent rules for private constructors of sealed classes
+ProgressionsChangingResolve	1.8	1.0					CannotBeDisabled			KT-49276	progressions changing resolve
+AbstractClassMemberNotImplementedWithIntermediateAbstractClass	1.8	1.0	progressive				CannotBeDisabled			KT-45508	abstract class member not implemented with intermediate abstract class
+ForbidSuperDelegationToAbstractAnyMethod	1.8	1.0	progressive				CannotBeDisabled			KT-38078	forbid super delegation to abstract any method
+ProperEqualityChecksInBuilderInferenceCalls	1.8	1.0	progressive				CannotBeDisabled				proper equality checks in builder inference calls
+ProhibitNonExhaustiveIfInRhsOfElvis	1.8	1.0	progressive				CannotBeDisabled			KT-44705	prohibit non exhaustive if in rhs of elvis
+ReportMissingUpperBoundsViolatedErrorOnAbbreviationAtSupertypes	1.8	1.0	progressive				CannotBeDisabled			KT-29168	report missing upper bounds violated error on abbreviation at supertypes
+ForbidUsingExtensionPropertyTypeParameterInDelegate	1.8	1.0	progressive				CannotBeDisabled			KT-24643	forbid using extension property type parameter in delegate
+SynchronizedSuspendError	1.8	1.0	progressive				CannotBeDisabled			KT-48516	synchronized suspend error
+ReportNonVarargSpreadOnGenericCalls	1.8	1.0	progressive				CannotBeDisabled			KT-48162	report non vararg spread on generic calls
+RangeUntilOperator	1.8	1.0					CannotBeDisabled			KT-15613	range until operator
+GenericInlineClassParameter	1.8	1.0		prerelease			CannotBeDisabled			KT-32162	generic inline class parameter
+ProhibitIllegalValueParameterUsageInDefaultArguments	1.9	1.0	progressive				CannotBeDisabled			KT-25694	prohibit illegal value parameter usage in default arguments
+ProhibitConstructorCallOnFunctionalSupertype	1.9	1.0	progressive				CannotBeDisabled			KT-46344	prohibit constructor call on functional supertype
+ProhibitArrayLiteralsInCompanionOfAnnotation	1.9	1.0	progressive				CannotBeDisabled			KT-39041	prohibit array literals in companion of annotation
+ProhibitCyclesInAnnotations	1.9	1.0	progressive				CannotBeDisabled			KT-47932	prohibit cycles in annotations
+ForbidExtensionFunctionTypeOnNonFunctionTypes	1.9	1.0	progressive				CannotBeDisabled			KT-43527	forbid extension function type on non function types
+ProhibitEnumDeclaringClass	1.9	1.0	progressive				CannotBeDisabled			KT-49653	prohibit enum declaring class
+StopPropagatingDeprecationThroughOverrides	1.9	1.0	progressive				CannotBeDisabled			KT-47902	stop propagating deprecation through overrides
+ReportTypeVarianceConflictOnQualifierArguments	1.9	1.0	progressive				CannotBeDisabled			KT-50947	report type variance conflict on qualifier arguments
+ReportErrorsOnRecursiveTypeInsidePlusAssignment	1.9	1.0	progressive				CannotBeDisabled			KT-48546	report errors on recursive type inside plus assignment
+ForbidExtensionCallsOnInlineFunctionalParameters	1.9	1.0	progressive				CannotBeDisabled			KT-52502	forbid extension calls on inline functional parameters
+SkipStandaloneScriptsInSourceRoots	1.9	1.0					CannotBeDisabled		-Xallow-any-scripts-in-source-roots	KT-52525	skip standalone scripts in source roots
+ModifierNonBuiltinSuspendFunError	1.9	1.0	progressive				CannotBeDisabled			KT-49264	modifier non builtin suspend fun error
+EnumEntries	1.9	1.8		prerelease			CannotBeDisabled			KT-48872	enum entries
+ForbidSuperDelegationToAbstractFakeOverride	1.9	1.0	progressive				CannotBeDisabled			KT-49017	forbid super delegation to abstract fake override
+DataObjects	1.9	1.0					CannotBeDisabled			KT-4107	data objects
+ProhibitAccessToEnumCompanionMembersInEnumConstructorCall	1.9	1.0	progressive				CannotBeDisabled			KT-49110	prohibit access to enum companion members in enum constructor call
+RefineTypeCheckingOnAssignmentsToJavaFields	1.9	1.0	progressive				CannotBeDisabled			KT-46727	refine type checking on assignments to java fields
+ValueClassesSecondaryConstructorWithBody	1.9	1.0		prerelease			CannotBeDisabled			KT-55333	value classes secondary constructor with body
+NativeJsProhibitLateinitIsInitializedIntrinsicWithoutPrivateAccess	1.9	1.0	progressive				CannotBeDisabled			KT-27002	native js prohibit lateinit is initialized intrinsic without private access
+TakeIntoAccountEffectivelyFinalInMustBeInitializedCheck	1.9	1.0					CannotBeDisabled			KT-58587	take into account effectively final in must be initialized check
+ProhibitUsingNullableTypeParameterAgainstNotNullAnnotated	1.9	1.0					CannotBeDisabled			KT-36770	prohibit using nullable type parameter against not null annotated
+NoSourceCodeInNotNullAssertionExceptions	1.9	1.4					CannotBeDisabled			KT-57570	no source code in not null assertion exceptions
+MultiplatformRestrictions	1.9	1.0	progressive				CannotBeDisabled			KT-61668	multiplatform restrictions
+EnhanceNullabilityOfPrimitiveArrays	2.0	1.0	progressive				CannotBeDisabled			KT-54521	enhance nullability of primitive arrays
+AllowEmptyIntersectionsInResultTypeResolver	2.0	1.0					CannotBeDisabled			KT-51221	allow empty intersections in result type resolver
+ProhibitSmartcastsOnPropertyFromAlienBaseClassInheritedInInvisibleClass	2.0	1.0	progressive				CannotBeDisabled			KT-57290	prohibit smartcasts on property from alien base class inherited in invisible class
+ForbidInferringPostponedTypeVariableIntoDeclaredUpperBound	2.0	1.0	progressive				CannotBeDisabled			KT-47986	forbid inferring postponed type variable into declared upper bound
+ProhibitUseSiteGetTargetAnnotations	2.0	1.0	progressive				CannotBeDisabled			KT-15470	prohibit use site get target annotations
+KeepNullabilityWhenApproximatingLocalType	2.0	1.0	progressive				CannotBeDisabled			KT-53982	keep nullability when approximating local type
+ProhibitAccessToInvisibleSetterFromDerivedClass	2.0	1.0	progressive				CannotBeDisabled			KT-56662	prohibit access to invisible setter from derived class
+ProhibitOpenValDeferredInitialization	2.0	1.0	progressive				CannotBeDisabled			KT-57553	prohibit open val deferred initialization
+SupportEffectivelyFinalInExpectActualVisibilityCheck	2.0	1.0	progressive				CannotBeDisabled			KT-61955	support effectively final in expect actual visibility check
+ProhibitMissedMustBeInitializedWhenThereIsNoPrimaryConstructor	2.0	1.0	progressive				CannotBeDisabled			KT-58472	prohibit missed must be initialized when there is no primary constructor
+MangleCallsToJavaMethodsWithValueClasses	2.0	1.0					CannotBeDisabled			KT-55945	mangle calls to java methods with value classes
+ProhibitDefaultArgumentsInExpectActualizedByFakeOverride	2.0	1.0	progressive				CannotBeDisabled			KT-62036	prohibit default arguments in expect actualized by fake override
+DisableCompatibilityModeForNewInference	2.0	1.0					CannotBeDisabled		-Xnew-inference	KT-63558	disable compatibility mode for new inference
+DfaBooleanVariables	2.0	1.0					CannotBeDisabled			KT-25747	dfa boolean variables
+LightweightLambdas	2.0	1.0					CannotBeDisabled			KT-45375	lightweight lambdas
+ObjCSignatureOverrideAnnotation	2.0	2.0					CannotBeDisabled			KT-61323	obj c signature override annotation
+JsAllowValueClassesInExternals	2.0	1.0					CannotBeDisabled				js allow value classes in externals
+ProhibitImplementingVarByInheritedVal	2.1	1.0	progressive				CannotBeDisabled			KT-56779	prohibit implementing var by inherited val
+PrioritizedEnumEntries	2.1	1.0		prerelease			CannotBeDisabled			KT-58920	prioritized enum entries
+ProhibitInlineModifierOnPrimaryConstructorParameters	2.1	1.0	progressive				CannotBeDisabled			KT-59664	prohibit inline modifier on primary constructor parameters
+ProhibitSingleNamedFunctionAsExpression	2.1	1.0	progressive				CannotBeDisabled			KT-62573	prohibit single named function as expression
+ForbidLambdaParameterWithMissingDependencyType	2.1	1.0	progressive				CannotBeDisabled			KT-64474	forbid lambda parameter with missing dependency type
+JsAllowInvalidCharsIdentifiersEscaping	2.1	1.0					CannotBeDisabled			KT-31799	js allow invalid chars identifiers escaping
+SupportJavaErrorEnhancementOfArgumentsOfWarningLevelEnhanced	2.1	1.0	progressive				CannotBeDisabled			KT-63209	support java error enhancement of arguments of warning level enhanced
+ProhibitPrivateOperatorCallInInline	2.1	1.0	progressive				CannotBeDisabled			KT-65494	prohibit private operator call in inline
+ProhibitTypealiasAsCallableQualifierInImport	2.1	1.0	progressive				CannotBeDisabled			KT-64350	prohibit typealias as callable qualifier in import
+JsExternalPropertyParameters	2.1	1.0					CannotBeDisabled			KT-65965	js external property parameters
+CorrectSpecificityCheckForSignedAndUnsigned	2.1	1.0					CannotBeDisabled			KT-35305	correct specificity check for signed and unsigned
+AllowAccessToProtectedFieldFromSuperCompanion	2.1	1.0					CannotBeDisabled			KT-39868	allow access to protected field from super companion
+CheckLambdaAgainstTypeVariableContradictionInResolution	2.1	1.0					CannotBeDisabled			KT-58310	check lambda against type variable contradiction in resolution
+ProperUninitializedEnumEntryAccessAnalysis	2.1	1.0	progressive				CannotBeDisabled			KT-68451	proper uninitialized enum entry access analysis
+ImprovedCapturedTypeApproximationInInference	2.1	1.0					CannotBeDisabled			KT-64515	improved captured type approximation in inference
+ImprovedVarianceInCst	2.1	1.0					CannotBeDisabled			KT-68970	improved variance in cst
+InferMoreImplicationsFromBooleanExpressions	2.1	1.0					CannotBeDisabled			KT-64193	infer more implications from boolean expressions
+ImprovedExhaustivenessChecksIn21	2.1	1.0					CannotBeDisabled			KT-21908	improved exhaustiveness checks in21
+ProhibitSynchronizationByValueClassesAndPrimitives	2.1	1.0	progressive				CannotBeDisabled			KT-67791	prohibit synchronization by value classes and primitives
+AllowSuperCallToJavaInterface	2.1	1.0					CannotBeDisabled			KT-69729	allow super call to java interface
+ProhibitJavaClassInheritingPrivateKotlinClass	2.1	1.0	progressive				CannotBeDisabled			KT-66328	prohibit java class inheriting private kotlin class
+ProhibitReturningIncorrectNullabilityValuesFromSamConstructorLambdaOfJdkInterfaces	2.1	1.0	progressive				CannotBeDisabled			KT-57014	prohibit returning incorrect nullability values from sam constructor lambda of jdk interfaces
+ProhibitNothingAsCatchParameter	2.1	1.0	progressive				CannotBeDisabled			KT-8322	prohibit nothing as catch parameter
+NullableNothingInReifiedPosition	2.1	1.0		prerelease			CannotBeDisabled			KT-54227	nullable nothing in reified position
+ElvisInferenceImprovementsIn21	2.1	1.0					CannotBeDisabled			KT-71751	elvis inference improvements in21
+ConsiderForkPointsWhenCheckingContradictions	2.1	1.0					CannotBeDisabled			KT-68768	consider fork points when checking contradictions
+AvoidApproximationOfRecursiveCapturedTypesWithNoReason	2.1	1.0					CannotBeDisabled			KT-69995	avoid approximation of recursive captured types with no reason
+PCLAEnhancementsIn21	2.1	1.0					CannotBeDisabled			KT-69170	p c l a enhancements in21
+InferenceEnhancementsIn21	2.1	1.0					CannotBeDisabled			KT-61227	inference enhancements in21
+StricterConstraintIncorporationRecursionDetector	2.1	1.0					CannotBeDisabled			KT-73434	stricter constraint incorporation recursion detector
+ForkIsNotSuccessfulWhenNoBranchIsSuccessful	2.1	1.0					CannotBeDisabled			KT-75444	fork is not successful when no branch is successful
+BreakContinueInInlineLambdas	2.2	1.0					CannotBeDisabled		-Xnon-local-break-continue	KT-1436	break continue in inline lambdas
+ForbidUsingExpressionTypesWithInaccessibleContent	2.2	1.0	progressive				CannotBeDisabled			KT-66691	forbid using expression types with inaccessible content
+ReportExposedTypeForMoreCasesOfTypeParameterBounds	2.2	1.0	progressive				CannotBeDisabled			KT-69653	report exposed type for more cases of type parameter bounds
+ForbidReifiedTypeParametersOnTypeAliases	2.2	1.0	progressive				CannotBeDisabled			KT-70163	forbid reified type parameters on type aliases
+ForbidProjectionsInAnnotationProperties	2.2	1.0	progressive				CannotBeDisabled			KT-70002	forbid projections in annotation properties
+ForbidJvmAnnotationsOnAnnotationParameters	2.2	1.0	progressive				CannotBeDisabled			KT-25861	forbid jvm annotations on annotation parameters
+ForbidFieldAnnotationsOnAnnotationParameters	2.2	1.0	progressive				CannotBeDisabled			KT-70233	forbid field annotations on annotation parameters
+ProhibitConstructorAndSupertypeOnTypealiasWithTypeProjection	2.2	1.0	progressive				CannotBeDisabled			KT-60305	prohibit constructor and supertype on typealias with type projection
+CallableReferenceOverloadResolutionInLambda	2.2	1.0					CannotBeDisabled			KT-73011	callable reference overload resolution in lambda
+ProhibitGenericQualifiersOnConstructorCalls	2.2	1.0	progressive				CannotBeDisabled			KT-73527	prohibit generic qualifiers on constructor calls
+AvoidWrongOptimizationOfTypeOperatorsOnValueClasses	2.2	1.0					CannotBeDisabled			KT-67517	avoid wrong optimization of type operators on value classes
+ForbidSyntheticPropertiesWithoutBaseJavaGetter	2.2	1.0	progressive				CannotBeDisabled			KT-72305	forbid synthetic properties without base java getter
+AnnotationDefaultTargetMigrationWarning	2.2	1.0	progressive				CannotBeDisabled		-Xannotation-default-target={first-only-warn|first-only}	KT-73255	annotation default target migration warning
+AllowDnnTypeOverridingFlexibleType	2.2	1.0					CannotBeDisabled			KT-74049	allow dnn type overriding flexible type
+ForbidEnumEntryNamedEntries	2.2	1.0	progressive				CannotBeDisabled			KT-72829	forbid enum entry named entries
+WhenGuards	2.2	1.0					CannotBeDisabled		-Xwhen-guards	KT-13626	when guards
+MultiDollarInterpolation	2.2	1.0					CannotBeDisabled		-Xmulti-dollar-interpolation	KT-2425	multi dollar interpolation
+JvmDefaultEnableByDefault	2.2	1.0					CannotBeDisabled			KT-71768	jvm default enable by default
+ForbidExposureOfPrivateTypesInNonPrivateInlineFunctionsInKlibs	2.2	1.0	progressive				CannotBeDisabled			KT-70916	forbid exposure of private types in non private inline functions in klibs
+FixationEnhancementsIn22	2.2	1.0					CannotBeDisabled			KT-76345	fixation enhancements in22
+ForbidCrossFileIrFieldAccessInKlibs	2.2	1.0	progressive				CannotBeDisabled			KT-71138	forbid cross file ir field access in klibs
+AllowExpectDeclarationsInJsExport	2.2	1.0					CannotBeDisabled			KT-64951	allow expect declarations in js export
+DoNotRunSuspendConversionForLambdaReturnStatements	2.2	1.0	progressive				CannotBeDisabled			KT-74932	do not run suspend conversion for lambda return statements
+JvmNullOutSpilledCoroutineLocals	2.2	2.2					CannotBeDisabled			KT-63720	jvm null out spilled coroutine locals
+CapturedTypeApproximationReworked	2.2	1.0					CannotBeDisabled			KT-79451	captured type approximation reworked
+ForbidCompanionInLocalInnerClass	2.3	1.0	progressive				CannotBeDisabled			KT-47289	forbid companion in local inner class
+ForbidImplementationByDelegationWithDifferentGenericSignature	2.3	1.0	progressive				CannotBeDisabled			KTLC-267	forbid implementation by delegation with different generic signature
+ForbidJvmSerializableLambdaOnInlinedFunctionLiterals	2.3	1.0	progressive				CannotBeDisabled			KTLC-9	forbid jvm serializable lambda on inlined function literals
+ReportExposedTypeForInternalTypeParameterBounds	2.3	1.0	progressive				CannotBeDisabled			KTLC-275	report exposed type for internal type parameter bounds
+EnableDfaWarningsInK2	2.3	1.0					CannotBeDisabled			KT-50965	enable dfa warnings in k2
+ResolveTopLevelLambdasAsSyntheticCallArgument	2.3	1.0					CannotBeDisabled			KT-67869	resolve top level lambdas as synthetic call argument
+DataFlowBasedExhaustiveness	2.3	1.0					CannotBeDisabled		-Xdata-flow-based-exhaustiveness	KT-76635	data flow based exhaustiveness
+UnstableSmartcastOnDelegatedProperties	2.3	1.0	progressive				CannotBeDisabled			KTLC-273	unstable smartcast on delegated properties
+ForbidAnnotationsWithUseSiteTargetOnExpressions	2.3	1.0	progressive				CannotBeDisabled			KT-75242	forbid annotations with use site target on expressions
+ProhibitNullableTypeThroughTypealias	2.3	1.0	progressive				CannotBeDisabled			KTLC-279	prohibit nullable type through typealias
+ForbidObjectDelegationToItself	2.3	1.0	progressive				CannotBeDisabled			KT-17417	forbid object delegation to itself
+JvmIndyAllowLambdasWithAnnotations	2.3	1.0					CannotBeDisabled			KTLC-278	jvm indy allow lambdas with annotations
+NestedTypeAliases	2.3	1.0		prerelease			CannotBeDisabled		-Xnested-type-aliases	KT-45285	nested type aliases
+ProhibitIntersectionReifiedTypeParameter	2.3	1.0	progressive				CannotBeDisabled			KTLC-13	prohibit intersection reified type parameter
+AllowCheckForErasedTypesInContracts	2.3	1.0					CannotBeDisabled		-Xallow-contracts-on-more-functions	KT-45683	allow check for erased types in contracts
+AllowContractsOnSomeOperators	2.3	1.0					CannotBeDisabled		-Xallow-contracts-on-more-functions	KT-32313	allow contracts on some operators
+AllowContractsOnPropertyAccessors	2.3	1.0					CannotBeDisabled		-Xallow-contracts-on-more-functions	KT-27090	allow contracts on property accessors
+ConditionImpliesReturnsContracts	2.3	1.0					CannotBeDisabled		-Xallow-condition-implies-returns-contracts	KT-8889	condition implies returns contracts
+HoldsInContracts	2.3	1.0					CannotBeDisabled		-Xallow-holdsin-contract	KT-32993	holds in contracts
+InferenceEnhancementsIn23	2.3	1.0					CannotBeDisabled			KT-76826	inference enhancements in23
+AllowReturnInExpressionBodyWithExplicitType	2.3	1.0					CannotBeDisabled			KT-76926	allow return in expression body with explicit type
+ParseLambdaWithSuspendModifier	2.3	1.0					CannotBeDisabled			KT-22765	parse lambda with suspend modifier
+JsAllowLongInExportedDeclarations	2.3	1.0					CannotBeDisabled			KT-79222	js allow long in exported declarations
+JsStaticInInterface	2.3	1.0					CannotBeDisabled			KT-80168	js static in interface
+IrRichCallableReferencesInKlibs	2.3	1.0					CannotBeDisabled			KT-72734	ir rich callable references in klibs
+AllowCallingJavaOpenSealedClassConstructor	2.3	1.0					CannotBeDisabled			KT-78879	allow calling java open sealed class constructor
+ImprovedExhaustivenessChecksIn23	2.3	1.0					CannotBeDisabled			KT-80602	improved exhaustiveness checks in23
+EqualityConstraintForOperatorsUnderAssignments	2.3	1.0					CannotBeDisabled			KT-77008	equality constraint for operators under assignments
+AnnotationsInMetadata	2.4	1.0					CannotBeDisabled			KT-75736	annotations in metadata
+ForbidExposingLessVisibleTypesInInline	2.4	1.0	progressive				CannotBeDisabled			KTLC-283	forbid exposing less visible types in inline
+ForbidCaptureInlinableLambdasInJsCode	2.4	1.0	progressive				CannotBeDisabled			KT-69297	forbid capture inlinable lambdas in js code
+ForbidInitializationBeforeDeclarationInAnonymous	2.4	1.0	progressive				CannotBeDisabled			KTLC-290	forbid initialization before declaration in anonymous
+ForbidPrivateToThisUnboundCallableReferences	2.4	1.0	progressive				CannotBeDisabled			KTLC-383	forbid private to this unbound callable references
+AllowReifiedTypeInCatchClause	2.4	1.0					CannotBeDisabled		-Xallow-reified-type-in-catch	KT-54363	allow reified type in catch clause
+ApproximateLocalTypesInPublicDeclarations	2.4	1.0					CannotBeDisabled			KT-82454	approximate local types in public declarations
+LocalVariableTargetedAnnotationOnDestructuring	2.4	1.0					CannotBeDisabled			KT-81408	local variable targeted annotation on destructuring
+ForbidGetSetValueWithTooManyParameters	2.4	1.0	progressive				CannotBeDisabled			KTLC-289	forbid get set value with too many parameters
+ForbidInlineEnumEntries	2.4	1.0	progressive				CannotBeDisabled			KTLC-361	forbid inline enum entries
+TurnTypeCheckWarningsIntoErrors	2.4	1.0	progressive				CannotBeDisabled			KTLC-365	turn type check warnings into errors
+ProhibitExtendingAnnotationClasses	2.4	1.0	progressive				CannotBeDisabled			KTLC-374	prohibit extending annotation classes
+RefinedVarargConversionRulesForCallableReferences	2.4	1.0					CannotBeDisabled			KT-39697	refined vararg conversion rules for callable references
+CheckOptInOnPureEnumEntries	2.4	1.0	progressive				CannotBeDisabled			KTLC-359	check opt in on pure enum entries
+ProperlyCheckUpperBoundsViolationsWhenCreatingFreshVariables	2.4	1.0	progressive				CannotBeDisabled			KT-82318	properly check upper bounds violations when creating fresh variables
+ReportUpperBoundViolatedInCallArgumentInteractions	2.4	1.0	progressive				CannotBeDisabled			KTLC-373	report upper bound violated in call argument interactions
+CheckPackageInfoNullnessAnnotations	2.4	1.0	progressive				CannotBeDisabled			KT-77729	check package info nullness annotations
+ForbidTypeAliasWithMissingDependencyType	2.4	1.0	progressive				CannotBeDisabled			KT-79781	forbid type alias with missing dependency type
+ForbidImplicitTypeAnnotationWithMissingDependency	2.4	1.0	progressive				CannotBeDisabled			KT-80247	forbid implicit type annotation with missing dependency
+ProperExhaustivenessCheckForJavaOpenSealedClass	2.4	1.0	progressive				CannotBeDisabled			KTLC-366	proper exhaustiveness check for java open sealed class
+DisableMaxTypeDepthFromInitialConstraints	2.4	1.0	progressive				CannotBeDisabled			KTLC-372	disable max type depth from initial constraints
+JsAllowExportingSuspendFunctions	2.4	1.0					CannotBeDisabled			KT-56281	js allow exporting suspend functions
+ImprovedResolutionInSecondaryConstructors	2.4	1.0					CannotBeDisabled			KT-77275	improved resolution in secondary constructors
+CacheLocalVariableScopes	2.4	1.0					CannotBeDisabled			KT-68606	cache local variable scopes
+ContextParameters	2.4	1.0					CannotBeDisabled		-Xcontext-parameters	KT-72222	context parameters
+PropertyParamAnnotationDefaultTargetMode	2.4	1.0					CannotBeDisabled		-Xannotation-default-target={param-property|first-only|first-only-warn}	KT-73255	property param annotation default target mode
+AnnotationAllUseSiteTarget	2.4	1.0					CannotBeDisabled		-Xannotation-target-all	KT-73256	annotation all use site target
+OverloadResolutionSpecificityForEnhancedJvmPrimitiveWrappers	2.4	1.0					CannotBeDisabled			KT-9182	overload resolution specificity for enhanced jvm primitive wrappers
+ForbidTypeAliasToCompilerRequiredAnnotation	2.4	1.0	progressive				CannotBeDisabled			KT-79369	forbid type alias to compiler required annotation
+ForbidArrayLiteralsInNonAnnotationContexts	2.4	1.0	progressive				CannotBeDisabled			KTLC-369	forbid array literals in non annotation contexts
+LexicographicVariableReadinessCalculation	2.4	1.0					CannotBeDisabled			KT-77939	lexicographic variable readiness calculation
+ForbidClassLiteralWithPotentiallyNullableReifiedLhs	2.4	1.0	progressive				CannotBeDisabled			KTLC-370	forbid class literal with potentially nullable reified lhs
+ForbidOverriddenDefaultParametersInInline	2.4	1.0	progressive				CannotBeDisabled			KT-49722	forbid overridden default parameters in inline
+ForbidRootIdePackageInCli	2.4	1.0	progressive				CannotBeDisabled			KT-81357	forbid root ide package in cli
+ReportOptInUsageOnCompanionObjectAccesses	2.4	1.0	progressive				CannotBeDisabled			KT-82524	report opt in usage on companion object accesses
+ChangedIntersectionWithRecursiveCapturedType	2.4	1.0					CannotBeDisabled			KT-65059	changed intersection with recursive captured type
+FixedUninitializedEnumCompanionCheck	2.4	1.0					CannotBeDisabled			KT-84860	fixed uninitialized enum companion check
+SkipHiddenObjectsInResolution	2.4	1.0					CannotBeDisabled			KT-82555	skip hidden objects in resolution
+NoDeprecationOnImportStatements	2.4	1.0					CannotBeDisabled			KT-52673	no deprecation on import statements
+JvmEnhancedBridges	2.4	1.0					CannotBeDisabled			KT-82900	jvm enhanced bridges
+DiscriminateNothingAsNullabilityConstraintInInference	2.4	1.0					CannotBeDisabled			KT-81948	discriminate nothing as nullability constraint in inference
+ResolveEqualsRhsInDependentContextWithCompletion	2.4	1.0					CannotBeDisabled			KT-81763	resolve equals rhs in dependent context with completion
+IrIntraModuleInlinerBeforeKlibSerialization	2.4	2.3					CannotBeDisabled			KT-79717	ir intra module inliner before klib serialization
+ImprovedExhaustivenessCheckForSubjectVariable24	2.4	1.0					CannotBeDisabled			KT-83903	improved exhaustiveness check for subject variable24
+DontMakeExplicitNullableJavaTypeArgumentsFlexible	2.4	1.0					CannotBeDisabled			KTLC-284	dont make explicit nullable java type arguments flexible
+ExplicitBackingFields	2.4	1.0					CannotBeDisabled		-Xexplicit-backing-fields	KT-14663	explicit backing fields
+ProhibitFunctionCallsInDefaultParametersOfInline	2.4	1.0	progressive				CannotBeDisabled			KT-83829	prohibit function calls in default parameters of inline
+AllowNamedCompanionForJsExport	2.4	1.0					CannotBeDisabled			KT-82128	allow named companion for js export
+AllowInterfaceNestedClassesInJsExport	2.4	1.0					CannotBeDisabled			KT-84332	allow interface nested classes in js export
+NativeTestProcessorBeforeSerialization	2.4	1.0					CannotBeDisabled			KT-83807	native test processor before serialization
+JsAllowExportingValueClasses	2.4	1.0					CannotBeDisabled			KT-72198	js allow exporting value classes
+DontCreateSyntheticPropertiesWithoutBaseJavaGetter	2.4	1.0					CannotBeDisabled			KT-64358	dont create synthetic properties without base java getter
+ErrorAboutDataClassCopyVisibilityChange	2.5	1.0	progressive				CannotBeDisabled			KT-11914	error about data class copy visibility change
+KlibAnnotationsInMetadata	2.5	1.0					CannotBeDisabled			KT-81466	klib annotations in metadata
+ForbidReturnInExpressionBodyWithoutExplicitTypeEdgeCases	2.5	1.0					CannotBeDisabled			KTLC-288	forbid return in expression body without explicit type edge cases
+ForbidExternalEnumEntriesAndPrimaryConstructorProperties	2.5	1.0	progressive				CannotBeDisabled			KTLC-389	forbid external enum entries and primary constructor properties
+ReportTypeVarianceConflictsInDnnAndFlexible	2.5	1.0	progressive				CannotBeDisabled			KTLC-392	report type variance conflicts in dnn and flexible
+ProperSupportOfInnerClassesInCallableReferenceLHS	2.5	1.0					CannotBeDisabled			KTLC-388	proper support of inner classes in callable reference l h s
+DontIgnoreUpperBoundViolatedOnImplicitArguments	2.5	1.0					CannotBeDisabled			KTLC-287	dont ignore upper bound violated on implicit arguments
+ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds	2.5	1.0	progressive				CannotBeDisabled			KTLC-358	forbid upper bounds violation on type operator and parameter bounds
+ForbidUselessTypeArgumentsIn25	2.5	1.0	progressive				CannotBeDisabled			KTLC-390	forbid useless type arguments in25
+WrapContinuationForTailCallFunctions	2.5	2.5					CannotBeDisabled			KT-74051	wrap continuation for tail call functions
+EagerLambdaAnalysis	2.5	1.0					CannotBeDisabled			KT-51107	eager lambda analysis
+AllowReturnsResultOfContract	2.5	2.4		prerelease			CannotBeDisabled		-Xallow-returns-result-of	KT-85948	allow returns result of contract
+ExpectActualClasses		1.0					CannotBeDisabled			KT-62885	expect actual classes
+DataClassCopyRespectsConstructorVisibility		1.0					CannotBeDisabled		-Xconsistent-data-class-copy-visibility	KT-11914	data class copy respects constructor visibility
+ForbidParenthesizedLhsInAssignments		1.0					CannotBeDisabled			KT-70507	forbid parenthesized lhs in assignments
+DirectJavaActualization		1.0					CannotBeDisabled		-Xdirect-java-actualization	KT-67202	direct java actualization
+IgnoreNullabilityForErasedValueParameters		1.0					CannotBeDisabled				ignore nullability for erased value parameters
+NoBuilderInferenceWithoutAnnotationRestriction		1.0					CannotBeDisabled				no builder inference without annotation restriction
+ReportErrorsForComparisonOperators		1.0					CannotBeDisabled				report errors for comparison operators
+NoAdditionalErrorsInK1DiagnosticReporter		1.0					CannotBeDisabled				no additional errors in k1 diagnostic reporter
+ProhibitScriptTopLevelInnerClasses		1.0					CannotBeDisabled				prohibit script top level inner classes
+DisableSimplificationOfFlexibleUpperConstraintWithDnnLowerBound		1.0					CannotBeDisabled			KT-52283	disable simplification of flexible upper constraint with dnn lower bound
+PreciseSimplificationToFlexibleLowerConstraint		1.0					CannotBeDisabled			KT-78621	precise simplification to flexible lower constraint
+DiscriminateSuspendInOverloadResolution		1.0					CannotBeDisabled			KT-23610	discriminate suspend in overload resolution
+ExpectRefinement		1.0					CannotBeDisabled			KT-73557	expect refinement
+JsEnableExtensionFunctionInExternals		1.0					CannotBeDisabled				js enable extension function in externals
+PackagePrivateFileClassesWithAllPrivateMembers		1.0					CannotBeDisabled				package private file classes with all private members
+MultiPlatformProjects		1.0					CannotBeDisabled		-Xmulti-platform		multi platform projects
+ProhibitComparisonOfIncompatibleClasses		1.0					CannotBeDisabled				prohibit comparison of incompatible classes
+ProhibitAllMultipleDefaultsInheritedFromSupertypes		1.0					CannotBeDisabled				prohibit all multiple defaults inherited from supertypes
+FunctionalTypeWithExtensionAsSupertype		1.0					CannotBeDisabled				functional type with extension as supertype
+ContextReceivers		1.0					CannotBeDisabled		-Xcontext-receivers		context receivers
+ExplicitContextArguments		1.0					CannotBeDisabled		-Xexplicit-context-arguments	KT-81684	explicit context arguments
+JvmInlineMultiFieldValueClasses		1.0		prerelease			CannotBeDisabled				jvm inline multi field value classes
+JavaSamConversionEqualsHashCode		1.0		prerelease			CannotBeDisabled				java sam conversion equals hash code
+AllowAnyAsAnActualTypeForExpectInterface		1.0					CannotBeDisabled			KT-79308	allow any as an actual type for expect interface
+CompanionBlocksAndExtensions		1.0		prerelease			CannotBeDisabled			KT-11968	companion blocks and extensions
+NameBasedDestructuring		1.0					CannotBeDisabled		-Xname-based-destructuring={only-syntax|name-mismatch|complete}	KT-19627	name based destructuring
+DeprecateNameMismatchInShortDestructuringWithParentheses		1.0					CannotBeDisabled		-Xname-based-destructuring={name-mismatch|complete}	KT-19627	deprecate name mismatch in short destructuring with parentheses
+EnableNameBasedDestructuringShortForm		1.0					CannotBeDisabled		-Xname-based-destructuring=complete	KT-19627	enable name based destructuring short form
+LocalTypeAliases		1.0		prerelease			CannotBeDisabled		-Xlocal-type-aliases	KT-81404	local type aliases
+JsExposedNotExportedSuperInterfaceApiByExportedOne		1.0					CannotBeDisabled			KT-83009	js exposed not exported super interface api by exported one
+JsExportInterfacesInImplementableWay		1.0					CannotBeDisabled			KT-65802	js export interfaces in implementable way
+UnitConversionsOnArbitraryExpressions		1.0					CannotBeDisabled			KT-84393	unit conversions on arbitrary expressions
+JsAllowImplementingFunctionInterface		1.0					CannotBeDisabled				js allow implementing function interface
+CustomEqualsInValueClasses		1.0					CannotBeDisabled			KT-24874	custom equals in value classes
+ContractSyntaxV2		1.0		prerelease			CannotBeDisabled			KT-56127	contract syntax v2
+ReferencesToSyntheticJavaProperties		1.0				testOnly	CannotBeDisabled			KT-8575	references to synthetic java properties
+ImplicitSignedToUnsignedIntegerConversion		1.0				testOnly	CannotBeDisabled			KT-56583	implicit signed to unsigned integer conversion
+ForbidInferringTypeVariablesIntoEmptyIntersection		1.0					CannotBeDisabled			KT-51221	forbid inferring type variables into empty intersection
+IntrinsicConstEvaluation		1.0					CannotBeDisabled		-Xintrinsic-const-evaluation	KT-49303	intrinsic const evaluation
+DisableCheckingChangedProgressionsResolve		1.0					CannotBeDisabled			KT-49276	disable checking changed progressions resolve
+CollectionLiterals		1.0					CannotBeDisabled		-Xcollection-literals	KT-80489	collection literals
+ProperFieldAccessGenerationForFieldAccessShadowedByKotlinProperty		1.0					CannotBeDisabled			KT-56386	proper field access generation for field access shadowed by kotlin property
+IrCrossModuleInlinerBeforeKlibSerialization		2.3		prerelease			CannotBeDisabled			KT-79717	ir cross module inliner before klib serialization
+AllowEagerSupertypeAccessibilityChecks		1.0					CannotBeDisabled			KT-73611	allow eager supertype accessibility checks
+UnnamedLocalVariables		1.0					CannotBeDisabled			KT-74809	unnamed local variables
+ContextSensitiveResolutionUsingExpectedType		1.0					CannotBeDisabled		-Xcontext-sensitive-resolution	KT-16768	context sensitive resolution using expected type
+DisableWarningsForValueBasedJavaClasses		1.0					CannotBeDisabled			KT-70722	disable warnings for value based java classes
+DisableWarningsForIdentitySensitiveOperationsOnValueClassesAndPrimitives		1.0					CannotBeDisabled			KT-70722	disable warnings for identity sensitive operations on value classes and primitives
+ExportKlibToOlderAbiVersion		1.0		prerelease			CannotBeDisabled			KT-76131	export klib to older abi version
+ForbidInferOfInvisibleTypeAsReifiedVarargOrReturnType		1.0					CannotBeDisabled			KTLC-14	forbid infer of invisible type as reified vararg or return type
+ForbidExposingPackagePrivateInInternal		1.0					CannotBeDisabled			KTLC-271	forbid exposing package private in internal
+JvmLoadAnnotationsOnAnnotationProperties		1.0					CannotBeDisabled			KT-22463	jvm load annotations on annotation properties
+TreatProvideDelegateAsConventionName		1.0					CannotBeDisabled			KT-83538	treat provide delegate as convention name
+ExportKDocDocumentationToKlib		1.0					CannotBeDisabled			KT-83921	export k doc documentation to klib

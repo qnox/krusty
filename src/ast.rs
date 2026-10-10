@@ -19,6 +19,7 @@ mod constructors;
 mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
+mod language_gates;
 mod operators;
 mod type_refs;
 pub use type_refs::TrFlags;
@@ -29,6 +30,7 @@ pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
+pub use language_gates::{LanguageGates, UnsupportedSyntax, ValueClassArity, ValueClassRules};
 pub use operators::{BinOp, UnOp};
 pub use use_site_annotations::UseSiteAnnotation;
 
@@ -502,7 +504,7 @@ pub enum LambdaParameterRole {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructureEntry {
     pub name: String,
-    /// Span of the written name, including a bare `_`.
+    /// Span of the written name, backticks included, and of a bare `_`.
     pub name_span: Span,
     pub mutable: bool,
     pub ignored: bool,
@@ -1050,9 +1052,10 @@ pub struct ClassDecl {
     /// Span of the `value` keyword. Absent for a legacy `inline class` and for an ordinary class.
     /// The missing-`@JvmInline` diagnostic points here.
     pub value_modifier_span: Option<Span>,
-    /// Span of the primary constructor's parameter list, `(` through `)`. Absent when the class
-    /// writes no parameter list.
-    pub primary_constructor_parameters_span: Option<Span>,
+    /// Span of the written primary constructor, from its modifiers or `constructor` keyword (or
+    /// its `(` when it writes neither) through its `)`. Absent when the class writes no parameter
+    /// list.
+    pub primary_constructor_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
@@ -1544,6 +1547,7 @@ pub struct ExpectDeclaration {
 #[derive(Default)]
 pub struct File {
     pub package: Option<String>,
+    pub language_gates: LanguageGates,
     pub is_script: bool,
     /// Common-source role supplied by the source-set driver, not parsed from Kotlin syntax.
     pub is_common: bool,
@@ -1601,6 +1605,9 @@ pub struct File {
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
     /// node. Keyed by the value expression's `ExprId`; absent for expression bodies and synthetic values.
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
+    /// Local properties named by the unescaped `_` token: they bind nothing. A local named
+    /// `` `_` `` is an ordinary binding with that name.
+    pub unnamed_locals: std::collections::HashSet<StmtId>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: std::collections::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
@@ -1858,6 +1865,9 @@ pub struct File {
     /// reference: `<T : B>` and `where T : B` both map `B` to the parameter as `<…>` wrote it,
     /// annotations and inline bound included, which is where kotlinc reports about the parameter.
     pub type_parameter_bound_owners: std::collections::HashMap<u32, crate::diag::Span>,
+    /// The `<…>` type-parameter list of each declaration that writes one, keyed like
+    /// [`Self::declaration_type_parameter_annotations`].
+    pub type_parameter_lists: std::collections::HashMap<u32, Span>,
     /// Signature starts for typealiases with declaration type parameters. Typealiases currently live
     /// in the structural alias tables rather than `Decl`; this exact owner set lets semantic annotation
     /// resolution use file scope without guessing from names or source text.
@@ -1947,6 +1957,7 @@ impl File {
         self.stmt_lines = Vec::new();
         self.assignment_target_lines = Default::default();
         self.value_operator_spans = Default::default();
+        self.unnamed_locals = Default::default();
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();

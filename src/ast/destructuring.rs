@@ -1,7 +1,6 @@
 //! Parser-owned syntax retained for destructuring declarations across later compiler phases.
 
 use super::{StmtId, TypeRef};
-use crate::diag::Span;
 use std::collections::{HashMap, HashSet};
 
 /// Whether a name-based entry names its property by the entry itself or by an explicit rename.
@@ -36,10 +35,16 @@ pub struct DestructuringSyntax {
     /// Loops whose variable is a destructuring pattern, each with the destructuring statement
     /// prepended to its body, the only consumer of the synthetic loop variable.
     pub loops: HashMap<StmtId, StmtId>,
-    /// Square-bracket destructures parsed while `NameBasedDestructuring` is disabled. Retaining the
-    /// opening bracket span lets the frontend report the language-version diagnostic after module
-    /// admission without discarding declarations later in the file.
-    pub ungated_bracket_spans: Vec<Span>,
     /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
     pub entry_types: HashMap<u32, Vec<Option<TypeRef>>>,
+    /// Statements written in the parenthesized short form, whose entries carry no `val`/`var`:
+    /// `val (a, b) = e`, `for ((a, b) in xs)`, and the lambda parameter `{ (a, b) -> }`. The
+    /// square-bracket forms and the full form `(val a, val b) = e` are absent. Kotlin plans to give
+    /// this syntax name-based meaning, so its positional entries are the subject of the
+    /// `DeprecateNameMismatchInShortDestructuringWithParentheses` warnings.
+    pub parenthesized_short_form: HashSet<StmtId>,
+    /// `+DeprecateNameMismatchInShortDestructuringWithParentheses` without
+    /// `+EnableNameBasedDestructuringShortForm`: positional entries of the parenthesized short form
+    /// warn where the planned name-based reading would reject them or change their meaning.
+    pub warns_parenthesized_short_form: bool,
 }

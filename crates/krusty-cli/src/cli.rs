@@ -91,8 +91,9 @@ pub struct Options {
     /// What kotlinc reports about the `-XXLanguage` arguments after the syntax warnings: the
     /// unsafe-arguments notice and each value it cannot use.
     pub language_feature_problems: Vec<ArgumentProblem>,
-    /// kotlinc's configuration errors (a feature that cannot be disabled), in its words. They are
-    /// reported before the configuration warnings and fail the invocation.
+    /// kotlinc's configuration errors (an inconsistent klib inliner configuration, a feature that
+    /// cannot be disabled), in its words. They are reported before the configuration warnings and
+    /// fail the invocation.
     pub configuration_errors: Vec<String>,
     /// Named CLI warnings and their configured severity. These are evaluated before compilation;
     /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.
@@ -822,16 +823,21 @@ mod tests {
     }
 
     #[test]
-    fn feature_argument_values_cannot_enable_unmodeled_semantics() {
-        for mode in ["name-mismatch", "complete"] {
+    fn name_based_destructuring_modes_select_their_modeled_features() {
+        for (mode, short_form) in [("name-mismatch", false), ("complete", true)] {
             let flag = format!("-Xname-based-destructuring={mode}");
             let parsed = parse_args(&[&flag, "x.kt"]);
+            assert!(parsed.ignored.is_empty(), "{mode}: {:?}", parsed.ignored);
+            assert!(parsed.errors.is_empty(), "{mode}: {:?}", parsed.errors);
+            let features = &parsed.language_settings.features;
+            assert!(features.has("NameBasedDestructuring"), "{mode}");
+            assert!(
+                features.has("DeprecateNameMismatchInShortDestructuringWithParentheses"),
+                "{mode}"
+            );
             assert_eq!(
-                parsed.errors,
-                ["krusty does not implement the language feature \
-                  'DeprecateNameMismatchInShortDestructuringWithParentheses' selected by \
-                  '-Xname-based-destructuring'"
-                    .to_string()],
+                features.has("EnableNameBasedDestructuringShortForm"),
+                short_form,
                 "{mode}"
             );
         }

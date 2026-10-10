@@ -427,6 +427,7 @@ impl<'a> ModuleSymbols<'a> {
             is_nested: c.is_nested,
             outer_instance: c.inner_of,
             kind,
+            is_data: c.is_data(),
             inheritance: crate::libraries::ClassifierInheritance {
                 is_abstract: c.is_abstract() || c.is_interface(),
                 is_extensible: !c.is_interface() && !c.is_final(),
@@ -1638,6 +1639,7 @@ mod tests {
             lambda_param_types: vec![],
             lambda_recv: vec![],
             inline_modifiers: vec![],
+            reified_type_parameter_ordinals: vec![],
             visibility: crate::types::Visibility::Public,
             context_count: 0,
             source_decl: None,

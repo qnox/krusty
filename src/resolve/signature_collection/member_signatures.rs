@@ -10,14 +10,12 @@ pub(in crate::resolve) fn source_member_extension(
     signature: Signature,
     receiver_ty: Ty,
     physical_name: &str,
-    reified_type_parameter_ordinals: Vec<u32>,
 ) -> MemberExtFunSig {
     let physical_params = signature.params.clone();
     MemberExtFunSig {
         receiver_ty,
         physical_receiver: receiver_ty,
         signature,
-        reified_type_parameter_ordinals,
         physical_params,
         physical_name: physical_name.to_owned(),
         external_identity: None,
@@ -228,6 +226,7 @@ pub(in crate::resolve) fn member_signature_from_header(
             .iter()
             .map(|parameter| parameter.inline_modifier)
             .collect(),
+        reified_type_parameter_ordinals: reified_type_parameter_ordinals(header),
         visibility: header.visibility,
         context_count: header.context_count,
         source_decl: None,
@@ -460,7 +459,6 @@ pub(in crate::resolve) fn declared_member_callable_headers(
             .as_ref()
             .map(|receiver| ty_of_ref(receiver, classes, &method_tparams, diags))
         {
-            let reified_type_parameter_ordinals = reified_type_parameter_ordinals(&header);
             extensions
                 .entry(header.name.clone())
                 .or_default()
@@ -468,7 +466,6 @@ pub(in crate::resolve) fn declared_member_callable_headers(
                     signature,
                     receiver_ty,
                     &header.name,
-                    reified_type_parameter_ordinals,
                 ));
         } else {
             methods

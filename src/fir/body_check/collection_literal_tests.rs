@@ -69,7 +69,7 @@ fn inherited_collection_literal_operator_keeps_the_companion_receiver() {
 #[test]
 fn empty_collection_literal_keeps_the_selected_companion_block_operator() {
     let (body, index) = checked_function_body(
-        "// LANGUAGE: +CompanionBlocks +CompanionExtensions +CollectionLiterals\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions +CollectionLiterals\n\
          class MyList {\n\
              companion { operator fun of(vararg values: String): MyList = MyList() }\n\
          }\n\

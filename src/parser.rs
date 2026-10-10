@@ -32,6 +32,8 @@ mod nesting;
 mod properties;
 mod return_labels;
 mod superclass_references;
+mod syntax_gates;
+mod type_aliases;
 mod type_parameters;
 mod value_parameters;
 use class_recovery::error_class_decl;
@@ -629,8 +631,8 @@ struct Parser<'a> {
     i: usize,
     file: File,
     diags: &'a mut DiagSink,
-    /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
-    name_based_destructuring: bool,
+    /// The language features whose syntax the parser gates, `NameBasedDestructuring` among them.
+    gates: syntax_gates::SyntaxGates,
     explicit_backing_fields: bool,
     /// `+EnableNameBasedDestructuringShortForm`: a plain paren entry `(a, b)` binds each variable to
     /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
@@ -673,10 +675,11 @@ struct Parser<'a> {
     /// Span of the `context` keyword introducing the buffered clause. Diagnostics about the clause
     /// itself are anchored here rather than on some later modifier, which is where kotlinc puts them.
     pending_context_span: Option<Span>,
-    /// Where the member declaration prefix most recently read by `parse_member_decl_prefix` began,
-    /// with the token index at which that prefix ended. A body property whose `val`/`var` sits at
-    /// exactly that index starts its declaration there, modifiers and annotations included; any
-    /// other declaration never reads a stale prefix, because its keyword is elsewhere.
+    /// Where the declaration prefix most recently read by `parse_member_decl_prefix` (or the
+    /// annotations of a statement) began, with the token index at which that prefix ended. A body
+    /// property or type alias whose keyword sits at exactly that index starts its declaration
+    /// there, modifiers and annotations included; any other declaration never reads a stale
+    /// prefix, because its keyword is elsewhere.
     member_declaration_prefix: Option<(u32, usize)>,
     /// Span of the identifier most recently read as a DECLARATION's name (every declaration head
     /// takes its name through `ident_or_error`). A declaration head reads this immediately after
@@ -789,7 +792,7 @@ impl<'a> Parser<'a> {
             i: 0,
             file,
             diags,
-            name_based_destructuring: features.has("NameBasedDestructuring"),
+            gates: syntax_gates::SyntaxGates::new(features),
             short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
             multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
             explicit_backing_fields: features.has("ExplicitBackingFields"),
@@ -1760,31 +1763,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse the complete declaration-shaped part of a type alias. Semantic registration differs
-    /// between file, classifier, and local scopes, but no scope is allowed to skip its tokens.
-    fn parse_type_alias_syntax(&mut self) -> crate::ast::TypeAliasDecl {
-        let start = self.tok().span;
-        self.bump(); // `typealias`
-        let name = self.ident_or_error("typealias name");
-        let name_span = self.declaration_name_span;
-        let type_params = if self.at(TokenKind::Lt) {
-            self.parse_type_params(start.lo).0
-        } else {
-            Vec::new()
-        };
-        self.expect(TokenKind::Eq, "'='");
-        self.skip_plain_newlines();
-        let target = self.parse_type();
-        let end = self.t[self.i.saturating_sub(1)].span;
-        crate::ast::TypeAliasDecl {
-            name,
-            type_params,
-            target,
-            span: Span::new(start.lo, end.hi),
-            name_span,
-        }
-    }
-
     /// Parse a property declaration. Whether an absent initializer is legal belongs to semantic
     /// checking, because the answer depends on declaration ownership and modifiers.
     /// Consume an initializer's `=` when the next non-newline token is one.
@@ -2096,7 +2074,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
@@ -2486,7 +2464,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
@@ -2553,18 +2531,13 @@ impl<'a> Parser<'a> {
         // rejects it points at the modifier, not at the function's name.
         let tailrec_span = declaration_modifiers::span(self, modifiers, "tailrec");
         self.bump(); // 'fun'
-        let (type_params, non_null_type_params, reified_type_params, type_param_bounds, _) =
-            if self.at(TokenKind::Lt) {
-                self.parse_type_params(start.lo)
-            } else {
-                (
-                    Vec::new(),
-                    std::collections::HashSet::new(),
-                    std::collections::HashSet::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            };
+        let type_parameters::TypeParameterList {
+            names: type_params,
+            non_null: non_null_type_params,
+            reified: reified_type_params,
+            bounds: type_param_bounds,
+            ..
+        } = self.parse_type_params(start.lo);
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         while self.at(TokenKind::At) {
@@ -2573,6 +2546,9 @@ impl<'a> Parser<'a> {
         }
         let (receiver, name) = self.parse_receiver_and_declaration_name("extension function name");
         let name_span = self.declaration_name_span;
+        if let Some(operator) = operator_span {
+            self.gate_operator(&name, operator);
+        }
         let mut params = self.parse_param_list();
         // Context parameters (`context(a: A) fun f()`), parsed at the declaration site into
         // `pending_context_params`, become LEADING value parameters (kotlinc's ABI) — prepend them and
@@ -2972,26 +2948,22 @@ impl<'a> Parser<'a> {
         self.bump(); // 'class'
         let name = self.ident_or_error("class name");
         let name_span = self.declaration_name_span;
-        let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
-        {
-            self.parse_type_params(start.lo)
-        } else {
-            (
-                Vec::new(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-        };
+        let type_parameters::TypeParameterList {
+            names: type_params,
+            bounds: type_param_bounds,
+            variances: type_param_variances,
+            ..
+        } = self.parse_type_params(start.lo);
         let lexical_type_param_lens =
             self.push_lexical_type_params(&type_params, &type_param_bounds);
         let mut primary_constructor_annotations = Vec::new();
         let mut primary_constructor_annotation_args = Vec::new();
         // An explicit constructor prefix may continue across physical newlines.
         let mut primary_ctor_visibility = Visibility::Public;
+        let mut primary_ctor_start = self.tok().span.lo;
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
+            primary_ctor_start = self.tok().span.lo;
             if self.at(TokenKind::At) || self.at_modifier() {
                 let ctor_mods = self.skip_decl_prefix();
                 // The declared constructor visibility survives into `@Metadata` (and, for
@@ -3007,9 +2979,8 @@ impl<'a> Parser<'a> {
         }
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
-        let primary_ctor_open = self.tok().span.lo;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
-        let mut primary_constructor_parameters_span = None;
+        let mut primary_constructor_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
             self.skip_newlines();
@@ -3085,7 +3056,7 @@ impl<'a> Parser<'a> {
             ctor_close_lo = self.tok().span.lo;
             let close = self.tok().span;
             if self.expect(TokenKind::RParen, "')'") {
-                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
+                primary_constructor_span = Some(Span::new(primary_ctor_start, close.hi));
             }
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
@@ -3194,7 +3165,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span,
+            primary_constructor_span,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3448,18 +3419,12 @@ impl<'a> Parser<'a> {
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
         let name_span = self.declaration_name_span;
-        let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
-        {
-            self.parse_type_params(start.lo)
-        } else {
-            (
-                Vec::new(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-        };
+        let type_parameters::TypeParameterList {
+            names: type_params,
+            bounds: type_param_bounds,
+            variances: type_param_variances,
+            ..
+        } = self.parse_type_params(start.lo);
         let (supertypes, _base, _base_span, _base_type_args, _base_args, _) =
             self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
@@ -3561,7 +3526,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3676,7 +3641,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3813,7 +3778,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),
@@ -4417,6 +4382,7 @@ impl<'a> Parser<'a> {
         // Statement annotations have no codegen representation, but `@Suppress` and opt-in
         // acceptance are scoped frontend policies. Retain what they read on the transient statement.
         if self.at(TokenKind::At) {
+            let prefix_start = self.tok().span.lo;
             let mut annotations = Vec::new();
             while self.at(TokenKind::At) {
                 let (annotation, arguments) = self.parse_annotation();
@@ -4428,6 +4394,7 @@ impl<'a> Parser<'a> {
                 }
                 self.skip_newlines();
             }
+            self.member_declaration_prefix = Some((prefix_start, self.i));
             let statement = self.parse_stmt();
             if !annotations.is_empty() {
                 self.file

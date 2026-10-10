@@ -780,6 +780,8 @@ mod enum_entry_constructor_e2e;
 mod enum_entry_deferred_val_e2e;
 #[path = "enum_entry_named_arg_e2e.rs"]
 mod enum_entry_named_arg_e2e;
+#[path = "enum_entry_named_entries_e2e.rs"]
+mod enum_entry_named_entries_e2e;
 #[path = "enum_entry_property_e2e.rs"]
 mod enum_entry_property_e2e;
 #[path = "enum_entry_self_instance_e2e.rs"]
@@ -1238,6 +1240,8 @@ mod internal_component_names_e2e;
 mod internal_member_names_e2e;
 #[path = "intersection_reified_type_of_e2e.rs"]
 mod intersection_reified_type_of_e2e;
+#[path = "intrinsic_const_evaluation_e2e.rs"]
+mod intrinsic_const_evaluation_e2e;
 #[path = "invariant_argument_wildcards_e2e.rs"]
 mod invariant_argument_wildcards_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
@@ -1658,6 +1662,8 @@ mod value_class_dependency_bridge_e2e;
 mod value_class_equality_e2e;
 #[path = "value_class_equals_hash_e2e.rs"]
 mod value_class_equals_hash_e2e;
+#[path = "value_class_feature_gates_e2e.rs"]
+mod value_class_feature_gates_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]
 mod value_class_generic_carrier_e2e;
 #[path = "value_class_generic_slot_read_e2e.rs"]
@@ -1716,8 +1722,14 @@ mod expect_declaration_body_e2e;
 mod all_tail_calls_e2e;
 #[path = "classpath_tail_forward_e2e.rs"]
 mod classpath_tail_forward_e2e;
+#[path = "collection_literals_gate_e2e.rs"]
+mod collection_literals_gate_e2e;
+#[path = "companion_blocks_gate_e2e.rs"]
+mod companion_blocks_gate_e2e;
 #[path = "for_loop_iterable_slot_e2e.rs"]
 mod for_loop_iterable_slot_e2e;
+#[path = "function_type_supertypes_e2e.rs"]
+mod function_type_supertypes_e2e;
 #[path = "inline_arguments_in_place_e2e.rs"]
 mod inline_arguments_in_place_e2e;
 mod inline_format_arguments_e2e;
@@ -1727,6 +1739,8 @@ mod inline_operand_copies_e2e;
 mod intrinsic_suspension_probes_e2e;
 #[path = "lambda_result_types_e2e.rs"]
 mod lambda_result_types_e2e;
+#[path = "local_type_aliases_e2e.rs"]
+mod local_type_aliases_e2e;
 #[path = "multi_index_operator_e2e.rs"]
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
@@ -2093,6 +2107,8 @@ mod try_primitive_nullable_join_e2e;
 mod uncast_continuation_operand_e2e;
 #[path = "unmatched_null_check_temporaries_e2e.rs"]
 mod unmatched_null_check_temporaries_e2e;
+#[path = "unnamed_local_variables_e2e.rs"]
+mod unnamed_local_variables_e2e;
 #[path = "upcast_checkcast_e2e.rs"]
 mod upcast_checkcast_e2e;
 #[path = "when_subject_once_e2e.rs"]
@@ -2280,6 +2296,8 @@ mod reified_inline_check_e2e;
 mod reified_inline_return_infer_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]
 mod reified_inline_splice_ldc_wide_e2e;
+#[path = "reified_intersection_gate_e2e.rs"]
+mod reified_intersection_gate_e2e;
 #[path = "reified_local_delegate_e2e.rs"]
 mod reified_local_delegate_e2e;
 #[path = "reified_member_metadata_e2e.rs"]
@@ -2448,6 +2466,8 @@ mod shared_cell_declaration_e2e;
 mod short_circuit_condition_e2e;
 #[path = "short_circuit_e2e.rs"]
 mod short_circuit_e2e;
+#[path = "short_destructuring_meaning_e2e.rs"]
+mod short_destructuring_meaning_e2e;
 #[path = "sibling_generic_custom_serializer_e2e.rs"]
 mod sibling_generic_custom_serializer_e2e;
 #[path = "sibling_value_class_data_class_e2e.rs"]

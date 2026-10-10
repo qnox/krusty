@@ -6,7 +6,7 @@ impl Parser<'_> {
     /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
     /// under `+NameBasedDestructuring`) immediately followed by a `val`/`var` keyword.
     pub(super) fn at_full_form_destructure(&self) -> bool {
-        if !self.name_based_destructuring {
+        if !self.name_based_destructuring() {
             return false;
         }
         let opener = self.at(TokenKind::LParen) || self.at(TokenKind::LBracket);
@@ -38,8 +38,8 @@ impl Parser<'_> {
                     .error(self.tok().span, "expected 'val' or 'var'".to_string());
             }
             let ignored = self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
+            let name_span = self.syntactic_ident_span(self.tok());
             let name = self.ident_or_error("variable name");
-            let name_span = self.declaration_name_span;
             let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
             let source_property =
                 self.destructure_property(&name, close == TokenKind::RParen, &mut entry_type);
@@ -77,11 +77,12 @@ impl Parser<'_> {
     /// Parse a local `val`/`var`, including the leading-keyword destructuring form.
     pub(super) fn parse_local_binding(&mut self, start: Span) -> StmtId {
         let is_var = self.at(TokenKind::KwVar);
+        let keyword = self.tok().span;
         self.bump();
         let close = if self.at(TokenKind::LParen) {
             Some(TokenKind::RParen)
         } else if self.at(TokenKind::LBracket) {
-            self.note_ungated_bracket_destructure();
+            self.gate_bracket_destructuring();
             Some(TokenKind::RBracket)
         } else {
             None
@@ -94,8 +95,8 @@ impl Parser<'_> {
             loop {
                 let ignored =
                     self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
+                let name_span = self.syntactic_ident_span(self.tok());
                 let name = self.ident_or_error("variable name");
-                let name_span = self.declaration_name_span;
                 let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                 let implicit = self.short_form_destructuring && close == TokenKind::RParen;
                 let source_property = self.destructure_property(&name, implicit, &mut entry_type);
@@ -128,9 +129,17 @@ impl Parser<'_> {
             let init = self.parse_expr();
             let statement = self.finish_stmt(Stmt::Destructure { entries, init }, start);
             self.record_destructure_syntax(statement, source_properties, entry_types);
+            if close == TokenKind::RParen {
+                self.file
+                    .destructuring
+                    .parenthesized_short_form
+                    .insert(statement);
+            }
             return statement;
         }
 
+        self.gate_unnamed_local(is_var.then_some(keyword));
+        let unnamed = self.at_unnamed_local_name();
         let name = self.ident_or_error("variable name");
         let ty = if self.eat(TokenKind::Colon) {
             self.skip_plain_newlines();
@@ -174,7 +183,7 @@ impl Parser<'_> {
         if let Some(operator) = init_operator {
             self.file.value_operator_spans.insert(init.0, operator);
         }
-        self.finish_stmt(
+        let statement = self.finish_stmt(
             Stmt::Local {
                 is_var: is_var || deferred,
                 name,
@@ -182,18 +191,11 @@ impl Parser<'_> {
                 init,
             },
             start,
-        )
-    }
-
-    /// Square-bracket destructuring is parsed at every language level. The `[` span is retained so
-    /// the frontend can report the language-version diagnostic after module admission.
-    pub(super) fn note_ungated_bracket_destructure(&mut self) {
-        if !self.name_based_destructuring {
-            self.file
-                .destructuring
-                .ungated_bracket_spans
-                .push(self.tok().span);
+        );
+        if unnamed {
+            self.file.unnamed_locals.insert(statement);
         }
+        statement
     }
 
     /// `= property` is an explicit rename. A parenthesized name-based entry without `=` names the
@@ -204,7 +206,7 @@ impl Parser<'_> {
         implicit: bool,
         entry_type: &mut Option<TypeRef>,
     ) -> Option<DestructureProperty> {
-        if self.name_based_destructuring && self.eat(TokenKind::Eq) {
+        if self.name_based_destructuring() && self.eat(TokenKind::Eq) {
             let source = self.ident_or_error("property name");
             if self.eat(TokenKind::Colon) {
                 *entry_type = Some(self.parse_type());

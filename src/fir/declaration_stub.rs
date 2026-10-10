@@ -109,6 +109,14 @@ impl DeclarationFlags {
     /// default when a compiler plugin changes the default modality (all-open) and must keep an
     /// explicit one. A function's written `final` is its `FINAL`.
     pub const FINAL_MODIFIER: u64 = 1 << 43;
+    /// The classifier's primary constructor, as opposed to a secondary one. Consumers that need the
+    /// primary constructor's parameters (data-class components) read this declaration fact.
+    pub const PRIMARY_CONSTRUCTOR: u64 = 1 << 44;
+
+    /// Exactly `flag`, with every other flag clear.
+    pub const fn only(flag: u64) -> Self {
+        Self(flag)
+    }
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

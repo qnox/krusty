@@ -8,11 +8,15 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
+mod deprecation;
 mod language_versions;
 mod table;
+mod unsupported;
 
+pub use deprecation::DeprecationGate;
 pub use language_versions::{vendored_language_versions, LanguageVersionPolicy, VersionStatus};
 pub use table::{vendored_table, BehaviorAfterSinceVersion, FeatureTable, LanguageFeature};
+pub use unsupported::FeatureGate;
 
 /// One explicit language-feature state, as kotlinc's `specificFeatures` map holds it: the effect of
 /// an `@Enables`/`@Disables` argument, a `-XXLanguage:` argument, or a `// LANGUAGE:` directive.
@@ -29,6 +33,7 @@ pub struct LangFeatures {
     /// The reference release whose feature table supplies the defaults.
     release: KotlinVersion,
     language_version: LanguageVersion,
+    api_version: LanguageVersion,
     enabled: HashSet<String>,
     /// The explicitly set features and their states, in kotlinc's `specificFeatures` sense. These
     /// decide whether the output is pre-release ([`Self::is_pre_release`]).
@@ -78,6 +83,7 @@ impl LangFeatures {
         Self {
             release,
             language_version,
+            api_version,
             enabled,
             specific: BTreeMap::new(),
             opted_in: BTreeSet::new(),
@@ -104,30 +110,46 @@ impl LangFeatures {
 
 /// The kotlinc `LanguageFeature`s krusty's frontend or backend consumes, sorted by name, one per
 /// line. A feature is listed once some phase checks it (`LangFeatures::has`), so a command line may
-/// turn it on and get that behaviour.
+/// turn it on and get that behaviour, or once kotlinc's own consumers are shown to leave every
+/// target krusty emits unchanged (each such decision is recorded in `docs/SPEC.md`): the klib
+/// inliner features select lowerings kotlinc runs only before serializing a klib.
 const MODELED_FEATURES: &[&str] = &[
     "AllowAccessToProtectedFieldFromSuperCompanion",
     "AllowEagerSupertypeAccessibilityChecks",
+    "AllowExpectValueClassesWithNoPrimaryConstructor",
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
+    "CollectionLiterals",
+    "CompanionBlocksAndExtensions",
     "ContextParameters",
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",
+    "CustomEqualsInValueClasses",
     "DataClassCopyRespectsConstructorVisibility",
+    "DeprecateNameMismatchInShortDestructuringWithParentheses",
     "EagerLambdaAnalysis",
     "EnableNameBasedDestructuringShortForm",
     "EnumEntries",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
+    "ForbidEnumEntryNamedEntries",
     "FullValueClasses",
+    "FunctionalTypeWithExtensionAsSupertype",
     "ImplicitSignedToUnsignedIntegerConversion",
+    "IntrinsicConstEvaluation",
+    "IrCrossModuleInlinerBeforeKlibSerialization",
+    "IrIntraModuleInlinerBeforeKlibSerialization",
+    "JvmInlineMultiFieldValueClasses",
     "JvmSupportRecursiveTypeOf",
+    "LocalTypeAliases",
     "MultiDollarInterpolation",
     "MultiPlatformProjects",
     "NameBasedDestructuring",
     "NestedTypeAliases",
     "PrioritizedEnumEntries",
+    "ProhibitIntersectionReifiedTypeParameter",
     "UnitConversionsOnArbitraryExpressions",
+    "UnnamedLocalVariables",
     "WhenGuards",
 ];
 
@@ -166,6 +188,11 @@ impl LangFeatures {
     /// compiler-specific switch.
     pub const fn language_version(&self) -> LanguageVersion {
         self.language_version
+    }
+
+    /// The API level these defaults were derived for.
+    pub const fn api_version(&self) -> LanguageVersion {
+        self.api_version
     }
 
     pub fn new() -> Self {
@@ -361,11 +388,15 @@ mod tests {
     #[test]
     fn modeled_features_are_sorted_kotlinc_features() {
         assert!(MODELED_FEATURES.windows(2).all(|pair| pair[0] < pair[1]));
-        let table =
-            FeatureTable::for_version(crate::kotlin_version::KotlinVersion::newest()).unwrap();
+        // A feature may belong to some supported releases only, like
+        // `JvmInlineMultiFieldValueClasses`, which 2.4.20 removed.
+        let tables = crate::kotlin_version::KotlinVersion::supported()
+            .into_iter()
+            .map(|release| FeatureTable::for_version(release).unwrap())
+            .collect::<Vec<_>>();
         for name in MODELED_FEATURES {
             assert!(
-                table.get(name).is_some(),
+                tables.iter().any(|table| table.get(name).is_some()),
                 "{name} is not a kotlinc language feature"
             );
         }
@@ -394,6 +425,7 @@ mod tests {
             "ExplicitBackingFields",
             "MultiDollarInterpolation",
             "PrioritizedEnumEntries",
+            "ProhibitIntersectionReifiedTypeParameter",
             "WhenGuards",
         ] {
             assert!(features.has(name), "{name} is stable in 2.4");
@@ -426,6 +458,7 @@ mod tests {
             "ExplicitBackingFields",
             "ExplicitContextArguments",
             "NameBasedDestructuring",
+            "ProhibitIntersectionReifiedTypeParameter",
         ] {
             assert!(!features.has(name), "{name} is not stable in 2.2");
         }

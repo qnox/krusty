@@ -1594,7 +1594,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc-wasm and kotlinc-native 2.4.20:
   - No parameter list: `primary constructor is required for value classes.` at `value`; with
     `FullValueClasses` a final class reports `… for final value classes.`.
-  - `()`: `value class must have exactly one primary constructor parameter.` at the parameter list;
+  - `()`: `value class must have exactly one primary constructor parameter.` at the primary
+    constructor;
     with `FullValueClasses` an unannotated final class reports `final value class must have at least
     one primary constructor parameter.` there, and an annotated one `@JvmInline value class must
     have exactly one primary constructor parameter.`.
@@ -2332,6 +2333,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   direct accessor realization, the valid property is typed but rejected before emission with a stable
   boundary until an alternative cached-mapping realization is implemented. Test:
   `tests/enum_entries_e2e.rs`.
+- **An enum entry named `entries` (`ForbidEnumEntryNamedEntries`, `DECLARATION_OF_ENUM_ENTRY_ENTRIES`).**
+  The entry is reported at its name: `conflicting declarations: the enum entry 'entries' and the
+  property 'Enum.entries' (KT-48872).`, an error with the feature (the default since 2.2) and
+  otherwise a warning followed by `This will become an error in language version 2.2. See
+  https://youtrack.jetbrains.com/issue/KT-72829.` (the version and issue from the vendored feature
+  table). What `entries` names on such an enum follows kotlinc's
+  `DiscriminateSyntheticAndForbiddenProperties`, decided by the use site's settings: with the feature
+  the entry resolves with low priority, so `Enum.entries` wins; without it, under
+  `PrioritizedEnumEntries`, the entry and the property are equal candidates for both an unqualified
+  `entries` in the enum and `E.entries`, reported at the name as `overload resolution ambiguity
+  between candidates:` followed by `enum entry entries: E` and `companion val entries:
+  EnumEntries<E>`; without either feature `E.entries` reads the entry. A callable reference
+  `E::entries` names the property in every case. Not modeled: suppressing the warning. Tests:
+  `tests/enum_entry_named_entries_e2e.rs` (complete errors and warnings in each state and the
+  run-time meaning without either feature, vs kotlinc) and `tests/feature_coverage_a_e2e.rs`
+  (`enum_entries_callable_reference_is_distinct_from_same_named_enum_entry`).
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form
@@ -4624,6 +4641,142 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is `underscore in name-based destructuring without renaming is forbidden.` and reads no
   property. Tests: `multiDecl/*` box corpus (+96 gate),
   `tests/name_based_destructuring_e2e.rs`.
+
+- **`DeprecateNameMismatchInShortDestructuringWithParentheses` (off by default, no
+  `sinceVersion`).** Enabled while `EnableNameBasedDestructuringShortForm` is off, every positional
+  entry of the parenthesized short form — `val`/`var (a, b) = e`, `for ((a, b) in xs)`, and the
+  lambda parameter `{ (a, b) -> }`, never the bracket forms nor the full form `(val a, val b)` —
+  warns at the entry as kotlinc 2.4.20's `FirDestructuringDeclarationChecker` does. The parser
+  records which statements use that form (`DestructuringSyntax::parenthesized_short_form`); the
+  checker never recovers it from spelling. An `_` entry is `DESTRUCTURING_SHORT_FORM_UNDERSCORE`.
+  Otherwise the destructured type (initializer, loop element, or lambda parameter type; smart
+  casts included) must be a classifier type — a type parameter reports nothing. A data class's
+  property for component N is its primary constructor's Nth value parameter; the read-only
+  `Map.Entry` face (the provider's mapped-collection role, not a name) has `key`/`value`; no
+  property on a non-data class reports `non-data class '<type>'` once, on component 1; a data
+  class without one reports `custom component operators of data class '<type>'`; a different
+  name reports `DESTRUCTURING_SHORT_FORM_NAME_MISMATCH`. Data-class-ness and primary-constructor
+  parameter names come from the declaration: the source `data` modifier (`ClassFlags::DATA`) or
+  Kotlin metadata's `IS_DATA` class flag and the constructor without `IS_SECONDARY`, published on
+  the common classifier record (`LibraryType::is_data`). Tests:
+  `tests/short_destructuring_meaning_e2e.rs` (complete warning blocks vs kotlinc).
+
+- **`UNSUPPORTED_FEATURE` messages.** `src/features/unsupported.rs` ports kotlinc's
+  `LanguageFeatureMessageRenderer` for an unsupported feature, with the first letter lowercased as
+  kotlinc's CLI renders it: language versions 1.x before a 2.0-only feature, a test-only feature
+  (`unsupported.`), `only available since language version`/`API version`, `disabled` for a stable
+  feature switched off, and `experimental and should be enabled explicitly` naming the feature's own
+  `-X` argument or `-XXLanguage:+Name`, followed by the feature's hint URL. Every syntax gate takes
+  its message from there, including name-based destructuring's. Parse-time gates are kept on the
+  file (`File::language_gates`) and reported by the frontend in source order with every other
+  diagnostic. Tests: `src/features/unsupported.rs`.
+- **Unnamed local variables (`UnnamedLocalVariables`).** A local `val _ = e` evaluates `e` and binds
+  nothing, so several may share a scope. Without the feature kotlinc reports `UNSUPPORTED_FEATURE`
+  at the `_` of each local property, `for` variable and `when` subject variable, including the
+  locals of a local class's members; a destructuring entry, a `catch` parameter and the escaped
+  `` `_` `` are not unnamed. `var _` is additionally `'var' properties require a name.` at the
+  `var` keyword, whatever the feature. An untyped `when (val _ = e)` uses `e` itself as the subject.
+  Tests: `tests/unnamed_local_variables_e2e.rs`.
+- **Local type aliases (`LocalTypeAliases`, `-Xlocal-type-aliases`).** Without the feature every
+  type alias declared in a body (a function, local function, member function, initializer block
+  or object expression, including the members of local classes) is `UNSUPPORTED_FEATURE` at the
+  declaration's start, its annotations included. Nested type aliases in a classifier are
+  `NestedTypeAliases`, not this feature. Tests: `tests/local_type_aliases_e2e.rs`.
+- **Collection literals off (`CollectionLiterals`, `-Xcollection-literals`).** Without the feature an
+  `operator fun of` is `UNSUPPORTED_FEATURE` at its `operator` modifier. A `[…]` outside an
+  annotation argument (at any depth, e.g. `arrayOf(*["a"])`) or an annotation class's parameter
+  default reports `array literals outside of annotations are unsupported.` and
+  `UNSUPPORTED_FEATURE` at the literal, as `ExpressionChecker` diagnostics that follow any type
+  mismatch at the same position. The literal is typed as kotlinc's array-literal fallback: a primitive array when one is expected,
+  otherwise `Array<T>` with `T` the common supertype of the elements (each checked against the
+  expected element type), or the expected element type (else `Any?`) when it has none. That type
+  drives the mismatch (`expected 'List<Int>', actual 'Array<Int>'`). Tests:
+  `tests/collection_literals_gate_e2e.rs`.
+- **Companion blocks and extensions off (`CompanionBlocksAndExtensions`,
+  `-Xcompanion-blocks-and-extensions`).** Without the feature a classifier's first `companion { … }`
+  block is `UNSUPPORTED_FEATURE` at its `companion` keyword (later blocks are not reported again).
+  A file-level `companion fun C.f()`/`companion val C.p` is `UNSUPPORTED_FEATURE` and
+  `modifier 'companion' is not applicable inside 'file'.` at the modifier. A block member still
+  resolves, but each reference that selects it (call, property read or write, unqualified in the
+  class or qualified by it, callable reference) is `UNSUPPORTED_FEATURE` at the name. A written
+  companion extension is not a candidate, so a reference to it is `unresolved reference`. Tests:
+  `tests/companion_blocks_gate_e2e.rs`.
+- **Extension function supertypes (`FunctionalTypeWithExtensionAsSupertype`).** Without the feature
+  an extension or context function type as a supertype of a class, interface or object expression
+  is `extension or contextual function type is not allowed as a supertype.` at the supertype
+  reference. A plain function type is unaffected. Tests: `tests/function_type_supertypes_e2e.rs`.
+- **Multi-field `@JvmInline` value classes (`JvmInlineMultiFieldValueClasses`, 2.4.0 and 2.4.10
+  only).** Without the feature a value class represented inline (with `@JvmInline`, or without it
+  and without `FullValueClasses`) must declare exactly one primary-constructor parameter: `inline
+  class must have exactly one primary constructor parameter.` at the parameter list (2.4.20: `value
+  class` / `@JvmInline value class`, by whether `FullValueClasses` is on). With it the count is any
+  positive number (`value class must have at least one primary constructor parameter.` for none),
+  each parameter is checked (`val` only, not `Unit`/`Nothing`), and a multi-field class has no
+  default arguments. 2.4.20 has no such feature: a `value class` without `@JvmInline` and with more
+  than one parameter is `UNSUPPORTED_FEATURE(FullValueClasses)` at `value`, and the missing
+  `@JvmInline` error is then reported only for a one-parameter class. A missing primary
+  constructor is `primary constructor is required for value classes.` at `value`. A failed
+  primary-constructor check ends the class's checking. These per-release rules refine the
+  target-explicit constructor-cardinality rules above: signature collection reports the
+  constructor diagnostics once, at the written primary constructor (its modifiers or
+  `constructor` keyword through `)`), while it decides the representation; the body checker
+  consults the same verdict before checking the parameters. krusty does not flatten a multi-field
+  inline class yet: it is collected as an ordinary class, so accepted fixtures only declare one. Not modelled: the value-class
+  placement, modality, supertype, delegation and recursion checks, and the annotation-target
+  restrictions kotlinc gates on this feature. Tests: `tests/value_class_feature_gates_e2e.rs`.
+- **Custom `equals` in value classes (`CustomEqualsInValueClasses`).** Without the feature `equals`
+  and `hashCode` are reserved member names of a value class represented inline, like `box` and
+  `unbox` (`member name '…' is reserved for future releases.` at the member name; inherited from an
+  interface with a body: `… but is implemented in supertype 'I'.` at the `class` keyword). An
+  `operator fun equals` must be a member (`must be a member function.`) and override `Any.equals`
+  (`must override 'equals()' in Any.`); with the feature, an inline value class may instead define
+  `operator fun equals(other: C<*>): Boolean`, the message then naming that form. A typed equality
+  has no type parameters (`type parameters are prohibited here.`) and only star-projected
+  arguments; an `Any.equals` override without one is warned as boxing. Not modelled: the
+  operator-equals warnings of anonymous objects and enum entries. Tests:
+  `tests/value_class_feature_gates_e2e.rs`.
+- **`expect` value classes without a primary constructor
+  (`AllowExpectValueClassesWithNoPrimaryConstructor`, 2.4.20 only).** Without the feature a
+  top-level `expect value class` without a primary constructor is `primary constructor is required
+  for value classes.` at `value`, whether or not its `actual` declares one. With it the constructor
+  is left to the `actual`, and the class may declare no secondary constructor (`expect value class
+  without primary constructor cannot have secondary constructors.` at each). Not modelled: an
+  annotated `expect` class under `FullValueClasses`. A matched `expect` value class with a secondary
+  constructor in a source set with another error still reaches a recovery internal error. Tests:
+  `tests/value_class_feature_gates_e2e.rs`.
+- **Klib inliner phases (`IrIntraModuleInlinerBeforeKlibSerialization`,
+  `IrCrossModuleInlinerBeforeKlibSerialization`): no effect on JVM output.** kotlinc 2.4.x consults
+  them only in `loweringsOfTheFirstPhase` (`ir.inline/CommonLoweringPhases.kt`, the JS and Wasm
+  pre-serialization phases) and `NativeFirstPhaseLoweringPhases`: lowerings that run before a klib
+  is serialized. The JVM pipeline (`JvmLoweringPhases`) and the frontend never read them, and krusty
+  serializes no klib for any target, so either state compiles identically. The command line keeps
+  kotlinc's own consumers: enabling `IrCrossModuleInlinerBeforeKlibSerialization` forces
+  pre-release binaries, and kotlinc's `configureLanguageFeaturesFromInternalArgs` refuses an
+  explicitly enabled cross-module inliner unless the intra-module one is explicitly enabled too
+  (its default state does not count): `-XXLanguage:+IrCrossModuleInlinerBeforeKlibSerialization
+  requires -XXLanguage:+IrIntraModuleInlinerBeforeKlibSerialization. Enable the intra-module
+  inliner as well to avoid inconsistent configuration.`, reported with the other configuration
+  errors before the pre-release warning. Tests: `tests/language_feature_arguments_e2e.rs`
+  (`klib_inliner_features_*`: messages, exit status and output tree byte for byte vs kotlinc).
+- **Intersection type arguments for reified type parameters
+  (`ProhibitIntersectionReifiedTypeParameter`, `TYPE_INTERSECTION_AS_REIFIED`).** After a call is
+  selected, each type argument bound to a reified type parameter of the callee (the selected
+  callable's declared reified ordinals, normalized by every provider) that is an intersection type,
+  or an array type whose invariant element type is one, is reported at the callee name: `type
+  argument for reified type parameter 'T' was inferred to the intersection of ['X' & 'Y'].
+  Reification of an intersection type results in the common supertype being used. …`. kotlinc
+  declares it as a deprecation of the feature, so it is an error with the feature (the default since
+  2.3) and otherwise a warning followed by `This will become an error in language version 2.3. See
+  https://youtrack.jetbrains.com/issue/KTLC-13.`; the version and issue come from the vendored
+  feature table. The warning is suppressed only by its kotlinc factory name
+  `@Suppress("TYPE_INTERSECTION_AS_REIFIED_WARNING")`; the bare name suppresses nothing. Not
+  modeled: kotlinc's suppression of the error by `TYPE_INTERSECTION_AS_REIFIED_ERROR` (krusty
+  models no error suppression), and the cases where krusty infers a different type argument than
+  kotlinc — a common supertype of unrelated value arguments (`sel(A, B)` passed on as a value
+  argument, `combine(flowOf("1"), flowOf(2))`) and a smart cast to `X & Y` — which krusty infers
+  as a single classifier and therefore does not report. Tests:
+  `tests/reified_intersection_gate_e2e.rs` (complete errors with the feature, complete warnings,
+  suppression and the reified common supertype at run time without it, all vs kotlinc).
 
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and
@@ -12160,6 +12313,53 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
+- **A `const val` initializer's value (`IntrinsicConstEvaluation`, `CONST_VAL_WITH_NON_CONST_INITIALIZER`,
+  `NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION`).** kotlinc's frontend evaluates every `const val`
+  initializer (`FirExpressionEvaluator`, reported by `FirConstPropertyChecker`); krusty ports both
+  (`resolve::const_initializer_evaluation`, values from `libraries::intrinsic_const_evaluation`)
+  over the checker's own decisions: the callable selected for each call and operator, the payload
+  of each constant read, and the selected enum entry. The value becomes the field's `ConstantValue`
+  and every read of it. Literals, string templates over constant-typed parts (and a `null`
+  literal), `==`/`!=` with boxed `equals` meaning (`0.0 == -0.0` is false, `NaN == NaN` is true),
+  `&&`/`||` over `Boolean` operands, `<`/`<=`/`>`/`>=` through `compareTo` (the total order:
+  `-0.0 < 0.0`), and `as` to a supertype of the value evaluate. `===`, `if`, `when`, `?:`, safe
+  calls and `!!` do not. A call evaluates when every receiver and argument has a constant type
+  (a non-null primitive, unsigned type or `String`) and value, and its selected declaration is a
+  compile-time operation. Without `IntrinsicConstEvaluation` (the default) that is a `kotlin`
+  package declaration named `unaryPlus`, `unaryMinus`, `not`, `inv`, `plus`, `minus`, `times`,
+  `div`, `rem`, `and`, `or`, `xor`, `shl`, `shr`, `ushr`, `compareTo`, `floorDiv`, `mod`, `code`,
+  `toString` or a signed number conversion, or `String.get`, never on an unsigned dispatch
+  receiver; and the readable builtin properties are `String.length` and `Char.code`. With the
+  feature it is a declaration in kotlinc's operation table (`OperationsMapGenerated.knownOps`,
+  vendored as `src/libraries/intrinsic_const_evaluation/known_operations.txt`, keyed by callable
+  identity and the receiver and first parameter's compile-time types): kotlinc keys it so rather
+  than by `@IntrinsicConstEvaluation`, which the JVM `kotlin-stdlib` omits on `trim`, `uppercase`
+  and `Char(Int)`. That adds `inc`/`dec`, `equals`, unsigned arithmetic and conversions,
+  `kotlin.experimental` bitwise operations, `Char(Int)`, `lowercase`/`uppercase`,
+  `trim`/`trimStart`/`trimEnd`/`trimIndent`/`trimMargin`, and the properties `Enum.name` on an
+  entry and `KCallable.name` on a callable reference (`<init>` for a constructor). Values are
+  Kotlin/JVM's: integral arithmetic wraps, an integral `div`/`rem` by zero has no value, a
+  floating value converts to an integral type toward zero and saturating, unsigned values
+  zero-extend, `UInt`/`ULong.toFloat()` round through `Double`, case mapping is full Unicode
+  mapping, and `trimIndent`/`trimMargin` split lines at `\r\n`, `\n` and `\r`. An initializer
+  without a value is reported at its start: `only 'const val' can be used in constant
+  expressions.` when it reads a non-`const` `val` initialized by a literal, otherwise `const 'val'
+  initializer must be a constant value.`; an unresolved read reports only itself. The check runs
+  on a top-level or singleton member `const val` that is not a `var` and has no getter or delegate
+  and a type usable for a constant. Not modeled: the non-`const`-`val` message for a `val` outside
+  the checked singleton (another top-level declaration or another file; the read reports a
+  non-constant initializer), a failed `const`'s reason propagating to a `const` reading it (kotlinc
+  re-evaluates the read declaration; krusty reports a non-constant initializer), the other
+  `FirConstPropertyChecker` errors (`const` on a `var`, outside a singleton, with a getter,
+  delegate or no initializer, or of an unusable type), annotation arguments that call these
+  operations, a constructor call of an unsigned type, and kotlinc's IR folding of a
+  `KCallable.name` read in a function body (`evaluate/intrinsicConst/kCallableNameWithSideEffect.kt`,
+  `kt58717.kt`), which is not part of this feature, nor its folding of unsigned conversions and
+  operations in a function body (`2u.toUByte()` in `evaluate/incDec.kt` and
+  `evaluate/u{byte,short,int,long}Operations.kt`), which kotlinc does with or without the feature;
+  those cases pass with divergent bytecode. (`tests/intrinsic_const_evaluation_e2e.rs`,
+  `libraries::intrinsic_const_evaluation::tests`, `kt_string::text_operations::tests`. Corpus:
+  `evaluate/intrinsicConst/*.kt`, `evaluate/u{byte,short,int,long}Operations.kt`.)
 - **Delegated property references (kotlinc's `PropertyReferenceLowering`).** The `KProperty` a
   class's, object's or file facade's delegated-property operators receive live in one
   `$$delegatedProperties` array per class: a leading `static final synthetic` field (after an enum's

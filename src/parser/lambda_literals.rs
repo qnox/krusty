@@ -120,13 +120,15 @@ impl Parser<'_> {
         // A destructured lambda parameter `{ (a, b) -> … }` binds ONE (synthetic) parameter, then
         // `val (a, b) = <synthetic>` is prepended to the body — reusing the `Stmt::Destructure`
         // machinery. Collected here, spliced after the body statements are parsed.
-        // (synthetic param name, destructured entries `(name, is_var)`, span) per `(a, b)` param.
+        // (synthetic param name, destructured entries `(name, is_var)`, span, parenthesized short
+        // form) per `(a, b)` param.
         type LambdaDestructure = (
             String,
             Vec<DestructureEntry>,
             Vec<Option<DestructureProperty>>,
             Vec<Option<TypeRef>>,
             Span,
+            bool,
         );
         let mut destructures: Vec<LambdaDestructure> = Vec::new();
         // How each parameter was written, parallel to `params`.
@@ -141,6 +143,9 @@ impl Parser<'_> {
                     let mut entries = Vec::new();
                     let mut source_props: Vec<Option<DestructureProperty>> = Vec::new();
                     let mut entry_types: Vec<Option<TypeRef>> = Vec::new();
+                    // `{ (a, b) -> … }` is the parenthesized short form until an entry carries
+                    // `val`/`var`.
+                    let mut parenthesized_short = true;
                     loop {
                         // Full form (`{ (val a, val b) -> … }`): each component carries its own
                         // `val`/`var` and binds by property name. Keyword-less short form is positional
@@ -149,12 +154,13 @@ impl Parser<'_> {
                         let had_kw = is_var || self.at(TokenKind::KwVal);
                         if had_kw {
                             self.bump();
+                            parenthesized_short = false;
                         }
                         let ignored = self.at(TokenKind::Ident)
                             && self.text() == "_"
                             && !self.escaped_ident();
+                        let name_span = self.syntactic_ident_span(self.tok());
                         let n = self.ident_or_error("variable name");
-                        let name_span = self.declaration_name_span;
                         let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                         // By-name entry (`(a = prop) ->`) or short-form (`(a, b) ->` binds by own name).
                         let implicit = self.short_form_destructuring || had_kw;
@@ -181,9 +187,16 @@ impl Parser<'_> {
                     param_spans.push(sp);
                     param_types.push(self.eat(TokenKind::Colon).then(|| self.parse_type()));
                     roles.push(LambdaParameterRole::Destructured);
-                    destructures.push((synth, entries, source_props, entry_types, sp));
+                    destructures.push((
+                        synth,
+                        entries,
+                        source_props,
+                        entry_types,
+                        sp,
+                        parenthesized_short,
+                    ));
                 } else if self.at(TokenKind::LBracket) {
-                    self.note_ungated_bracket_destructure();
+                    self.gate_bracket_destructuring();
                     // The short-form bracket destructuring `{ [a, b] -> … }` (NameBasedDestructuring) —
                     // identical to the `(a, b)` form, just with `[ ]`.
                     let sp = self.tok().span;
@@ -200,8 +213,8 @@ impl Parser<'_> {
                         let ignored = self.at(TokenKind::Ident)
                             && self.text() == "_"
                             && !self.escaped_ident();
+                        let name_span = self.syntactic_ident_span(self.tok());
                         let n = self.ident_or_error("variable name");
-                        let name_span = self.declaration_name_span;
                         let entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                         entries.push(DestructureEntry {
                             name: n,
@@ -225,7 +238,7 @@ impl Parser<'_> {
                     roles.push(LambdaParameterRole::Destructured);
                     // The `[a, b]` bracket form is positional (`componentN`), never by-name.
                     let source_props = vec![None; entries.len()];
-                    destructures.push((synth, entries, source_props, entry_types, sp));
+                    destructures.push((synth, entries, source_props, entry_types, sp, false));
                 } else if self.at(TokenKind::Ident) {
                     let parameter_span = self.tok().span;
                     roles.push(if self.text() == "_" && !self.escaped_ident() {
@@ -267,10 +280,15 @@ impl Parser<'_> {
         self.block_trailing_is_value = saved_block_value;
         // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
         // first parameter's binding ends up first).
-        for (synth, entries, source_props, entry_types, sp) in destructures.into_iter().rev() {
+        for (synth, entries, source_props, entry_types, sp, parenthesized_short) in
+            destructures.into_iter().rev()
+        {
             let init = self.file.add_expr(Expr::Name(synth), sp);
             let d = self.file.add_stmt(Stmt::Destructure { entries, init }, sp);
             self.file.destructuring.lambda_parameters.insert(d);
+            if parenthesized_short {
+                self.file.destructuring.parenthesized_short_form.insert(d);
+            }
             if source_props.iter().any(|s| s.is_some()) {
                 self.file
                     .destructuring

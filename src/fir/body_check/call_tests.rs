@@ -2156,7 +2156,8 @@ fn top_level_extension_call_keeps_its_stable_target_and_extension_receiver() {
 #[test]
 fn companion_extension_calls_keep_associated_targets_without_runtime_receivers() {
     let (body, index) = checked_function_body(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion fun C.func(value: String): String = value\n\
          companion fun C.getOk(): String = \"OK\"\n\
          fun box(): String = C.func(C.getOk())\n",
@@ -2192,7 +2193,7 @@ fn companion_extension_calls_keep_associated_targets_without_runtime_receivers()
 #[test]
 fn companion_block_call_shadows_same_named_companion_object_member() {
     let (body, index) = checked_function_body(
-        "// LANGUAGE: +CompanionBlocks +CompanionExtensions\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
          class C {\n\
              companion { fun value(): String = \"block\" }\n\
              companion object { fun value(): String = \"object\" }\n\
@@ -2248,7 +2249,7 @@ fn imported_companion_block_call_is_receiverless_and_stably_bound() {
 #[test]
 fn inferred_signature_selects_companion_block_call_without_a_value_facet() {
     let (body, _) = checked_function_body(
-        "// LANGUAGE: +CompanionBlocks +CompanionExtensions\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
          interface C { companion { fun value() = \"OK\" } }\n\
          fun box() = C.value()\n",
         "box",
@@ -2265,7 +2266,7 @@ fn inferred_signature_selects_companion_block_call_without_a_value_facet() {
 #[test]
 fn typealiases_share_companion_associated_classifier_calls_without_receivers() {
     let (body, index) = checked_function_body(
-        "// LANGUAGE: +CompanionExtensions\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
          class Target<T>\n\
          typealias Foo<T> = Target<T>\n\
          typealias Bar = Target<Int>\n\
@@ -4603,6 +4604,7 @@ fn reified_intersection_argument_records_its_common_supertype() {
          object B : X, Y\n\
          fun <T> sel(left: T, right: T): T = left\n\
          inline fun <reified T> T.keep(): T = this\n\
+         @Suppress(\"TYPE_INTERSECTION_AS_REIFIED_WARNING\")\n\
          fun run() { sel(A, B).keep() }\n",
         "run",
     );

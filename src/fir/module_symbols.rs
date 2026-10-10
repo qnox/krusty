@@ -259,6 +259,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.inheritance.is_extensible =
             !flags.has(DeclarationFlags::INTERFACE) && !flags.has(DeclarationFlags::FINAL);
         projected.sam_eligible = flags.has(DeclarationFlags::FUN_INTERFACE);
+        projected.is_data = flags.has(DeclarationFlags::DATA);
         let mut supertype_templates = classifier_header
             .declared_supertypes()
             .map(|supertype| supertype.get())
@@ -428,10 +429,13 @@ impl<'a> StreamedModuleSymbols<'a> {
             constructor.call_sig = call_sig.clone();
             constructor.context_count = callable.shape.context_parameter_count as usize;
             constructor.reified = reified;
-            constructor.visibility = self
-                .index
-                .declaration_header(declaration)
+            let constructor_header = self.index.declaration_header(declaration);
+            constructor.visibility = constructor_header
                 .map_or(declaration_header.visibility, |header| header.visibility);
+            constructor.set_is_primary_constructor(
+                constructor_header
+                    .is_some_and(|header| header.flags.has(DeclarationFlags::PRIMARY_CONSTRUCTOR)),
+            );
             constructor.annotations = self.index.declaration_annotations(declaration).to_vec();
             constructor.stable_declaration = Some(declaration);
             if !parameter_names.is_empty() {
@@ -872,12 +876,17 @@ impl<'a> StreamedModuleSymbols<'a> {
         shape.no_infer_params = no_infer;
         shape.implicit_integer_coercion = implicit_integer_coercion;
         shape.inline_modifiers = inline_modifiers;
-        let reified = self.index.callable(callable).is_some_and(|callable| {
-            (0..)
-                .map_while(|ordinal| self.index.type_parameter(callable.declaration, ordinal))
-                .filter_map(|parameter| self.index.type_parameter_header(parameter))
-                .any(|parameter| parameter.flags.is_reified())
-        });
+        if let Some(callable) = self.index.callable(callable) {
+            shape.reified_type_parameter_ordinals = (0..)
+                .map_while(|ordinal| {
+                    let parameter = self.index.type_parameter(callable.declaration, ordinal)?;
+                    Some((ordinal, self.index.type_parameter_header(parameter)))
+                })
+                .filter(|(_, header)| header.is_some_and(|header| header.flags.is_reified()))
+                .map(|(ordinal, _)| ordinal)
+                .collect();
+        }
+        let reified = !shape.reified_type_parameter_ordinals.is_empty();
         (shape, reified)
     }
 
@@ -980,6 +989,10 @@ impl<'a> StreamedModuleSymbols<'a> {
             );
             callable.owner = internal;
             callable.origin = Origin::Module { facade: internal };
+            callable.reified_type_parameter_ordinals = call_sig
+                .reified_type_parameter_ordinals
+                .clone()
+                .into_boxed_slice();
             callable.owner_is_interface = is_interface;
             callable.suspend = header.flags.has(DeclarationFlags::SUSPEND);
             callable.is_abstract = header.flags.has(DeclarationFlags::ABSTRACT);
@@ -1437,6 +1450,10 @@ impl<'a> StreamedModuleSymbols<'a> {
             }
             let mut callable =
                 Self::semantic_callable(name, realized_parameters, result, receiver, context_count);
+            callable.reified_type_parameter_ordinals = call_sig
+                .reified_type_parameter_ordinals
+                .clone()
+                .into_boxed_slice();
             callable.suspend = header.flags.has(DeclarationFlags::SUSPEND);
             callable.is_abstract = header.flags.has(DeclarationFlags::ABSTRACT);
             callable.inline =

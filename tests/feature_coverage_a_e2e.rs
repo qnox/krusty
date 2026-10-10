@@ -263,7 +263,9 @@ fun box(): String = Color.first.name
 
 #[test]
 fn enum_entries_callable_reference_is_distinct_from_same_named_enum_entry() {
-    let src = r#"
+    // With `ForbidEnumEntryNamedEntries` (the default) the entry is an error, and with
+    // `PrioritizedEnumEntries` alone `EnumWithClash.entries` is ambiguous.
+    let src = r#"// LANGUAGE: -PrioritizedEnumEntries -ForbidEnumEntryNamedEntries
 enum class EnumWithClash { values, entries, valueOf }
 fun use(): String {
     val all = EnumWithClash::entries
@@ -297,11 +299,17 @@ fun use(): String {
             (references, value_reads)
         },
     );
-    assert!(errors.is_empty(), "{errors:?}");
+    let deprecation = "conflicting declarations: the enum entry 'entries' and the property \
+        'Enum.entries' (KT-48872). This will become an error in language version 2.2. See \
+        https://youtrack.jetbrains.com/issue/KT-72829.";
+    assert_eq!(errors, [deprecation]);
     assert_eq!((references, value_reads), (1, 1));
     // BACKEND STILL BAILS on this shape: checker-clean is asserted, emission is a known
     // gap - upgrade to `expect_true_e2e` when the backend admits it.
-    assert!(common::front_end_diagnostics_with_stdlib(src).is_empty());
+    assert_eq!(
+        common::front_end_diagnostics_with_stdlib(src),
+        [deprecation]
+    );
 }
 
 #[test]

@@ -123,6 +123,7 @@ mod tests {
             is_nested: false,
             outer_instance: None,
             kind: TypeKind::Interface,
+            is_data: false,
             inheritance: Default::default(),
             supertypes: direct_supertypes.into_iter().collect::<Vec<_>>().into(),
             supertype_templates: Vec::new(),

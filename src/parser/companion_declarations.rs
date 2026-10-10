@@ -15,6 +15,8 @@ use crate::ast::CompanionBlockMember;
 pub(super) struct ClassifierCompanions {
     pub(super) object: Option<DeclId>,
     pub(super) block_members: Vec<CompanionBlockMember>,
+    /// Whether a `companion { … }` block was parsed, member or not.
+    has_block: bool,
 }
 
 impl Parser<'_> {
@@ -46,6 +48,7 @@ impl Parser<'_> {
             self.kind(),
             TokenKind::KwFun | TokenKind::KwVal | TokenKind::KwVar
         ) {
+            self.gate_companion_extension(self.t[save].span);
             mods.push("companion".to_string());
             mods.append(&mut tail);
         } else {
@@ -79,6 +82,10 @@ impl Parser<'_> {
         if self.at_companion_object_declaration() {
             companions.object = Some(self.parse_companion(outer, modifiers));
         } else {
+            if !companions.has_block {
+                companions.has_block = true;
+                self.gate_companion_block(self.tok().span);
+            }
             self.parse_companion_block(outer, modifiers, &mut companions.block_members);
         }
     }
