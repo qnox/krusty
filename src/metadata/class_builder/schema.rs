@@ -774,7 +774,7 @@ pub(crate) fn class_message(
         );
         // Own type parameters are named, an enclosing class's addressed by id; see `build_prop`.
         function_type_parameters.extend(semantic_named_type_parameters(
-            m.type_params.iter().map(String::as_str),
+            m.type_params.iter().map(|(name, _)| name.as_str()),
             m.semantic_type_params.iter().map(String::as_str),
         ));
         // kotlinc interns the return type before the type parameters, as at the top level.
@@ -791,14 +791,14 @@ pub(crate) fn class_message(
             )
         });
         st.put_type(&mut func, 3, 7, &ret); // Function.return_type(_id) = 3 / 7
-        for (index, name) in m.type_params.iter().enumerate() {
+        for (index, (name, reified)) in m.type_params.iter().enumerate() {
             let id = first_own as usize + index;
             let parameter = encode_metadata_type_parameter(
                 st,
                 id,
                 &MetadataTypeParameter {
                     name: name.clone(),
-                    reified: false,
+                    reified: *reified,
                     variance: crate::types::TypeVariance::Invariant,
                     upper_bounds: m.type_param_bounds.get(index).cloned().unwrap_or_default(),
                     upper_bound_spellings: m

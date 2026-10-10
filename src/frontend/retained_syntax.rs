@@ -978,6 +978,8 @@ pub(super) fn compact(file: &mut File) {
         std::mem::take(&mut file.exact_member_name_spans),
         &expressions,
     );
+    file.operator_token_spans =
+        remap_u32_map(std::mem::take(&mut file.operator_token_spans), &expressions);
     file.nullable_callable_ref_receivers = remap_u32_set(
         std::mem::take(&mut file.nullable_callable_ref_receivers),
         &expressions,

@@ -67,9 +67,13 @@ fn an_unbounded_type_parameter_return_is_not_annotated_non_null() {
     };
     assert_eq!(code, 0, "kotlinc rejected the fixture: {stderr}");
 
-    let classes =
-        common::compile_in_process(SRC, "TypeParamNullability", &[common::stdlib_jar()], None)
-            .expect("the fixture compiles");
+    let classes = common::compile_in_process(
+        SRC,
+        "TypeParamNullability",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the fixture compiles");
     for (internal, bytes) in &classes {
         std::fs::write(out.join(format!("{internal}.class")), bytes).expect("write class");
     }
@@ -112,9 +116,13 @@ fn an_abstract_accessor_of_a_type_parameter_property_keeps_its_signature() {
     let reference = krusty::jvm::classreader::parse_class(&reference_bytes)
         .expect("parse reference Unbounded.class");
 
-    let classes =
-        common::compile_in_process(SRC, "AccessorSignature", &[common::stdlib_jar()], None)
-            .expect("the fixture compiles");
+    let classes = common::compile_in_process(
+        SRC,
+        "AccessorSignature",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the fixture compiles");
     let (_, ours_bytes) = classes
         .iter()
         .find(|(internal, _)| internal == "Unbounded")
@@ -229,7 +237,7 @@ fn a_nullable_bounded_type_parameter_property_is_unguarded() {
         NULLABLE_OCCURRENCE,
         "NullableTypeParam",
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("the fixture compiles");
     for (internal, bytes) in &classes {

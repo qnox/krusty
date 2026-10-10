@@ -453,7 +453,7 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
         vec![("key".to_string(), Ty::ty_param(&t_semantic, t_bound))],
         Ty::nullable(r),
     );
-    get.type_params = vec!["T".to_string(), "R".to_string()];
+    get.type_params = vec![("T".to_string(), false), ("R".to_string(), false)];
     get.semantic_type_params = vec![t_semantic, r_semantic];
     get.type_param_bounds = vec![vec![t_bound], vec![any]];
 

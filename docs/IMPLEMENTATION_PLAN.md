@@ -4621,8 +4621,29 @@ code is the one the code generator already names: provider-owned bodies through 
   extensions and an enum's `values`/`valueOf` (and `entries`, only with `hasEnumEntries`) are
   receiver-less candidates of the classifier's namespace naming it as `associated_classifier`.
   Private classes, members and constructors are not published, although IR gives a private class
-  member or constructor (an enum's, an object's) a public signature. The `SemanticPlatform` hooks
-  come next, then the Native lane switch.
+  member or constructor (an enum's, an object's) a public signature.
+- **Platform (done).** `KlibLibraries::open` publishes the KLIBs a compilation selects, zipped or
+  unpacked, and is a `SemanticPlatform`; each caller names its own target's libraries (Native's
+  `klib/common/stdlib`; `toolchain::kotlin_stdlib_klib` names each target's).
+  `for_compilation` starts another
+  compilation over the same signed declarations. Its hooks are target-neutral: the language's
+  `FunctionN`/`SuspendFunctionN`/`KFunctionN` classifiers (no KLIB serializes them), function and
+  reference types, `KClass`, value-class underlyings, and the contract intrinsic and DSL members,
+  recognized by `contracts::is_contract_intrinsic`/`dsl_member` as the JVM provider does. Against
+  the 2.4.20 Native box corpus the stdlib KLIB currently passes 2007 of 7089 applicable cases where
+  the JVM surface passes 5372. The gaps, largest first: KLIB default arguments (`assertEquals`'s
+  `message`, from the parameter's IR default), builtin members carrying no compiler intrinsic
+  (`Int.plus`, `String.plus`, `compareTo`), and inline stdlib bodies (`let`, `apply`, `run`). The
+  Native lane switches, as a per-lane libraries setting in `tests/box_lane.rs`, once it no longer
+  regresses.
+- **Builtin operations (done).** A KLIB builtin gets its compiler operation from the shared rules
+  the JVM provider uses (`builtin_member_realization`, `builtin_top_level_realization`,
+  `add_core_builtin_declarations`), by exact declaration, whether or not it has an IR body. A
+  target's own intrinsic annotation (`@TypedIntrinsic`, `@WasmOp`) is never read. The Native
+  corpus passes 3542 of 7089 against the stdlib KLIB (from 2007). Every `external` function of
+  each target's stdlib KLIB must carry an operation: `klib_libraries::tests::external_coverage`
+  checks Native, JS, wasm-js and wasm-wasi against `tests/klib_uncovered_externals/<target>/`,
+  lists that may only shrink (2.4.20: 402, 25, 16 and 1 uncovered).
 - **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
   decoded trees of a library set by linkable identity and answers a selected callable's frozen
   `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.
@@ -4655,6 +4676,22 @@ code is the one the code generator already names: provider-owned bodies through 
   inlined function blocks, `throw`, `&&`/`||` and object construction.
   Next: members and classes in the provider, `throw` and object construction, `&&`/`||`, then
   wiring the unit into the Native lane switch (nothing is wired into a backend yet).
+- **Lowering (third slice).** Control and value forms, each lowered to what checked FIR lowering
+  produces for the equivalent source (`klib_lowering/body_lowering/` by form: `blocks`,
+  `conditionals`, `loops`, `string_templates`, `type_operators`, `calls`): `&&`/`||` with their
+  short-circuit facts; `if` and `when` without `else` as statements; nested plain blocks typed as
+  the source block and `Unit` bodies without a trailing `return`; the `Unit` coercions a KLIB adds,
+  dropped or converted by context; `throw`; string templates with merged literal runs; `while` and
+  `do`-`while` with labelled `break`/`continue`; `is`/`!is`, `as` and the `T?`-to-`T` smart cast;
+  `null` typed as the null literal. Still declining by form: constructor calls (a frozen
+  `KlibBodyCallable` has no classifier to construct, so `throw IllegalArgumentException(…)` and
+  `coerceIn` stop there), `as?`, `is` of a nullable type, implicit non-null assertions, other
+  implicit casts (a widening is not told from a narrowing without supertypes), blocks of a
+  compiler-introduced origin (inlined bodies, `for` loops) and composite blocks. The stdlib's
+  `boundsErrorMessage`, `messagePrefix`, `ensureNeverFrozen` and `initRuntimeIfNeeded` now lower
+  too; the remaining declines are led by generics, inlined blocks, file-private and member callees
+  and constructor calls.
+  Next: constructors and member callees in the provider, then the Native lane switch.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
@@ -5359,10 +5396,28 @@ non-inline callers, still reads the field directly. Test:
 - The backend reads each value's checked type (`IrFile::checked_type`) and the frontend-selected
   entry (`IrFile::entry_point`, `IrFile::box_entry`); a missing or duplicate entry is rejected in
   `Backend::check_module` before anything is emitted.
+- ✅ Arithmetic result types are a common-IR fact: every non-`Boolean` `PrimitiveBinOp` carries
+  the selected operator's declared result (`IrFile::add_arithmetic`, proven complete by
+  `IrFile::validate_complete_facts`). Native deleted its promotion table (`arithmetic_result`);
+  Native and Wasm only choose operand widening and narrowing to that result.
+- Classes: final, open and abstract classes, interfaces declared in the same file and `object`
+  declarations, with primary and secondary constructors, fields, properties, virtual and `super`
+  calls, interface dispatch, `is`/`!is`/`as`/`as?`, and `equals`/`hashCode`/`toString` a class
+  declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
+  program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
+  keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
+  struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Declined by name:
+  enum, value, annotation, inner and local capturing classes, companions, bridged overrides,
+  supertypes from another file or the library, and a call that could reach `kotlin.Any`'s own
+  `toString`/`hashCode`, which have no body in the module until the library's bodies are.
+  Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
+  181/181/182; Native's counts are unchanged by the shared tables.
+- Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
+  checked type, which Wasm declines rather than infer one.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
-- Next: classes as struct subtypes with vtables, exceptions on wasm EH, library calls keyed by the
-  selected declaration, multi-file and `// MODULE:` programs, then a klib-backed library provider
-  shared with Native.
+- Next: exceptions on wasm EH, library calls keyed by the selected declaration, enums and
+  companions on the class tables, multi-file and `// MODULE:` programs, then a klib-backed library
+  provider shared with Native.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

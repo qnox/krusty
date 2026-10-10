@@ -8,7 +8,7 @@ fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Annotations")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -51,13 +51,13 @@ fn checked_target_applications_publish_valid_policies_and_isolate_invalid_recove
     let mut diagnostics = DiagSink::new();
     let platform = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for("")),
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for("")),
         ))
         .expect("JVM provider initialization"),
     );
     let analysis = analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Targets")],
-        platform,
+        crate::frontend::PlatformProvider::jvm(platform),
         &LangFeatures::new(),
         &mut diagnostics,
     );

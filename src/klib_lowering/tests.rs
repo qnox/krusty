@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 
 mod body_forms;
+mod control_forms;
+mod demo_package;
 
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
@@ -25,7 +27,7 @@ use crate::metadata::klib_ir::{
     read_declaration_trees, KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees,
     KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
 };
-use crate::metadata::semantic::{parse_package_fragment_checked, KotlinFunction, KotlinPackage};
+use crate::metadata::semantic::{KotlinFunction, KotlinPackage};
 use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, Visibility};
@@ -121,9 +123,44 @@ pub(super) fn type_name_of(ty: Ty) -> String {
 /// Every fact a backend reads about an expression of a lowered body, as one text: its node, the
 /// logical type, a return's depth (`@0`), a stable (`!`) or mutable (`~`) binding read, a `when`'s
 /// exhaustiveness (`exhaustive:`), a callable scope (`scope`) and a recorded negation
-/// (`negation`). A call names its callee by source name, so two units' bodies compare whatever
-/// order their functions were declared in.
+/// (`negation`), a short circuit (`and`, `or`) and a written cast (`written`). A call names its
+/// callee by source name, so two units' bodies compare whatever order their functions were
+/// declared in, and a loop label by its order of appearance (`@L0`), so two lowerings that name
+/// their loops differently compare.
 pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
+    normalized_labels(&render_node(ir, expression))
+}
+
+/// `rendered` with each distinct `@label` replaced by `@L<n>`, numbered by first appearance.
+fn normalized_labels(rendered: &str) -> String {
+    let mut labels = Vec::<String>::new();
+    let mut out = String::new();
+    let mut rest = rendered;
+    while let Some(at) = rest.find("@$") {
+        out.push_str(&rest[..=at]);
+        let label = &rest[at + 1..];
+        let end = label
+            .find(|character: char| {
+                !(character.is_ascii_alphanumeric() || "_$".contains(character))
+            })
+            .unwrap_or(label.len());
+        let name = &label[..end];
+        let index = match labels.iter().position(|known| known == name) {
+            Some(index) => index,
+            None => {
+                labels.push(name.to_owned());
+                labels.len() - 1
+            }
+        };
+        out.push_str(&format!("L{index}"));
+        rest = &label[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn render_node(ir: &IrFile, expression: ExprId) -> String {
+    let render = render_node;
     let node = match ir.expr(expression) {
         IrExpr::Block { stmts, value } => {
             let statements = stmts
@@ -163,7 +200,12 @@ pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
                 .map_or(String::new(), |ty| {
                     format!("exhaustive:{} ", type_name_of(*ty))
                 });
-            format!("{exhaustive}when[{branches}]")
+            let short_circuit = match ir.short_circuits.get(&expression) {
+                Some(crate::ir::IrShortCircuitKind::And) => "and ",
+                Some(crate::ir::IrShortCircuitKind::Or) => "or ",
+                None => "",
+            };
+            format!("{short_circuit}{exhaustive}when[{branches}]")
         }
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
             let negation = if ir.negations.contains(&expression) {
@@ -217,12 +259,66 @@ pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
             format!("v{slot}{stable}")
         }
         IrExpr::Const(constant) => format!("{constant:?}"),
+        IrExpr::While {
+            cond,
+            body,
+            update,
+            post_test,
+            label,
+        } => format!(
+            "{}{}({}) {}{}",
+            if *post_test { "do-while" } else { "while" },
+            label_suffix(label.as_deref()),
+            render(ir, *cond),
+            render(ir, *body),
+            update.map_or(String::new(), |update| format!(
+                " update {}",
+                render(ir, update)
+            ))
+        ),
+        IrExpr::Break { label } => format!("break{}", label_suffix(label.as_deref())),
+        IrExpr::Continue { label } => format!("continue{}", label_suffix(label.as_deref())),
+        IrExpr::Throw { operand } => format!("throw {}", render(ir, *operand)),
+        IrExpr::StringConcat(parts) => format!(
+            "concat[{}]",
+            parts
+                .iter()
+                .map(|part| render(ir, *part))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } => format!(
+            "{}{op:?}<{}>({})",
+            if ir.written_casts.contains(&expression) {
+                "written "
+            } else {
+                ""
+            },
+            type_name_of(*type_operand),
+            render(ir, *arg)
+        ),
+        IrExpr::NotNullAssert { operand, check } => {
+            format!("{check:?}!!({})", render(ir, *operand))
+        }
+        IrExpr::BottomValue {
+            producer,
+            completion,
+        } => format!("{completion:?}({})", render(ir, *producer)),
+        IrExpr::UnitInstance => "Unit".to_owned(),
         other => panic!("a lowered body holds no {other:?}"),
     };
     match ir.logical_types.get(&expression) {
         Some(ty) => format!("{node}: {}", type_name_of(*ty)),
         None => node,
     }
+}
+
+fn label_suffix(label: Option<&str>) -> String {
+    label.map_or(String::new(), |label| format!("@{label}"))
 }
 
 /// The rendered body checked FIR lowering produces for the one function of `source` named `name`.
@@ -278,6 +374,7 @@ fn coerce_declaration() -> KotlinFunction {
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_external: false,
         is_static: false,
         context_count: 0,
         context_kinds: Vec::new(),
@@ -594,11 +691,23 @@ fn a_signature_lowers_into_one_function() {
 }
 
 #[test]
-fn a_body_that_throws_declines_by_its_form() {
+fn a_body_that_constructs_declines_by_its_form() {
     let message = declined(|parts, arena| {
         let less = parts.call(arena, less_int());
-        let this = parts.read(arena, &parts.receiver);
-        let thrown = arena.push_expr(Some(parts.nothing), KlibIrExprKind::Throw(this));
+        // Any constructor: the form declines before its callee is read.
+        let constructed = arena.push_expr(
+            Some(parts.nothing),
+            KlibIrExprKind::ConstructorCall {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(KlibIrSymbolKind::Constructor, less_int()),
+                    arguments: KlibIrArguments::Flat(Vec::new()),
+                    type_arguments: Vec::new(),
+                    origin: None,
+                },
+                constructor_type_arguments: 0,
+            },
+        );
+        let thrown = arena.push_expr(Some(parts.nothing), KlibIrExprKind::Throw(constructed));
         let conditional = parts.conditional(arena, less, thrown);
         Some(KlibIrBody::Block(vec![parts.return_from(
             arena,
@@ -608,7 +717,7 @@ fn a_body_that_throws_declines_by_its_form() {
     });
     assert_eq!(
         message,
-        "the KLIB body of `kotlin.ranges.coerceAtLeast` (it uses `throw`)"
+        "the KLIB body of `kotlin.ranges.coerceAtLeast` (it uses a constructor call)"
     );
 }
 
@@ -919,30 +1028,10 @@ pub(super) fn distribution_root() -> Option<PathBuf> {
 /// The common stdlib KLIB's declarations and their bodies.
 pub(super) fn stdlib(root: &std::path::Path) -> (KlibLibraries, KlibDeclarationBodies) {
     let path = root.join("klib/common/stdlib");
+    let libraries =
+        KlibLibraries::open(std::slice::from_ref(&path)).unwrap_or_else(|error| panic!("{error}"));
     let archive =
         KlibArchive::open(&path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
-    let packages = archive
-        .package_fragments()
-        .into_iter()
-        .map(|fragment| {
-            let bytes = archive
-                .read(&fragment.entry)
-                .unwrap_or_else(|error| panic!("read {}: {error}", fragment.entry));
-            let package = parse_package_fragment_checked(&bytes)
-                .unwrap_or_else(|error| panic!("decode {}: {error:?}", fragment.entry));
-            let segments = if fragment.package_fqname.is_empty() {
-                Vec::new()
-            } else {
-                fragment
-                    .package_fqname
-                    .split('.')
-                    .map(str::to_owned)
-                    .collect()
-            };
-            (segments, package)
-        })
-        .collect();
-    let libraries = KlibLibraries::from_packages(packages).expect("the stdlib is signable");
     let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");
     let bodies = KlibDeclarationBodies::from_libraries(vec![trees]).expect("one library");
     (libraries, bodies)
@@ -1010,7 +1099,7 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
 }
 
 #[test]
-fn stdlib_coerce_in_declines_by_its_throw() {
+fn stdlib_coerce_in_declines_by_its_exception_construction() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -1029,10 +1118,10 @@ fn stdlib_coerce_in_declines_by_its_throw() {
             &bodies,
             &KlibCalleeFacts::default(),
         )
-        .expect_err("coerceIn throws on an empty range");
+        .expect_err("coerceIn constructs the exception it throws on an empty range");
     assert_eq!(
         decline.to_string(),
-        "the KLIB body of `kotlin.ranges.coerceIn` (it uses `throw`)"
+        "the KLIB body of `kotlin.ranges.coerceIn` (it uses a constructor call)"
     );
     assert!(unit.ir().exprs.is_empty());
 }

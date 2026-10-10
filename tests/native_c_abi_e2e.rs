@@ -10,9 +10,8 @@ use std::process::Command;
 
 use object::{Object, ObjectSymbol};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -51,8 +50,7 @@ fn host() -> Option<NativeTarget> {
 }
 
 fn compile(sources: &[(&str, &str)], module: &str) -> (Vec<Artifact>, Vec<String>) {
-    let jar = krusty::toolchain::stdlib_jar().expect("the native tests require the stdlib jar");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -70,9 +68,6 @@ fn compile(sources: &[(&str, &str)], module: &str) -> (Vec<Artifact>, Vec<String
         features.apply_source_directives(source);
     }
     let mut diags = DiagSink::new();
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
-    );
     let entry = if sources
         .iter()
         .any(|(_, source)| source.contains("fun box("))
@@ -84,6 +79,12 @@ fn compile(sources: &[(&str, &str)], module: &str) -> (Vec<Artifact>, Vec<String
     let backend = CraneliftBackend::new(host().expect("checked by the caller"))
         .with_entry(entry)
         .verified();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
+    );
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, module, &mut diags);
     (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
 }

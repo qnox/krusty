@@ -8,8 +8,8 @@ use crate::ast::TypeRef;
 mod description;
 
 pub use description::{
-    CallBinding, Decoded, Description, DescriptionBinder, DescriptionOwner, DslMember, KindBinding,
-    SelectedDslCallable, Term, TermId, TermKind,
+    dsl_member, is_contract_intrinsic, CallBinding, Decoded, Description, DescriptionBinder,
+    DescriptionOwner, DslMember, KindBinding, SelectedDslCallable, Term, TermId, TermKind,
 };
 
 /// A contract whose source type references have all been bound to publishable semantic types.

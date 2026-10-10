@@ -14,12 +14,12 @@ fn analyze_jvm_source(
     }
     crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 crate::jvm::classpath::Classpath::new(classpath),
             ))
             .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         diagnostics,
     )

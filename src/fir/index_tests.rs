@@ -39,7 +39,7 @@ fn published_inherited_defaults(
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem(stem)],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -180,7 +180,7 @@ fn member_source_order_interleaves_functions_and_properties() {
             "class C {\n    fun before() = 1\n    var value = \"x\"\n    fun after() = value.length\n}\n",
         )
         .with_file_stem("Members")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -229,7 +229,7 @@ fn generated_data_members_follow_every_declared_member() {
             SourceInput::kotlin("data class D(val x: Int) {\n    fun declared(): Int = x\n}\n")
                 .with_file_stem("DataOrder"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -274,7 +274,7 @@ fn resolved_index_owns_semantic_classifier_graph_without_header_syntax() {
             "package sample\nopen class Parent<T>\nclass Child : Parent<String>()\nval answer: Int = 42\nfun make(): Child = Child()\nfun String.ext(value: Int): Int = value\n",
         )
         .with_file_stem("Hierarchy")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -379,7 +379,7 @@ fn property_override_edges_are_exact_pending_free_pass_one_facts() {
              }\n",
         )
         .with_file_stem("Overrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -452,10 +452,10 @@ fn anonymous_object_inferred_override_stays_deferred_until_its_checked_body() {
              }\n",
         )
         .with_file_stem("AnonymousContext")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -506,7 +506,7 @@ fn superclass_function_override_edge_precedes_backend_erasure() {
              }\n",
         )
         .with_file_stem("FunctionOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -570,7 +570,7 @@ fn interface_function_override_edge_precedes_backend_erasure() {
              }\n",
         )
         .with_file_stem("InterfaceOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -618,7 +618,7 @@ fn enum_entry_override_edge_is_owned_by_the_stable_entry() {
              }\n",
         )
         .with_file_stem("EnumEntryOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -683,7 +683,7 @@ fn inherited_interface_implementation_is_published_before_backend_lowering() {
              class StringMatcher : StringBase(), Matcher<String>\n",
         )
         .with_file_stem("InheritedInterfaceOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -728,7 +728,7 @@ fn inherited_interface_property_is_published_before_backend_lowering() {
              class StringValue : StringBase(), Valued<String>\n",
         )
         .with_file_stem("InheritedInterfaceProperties")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -780,10 +780,10 @@ fn mapped_interface_override_publishes_external_declaration_identity() {
              }\n",
         )
         .with_file_stem("MappedInterfaceOverride")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -849,10 +849,10 @@ fn a_dependency_property_publishes_its_kotlin_name() {
              fun h(s: String): IntRange = s.indices\n",
         )
         .with_file_stem("DependencyPropertyName")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -936,10 +936,10 @@ fn a_dependency_extension_publishes_its_kotlin_name() {
              fun s(x: List<Int>): Int = x.sum()\n",
         )
         .with_file_stem("DependencyExtensionName")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1006,10 +1006,10 @@ fn value_class_override_publishes_the_generic_interface_edge() {
              }\n",
         )
         .with_file_stem("ValueClassComparableOverride")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );

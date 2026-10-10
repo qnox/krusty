@@ -1,14 +1,16 @@
 //! Kotlin's arithmetic, comparison and numeric-representation rules, lowered.
 //!
-//! What lives here is every decision about a NUMBER: how a value moves between machine carriers,
-//! which operand type an operation is performed in, and what the answer's type is. Kotlin's rules
-//! differ from C's at almost every one of those points, and the differences are observable:
+//! What lives here is every machine decision about a NUMBER: how a value moves between carriers,
+//! which width an operation is performed at, and how its answer reaches the type the selected
+//! operator declares. That type itself is not decided here: common lowering records the selected
+//! operator's result (`Int.plus(Long): Long`, `Char.plus(Int): Char`, `Char.minus(Char): Int`)
+//! on every arithmetic node. Kotlin's rules differ from C's at almost every one of these points,
+//! and the differences are observable:
 //!
 //! - `+`, `-`, `*` and unary `-` WRAP; `/` and `%` go through the runtime so division by zero is
 //!   Kotlin's `ArithmeticException` rather than a machine trap; shifts mask their count.
-//! - Arithmetic on the narrow integer types IS `Int` arithmetic — Kotlin has no
-//!   `Byte.plus(Byte): Byte` — and `Char` is the exception that makes the rest a rule, since
-//!   `Char.plus(Int)` is declared to return `Char` and only `Char.minus(Char)` returns `Int`.
+//! - Arithmetic on the narrow integer types runs at `Int` width, and an answer the selected
+//!   operator declares narrower (`Char.plus(Int): Char`) is narrowed back to it.
 //! - `compareTo` on floating point is a TOTAL order, not C's `<`/`>`: every `NaN` above every
 //!   other value including itself, `-0.0` below `0.0`. The same operation reached through `<`
 //!   keeps IEEE semantics, so the two spellings genuinely differ.
@@ -352,6 +354,7 @@ impl BodyLowering<'_, '_, '_> {
     /// A built-in binary operator, with Kotlin's semantics where the machine's differ.
     pub(super) fn binary(
         &mut self,
+        id: u32,
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
@@ -596,12 +599,14 @@ impl BodyLowering<'_, '_, '_> {
             (left, right, ty)
         };
 
-        // `Char + Int` is `Char`, and the arithmetic above ran at `Int` width, so the result is
-        // narrowed back — the same `i2c` kotlinc emits after the `iadd`. Everything else keeps the
-        // width it was computed at.
-        let narrow_to_char =
-            arithmetic_result(op, lhs_ty.map_or(Ty::Int, |ty| ty.non_null()), rhs_ty) == Ty::Char
-                && lhs_ty.map(Ty::non_null) == Some(Ty::Char);
+        // The selected operator's result can be narrower than the width the arithmetic ran at:
+        // `Char.plus(Int): Char` is computed at `Int` and narrowed back, the same `i2c` kotlinc
+        // emits after the `iadd`. Everything else keeps the width it was computed at.
+        let narrow_to = if arithmetic {
+            self.narrower_result(id, ty)?
+        } else {
+            None
+        };
 
         let value = match op {
             // `iadd`/`isub`/`imul` wrap, which is Kotlin's rule; there is nothing to guard.
@@ -636,11 +641,23 @@ impl BodyLowering<'_, '_, '_> {
                 unreachable!("handled above")
             }
         };
-        Ok(Some(if narrow_to_char {
-            self.builder.ins().ireduce(types::I16, value)
-        } else {
-            value
+        Ok(Some(match narrow_to {
+            Some(result) => self.builder.ins().ireduce(result, value),
+            None => value,
         }))
+    }
+
+    /// The machine type of an arithmetic operator's recorded result, when it is narrower than the
+    /// integer width `computed` the operation ran at. The result type is the selected operator's,
+    /// which common lowering records for every arithmetic node; this only chooses the narrowing.
+    fn narrower_result(&self, id: u32, computed: Type) -> Result<Option<Type>, Unsupported> {
+        let Some(result) = self.file.ir.checked_type(id) else {
+            return Err("an arithmetic operator without its selected result type".into());
+        };
+        Ok(self
+            .carrier(result.non_null())
+            .clif()
+            .filter(|clif| !clif.is_float() && clif.bits() < computed.bits()))
     }
 
     /// `Byte`/`Short`/`Char` operands of arithmetic become `Int`, as Kotlin's operators declare.
@@ -834,16 +851,6 @@ impl BodyLowering<'_, '_, '_> {
             _ => return Err("a bit operation of the wrong arity".into()),
         };
         self.convert(produced, Some(operand), ret)
-    }
-}
-
-/// The type Kotlin performs an operation IN, which is not always either operand's.
-pub(super) fn arithmetic_result(op: IrBinOp, lhs: Ty, rhs: Option<Ty>) -> Ty {
-    match (lhs, op) {
-        (Ty::Char, IrBinOp::Add) => Ty::Char,
-        (Ty::Char, IrBinOp::Sub) if rhs.map(Ty::non_null) != Some(Ty::Char) => Ty::Char,
-        (Ty::Byte | Ty::Short | Ty::Char, _) => Ty::Int,
-        (other, _) => other,
     }
 }
 

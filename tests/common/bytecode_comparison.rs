@@ -239,11 +239,13 @@ fn compare_with_kotlinc_plugin_request(
             .map(|target| target + 44)
             .unwrap_or_else(|| panic!("unknown -jvm-target {other}")),
     };
+    let jdk = super::common_core::jdk_modules();
+    let jdk = (!krusty_cp_jars.contains(&jdk)).then_some(jdk);
     let classes = match language_settings {
         Some(language_settings) => super::common_core::source_set_compile::compile(
             &[(name, src)],
             krusty_cp_jars,
-            None,
+            jdk.as_deref(),
             Some(class_major),
             Some(language_settings.language_version.metadata_version()),
             language_settings,
