@@ -570,10 +570,6 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.platform_default_import_packages()
     }
 
-    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
-        self.platform.physical_property_getter_names(property)
-    }
-
     fn inherited_accessor_properties(
         &self,
         source: &dyn crate::symbol_source::SymbolSource,
