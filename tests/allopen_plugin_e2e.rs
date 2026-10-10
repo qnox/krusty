@@ -306,6 +306,11 @@ fn the_spring_preset_matches_through_a_dependency() {
     let krusty_lib = fixture.krusty("lib", SPRING_LIBRARY, &[], &[]);
     let sources = [("Main.kt", SPRING_MAIN)];
     let reference = fixture.kotlinc("main", &sources, &[reference_lib], &switches);
-    let krusty = fixture.krusty("main", &sources, &[krusty_lib.clone()], &switches);
+    let krusty = fixture.krusty(
+        "main",
+        &sources,
+        std::slice::from_ref(&krusty_lib),
+        &switches,
+    );
     assert_same_classes_and_box(&reference, &krusty, &[stdlib, krusty_lib]);
 }
