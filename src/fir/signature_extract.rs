@@ -5,6 +5,7 @@
 
 mod evaluated_casts;
 mod integer_literals;
+mod qualified_calls;
 mod safe_index;
 
 use crate::ast::{BinOp, Expr, ExprId, File, Stmt, TrFlags, TypeRef, UnOp};
@@ -15,8 +16,8 @@ use super::coverage::ExpressionForm;
 use super::signature_source::{source_function, source_property, source_signature_expression};
 use super::{
     DeclarationId, DeclarationStub, DeferredCallableSelection, DeferredMemberSelection,
-    DeferredValueSelection, OriginId, ResolvedTy, SigCallArgument, SigExpr, SigExprId,
-    SignatureGraph, SignatureScope, SignatureScopeId, SourceFileId,
+    DeferredValueSelection, OriginId, QualifiedCallCoordinate, ResolvedTy, SigCallArgument,
+    SigExpr, SigExprId, SignatureGraph, SignatureScope, SignatureScopeId, SourceFileId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,59 +126,6 @@ impl SignatureConstraintExtractor {
             scope,
             origin,
         })
-    }
-
-    fn qualified_callable_spelling(&self, file: &File, expression: ExprId) -> Option<String> {
-        fn collect(file: &File, expression: ExprId, names: &mut Vec<String>) -> bool {
-            match file.expr(expression) {
-                Expr::Name(name) => {
-                    names.push(name.clone());
-                    true
-                }
-                Expr::Member { receiver, name } => {
-                    if !collect(file, *receiver, names) {
-                        return false;
-                    }
-                    names.push(name.clone());
-                    true
-                }
-                _ => false,
-            }
-        }
-
-        let mut names = Vec::new();
-        if !collect(file, expression, &mut names) || names.len() < 2 {
-            return None;
-        }
-        if self
-            .lexical_values
-            .iter()
-            .rev()
-            .any(|values| values.contains_key(names[0].as_str()))
-        {
-            return None;
-        }
-        Some(names.join("."))
-    }
-
-    fn qualified_value(
-        &mut self,
-        file: &File,
-        expression: ExprId,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    ) -> Option<SigExprId> {
-        let spelling = self.qualified_callable_spelling(file, expression)?;
-        let spelling = self.graph.intern_name(&spelling);
-        let selection = self
-            .graph
-            .add_value_selection(super::DeferredValueSelection {
-                scope,
-                spelling,
-                origin,
-                expected: None,
-            });
-        Some(self.graph.add_expr(SigExpr::Value(selection)))
     }
 
     pub fn extract_file(
@@ -1638,7 +1586,8 @@ impl SignatureConstraintExtractor {
                 // lexical. This lets signature semantics evaluate classifier-only rungs such as a
                 // `companion val C.name` before asking whether `C` denotes a runtime value. Value
                 // roots still fall through to the ordinary receiver/member graph below.
-                if let Some(value) = self.qualified_value(file, expression, scope, selector_origin)
+                if let Some(value) =
+                    qualified_calls::value(self, file, expression, scope, selector_origin)
                 {
                     return Ok(value);
                 }
@@ -1646,10 +1595,11 @@ impl SignatureConstraintExtractor {
                     .expr_span(*receiver)
                     .map(&mut *origin)
                     .unwrap_or(node_origin);
-                let receiver = match self.qualified_value(file, *receiver, scope, receiver_origin) {
-                    Some(receiver) => receiver,
-                    None => self.consumed_expression(file, *receiver, scope, origin)?,
-                };
+                let receiver =
+                    match qualified_calls::value(self, file, *receiver, scope, receiver_origin) {
+                        Some(receiver) => receiver,
+                        None => self.consumed_expression(file, *receiver, scope, origin)?,
+                    };
                 self.member(receiver, name, scope, selector_origin)
             }
             Expr::SafeCall {
@@ -1890,7 +1840,11 @@ impl SignatureConstraintExtractor {
                                             .call_has_trailing_lambda
                                             .contains(&expression.0),
                                     });
-                            self.graph.add_expr(SigExpr::Call { target, arguments })
+                            self.graph.add_expr(SigExpr::Call {
+                                target,
+                                arguments,
+                                qualified: None,
+                            })
                         }
                     }
                     Expr::Member { receiver, name } => {
@@ -1950,14 +1904,30 @@ impl SignatureConstraintExtractor {
                                 scope,
                                 origin: node_origin,
                             })
-                        } else if let Some(spelling) =
-                            self.qualified_callable_spelling(file, *callee)
+                        } else if let Some(path) =
+                            qualified_calls::callable_path(self, file, *callee)
                         {
                             let arguments =
                                 self.call_arguments(file, expression, args, scope, origin)?;
                             let type_arguments =
                                 self.call_type_arguments(file, expression, scope, origin);
-                            let spelling = self.graph.intern_name(&spelling);
+                            let trailing_lambda =
+                                file.call_has_trailing_lambda.contains(&expression.0);
+                            let qualified_receiver = qualified_calls::receiver_expression(
+                                self, file, *receiver, scope, origin,
+                            )?;
+                            let member_spelling = self.graph.intern_name(name);
+                            let member = self.graph.add_member_selection(DeferredMemberSelection {
+                                scope,
+                                spelling: member_spelling,
+                                origin: selector_origin,
+                                expected: None,
+                                type_arguments,
+                                trailing_lambda,
+                            });
+                            let root = self.graph.intern_name(&path.root);
+                            let first_selector = self.graph.intern_name(&path.first_selector);
+                            let spelling = self.graph.intern_name(&path.spelling);
                             let target =
                                 self.graph
                                     .add_callable_selection(DeferredCallableSelection {
@@ -1967,11 +1937,19 @@ impl SignatureConstraintExtractor {
                                         origin: selector_origin,
                                         expected: None,
                                         type_arguments,
-                                        trailing_lambda: file
-                                            .call_has_trailing_lambda
-                                            .contains(&expression.0),
+                                        trailing_lambda,
                                     });
-                            self.graph.add_expr(SigExpr::Call { target, arguments })
+                            self.graph.add_expr(SigExpr::Call {
+                                target,
+                                arguments,
+                                qualified: Some(QualifiedCallCoordinate {
+                                    receiver: qualified_receiver,
+                                    root,
+                                    first_selector,
+                                    member,
+                                    origin: selector_origin,
+                                }),
+                            })
                         } else {
                             let receiver =
                                 self.consumed_expression(file, *receiver, scope, origin)?;

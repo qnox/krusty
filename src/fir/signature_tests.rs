@@ -25,9 +25,15 @@ fun inferred() = transform<String>(
     assert_eq!(extractor.failures(), []);
     let graph = extractor.finish().unwrap();
     let constraint = graph.constraints()[0];
-    let SigExpr::Call { target, arguments } = graph.expr(constraint.result).unwrap() else {
+    let SigExpr::Call {
+        target,
+        arguments,
+        qualified,
+    } = graph.expr(constraint.result).unwrap()
+    else {
         panic!("inferred signature root must remain a deferred call")
     };
+    assert_eq!(qualified, None);
     let selection = graph.callable_selection(target).unwrap();
     assert!(selection.trailing_lambda);
     assert_eq!(graph.operands(selection.type_arguments).len(), 1);
@@ -109,11 +115,24 @@ fun cmp(d: JDerived) =
     let SigExpr::MemberCall { receiver, .. } = graph.expr(constraint.result).unwrap() else {
         panic!("outer call must remain a member call")
     };
-    let SigExpr::Call { target, .. } = graph.expr(receiver).unwrap() else {
+    let SigExpr::Call {
+        target,
+        qualified: Some(qualified),
+        ..
+    } = graph.expr(receiver).unwrap()
+    else {
         panic!("classifier-qualified base must remain a deferred call")
     };
     let selection = graph.callable_selection(target).unwrap();
     assert_eq!(graph.name(selection.spelling), Some("Comparator.comparing"));
+    assert_eq!(graph.name(qualified.root), Some("Comparator"));
+    assert_eq!(graph.name(qualified.first_selector), Some("comparing"));
+    assert_eq!(
+        graph
+            .member_selection(qualified.member)
+            .and_then(|member| graph.name(member.spelling)),
+        Some("comparing")
+    );
 }
 
 #[test]

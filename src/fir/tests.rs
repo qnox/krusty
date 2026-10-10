@@ -2263,6 +2263,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
+        _qualified: bool,
         _expected: Option<ResolvedTy>,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId> {
@@ -2554,7 +2555,11 @@ fn resolver_selection_demands_the_selected_declaration_through_the_solver() {
         trailing_lambda: false,
     });
     let arguments = graph.add_call_arguments([]);
-    let call = graph.add_expr(SigExpr::Call { target, arguments });
+    let call = graph.add_expr(SigExpr::Call {
+        target,
+        arguments,
+        qualified: None,
+    });
     let selected_result = graph.add_expr(SigExpr::Known(
         ResolvedTy::new(Ty::String).expect("String is publishable"),
     ));
@@ -2619,6 +2624,7 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     let call = graph.add_expr(SigExpr::Call {
         target: call_selection,
         arguments: call_arguments,
+        qualified: None,
     });
     let member_selection = graph.add_member_selection(DeferredMemberSelection {
         scope,

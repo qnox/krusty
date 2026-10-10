@@ -544,6 +544,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             target: DeferredCallableSelectionId,
             arguments: CallArgumentRange,
+            qualified: Option<QualifiedCallCoordinate>,
             forced_expected: Option<ResolvedTy>,
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
@@ -556,6 +557,36 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let scope = graph
                 .scope(selection.scope)
                 .expect("a deferred callable scope must belong to its graph");
+            let expected = match (forced_expected, selection.expected) {
+                (Some(expected), _) => Some(expected),
+                (None, Some(expected)) => Some(evaluate_expression(
+                    semantics, expected, graph, demand, memo, computing,
+                )?),
+                (None, None) => None,
+            };
+            if let Some(qualified) = qualified {
+                let root = graph
+                    .name(qualified.root)
+                    .expect("a qualified call root must belong to its graph");
+                let first_selector = graph
+                    .name(qualified.first_selector)
+                    .expect("a qualified call selector must belong to its graph");
+                if semantics.qualified_call_receiver_is_value(scope, root, first_selector)? {
+                    return evaluate_member_call(
+                        semantics,
+                        qualified.receiver,
+                        qualified.member,
+                        arguments,
+                        qualified.origin,
+                        expected,
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    );
+                }
+            }
+            let qualified = qualified.is_some();
             let spelling = graph
                 .name(selection.spelling)
                 .expect("a deferred callable spelling must belong to its graph");
@@ -565,13 +596,6 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     semantics, argument, graph, demand, memo, computing,
                 )?);
             }
-            let expected = match (forced_expected, selection.expected) {
-                (Some(expected), _) => Some(expected),
-                (None, Some(expected)) => Some(evaluate_expression(
-                    semantics, expected, graph, demand, memo, computing,
-                )?),
-                (None, None) => None,
-            };
             let call_arguments = graph.call_arguments(arguments);
             let mut probes = call_arguments
                 .iter()
@@ -601,6 +625,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     &probes,
                     &resolved_type_arguments,
                     selection.trailing_lambda,
+                    qualified,
                     expected,
                     demand,
                 )?;
@@ -653,6 +678,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 &probes,
                 &resolved_type_arguments,
                 selection.trailing_lambda,
+                qualified,
                 expected,
                 demand,
             )?;
@@ -694,10 +720,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             computing: &mut std::collections::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
             match graph.expr(expression)? {
-                SigExpr::Call { target, arguments } => Some(evaluate_call(
+                SigExpr::Call {
+                    target,
+                    arguments,
+                    qualified,
+                } => Some(evaluate_call(
                     semantics,
                     target,
                     arguments,
+                    qualified,
                     Some(expected),
                     graph,
                     demand,
@@ -995,8 +1026,13 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         };
                         semantics.select_value(scope, spelling, selection.origin, expected, demand)
                     }
-                    SigExpr::Call { target, arguments } => evaluate_call(
-                        semantics, target, arguments, None, graph, demand, memo, computing,
+                    SigExpr::Call {
+                        target,
+                        arguments,
+                        qualified,
+                    } => evaluate_call(
+                        semantics, target, arguments, qualified, None, graph, demand, memo,
+                        computing,
                     ),
                     SigExpr::CallableReference(target) => {
                         let selection = graph.callable_selection(target).expect(
