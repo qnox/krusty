@@ -1583,8 +1583,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unboxed carrier, so an unrejected `a === b` silently compares two scalar carriers or boxes one as an
   unrelated JVM wrapper. No source/classpath branch is part of the identity policy.
   `referential_equality_on_a_value_class_operand` in `tests/resolve_parser_diag_coverage_e2e.rs`.
-- **A `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and rejected
-  otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
+- **Only the JVM requires `@JvmInline` on an inline `value class`.** JS, Wasm (wasm-js and
+  wasm-wasi) and Native read a single-field `value class` as inline from the `value` keyword alone
+  and give it the same unboxed representation an annotated one has. Which rules apply is the
+  compilation target (`CompilationTarget`), a required input of every frontend request
+  (`PlatformProvider::new`) and distinct from the semantic platform that supplies library
+  declarations. The analysis carries it to the backend, and a backend refuses a source set analyzed
+  for another target, so a Native build can never be checked under JVM rules. Every target counts
+  the primary constructor's parameters the same way, measured against kotlinc, kotlinc-js,
+  kotlinc-wasm and kotlinc-native 2.4.20:
+  - No parameter list: `primary constructor is required for value classes.` at `value`; with
+    `FullValueClasses` a final class reports `… for final value classes.`.
+  - `()`: `value class must have exactly one primary constructor parameter.` at the parameter list;
+    with `FullValueClasses` an unannotated final class reports `final value class must have at least
+    one primary constructor parameter.` there, and an annotated one `@JvmInline value class must
+    have exactly one primary constructor parameter.`.
+  - One parameter: inline (on the JVM only with `@JvmInline`, see below); with `FullValueClasses`
+    an unannotated one is a full value class.
+  - Several parameters: with `@JvmInline` the wrong-count message at the parameter list; without it
+    `the feature "full value classes" is experimental and should be enabled explicitly. …` at
+    `value`, and a full value class with the feature. A multi-field class is never inline, so it
+    never takes its first property as a carrier.
+  On a non-JVM target `@JvmInline` is an optional expectation that kotlinc resolves from a KLIB
+  library (and rejects outside common sources); an annotated declaration there arrives with the
+  KLIB library provider. `tests/value_class_declaration_e2e.rs` compares every form on every target
+  with its reference compiler (recorded; kotlinc-native required in the `klib-semantics` lane);
+  `a_value_class_needs_no_jvm_inline_on_native` in `tests/native_value_classes_e2e.rs` checks the
+  runtime answer against kotlinc-native's; `a_backend_refuses_a_source_set_analyzed_for_another_target`
+  in `src/compiler.rs`.
+- **On the JVM a `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and
+  rejected otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
   supported.`, pointed at the `value` keyword. The annotation is the resolved `kotlin.jvm.JvmInline`
   identity, so `import kotlin.jvm.JvmInline as Inline` / `@Inline` stays unboxed. A legacy
   `inline class` is unboxed without the annotation. With the feature, the class is a final JVM
@@ -3293,6 +3321,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member taking a callable reference (`HashMap.merge("a", 2, Int::plus)`) now selects in Pass 1
   instead of declining. Test: `tests/test_set_parser_gaps_e2e.rs`
   (`an_int_literal_selects_a_long_parameter_beside_a_defaulted_one`).
+- **A generic subscript operator publishes its solved type arguments.** `m["k"]` on a `Map<*, *>`
+  selects the stdlib `operator fun <K, V> Map<out K, V>.get(key: K): V?`; the star-projected receiver
+  binds `V` to `Any?`, as it does for the call form `m.get("k")`. Subscript selection solved the
+  extension through its semantic signature (receiver included) but recorded no type arguments, so an
+  expectation-free `val x = m["k"]` could not tell the solved `Any?` from the unsolved fallback and
+  reported "cannot infer type for type parameter 'V'". The selected subscript now commits its
+  bindings with its argument slots, like every other generic call; a `vararg` index parameter
+  publishes the bindings its own call shape solved. Member operators use the same handoff, so an
+  inline `operator fun <reified T> get(value: T)` receives the `T` selected from its index argument.
+  Test:
+  `tests/operator_index_e2e.rs` (`a_star_projected_receiver_binds_an_indexed_extension_result`).
 - **A receiver-less classifier callable reference is the `Classifier.name(...)` family.** A Java
   static method, and any other classifier callable with no value receiver, is named by
   `Classifier::member` the same way `Classifier.member(...)` names it. Pass 1 sees that family only
@@ -11982,6 +12021,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IrFile::checked_type` is that one contract; it never derives a parent's type from its children.
   The Wasm backend declines a value without a checked type by name rather than inferring one.
   Tests: the `wasm-js`/`wasm-wasi` box lanes.
+- **An arithmetic operator's result is the selected operator's declared result, recorded once.**
+  Kotlin's mixed numeric promotion (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
+  `Char.minus(Char): Int`, `Byte`/`Short` operands answering `Int`) is a fact of the operator the
+  checker selected. Common lowering records it on every non-`Boolean` `PrimitiveBinOp` through
+  `IrFile::add_arithmetic`, taking a source operator's type from the checked call and a node it
+  synthesizes (an increment's sum, a loop index step, a data-class hash step, a serializer mask)
+  from the operation it builds. `IrFile::validate_complete_facts` rejects an arithmetic node with no
+  recorded result before any backend runs. Native and Wasm keep no promotion table: they choose the
+  operand widening and narrow the answer to the recorded type (`Char` after an `Int`-width add).
+  Tests: `fir_lower::tests::arithmetic_result_types`, `wasm::codegen::tests::
+  mixed_numeric_operators_lower_at_their_selected_result`, `tests/native_mixed_arithmetic_e2e.rs`.
 - **Native targets: every prebuilt runtime object is its target's, and the runtime is closed.**
   `build.rs` compiles each runtime source once per supported target and, after each compile, reads
   the object's ELF identity: it must be 64-bit (`EI_CLASS` 2), little-endian (`EI_DATA` 1), a

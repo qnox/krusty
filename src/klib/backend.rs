@@ -7,6 +7,7 @@
 //! not a target's realization of them.
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
+use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::ir::{IrClass, IrFile};
 use crate::metadata::class_declarations::{ClassTailOptions, PropertyOrigin};
@@ -51,6 +52,12 @@ pub struct KlibModule {
 
 impl Backend for KlibBackend {
     type State = KlibModule;
+
+    fn compilation_target(&self) -> CompilationTarget {
+        match self.platform {
+            KlibPlatform::Native => CompilationTarget::Native,
+        }
+    }
 
     fn lower_ir_file(
         &self,

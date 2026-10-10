@@ -5371,6 +5371,10 @@ non-inline callers, still reads the field directly. Test:
 - The backend reads each value's checked type (`IrFile::checked_type`) and the frontend-selected
   entry (`IrFile::entry_point`, `IrFile::box_entry`); a missing or duplicate entry is rejected in
   `Backend::check_module` before anything is emitted.
+- ✅ Arithmetic result types are a common-IR fact: every non-`Boolean` `PrimitiveBinOp` carries
+  the selected operator's declared result (`IrFile::add_arithmetic`, proven complete by
+  `IrFile::validate_complete_facts`). Native deleted its promotion table (`arithmetic_result`);
+  Native and Wasm only choose operand widening and narrowing to that result.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
 - Next: classes as struct subtypes with vtables, exceptions on wasm EH, library calls keyed by the
   selected declaration, multi-file and `// MODULE:` programs, then a klib-backed library provider

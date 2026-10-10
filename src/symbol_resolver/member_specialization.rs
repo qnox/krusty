@@ -1,6 +1,10 @@
 //! Receiver-bound specialization of declared member signatures.
 
-use super::{ty_subst, ty_subst_keep_unbound, GSigBinds};
+use super::{
+    infer_generic_call_bindings_from_symbols, merge_call_argument_bindings,
+    merge_specialized_return, seed_undeclared_return_bindings, seeded_gsig_binds, ty_subst,
+    ty_subst_keep_unbound, unify_ty_from_symbols, CallArgKind, GSigBinds,
+};
 use crate::libraries::{
     GenericSig, InlineBodyPlan, InlineCollectionAppend, InlineCollectionCapacity,
     InlineIterationTraversal, LibraryCallable, LibraryMember, PropertyInfo,
@@ -19,6 +23,140 @@ pub(crate) enum TypePosition {
 pub(crate) enum UnboundSpecialization {
     Preserve,
     UseUpperBound,
+}
+
+pub(super) fn bind_member_return(
+    source: &dyn SymbolSource,
+    gsig: &GenericSig,
+    receiver: Ty,
+    args: &[Ty],
+    type_args: &[Ty],
+    provider_ret: Ty,
+) -> Ty {
+    let args = args
+        .iter()
+        .copied()
+        .map(CallArgKind::Typed)
+        .collect::<Vec<_>>();
+    bind_member_return_from_call_args_tracking(
+        source,
+        gsig,
+        receiver,
+        &args,
+        type_args,
+        None,
+        &[],
+        provider_ret,
+    )
+    .0
+}
+
+pub(super) fn bind_member_return_from_call_args_tracking(
+    source: &dyn SymbolSource,
+    gsig: &GenericSig,
+    receiver: Ty,
+    args: &[CallArgKind],
+    type_args: &[Ty],
+    vararg_index: Option<usize>,
+    no_infer_params: &[bool],
+    provider_ret: Ty,
+) -> (Ty, GSigBinds) {
+    let mut binds = seeded_gsig_binds(gsig, type_args);
+    if let Ty::Obj(owner, arguments) = receiver.non_null() {
+        if let Some(classifier) = source.classifier(owner) {
+            for (formal, argument) in classifier.type_params.iter().zip(arguments) {
+                if !gsig.formals.iter().any(|method| method == formal) {
+                    binds.entry(formal.clone()).or_insert(*argument);
+                }
+            }
+        }
+    }
+    if let Some(declared_receiver) = gsig.receiver {
+        unify_ty_from_symbols(source, declared_receiver, receiver, &mut binds);
+        preserve_receiver_identity_bindings(declared_receiver, receiver, &mut binds);
+    } else {
+        seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
+    }
+    let receiver_bindings = binds.clone();
+    let inferred = infer_generic_call_bindings_from_symbols(
+        source,
+        gsig,
+        gsig.params.iter().zip(args).enumerate().filter_map(
+            |(parameter, (&declared, argument))| {
+                (!no_infer_params.get(parameter).copied().unwrap_or(false)
+                    && !argument.is_omitted_default()
+                    && (!argument.is_expected_type_callable()
+                        || argument.result_is_input_constrained()))
+                .then_some((
+                    parameter,
+                    argument.inference_type(source, declared),
+                    argument.is_spread(),
+                ))
+            },
+        ),
+        vararg_index,
+    );
+    merge_call_argument_bindings(
+        source,
+        gsig,
+        type_args,
+        &receiver_bindings,
+        &mut binds,
+        inferred,
+    );
+    crate::trace_compiler!(
+        "expected_call",
+        "bind member return declared={:?} provider={provider_ret:?} bindings={binds:?}",
+        gsig.ret,
+    );
+    let ret = instantiate_slot(
+        source,
+        Some(gsig),
+        gsig.ret,
+        &binds,
+        TypePosition::Out,
+        UnboundSpecialization::UseUpperBound,
+    );
+    // A direct METHOD-owned return variable specializes to the inferred argument even when its
+    // erased provider return is a non-top upper bound (`<A : Annotation> … : A` physically returns
+    // `Annotation`). Owner variables are deliberately excluded: their provider-specialized return
+    // is the receiver binding that `seed_undeclared_return_bindings` recovered above.
+    let direct_method_return = gsig
+        .ret
+        .non_null()
+        .ty_param_name()
+        .is_some_and(|name| gsig.formals.iter().any(|formal| formal == name));
+    let ret = if direct_method_return {
+        ret
+    } else {
+        merge_specialized_return(provider_ret, ret)
+    };
+    (ret, binds)
+}
+
+/// Receiver substitution must preserve a caller's still-symbolic type parameter. General call
+/// inference intentionally ignores `T = T`, but a selected member on `Owner<T>` returning that same
+/// `T` must not erase it to its upper bound while the enclosing generic declaration is being checked.
+pub(super) fn preserve_receiver_identity_bindings(
+    declared: Ty,
+    actual: Ty,
+    bindings: &mut GSigBinds,
+) {
+    match (declared.non_null(), actual.non_null()) {
+        (Ty::TyParam(declared, _), actual @ Ty::TyParam(found, _)) if declared == found => {
+            bindings.entry(declared.to_string()).or_insert(actual);
+        }
+        (Ty::Obj(declared, declared_args), Ty::Obj(found, actual_args)) if declared == found => {
+            for (&declared, &actual) in declared_args.iter().zip(actual_args) {
+                preserve_receiver_identity_bindings(declared, actual, bindings);
+            }
+        }
+        (Ty::InProjection(declared), Ty::InProjection(actual))
+        | (Ty::OutProjection(declared), Ty::OutProjection(actual)) => {
+            preserve_receiver_identity_bindings(*declared, *actual, bindings);
+        }
+        _ => {}
+    }
 }
 
 fn compose_position(position: TypePosition, variance: crate::types::TypeVariance) -> TypePosition {

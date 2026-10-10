@@ -1,7 +1,7 @@
 //! Whole source sets analyzed against the Kotlin/Native stdlib KLIB as their platform.
 
-use crate::diag::DiagSink;
 use super::super::KlibLibraries;
+use crate::diag::DiagSink;
 
 fn native_stdlib() -> Option<KlibLibraries> {
     let Some(stdlib) = crate::toolchain::kotlin_native_stdlib_klib() else {
@@ -16,8 +16,12 @@ fn native_stdlib() -> Option<KlibLibraries> {
 
 fn diagnostics(libraries: &KlibLibraries, source: &str) -> Vec<String> {
     let mut diags = DiagSink::new();
-    let _ =
-        crate::frontend::analyze_source(source, Box::new(libraries.for_compilation()), &mut diags);
+    // The provider names no target; this analysis is Native's because these are its libraries.
+    let platform = crate::frontend::PlatformProvider::new(
+        crate::compilation_target::CompilationTarget::Native,
+        Box::new(libraries.for_compilation()),
+    );
+    let _ = crate::frontend::analyze_source(source, platform, &mut diags);
     diags
         .diags
         .iter()

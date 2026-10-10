@@ -28,7 +28,7 @@ mod enums;
 mod exceptions;
 mod frame_objects;
 mod intrinsic_operations;
-use arithmetic::{arithmetic_result, scalar_bound};
+use arithmetic::scalar_bound;
 use carrier::{box_suffix, machine_carrier, scalar_suffix, Carrier};
 use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
@@ -308,6 +308,7 @@ pub fn lower_file(
     }
     lowering.define_property_entry_points(file_init)?;
     lowering.define_constructor_entry_points(file_init)?;
+    lowering.define_value_box_entry_points()?;
     let defines_entry = selected.is_some();
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
@@ -1546,7 +1547,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => self.call(&callee, dispatch_receiver, &args),
+            } => self.call(id, &callee, dispatch_receiver, &args),
             IrExpr::TypeOp {
                 op,
                 arg,
@@ -1582,7 +1583,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     )
                 }
             }
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs),
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
             IrExpr::StringConcat(parts) => self.concat(&parts),
@@ -1624,7 +1625,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
                 receiver,
                 args,
-            } => self.method_call(class, index, receiver, &args),
+            } => self.method_call(id, class, index, receiver, &args),
             IrExpr::GetField {
                 receiver,
                 class,
@@ -2177,7 +2178,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Try { result, .. } => *result,
             IrExpr::StringConcat(_) => Ty::String,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
-            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => match op {
+            IrExpr::PrimitiveBinOp { op, .. } => match op {
                 IrBinOp::Lt
                 | IrBinOp::Le
                 | IrBinOp::Gt
@@ -2188,15 +2189,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 | IrBinOp::RefNe
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
-                // An operand of a bounded type parameter is read through its bound: the operator
-                // unboxes it, so the RESULT is that primitive and not the reference the
-                // declaration spells — a caller told otherwise would skip the boxing the next
-                // parameter needs, and the mismatch reaches the verifier, or worse.
-                _ => arithmetic_result(
-                    *op,
-                    scalar_bound(self.type_of(*lhs)?)?,
-                    self.type_of(*rhs).and_then(scalar_bound),
-                ),
+                // The selected operator's declared result, which common lowering recorded: the
+                // primitive itself even when an operand is a bounded type parameter's reference.
+                _ => self.file.ir.checked_type(id)?,
             },
             IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::Call { callee, .. } => match callee {
@@ -2267,9 +2262,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     self.file.ir.classes[*class as usize].fields[*index as usize].ty,
                 )
             }
+            IrExpr::EnclosingInstance { inner, .. } => {
+                let (class, field) = self.enclosing_field(*inner).ok()?;
+                self.file.ir.classes[class as usize].fields[field as usize].ty
+            }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
+            // What the checked accessor the access calls answers.
+            IrExpr::LocalDelegateAccess(access) => {
+                let plan = self
+                    .file
+                    .ir
+                    .local_delegate_plans
+                    .get(access.plan as usize)?;
+                match access.value {
+                    Some(_) => plan.setter.as_ref()?.result,
+                    None => plan.getter.result,
+                }
+            }
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),

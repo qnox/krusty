@@ -11,6 +11,7 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod anonymous_functions;
+mod class_recovery;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
@@ -32,6 +33,7 @@ mod properties;
 mod return_labels;
 mod superclass_references;
 mod value_parameters;
+use class_recovery::error_class_decl;
 use declaration_modifiers::{
     function_flags, has_visibility_modifier, modality_from_modifiers, modality_of, visibility_of,
 };
@@ -117,54 +119,6 @@ fn parse_with_features_and_script(
         }
     }
     p.file
-}
-
-/// The degraded result of a tripped declaration-nesting guard: an empty final class named
-/// `<error>`. That source-impossible synthetic name cannot collide with a declared class, and the
-/// empty body gives the later passes nothing to recurse over.
-fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
-    ClassDecl {
-        name_span: span,
-        primary_ctor_visibility: Visibility::Public,
-        name: "<error>".to_string(),
-        visibility: Visibility::Public,
-        annotations: Vec::new(),
-        annotation_args: Vec::new(),
-        type_parameters: crate::ast::ClassTypeParameters::new(Vec::new(), Vec::new(), Vec::new()),
-        context_params: Vec::new(),
-        lexical_type_parameter_captures: Vec::new(),
-        props: Vec::new(),
-        methods: Vec::new(),
-        companion: None,
-        body_props: Vec::new(),
-        init_order: Vec::new(),
-        is_data: false,
-        is_value: false,
-        value_modifier_span: None,
-        kind: ClassKind::Class,
-        singleton: false,
-        enum_entries: Vec::new(),
-        is_fun_interface: false,
-        modality: crate::ast::Modality::Final,
-        final_modifier: false,
-        inner_of: None,
-        supertypes: Vec::new(),
-        interface_delegations: Vec::new(),
-        base_class: None,
-        base_class_span: None,
-        base_type_args: Vec::new(),
-        base_args: Vec::new(),
-        primary_ctor_annotations: Some(Vec::new()),
-        primary_ctor_annotation_args: Vec::new(),
-        secondary_ctors: Vec::new(),
-        type_aliases: Vec::new(),
-        span,
-        ctor_close_line: 0,
-        companion_block_members: Vec::new(),
-        decl_line: 0,
-        decl_start_line: 0,
-        decl_end_line: 0,
-    }
 }
 
 /// A non-nullable, non-generic type reference.
@@ -2132,6 +2086,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
@@ -2521,6 +2476,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
@@ -3095,7 +3051,9 @@ impl<'a> Parser<'a> {
         }
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
+        let primary_ctor_open = self.tok().span.lo;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
+        let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
             self.skip_newlines();
@@ -3169,7 +3127,10 @@ impl<'a> Parser<'a> {
             // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
             // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
             ctor_close_lo = self.tok().span.lo;
-            self.expect(TokenKind::RParen, "')'");
+            let close = self.tok().span;
+            if self.expect(TokenKind::RParen, "')'") {
+                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
+            }
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
@@ -3277,6 +3238,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3643,6 +3605,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3757,6 +3720,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3893,6 +3857,7 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),
