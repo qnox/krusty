@@ -82,6 +82,12 @@ pub(crate) struct ClassDeclarationRecord {
     companion: Option<String>,
     nested: Vec<String>,
     member_order: Vec<ClassMemberOrder>,
+    /// How many entries close `member_order` describing interface-delegation members: the
+    /// functions and properties kotlinc lists after every other member.
+    delegation_members: usize,
+    /// Whether a source file declares the class. A classifier a compiler plugin generates (the
+    /// serializer class, the companion it adds) has none, and neither do its members.
+    has_source_file: bool,
     type_aliases: Vec<TypeAliasMeta>,
     secondary_ctors: Vec<SecondaryConstructorRecord>,
     /// The ordinal in the class's secondary constructors of the declaration each of
@@ -314,6 +320,41 @@ impl ClassDeclarationRecord {
     }
 
     /// The record's declaration, given its tail and its enum entries.
+    /// Add the plugin functions a target generated after the handoff, each with its function.
+    /// They take the place the handoff's own plugin functions take: after every declared and
+    /// synthesized member, ahead of the interface-delegation members.
+    fn add_target_functions(&mut self, functions: Vec<(u32, FnMeta)>) {
+        let at = self
+            .method_origins
+            .iter()
+            .position(|origin| matches!(origin, FunctionOrigin::Delegation(_)))
+            .unwrap_or(self.methods.len());
+        let added = functions.len();
+        for member in &mut self.member_order {
+            if let ClassMemberOrder::Function(index) = member {
+                if *index >= at {
+                    *index += added;
+                }
+            }
+        }
+        let order_at = self.member_order.len() - self.delegation_members;
+        self.member_order.splice(
+            order_at..order_at,
+            (at..at + added).map(ClassMemberOrder::Function),
+        );
+        let (methods, origins): (Vec<_>, Vec<_>) = functions
+            .into_iter()
+            .map(|(function, record)| (record, FunctionOrigin::Generated(function)))
+            .unzip();
+        self.methods.splice(at..at, methods);
+        self.method_origins.splice(at..at, origins);
+    }
+
+    /// Whether a source file declares the class; see the field.
+    pub(crate) fn has_source_file(&self) -> bool {
+        self.has_source_file
+    }
+
     pub(crate) fn declaration<'a>(
         &'a self,
         tail: &'a ClassTail<'a>,
@@ -746,6 +787,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .collect::<Vec<_>>();
     member_order::sort_delegation_functions(&mut delegation);
     let delegation_functions = methods.len()..methods.len() + delegation.len();
+    let delegation_function_count = delegation.len();
     methods.extend(delegation);
     let (methods, method_origins): (Vec<FnMeta>, Vec<FunctionOrigin>) = methods.into_iter().unzip();
     let type_aliases = ir
@@ -767,6 +809,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         &mut prop_origins,
         &mut prop_source_orders,
     );
+    let delegation_members = delegation_function_count + delegation_properties.len();
     let member_order = member_order::member_order(
         ir,
         c,
@@ -835,6 +878,8 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
             .map(|companion| companion.nested_segment_ref().to_string()),
         nested: nested_classifiers(ir, c),
         member_order,
+        delegation_members,
+        has_source_file: c.is_source_declared && !c.is_compiler_generated,
         type_aliases,
         secondary_ctors,
         secondary_ordinals,
@@ -1145,6 +1190,34 @@ fn value_class_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, FunctionOrigi
     .collect()
 }
 
+/// Add to each class's record the functions a target's compiler plugins published after the
+/// handoff recorded it (the JVM's serialization `write$Self`): the record names every one
+/// published before it.
+pub(crate) fn add_target_generated_functions(ir: &mut IrFile) {
+    let added = ir
+        .classes
+        .iter()
+        .filter_map(|c| {
+            let record = ir.class_declarations.get(&c.fq_name_id())?.as_ref()?;
+            let publication = ir.generated_member_publication(c.fq_name_id())?;
+            let functions = generated_functions(ir, publication)
+                .into_iter()
+                .filter(|(function, _)| {
+                    !record
+                        .method_origins
+                        .contains(&FunctionOrigin::Generated(*function))
+                })
+                .collect::<Vec<_>>();
+            (!functions.is_empty()).then(|| (c.fq_name_id(), functions))
+        })
+        .collect::<Vec<_>>();
+    for (class, functions) in added {
+        if let Some(Some(record)) = ir.class_declarations.get_mut(&class) {
+            record.add_target_functions(functions);
+        }
+    }
+}
+
 /// The records of the functions a compiler plugin generated and published, each with its function:
 /// the published name, visibility and parameter names over the function's semantic signature.
 fn generated_functions(
@@ -1187,6 +1260,8 @@ fn generated_functions(
                 ret,
             );
             record.flags = generated_function_flags(ir, member.function, metadata.visibility);
+            // A compiler plugin's function has no source file.
+            record.has_source = false;
             record.annotations =
                 MetadataAnnotations::of_optional(ir.function_annotations.get(&member.function));
             Some((member.function, record))

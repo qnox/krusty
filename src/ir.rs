@@ -1009,6 +1009,9 @@ pub struct IrClass {
     /// classes must not be published as declared nested classifiers in language metadata, even when
     /// their backend name happens to look nested.
     pub is_source_declared: bool,
+    /// A classifier the compiler generated for a source declaration (the companion a compiler
+    /// plugin gives a class). It is declared with no source file.
+    pub is_compiler_generated: bool,
     /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
     /// The executable scope a local, anonymous or generated class is declared in, recorded as an
@@ -1238,6 +1241,7 @@ impl IrClass {
         Self {
             fq_name,
             is_source_declared: false,
+            is_compiler_generated: false,
             is_anonymous_object: false,
             enclosure: None,
             is_inner_class: false,
@@ -1357,6 +1361,7 @@ impl IrClass {
         Self {
             fq_name: header.classifier,
             is_source_declared: true,
+            is_compiler_generated: flags.has(crate::fir::DeclarationFlags::COMPILER_GENERATED),
             is_anonymous_object: flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT),
             enclosure: None,
             is_inner_class: flags.has(crate::fir::DeclarationFlags::INNER),
@@ -1822,6 +1827,10 @@ pub struct IrFile {
     /// without scanning classes or recovering ownership from its generated name.
     pub(crate) class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
     pub classes: Vec<IrClass>,
+    /// Exact generated-class identities keyed by their semantic role within a source owner.
+    generated_classes: std::collections::HashMap<(TypeName, IrGeneratedClassRole), ClassId>,
+    /// Exact generated-function identities keyed by their semantic role within a class.
+    generated_functions: std::collections::HashMap<(TypeName, IrGeneratedFunctionRole), FunId>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:
         std::collections::HashMap<(TypeName, IrSecondaryConstructorRole), u32>,
@@ -2747,7 +2756,11 @@ impl IrFile {
     }
 
     pub fn class_const(&mut self, internal: Option<&str>) -> ExprId {
-        let internal = internal.map(crate::types::type_name);
+        self.class_const_name(internal.map(crate::types::type_name))
+    }
+
+    /// A class literal whose classifier is already resolved.
+    pub fn class_const_name(&mut self, internal: Option<TypeName>) -> ExprId {
         self.add_expr(IrExpr::ClassConst { internal })
     }
 
@@ -2757,7 +2770,16 @@ impl IrFile {
         name: impl Into<String>,
         descriptor: impl Into<String>,
     ) -> ExprId {
-        let owner = crate::types::type_name(owner);
+        self.external_static_field_name(crate::types::type_name(owner), name, descriptor)
+    }
+
+    /// A static field read whose owner is already resolved.
+    pub fn external_static_field_name(
+        &mut self,
+        owner: TypeName,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+    ) -> ExprId {
         self.add_expr(IrExpr::ExternalStaticField {
             owner,
             name: name.into(),
@@ -2786,7 +2808,16 @@ impl IrFile {
         ctor_desc: impl Into<String>,
         args: Vec<ExprId>,
     ) -> ExprId {
-        let internal = crate::types::type_name(internal);
+        self.new_external_name(crate::types::type_name(internal), ctor_desc, args)
+    }
+
+    /// An external construction whose classifier is already resolved.
+    pub fn new_external_name(
+        &mut self,
+        internal: TypeName,
+        ctor_desc: impl Into<String>,
+        args: Vec<ExprId>,
+    ) -> ExprId {
         self.add_expr(IrExpr::New {
             internal,
             args,
@@ -2892,7 +2923,9 @@ pub(crate) use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
-pub(crate) use generated_members::IrValueClassAnyMember;
+pub(crate) use generated_members::{
+    IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember,
+};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,

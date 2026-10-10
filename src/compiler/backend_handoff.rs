@@ -27,6 +27,8 @@ pub(super) fn checked_ir_file<'a>(
     stems: &'a [String],
     diags: &mut DiagSink,
 ) -> Option<CheckedIrFile<'a>> {
+    // Plugin-generated declarations are part of the file every target receives.
+    crate::plugins::declare_enabled(&mut ir, symbols.native_plugins(), module_name);
     let callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
         Ok(callables) => callables,
         Err(error) => {

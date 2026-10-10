@@ -3,7 +3,8 @@
 //! The source is analyzed exactly as every Native test analyzes it ([`common::native_analysis`]),
 //! compiled with `KlibBackend`, written as a library, and opened with `KlibArchive`. Each fragment
 //! is decoded with `parse_package_fragment_checked`, and the test compares the whole decoded class
-//! surface, in fragment order, as text.
+//! surface, in fragment order, as text. A compiler plugin's declarations are compared byte for
+//! byte with the fragment kotlinc-native writes.
 
 use std::fmt::Write as _;
 
@@ -71,6 +72,21 @@ object Registry {
 fn written_packages(sources: &[(&str, &str)]) -> Option<(Vec<String>, Vec<KotlinPackage>)> {
     let mut diags = DiagSink::new();
     let (analysis, stems) = common::native_analysis(sources, &mut diags)?;
+    let (messages, fragments) = written_fragments(analysis, &stems, diags);
+    let packages = fragments
+        .iter()
+        .map(|bytes| parse_package_fragment_checked(bytes).expect("decode a fragment"))
+        .collect();
+    Some((messages, packages))
+}
+
+/// The diagnostics of writing `analysis` as a library and, when there are none, the bytes of each
+/// package fragment the ordinary reader finds in it, in the archive's order.
+fn written_fragments(
+    analysis: krusty::frontend::StreamingSourceSetAnalysis,
+    stems: &[String],
+    mut diags: DiagSink,
+) -> (Vec<String>, Vec<Vec<u8>>) {
     let backend = KlibBackend::new(
         KlibPlatform::Native,
         KlibStamp::new(
@@ -78,14 +94,14 @@ fn written_packages(sources: &[(&str, &str)]) -> Option<(Vec<String>, Vec<Kotlin
             krusty::language_version::LanguageVersion::V2_4,
         ),
     );
-    let entries = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "lib", &mut diags);
+    let entries = krusty::compiler::emit_analyzed(analysis, stems, &backend, "lib", &mut diags);
     let messages = diags
         .diags
         .iter()
         .map(|diagnostic| diagnostic.msg.clone())
         .collect::<Vec<_>>();
     if !messages.is_empty() {
-        return Some((messages, Vec::new()));
+        return (messages, Vec::new());
     }
     let root = std::env::temp_dir().join(format!(
         "krusty-klib-classes-{}-{}",
@@ -100,16 +116,13 @@ fn written_packages(sources: &[(&str, &str)]) -> Option<(Vec<String>, Vec<Kotlin
         std::fs::write(&path, bytes).expect("write the entry");
     }
     let archive = KlibArchive::open(&root).expect("open the written library");
-    let packages = archive
+    let fragments = archive
         .package_fragments()
         .iter()
-        .map(|fragment| {
-            let bytes = archive.read(&fragment.entry).expect("read a fragment");
-            parse_package_fragment_checked(&bytes).expect("decode a fragment")
-        })
+        .map(|fragment| archive.read(&fragment.entry).expect("read a fragment"))
         .collect();
     std::fs::remove_dir_all(&root).expect("remove the library");
-    Some((Vec::new(), packages))
+    (Vec::new(), fragments)
 }
 
 /// A decoded type as Kotlin spells it, with the internal (`/`-separated) class name.
@@ -224,6 +237,162 @@ fn every_supported_class_shape_reads_back_in_declaration_order() {
     assert_eq!(messages, Vec::<String>::new());
     assert_eq!(packages.len(), 1);
     assert_eq!(surface(&packages[0]), EXPECTED_SURFACE);
+}
+
+/// A `@Serializable` class's library declarations are what kotlinx.serialization's frontend
+/// generates, exactly as kotlinc-native writes them: the serializer object and the companion with
+/// their members and no source file, and the class's deserialization constructor. `write$Self`
+/// is generated in IR only, so a library does not declare it.
+///
+/// The binary recording cache holds the `demo` fragment kotlinc-native 2.4.20 writes for `Foo.kt`,
+/// against kotlinx-serialization-core 1.9.0. CI compiles a cache miss live; a local miss reports the
+/// normal recording guidance rather than blessing a checked-in fragment:
+///
+/// ```text
+/// kotlinc-native -p library -nopack -o out -l core.klib \
+///     -Xplugin=kotlinx-serialization-compiler-plugin.jar Foo.kt
+/// ```
+///
+/// The reference is a full library, as `KlibBackend` writes one. A metadata-only KLIB
+/// (`-Xmetadata-klib`) leaves out the internal deserialization constructor.
+#[test]
+fn klib_serialization_plugin_declarations_match_kotlinc_native() {
+    let Some(native_root) = kotlin_native_root() else {
+        return;
+    };
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/klib_serialization");
+    let source = std::fs::read_to_string(fixtures.join("Foo.kt")).expect("read the fixture source");
+    let plugin = common::kotlinc_lib_dir()
+        .expect("the selected reference compiler has a lib directory")
+        .join("kotlinx-serialization-compiler-plugin.jar");
+    assert!(
+        plugin.is_file(),
+        "the selected reference compiler has no serialization plugin at {}",
+        plugin.display()
+    );
+    let Some(target) = native_serialization_target() else {
+        if std::env::var_os("KRUSTY_REQUIRE_KLIB").is_some() {
+            panic!("the required KLIB oracle has no kotlinx.serialization artifact for this host");
+        }
+        eprintln!("skipping KLIB serialization oracle on an unsupported host");
+        return;
+    };
+    let runtime = krusty::toolchain::ensure_maven_artifact(
+        "org.jetbrains.kotlinx",
+        &format!("kotlinx-serialization-core-{target}"),
+        "1.9.0",
+        "klib",
+    )
+    .expect("provision the pinned Native serialization runtime KLIB");
+    let plugin_bytes = std::fs::read(&plugin).expect("read the pinned serialization plugin");
+    let runtime_bytes = std::fs::read(&runtime).expect("read the pinned serialization runtime");
+    let fingerprint = common::byte_dump::fingerprint_parts(&[
+        b"kotlinc-native:2.4.20",
+        b"-p library -nopack -l <runtime> -Xplugin=<plugin> Foo.kt -o <out>",
+        source.as_bytes(),
+        &plugin_bytes,
+        &runtime_bytes,
+    ]);
+    let reference =
+        common::byte_dump::reference_files("klib-serialization-declarations", fingerprint, || {
+            compile_native_fragment(&native_root, &plugin, &runtime, &source)
+        })
+        .expect("the KLIB serialization reference is available");
+    let expected = reference
+        .get("demo.knm")
+        .expect("the native reference contains the demo fragment");
+
+    let mut diags = DiagSink::new();
+    let (analysis, stems) = common::native_analysis_with_plugins(
+        &[("Foo", &source)],
+        &crate::serialization_test_support::runtime_libraries(),
+        &mut diags,
+    )
+    .expect("the directed KLIB regression has its required analysis toolchain");
+    let (messages, fragments) = written_fragments(analysis, &stems, diags);
+    assert_eq!(messages, Vec::<String>::new());
+    assert_eq!(fragments, [expected.clone()]);
+}
+
+fn kotlin_native_root() -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE").map(std::path::PathBuf::from);
+    match root {
+        Some(root) if root.join("bin/kotlinc-native").is_file() => Some(root),
+        Some(root) => panic!(
+            "KRUSTY_KOTLIN_NATIVE={} has no bin/kotlinc-native",
+            root.display()
+        ),
+        None if std::env::var_os("KRUSTY_REQUIRE_KLIB").is_some() => {
+            panic!("KRUSTY_REQUIRE_KLIB needs KRUSTY_KOTLIN_NATIVE")
+        }
+        None => {
+            eprintln!("skipping KLIB serialization oracle: KRUSTY_KOTLIN_NATIVE is not set");
+            None
+        }
+    }
+}
+
+fn native_serialization_target() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("linuxx64"),
+        ("linux", "aarch64") => Some("linuxarm64"),
+        ("macos", "x86_64") => Some("macosx64"),
+        ("macos", "aarch64") => Some("macosarm64"),
+        _ => None,
+    }
+}
+
+fn compile_native_fragment(
+    native_root: &std::path::Path,
+    plugin: &std::path::Path,
+    runtime: &std::path::Path,
+    source: &str,
+) -> Option<std::collections::BTreeMap<String, Vec<u8>>> {
+    let work = common::scratch_dir()
+        .expect("allocate the kotlinc-native oracle directory")
+        .join("klib-serialization-reference");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("create the kotlinc-native oracle directory");
+    let source_path = work.join("Foo.kt");
+    std::fs::write(&source_path, source).expect("write the kotlinc-native fixture");
+    let output = work.join("out");
+    let result = std::process::Command::new(native_root.join("bin/kotlinc-native"))
+        .args(["-p", "library", "-nopack", "-o"])
+        .arg(&output)
+        .arg("-l")
+        .arg(runtime)
+        .arg(format!("-Xplugin={}", plugin.display()))
+        .arg(&source_path)
+        .output()
+        .expect("launch the pinned kotlinc-native oracle");
+    assert!(
+        result.status.success(),
+        "kotlinc-native rejected the serialization fixture (status {}):\nstdout:\n{}\nstderr:\n{}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr),
+    );
+    let archive = KlibArchive::open(&output).expect("open kotlinc-native's unpacked KLIB");
+    let fragments = archive
+        .package_fragments()
+        .into_iter()
+        .filter(|fragment| fragment.package_fqname == "demo")
+        .collect::<Vec<_>>();
+    let [fragment] = fragments.as_slice() else {
+        panic!(
+            "kotlinc-native wrote {} demo fragments instead of one",
+            fragments.len()
+        );
+    };
+    let bytes = archive
+        .read(&fragment.entry)
+        .expect("read kotlinc-native's demo fragment");
+    std::fs::remove_dir_all(work).expect("remove the kotlinc-native oracle directory");
+    Some(std::collections::BTreeMap::from([(
+        "demo.knm".to_string(),
+        bytes,
+    )]))
 }
 
 #[test]

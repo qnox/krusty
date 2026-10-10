@@ -664,28 +664,61 @@ pub trait IrPlugin {
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
-    /// Synthesize new classes or members.
+    /// Declare the Kotlin-visible classes and members the plugin generates. This runs at the
+    /// frontend/backend handoff, before any target sees the file, so every target's declaration
+    /// record includes them. A generated function's body is a placeholder until
+    /// [`Self::complete_declarations`]; nothing here may name a target representation.
     fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
+
+    /// Realize the declared members for the target: their bodies, and the storage and helpers
+    /// that have no Kotlin declaration of their own.
+    fn complete_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
     /// Fill in or rewrite method bodies after IR lowering.
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 }
 
-/// Run this compilation's native backend plugins over frontend-checked common IR. Annotation names
-/// and values have already been resolved and folded, so neither reparsed source nor spelling
-/// participates. `plugins` is the same selection the frontend ran; with none selected this is a no-op.
-/// Returns whether any plugin ran, and so may have generated or completed declarations.
-pub fn run_enabled(
+/// Declare what this compilation's native plugins generate, at the frontend/backend handoff.
+/// Annotation names and values have already been resolved and folded, so neither reparsed source
+/// nor spelling participates. `plugins` is the same selection the frontend ran; with none selected
+/// this is a no-op.
+pub fn declare_enabled(ir: &mut IrFile, plugins: &registry::NativePlugins, module_name: &str) {
+    let ctx = PluginContext::from_ir(ir);
+    if !triggered(ir, plugins, &ctx) {
+        return;
+    }
+    plugins.host(module_name).declare(ir, &ctx);
+}
+
+/// Realize what [`declare_enabled`] declared for a target backend, and rewrite the plugins'
+/// expressions in source bodies.
+pub fn complete_enabled(
     ir: &mut IrFile,
     plugins: &registry::NativePlugins,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
     classifiers: &dyn crate::types::ClassifierFactSource,
-) -> bool {
+) {
+    let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
+    if !triggered(ir, plugins, &ctx) {
+        return;
+    }
+    record_external_value_classes(ir, classifiers);
+    let external = external_serializers(ir, classifiers);
+    let ctx = ctx
+        .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
+        .with_external_serializers(external)
+        .with_runtime_serializers(runtime_serializers(classifiers))
+        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers));
+    plugins.host(module_name).complete(ir, &ctx);
+}
+
+/// Whether a selected plugin has anything to do in `ir`: a planned plugin expression or a class
+/// carrying its trigger annotation.
+fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext) -> bool {
     if plugins.is_empty() {
         return false;
     }
-    let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
     let uses_serialization = ir.exprs.iter().any(|expression| {
         matches!(
             expression,
@@ -695,22 +728,10 @@ pub fn run_enabled(
             }
         )
     });
-    if !uses_serialization
-        && ctx
+    uses_serialization
+        || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
             .is_empty()
-    {
-        return false;
-    }
-    record_external_value_classes(ir, classifiers);
-    let external = external_serializers(ir, classifiers);
-    let ctx = ctx
-        .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
-        .with_external_serializers(external)
-        .with_runtime_serializers(runtime_serializers(classifiers))
-        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers));
-    plugins.host(module_name).run(ir, &ctx);
-    true
 }
 
 /// The provider-confirmed kind of every serializer class a property's `@Serializable(with = …)`
@@ -1017,8 +1038,8 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
     external.into_iter()
 }
 
-/// Runs registered plugins over an `IrFile` phase by phase: all supertypes, then all declarations,
-/// then all body transforms.
+/// Runs registered plugins over an `IrFile` phase by phase: all supertypes and declarations at the
+/// handoff, then every target realization and body transform in the backend.
 #[derive(Default)]
 pub struct PluginHost {
     plugins: Vec<Box<dyn IrPlugin>>,
@@ -1105,12 +1126,20 @@ impl PluginHost {
         plans
     }
 
-    pub fn run(&self, ir: &mut IrFile, ctx: &PluginContext) {
+    /// The handoff phase: all supertypes, then all declarations.
+    pub fn declare(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for p in &self.plugins {
             p.generate_supertypes(ir, ctx);
         }
         for p in &self.plugins {
             p.generate_declarations(ir, ctx);
+        }
+    }
+
+    /// The target phase: every declaration's realization, then all body transforms.
+    pub fn complete(&self, ir: &mut IrFile, ctx: &PluginContext) {
+        for p in &self.plugins {
+            p.complete_declarations(ir, ctx);
         }
         for p in &self.plugins {
             p.transform_bodies(ir, ctx);
@@ -1118,9 +1147,15 @@ impl PluginHost {
     }
 }
 
-/// Fill all `IrClass` fields with empty defaults for a synthesized class.
+/// Fill all `IrClass` fields with empty defaults for a synthesized class named by its spelling.
+#[cfg(test)]
 pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
-    crate::ir::IrClass::synthetic(crate::types::type_name(&fq_name.into()))
+    synthetic_class_name(crate::types::type_name(&fq_name.into()))
+}
+
+/// Fill all [`crate::ir::IrClass`] fields with empty defaults for an already-resolved classifier.
+pub(crate) fn synthetic_class_name(fq_name: crate::types::TypeName) -> crate::ir::IrClass {
+    crate::ir::IrClass::synthetic(fq_name)
 }
 
 #[cfg(test)]
@@ -1259,7 +1294,8 @@ mod tests {
         let mut host = PluginHost::new();
         host.register(Box::new(TouchPlugin));
         let mut ir = IrFile::default();
-        host.run(&mut ir, &PluginContext::default());
+        host.declare(&mut ir, &PluginContext::default());
+        host.complete(&mut ir, &PluginContext::default());
         assert_eq!(ir.classes.len(), 1);
         assert!(ir.classes[0].fq_name_matches("demo/Generated"));
     }

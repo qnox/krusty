@@ -126,6 +126,7 @@ fn annotation_implementation(
     IrClass {
         fq_name,
         is_source_declared: false,
+        is_compiler_generated: false,
         is_anonymous_object: false,
         enclosure: Some(enclosure),
         is_inner_class: false,
