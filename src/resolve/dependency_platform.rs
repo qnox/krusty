@@ -331,6 +331,15 @@ impl SymbolSource for DependencyPlatform {
         self.platform.external_callable(identity)
     }
 
+    /// Dependency properties, like dependency callables, retain identities assigned by the
+    /// compiled platform underneath this source-declaration federation.
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.platform.external_property(identity)
+    }
+
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.source()
             .generated_serializer_singleton(classifier)
@@ -625,6 +634,27 @@ mod tests {
         }
     }
 
+    struct PropertyPlatform;
+
+    impl SymbolSource for PropertyPlatform {
+        fn external_property(
+            &self,
+            identity: crate::fir::ExternalPropertyId,
+        ) -> Option<crate::libraries::ExternalPropertyRealization> {
+            (identity == crate::fir::ExternalPropertyId::from_raw(5)).then(|| {
+                crate::libraries::ExternalPropertyRealization {
+                    name: "dependencyValue".to_owned(),
+                    getter: crate::fir::ExternalCallableId::from_raw(8),
+                    setter: None,
+                    declares_value_class_storage: false,
+                    compile_time_constant: None,
+                }
+            })
+        }
+    }
+
+    impl SemanticPlatform for PropertyPlatform {}
+
     fn type_shape(is_public: bool) -> LibraryType {
         LibraryType {
             is_kotlin: true,
@@ -763,6 +793,19 @@ mod tests {
         );
 
         assert!(platform.inherits_classifier_callables(classifier));
+    }
+
+    #[test]
+    fn dependency_wrapper_preserves_the_platforms_external_property_realization() {
+        let platform = DependencyPlatform::new(
+            Box::new(PropertyPlatform),
+            crate::resolve::SymbolTable::default(),
+        );
+        let realized = platform
+            .external_property(crate::fir::ExternalPropertyId::from_raw(5))
+            .expect("the dependency wrapper forwards the provider-owned identity");
+        assert_eq!(realized.name, "dependencyValue");
+        assert_eq!(realized.getter, crate::fir::ExternalCallableId::from_raw(8));
     }
 
     #[test]

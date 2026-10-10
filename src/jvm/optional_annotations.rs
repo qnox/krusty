@@ -214,58 +214,11 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         enum_entries_accessor: None,
         named_parameter_lists,
         annotations: Vec::new(),
-        retention: Some(declared_retention(declaration).to_string()),
-        annotation_targets: Some(declared_targets(declaration)),
+        retention: Some(crate::libraries::declared_retention(declaration).to_string()),
+        annotation_targets: Some(crate::libraries::declared_targets(declaration)),
         mapped_collection: None,
         annotation_element_defaults: Vec::new(),
     }
-}
-
-/// The class's `@kotlin.annotation.Retention`, as a classpath retention name. Kotlin's default is
-/// `RUNTIME`; `BINARY` is the class-file `CLASS` policy. Only an entry of
-/// `kotlin.annotation.AnnotationRetention` itself is a retention.
-fn declared_retention(declaration: &semantic::KotlinClass) -> &'static str {
-    let retention = type_name("kotlin/annotation/Retention");
-    let entry = declaration
-        .annotations
-        .iter()
-        .find(|annotation| annotation.identity == retention)
-        .and_then(|annotation| annotation.argument("value"));
-    let declared = match entry {
-        Some(semantic::AnnotationArgument::Enum { class, entry }) => {
-            crate::types::AnnotationRetention::of_entry(*class, entry)
-        }
-        _ => None,
-    };
-    match declared {
-        Some(crate::types::AnnotationRetention::Source) => "SOURCE",
-        Some(crate::types::AnnotationRetention::Binary) => "CLASS",
-        _ => "RUNTIME",
-    }
-}
-
-/// Where an unprefixed application may land, from the class's `@kotlin.annotation.Target`; a class
-/// that declares none is applicable everywhere.
-fn declared_targets(declaration: &semantic::KotlinClass) -> crate::types::AnnotationTargets {
-    let target = type_name("kotlin/annotation/Target");
-    let Some(allowed) = declaration
-        .annotations
-        .iter()
-        .find(|annotation| annotation.identity == target)
-        .and_then(|annotation| annotation.argument("allowedTargets"))
-    else {
-        return crate::types::AnnotationTargets::DEFAULT;
-    };
-    let entries = match allowed {
-        semantic::AnnotationArgument::Array(elements) => elements.as_slice(),
-        single => std::slice::from_ref(single),
-    };
-    crate::types::AnnotationTargets::kotlin(entries.iter().filter_map(|element| match element {
-        semantic::AnnotationArgument::Enum { class, entry } => {
-            crate::types::KotlinTarget::of_entry(*class, entry)
-        }
-        _ => None,
-    }))
 }
 
 #[cfg(test)]

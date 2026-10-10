@@ -2211,7 +2211,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 | Callee::ModuleWithDefaults { ret, .. }
                 // Another file's function returns what its declaration fixes; both files carry
                 // that type by the same projection, a value class as its value.
-                | Callee::Module { ret, .. }
                 | Callee::CrossFile { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
                 Callee::Special { source, .. } => {

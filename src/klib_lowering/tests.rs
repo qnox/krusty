@@ -271,6 +271,7 @@ fn coerce_declaration() -> KotlinFunction {
         param_defaults: vec![false],
         vararg: None,
         visibility: Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         is_inline: false,
         has_reified_type_params: false,
         is_suspend: false,
@@ -281,6 +282,8 @@ fn coerce_declaration() -> KotlinFunction {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        return_value_status: Default::default(),
+        contract: None,
     }
 }
 

@@ -189,7 +189,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   on members such as `MutableCollection.add`; a Java declaration records none and is skipped, so an
   override of `java.util.ArrayList.add` records 2. The same status resolution gives an override the
   `operator` (bit 8) and `infix` (bit 9) modifiers when any declaration it overrides has them. Test:
-  `tests/metadata_return_value_status_e2e.rs`.
+  `tests/metadata_return_value_status_e2e.rs`. KLIB package functions and properties carry these
+  same status bits through target-neutral normalization rather than dropping them at the provider
+  boundary.
 - Field order and type-parameter references (kotlinc 2.4.0, 2.4.10, 2.4.20): the protoc-generated
   `writeTo` emits every message's fields in ascending field-number order, repeated fields together
   and extensions last, so `Type.flags` (f1, e.g. `SUSPEND_TYPE`) comes first and a function's

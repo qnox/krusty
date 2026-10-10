@@ -327,7 +327,10 @@ fn condition_expression(
             let id = st.type_id(&it).map_or_else(|| types.id(it), u64::from);
             p.field_varint(5, id); // Expression.is_instance_type_id
         }
-        Condition::BoolParam(param) => {
+        Condition::BoolParam { param, negated } => {
+            if *negated {
+                p.field_varint(1, 1); // flags: negated
+            }
             p.field_varint(2, param.to_wire());
         }
         Condition::Const(b) => {

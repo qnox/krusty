@@ -25,6 +25,7 @@ names! {
     kotlin_ranges_package => "kotlin/ranges",
     kotlin_text_package => "kotlin/text",
     kotlin_internal_package => "kotlin/internal",
+    implicit_integer_coercion => "kotlin/internal/ImplicitIntegerCoercion",
     kotlin_sequences_package => "kotlin/sequences",
     intrinsic_const_evaluation => "kotlin/internal/IntrinsicConstEvaluation",
     platform_dependent => "kotlin/internal/PlatformDependent",

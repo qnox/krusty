@@ -35,6 +35,9 @@ val <T> List<T>.second: T get() = this[1]
 
 var counter: Int = 0
 
+var guarded: Int = 0
+    private set
+
 enum class Color { RED, GREEN }
 
 expect fun platform(): Int
@@ -55,3 +58,42 @@ class Registry {
 companion fun Registry.named(name: String): Registry = Registry()
 
 companion val Registry.capacity: Int get() = 1
+
+/** A classifier hierarchy: every kind, modality, and member shape the provider publishes. */
+interface Shape {
+    val area: Int
+    fun describe(): String = "shape"
+}
+
+fun interface Action {
+    fun run(value: Int): Int
+}
+
+annotation class Marker(val level: Int)
+
+abstract class Base<T : CharSequence>(val label: T) : Shape {
+    protected abstract fun hidden(): Int
+    internal open fun tuned(): Int = 0
+    private fun secret(): Int = 1
+    fun Int.scaled(): Int = this * 2
+}
+
+open class Derived(label: String) : Base<String>(label), Comparable<Derived> {
+    constructor(count: Int) : this(count.toString())
+
+    override val area: Int get() = 1
+    override fun hidden(): Int = 2
+    override fun compareTo(other: Derived): Int = 0
+    suspend fun fetch(): Int = 0
+
+    class Nested(val depth: Int)
+
+    companion object Factory {
+        fun create(): Derived = Derived("x")
+    }
+}
+
+object Singleton {
+    const val LIMIT: Int = 3
+    fun ping(): Int = LIMIT
+}

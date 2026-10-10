@@ -425,7 +425,10 @@ impl<'a> Decoder<'a, '_> {
                 ty: ConditionType::Source(ty.clone()),
                 negated: *negated,
             }),
-            TermKind::Name(_) => Ok(Condition::BoolParam(self.reference(id)?)),
+            TermKind::Name(_) => Ok(Condition::BoolParam {
+                param: self.reference(id)?,
+                negated: false,
+            }),
             TermKind::Bool(value) => Ok(Condition::Const(*value)),
             _ => Err(None),
         }

@@ -47,7 +47,9 @@ impl ResolvedContract {
                     validate(left)?;
                     validate(right)
                 }
-                Condition::IsNull { .. } | Condition::BoolParam(_) | Condition::Const(_) => Ok(()),
+                Condition::IsNull { .. } | Condition::BoolParam { .. } | Condition::Const(_) => {
+                    Ok(())
+                }
             }
         }
 
@@ -273,8 +275,12 @@ pub enum Condition {
         ty: ConditionType,
         negated: bool,
     },
-    /// The boolean argument itself — `returns() implies actual` in `require(actual)`.
-    BoolParam(ParamRef),
+    /// The boolean argument itself — `returns() implies actual` in `require(actual)` — or its
+    /// negation (`negated = true`), `returns() implies !actual` in `assertFalse(actual)`.
+    BoolParam {
+        param: ParamRef,
+        negated: bool,
+    },
     Const(bool),
     And(Box<Condition>, Box<Condition>),
     Or(Box<Condition>, Box<Condition>),
@@ -395,7 +401,10 @@ mod tests {
             c.effects,
             vec![Effect::ConditionalReturns {
                 returns: ReturnsValue::Any,
-                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: false,
+                },
             }]
         );
     }

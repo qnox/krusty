@@ -199,9 +199,9 @@ impl Checker<'_> {
                 }
                 out.push((path, target));
             }
-            Condition::BoolParam(param) => {
+            Condition::BoolParam { param, negated } => {
                 if let Some(arg) = self.contract_arg_expr(call, *param) {
-                    self.collect_condition_narrowings(scope, arg, true, out, declined);
+                    self.collect_condition_narrowings(scope, arg, !negated, out, declined);
                 }
             }
             Condition::And(l, r) => {

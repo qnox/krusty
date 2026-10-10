@@ -629,8 +629,15 @@ fn warning_policy_precedence_matches_kotlinc() {
     let dir = std::env::temp_dir().join(format!("krusty_warning_policy_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let source = dir.join("F.kt");
-    let location = source.display();
+    // Recorded kotlinc diagnostics retain their source spelling. Keep it stable across test
+    // processes while separating the two source bodies so concurrent runs only write identical
+    // bytes to either path.
+    let source_root = std::path::Path::new("target/test-sources/cli-warning-policy");
+    let explicit_source = source_root.join("explicit-return/F.kt");
+    let inferred_source = source_root.join("inferred-return/F.kt");
+    fs::create_dir_all(explicit_source.parent().unwrap()).unwrap();
+    fs::create_dir_all(inferred_source.parent().unwrap()).unwrap();
+    let location = inferred_source.display();
     let cli_warning = "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string();
     let visibility_warning =
         format!("{location}:1:1: warning: visibility must be specified in explicit API mode.");
@@ -748,7 +755,12 @@ fn warning_policy_precedence_matches_kotlinc() {
     ]);
 
     for case in cases {
-        fs::write(&source, case.source).expect("write warning-policy source");
+        let source = if case.source == "fun f() = 1\n" {
+            &inferred_source
+        } else {
+            &explicit_source
+        };
+        fs::write(source, case.source).expect("write warning-policy source");
         let reference_out = dir.join(format!("{}-reference", case.tag));
         let mut reference_args = case
             .arguments
@@ -778,7 +790,7 @@ fn warning_policy_precedence_matches_kotlinc() {
             .args(case.arguments)
             .args(["-no-reflect", "-d"])
             .arg(&krusty_out)
-            .arg(&source)
+            .arg(source)
             .output()
             .expect("run krusty");
         assert_eq!(result.status.code(), Some(case.code), "{}", case.tag);

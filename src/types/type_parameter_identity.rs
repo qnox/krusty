@@ -1,12 +1,29 @@
 //! Stable type-parameter identities and their source spellings.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::intern;
 
 static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
     OnceLock::new();
+static NEXT_METADATA_TYPE_PARAMETER: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate an opaque identity for a type parameter owned by a dependency declaration. The
+/// provider retains the identity beside the exact declaration key it decoded; only the source
+/// spelling is registered here for diagnostics.
+pub(crate) fn metadata_type_parameter(source: &str) -> &'static str {
+    let ordinal = NEXT_METADATA_TYPE_PARAMETER.fetch_add(1, Ordering::Relaxed);
+    let semantic = intern(&format!("\0metadata-tp:{ordinal}"));
+    let source = intern(source);
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(semantic, source);
+    semantic
+}
 
 /// Intern one declaration-owned type-parameter identity and retain its source spelling separately.
 /// The semantic key is opaque: callers compare it only by identity and never parse declaration

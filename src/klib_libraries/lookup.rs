@@ -4,9 +4,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use super::classifier_records::{associated_callables, classifier_record};
+use super::declaration_signatures::{SignedFunction, SignedProperty};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
-use crate::libraries::{package_function, Callables, FunctionSet, PropertySet, ResolvedSymbols};
+use crate::libraries::{
+    declared_function, declared_property, CallablePlacement, Callables, ClassifierDeclaration,
+    ExternalCallableKind, FnKind, FunctionInfo, FunctionSet, PropertyAccessorNames, PropertyInfo,
+    PropertySet, ResolvedSymbols,
+};
 use crate::symbol_source::SymbolNamespace;
 
 /// The records of one namespace, by declaration name.
@@ -44,32 +50,126 @@ impl SymbolLookups {
     }
 }
 
-/// The declarations at one key, normalized into selection candidates.
-///
-/// Only top-level functions are published so far; a classifier namespace declares nothing yet.
+/// The declarations at one key, normalized into selection candidates: the classifier the
+/// namespace declares under `name`, and the callables it declares under `name`. A package
+/// declares its top-level functions and properties; a classifier declares the callables named
+/// through it with no value operand.
 pub(super) fn declared_symbols(
     inventory: &PackageInventory,
     identities: &ExternalIdentities,
     namespace: SymbolNamespace,
     name: &str,
 ) -> ResolvedSymbols {
-    let SymbolNamespace::Package(package) = namespace else {
-        return ResolvedSymbols::default();
+    // A probe never interns its leaf: only an already-interned identity can name a published
+    // classifier.
+    let classifier_name = namespace
+        .existing_classifier(name)
+        .filter(|identity| inventory.classifier(*identity).is_some());
+    let classifier = classifier_name
+        .and_then(|identity| classifier_record(inventory, identities, identity))
+        .map(std::sync::Arc::new);
+    let (overloads, properties) = match namespace {
+        SymbolNamespace::Package(package) => (
+            inventory
+                .functions(package, name)
+                .map(|signed| {
+                    published_function(
+                        identities,
+                        signed,
+                        CallablePlacement::Package(package),
+                        &Default::default(),
+                    )
+                })
+                .collect(),
+            inventory
+                .properties(package, name)
+                .map(|signed| {
+                    published_property(
+                        identities,
+                        signed,
+                        CallablePlacement::Package(package),
+                        &Default::default(),
+                    )
+                })
+                .collect(),
+        ),
+        SymbolNamespace::Classifier(owner) => {
+            associated_callables(inventory, identities, owner, name)
+        }
     };
-    let overloads = inventory
-        .functions(package, name)
-        .map(|signed| {
-            let mut function = package_function(package, &signed.declaration, &signed.parameters);
-            // A KLIB declaration's implementation is its serialized IR body. Do not replace it
-            // with either a compiler intrinsic or an implementation role inferred from a stdlib
-            // signature. A genuinely bodyless ABI declaration needs an explicit availability
-            // contract from the body provider instead.
-            identities.assign_function(&signed.signature, &signed.parameters, &mut function);
-            function
-        })
-        .collect();
     ResolvedSymbols {
-        callables: Callables::from_parts(FunctionSet { overloads }, PropertySet::default()),
-        ..ResolvedSymbols::default()
+        classifier_name,
+        classifier_declaration: classifier_name.map(ClassifierDeclaration::Ordinary),
+        classifier,
+        builtin_classifier: false,
+        callables: Callables::from_parts(
+            FunctionSet { overloads },
+            PropertySet {
+                overloads: properties,
+            },
+        ),
+        importable_declaration: false,
     }
+}
+
+/// The shape a selected function or accessor at `placement` is realized as.
+fn realization_kind(placement: CallablePlacement, extension: bool) -> ExternalCallableKind {
+    match placement {
+        CallablePlacement::Package(_) if extension => ExternalCallableKind::Extension,
+        CallablePlacement::Package(_) | CallablePlacement::Associated { .. } => {
+            ExternalCallableKind::TopLevel
+        }
+        // A member extension is still dispatched on an instance of its class.
+        CallablePlacement::Member { .. } => ExternalCallableKind::Member,
+    }
+}
+
+/// Normalize one signed function at `placement` and give it its declaration's identity.
+pub(super) fn published_function(
+    identities: &ExternalIdentities,
+    signed: &SignedFunction,
+    placement: CallablePlacement,
+    enclosing: &crate::libraries::EnclosingBounds,
+) -> FunctionInfo {
+    let mut function = declared_function(
+        placement,
+        &signed.declaration,
+        &signed.parameters,
+        &signed.type_parameters,
+        enclosing,
+    );
+    // A KLIB declaration's implementation is its serialized IR body. Do not replace it with
+    // either a compiler intrinsic or an implementation role inferred from a stdlib signature. A
+    // genuinely bodyless ABI declaration needs an explicit availability contract from the body
+    // provider instead.
+    let kind = realization_kind(placement, function.kind == FnKind::Extension);
+    identities.assign_function(signed, kind, &mut function);
+    function
+}
+
+/// Normalize one signed property at `placement` and give it and its accessors their
+/// declarations' identities.
+pub(super) fn published_property(
+    identities: &ExternalIdentities,
+    signed: &SignedProperty,
+    placement: CallablePlacement,
+    enclosing: &crate::libraries::EnclosingBounds,
+) -> PropertyInfo {
+    // Each accessor keeps the name its library declares it under.
+    let accessors = PropertyAccessorNames {
+        getter: signed.getter.name(),
+        setter: signed.setter.as_ref().map(|setter| setter.name()),
+    };
+    let mut property = declared_property(
+        placement,
+        &signed.declaration,
+        &signed.parameters,
+        &signed.type_parameters,
+        accessors,
+        enclosing,
+    );
+    // As for functions, the implementation is the serialized IR body of each accessor.
+    let kind = realization_kind(placement, property.receiver.is_some());
+    identities.assign_property(signed, kind, &mut property);
+    property
 }
