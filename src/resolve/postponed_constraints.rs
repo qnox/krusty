@@ -54,6 +54,10 @@ impl PostponedCallConstraints {
         self.variables.instantiate_type(ty)
     }
 
+    fn declared_type(&self, ty: Ty) -> Ty {
+        self.variables.declared_type(ty)
+    }
+
     pub(super) fn enter_for_type(
         frames: &mut Vec<Self>,
         compilation: u64,
@@ -248,6 +252,22 @@ impl PostponedCallConstraints {
 }
 
 impl Checker<'_> {
+    /// Close one lambda's call-owned inference namespace. Its collected constraints and its checked
+    /// function type cross the call boundary together; allowing only the constraints through would
+    /// leave the argument carrying temporary identities into final overload selection.
+    pub(super) fn merge_postponed_lambda(
+        &mut self,
+        expression: ExprId,
+        checked: Ty,
+        aggregate: &mut PostponedCallConstraints,
+        frame: PostponedCallConstraints,
+    ) -> Ty {
+        let checked = frame.declared_type(checked);
+        aggregate.merge(&self.fed_source(), frame);
+        self.set(expression, checked);
+        checked
+    }
+
     pub(super) fn postponed_call_mentions(&self, ty: Ty) -> bool {
         self.postponed_call_constraints
             .iter()

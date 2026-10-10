@@ -19876,7 +19876,7 @@ impl<'a> Checker<'a> {
                                         .map(str::to_string)
                                         .as_deref(),
                                 );
-                                if collect_postponed {
+                                let checked = if collect_postponed {
                                     let inferred = self
                                         .postponed_call_constraints
                                         .pop()
@@ -19887,8 +19887,15 @@ impl<'a> Checker<'a> {
                                         inferred.lower,
                                         inferred.upper,
                                     );
-                                    postponed_constraints.merge(&self.fed_source(), inferred);
-                                }
+                                    self.merge_postponed_lambda(
+                                        a,
+                                        checked,
+                                        &mut postponed_constraints,
+                                        inferred,
+                                    )
+                                } else {
+                                    checked
+                                };
                                 return checked;
                             }
                         }
@@ -20281,7 +20288,7 @@ impl<'a> Checker<'a> {
                                 checked,
                                 &mut known_generic_bindings,
                             );
-                            if collect_postponed {
+                            let checked = if collect_postponed {
                                 let inferred = self
                                     .postponed_call_constraints
                                     .pop()
@@ -20292,8 +20299,15 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(&self.fed_source(), inferred);
-                            }
+                                self.merge_postponed_lambda(
+                                    a,
+                                    checked,
+                                    &mut postponed_constraints,
+                                    inferred,
+                                )
+                            } else {
+                                checked
+                            };
                             return checked;
                         }
                     }
@@ -20567,7 +20581,7 @@ impl<'a> Checker<'a> {
                                         call_fn_name.as_deref(),
                                     )
                                 });
-                            if collect_postponed {
+                            let checked = if collect_postponed {
                                 let inferred = self
                                     .postponed_call_constraints
                                     .pop()
@@ -20578,8 +20592,15 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(&self.fed_source(), inferred);
-                            }
+                                self.merge_postponed_lambda(
+                                    a,
+                                    checked,
+                                    &mut postponed_constraints,
+                                    inferred,
+                                )
+                            } else {
+                                checked
+                            };
                             // `expected_function` was specialized with these bindings before the
                             // lambda was checked. The checked lambda therefore already carries the
                             // selected parameter shape; substituting it again confuses an outer

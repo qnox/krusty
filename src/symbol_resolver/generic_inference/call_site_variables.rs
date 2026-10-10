@@ -31,7 +31,7 @@ pub(crate) struct CallSiteVariableMap {
 impl CallSiteVariableMap {
     fn from_call_owned(
         formals: &[String],
-        mut call_owned_identity: impl FnMut(&str) -> Option<&'static str>,
+        mut call_owned_identity: impl FnMut(&'static str) -> Option<&'static str>,
     ) -> Self {
         let call_owned = formals
             .iter()
