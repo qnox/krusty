@@ -270,6 +270,9 @@ pub fn emit_analyzed<B: Backend>(
         "Pass 2 must consume every checked signature default"
     );
     if !diags.has_errors() {
+        backend.check_module(&state, diags);
+    }
+    if !diags.has_errors() {
         outputs.extend(backend.finalize(state, module_name));
     }
     outputs
