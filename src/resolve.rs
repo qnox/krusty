@@ -58016,7 +58016,9 @@ impl<'a> Checker<'a> {
                                 receiver_depth: label_depth,
                             },
                         };
-                        self.mark_implicit_receiver_selection(e, receiver);
+                        let ty = self
+                            .select_labeled_receiver(scope, e, receiver, idx == top)
+                            .unwrap_or(ty);
                         if idx == top {
                             self.expr_lowers.insert(e, ExprLowering::LabeledThisInner);
                         } else {
@@ -58041,7 +58043,9 @@ impl<'a> Checker<'a> {
                                     )
                             });
                         if let Some(receiver) = receiver {
-                            self.mark_implicit_receiver_selection(e, receiver);
+                            let ty = self
+                                .select_labeled_receiver(scope, e, receiver, receiver.current)
+                                .unwrap_or(receiver.ty);
                             self.expr_lowers.insert(
                                 e,
                                 if receiver.current {
@@ -58050,7 +58054,7 @@ impl<'a> Checker<'a> {
                                     ExprLowering::LabeledThisDispatch
                                 },
                             );
-                            receiver.ty
+                            ty
                         } else {
                             self.diags
                                 .error(self.span(e), format!("unresolved reference '{n}'."));
