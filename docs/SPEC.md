@@ -3321,6 +3321,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member taking a callable reference (`HashMap.merge("a", 2, Int::plus)`) now selects in Pass 1
   instead of declining. Test: `tests/test_set_parser_gaps_e2e.rs`
   (`an_int_literal_selects_a_long_parameter_beside_a_defaulted_one`).
+- **A generic subscript operator publishes its solved type arguments.** `m["k"]` on a `Map<*, *>`
+  selects the stdlib `operator fun <K, V> Map<out K, V>.get(key: K): V?`; the star-projected receiver
+  binds `V` to `Any?`, as it does for the call form `m.get("k")`. Subscript selection solved the
+  extension through its semantic signature (receiver included) but recorded no type arguments, so an
+  expectation-free `val x = m["k"]` could not tell the solved `Any?` from the unsolved fallback and
+  reported "cannot infer type for type parameter 'V'". The selected subscript now commits its
+  bindings with its argument slots, like every other generic call; a `vararg` index parameter
+  publishes the bindings its own call shape solved. Member operators use the same handoff, so an
+  inline `operator fun <reified T> get(value: T)` receives the `T` selected from its index argument.
+  Test:
+  `tests/operator_index_e2e.rs` (`a_star_projected_receiver_binds_an_indexed_extension_result`).
 - **A receiver-less classifier callable reference is the `Classifier.name(...)` family.** A Java
   static method, and any other classifier callable with no value receiver, is named by
   `Classifier::member` the same way `Classifier.member(...)` names it. Pass 1 sees that family only
