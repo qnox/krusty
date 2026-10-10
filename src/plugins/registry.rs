@@ -23,9 +23,10 @@
 
 use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, KSP_PLUGIN_ID, SCRIPTING_PLUGIN_ID,
-    SERIALIZATION_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID,
+    SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
+use crate::plugins::noarg::NoArgPlugin;
 use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost};
 
@@ -67,6 +68,9 @@ pub struct RegisteredExtension {
     /// The `-P plugin:<id>:<key>=…` keys the plugin's command-line processor accepts, where krusty
     /// checks them as kotlinc does; `None` where it leaves them to the extension.
     pub option_keys: Option<&'static [&'static str]>,
+    /// `(key, value)` settings of a declared option whose behaviour krusty does not implement. Each
+    /// one fails the compile instead of silently producing other code than kotlinc.
+    pub unimplemented_options: &'static [(&'static str, &'static str)],
 }
 
 /// The service files through which a jar declares a compiler plugin to kotlinc's `ServiceLoader`:
@@ -152,6 +156,8 @@ pub enum PluginDiagnostic {
     Unsupported { plugin: String },
     /// A `-P` key the plugin's command-line processor does not declare — kotlinc's own error.
     UnsupportedOption { option: PluginOption },
+    /// A declared option setting krusty's native implementation does not honour yet — hard error.
+    UnimplementedOption { option: PluginOption },
 }
 
 impl PluginDiagnostic {
@@ -161,6 +167,7 @@ impl PluginDiagnostic {
             PluginDiagnostic::Unsupported { .. }
                 | PluginDiagnostic::HostUnavailable { .. }
                 | PluginDiagnostic::UnsupportedOption { .. }
+                | PluginDiagnostic::UnimplementedOption { .. }
         )
     }
 
@@ -189,6 +196,11 @@ impl PluginDiagnostic {
             ),
             PluginDiagnostic::UnsupportedOption { option } => format!(
                 "unsupported plugin option: {}:{}={}",
+                option.id, option.key, option.value
+            ),
+            PluginDiagnostic::UnimplementedOption { option } => format!(
+                "krusty: plugin option {}:{}={} is not implemented by krusty's built-in \
+                 implementation; remove it or compile this module with kotlinc.",
                 option.id, option.key, option.value
             ),
         }
@@ -280,6 +292,11 @@ fn build_allopen(act: &Activation, _release: Option<&str>) -> Box<dyn IrPlugin> 
     Box::new(AllOpenPlugin::from_options(&act.config.options))
 }
 
+/// Build the native no-arg plugin from the compilation's `-P` options for it.
+fn build_noarg(act: &Activation, _release: Option<&str>) -> Box<dyn IrPlugin> {
+    Box::new(NoArgPlugin::from_options(&act.config.options))
+}
+
 /// The set of extensions krusty knows about — independent of any compilation.
 #[derive(Default)]
 pub struct PluginRegistry {
@@ -291,8 +308,8 @@ impl PluginRegistry {
         Self::default()
     }
 
-    /// The extensions krusty ships with: serialization and all-open (native reimplementations) and
-    /// KSP (codegen host).
+    /// The extensions krusty ships with: serialization, all-open and no-arg (native
+    /// reimplementations) and KSP (codegen host).
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         r.register(RegisteredExtension {
@@ -300,18 +317,28 @@ impl PluginRegistry {
             registrar: "org.jetbrains.kotlinx.serialization.compiler.extensions.SerializationComponentRegistrar",
             kind: ExtensionKind::Native(build_serialization),
             option_keys: None,
+            unimplemented_options: &[],
         });
         r.register(RegisteredExtension {
             plugin_id: ALLOPEN_PLUGIN_ID,
             registrar: "org.jetbrains.kotlin.allopen.AllOpenComponentRegistrar",
             kind: ExtensionKind::Native(build_allopen),
             option_keys: Some(&["annotation", "preset"]),
+            unimplemented_options: &[],
+        });
+        r.register(RegisteredExtension {
+            plugin_id: NOARG_PLUGIN_ID,
+            registrar: "org.jetbrains.kotlin.noarg.NoArgComponentRegistrar",
+            kind: ExtensionKind::Native(build_noarg),
+            option_keys: Some(&["annotation", "preset", "invokeInitializers"]),
+            unimplemented_options: &[("invokeInitializers", "true")],
         });
         r.register(RegisteredExtension {
             plugin_id: KSP_PLUGIN_ID,
             registrar: "com.google.devtools.ksp.KotlinSymbolProcessingComponentRegistrar",
             kind: ExtensionKind::CodegenHost,
             option_keys: None,
+            unimplemented_options: &[],
         });
         // kotlinc's scripting plugin jar declares a K2 and a legacy registrar.
         for registrar in [
@@ -323,6 +350,7 @@ impl PluginRegistry {
                 registrar,
                 kind: ExtensionKind::ScriptsOnly,
                 option_keys: None,
+                unimplemented_options: &[],
             });
         }
         r
@@ -407,6 +435,20 @@ impl PluginRegistry {
                         }),
                 );
             }
+            diagnostics.extend(
+                act.config
+                    .options
+                    .iter()
+                    .filter(|option| option.id == ext.plugin_id)
+                    .filter(|option| {
+                        ext.unimplemented_options
+                            .iter()
+                            .any(|(key, value)| option.key == *key && option.value == *value)
+                    })
+                    .map(|option| PluginDiagnostic::UnimplementedOption {
+                        option: option.clone(),
+                    }),
+            );
             match ext.kind {
                 ExtensionKind::Native(build) => {
                     native.enabled.push(EnabledNative {
@@ -551,10 +593,11 @@ mod tests {
     }
 
     #[test]
-    fn builtins_register_serialization_allopen_and_ksp() {
+    fn builtins_register_serialization_allopen_noarg_and_ksp() {
         let r = PluginRegistry::with_builtins();
         assert!(r.is_registered(SERIALIZATION_PLUGIN_ID));
         assert!(r.is_registered(ALLOPEN_PLUGIN_ID));
+        assert!(r.is_registered(NOARG_PLUGIN_ID));
         assert!(r.is_registered(KSP_PLUGIN_ID));
         assert!(!r.is_registered("androidx.compose.compiler.plugins.kotlin"));
     }
@@ -609,6 +652,65 @@ mod tests {
         assert_eq!(
             errors,
             vec!["unsupported plugin option: org.jetbrains.kotlin.allopen:annotations=AllOpen"]
+        );
+    }
+
+    #[test]
+    fn noarg_resolves_to_native_and_reads_its_options() {
+        let jar = plugin_jar(
+            "noarg-compiler-plugin.jar",
+            &[registrar_of(NOARG_PLUGIN_ID)],
+        );
+        let c = cfg(&[
+            &format!("-Xplugin={jar}"),
+            "-P",
+            "plugin:org.jetbrains.kotlin.noarg:annotation=test.NoArg",
+            "-P",
+            "plugin:org.jetbrains.kotlin.noarg:invokeInitializers=false",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(resolved.native.plugin_ids(), vec![NOARG_PLUGIN_ID]);
+        assert_eq!(
+            resolved.diagnostics,
+            vec![PluginDiagnostic::NativeSubstitution {
+                plugin_id: NOARG_PLUGIN_ID.to_string(),
+                jar: Some(jar),
+            }]
+        );
+        assert!(resolved
+            .native
+            .host("app")
+            .no_arg_constructor_annotations()
+            .contains(&crate::types::type_name("test/NoArg")));
+    }
+
+    /// `invokeInitializers=true` is a declared no-arg option whose behaviour krusty does not
+    /// implement, so the compile fails rather than emitting a constructor that skips initializers.
+    #[test]
+    fn an_unimplemented_option_setting_fails_the_compile() {
+        let jar = plugin_jar(
+            "noarg-compiler-plugin.jar",
+            &[registrar_of(NOARG_PLUGIN_ID)],
+        );
+        let c = cfg(&[
+            &format!("-Xplugin={jar}"),
+            "-P",
+            "plugin:org.jetbrains.kotlin.noarg:invokeInitializers=true",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        let errors = resolved
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .map(PluginDiagnostic::message)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            errors,
+            vec![
+                "krusty: plugin option org.jetbrains.kotlin.noarg:invokeInitializers=true is not \
+                 implemented by krusty's built-in implementation; remove it or compile this module \
+                 with kotlinc."
+            ]
         );
     }
 
@@ -885,6 +987,7 @@ mod tests {
             registrar: "com.vendor.noop.NoOpRegistrar",
             kind: ExtensionKind::Native(build_noop),
             option_keys: None,
+            unimplemented_options: &[],
         });
         let jar = plugin_jar("vendor-plugin.jar", &["com.vendor.noop.NoOpRegistrar"]);
         let c = cfg(&[&format!("-Xplugin={jar}")]);
@@ -955,11 +1058,11 @@ mod tests {
         let every = PluginRegistry::with_builtins().every_native_extension();
         assert_eq!(
             every.plugin_ids(),
-            vec![SERIALIZATION_PLUGIN_ID, ALLOPEN_PLUGIN_ID]
+            vec![SERIALIZATION_PLUGIN_ID, ALLOPEN_PLUGIN_ID, NOARG_PLUGIN_ID]
         );
         assert_eq!(
             every.host("app").plugin_names(),
-            vec!["kotlinx.serialization", "allopen"]
+            vec!["kotlinx.serialization", "allopen", "noarg"]
         );
     }
 
@@ -1022,6 +1125,7 @@ mod tests {
             registrar: "vendor.x.Registrar",
             kind: ExtensionKind::CodegenHost,
             option_keys: None,
+            unimplemented_options: &[],
         });
         assert!(r.is_registered("vendor.x"));
         assert!(!r.is_registered("vendor.y"));

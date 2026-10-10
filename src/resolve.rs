@@ -148,8 +148,10 @@ mod override_plans;
 mod platform_value_narrowing;
 pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
+mod plugin_class_predicate;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
+mod plugin_noarg;
 mod plugin_status;
 mod postponed_applicability;
 mod postponed_constraints;
@@ -1532,6 +1534,9 @@ pub struct ClassSig {
     /// Arena declaration that owns this source classifier. Synthetic companion classifiers have no
     /// independent class declaration and therefore leave this unset.
     pub source_decl: Option<DeclId>,
+    /// The classifier's NAME in [`Self::source_file`], where a plugin's class rule reports. A
+    /// synthetic companion has no name of its own and leaves this empty.
+    pub name_span: crate::diag::Span,
     pub visibility: Visibility,
     /// Resolved classifier declaration annotations, projected to the stable module index before
     /// Pass 2 so plugins and semantic checks never revisit source occurrences.
@@ -1735,6 +1740,7 @@ impl ClassSig {
             stable_declaration,
             source_file,
             source_decl: Some(source_decl),
+            name_span: crate::diag::Span::new(0, 0),
             visibility,
             annotations: Vec::new(),
             applied_annotations: Vec::new(),

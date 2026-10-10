@@ -109,6 +109,9 @@ impl DeclarationFlags {
     /// default when a compiler plugin changes the default modality (all-open) and must keep an
     /// explicit one. A function's written `final` is its `FINAL`.
     pub const FINAL_MODIFIER: u64 = 1 << 43;
+    /// A compiler plugin (no-arg) gives this class a generated zero-argument constructor. The
+    /// frontend decides it where it publishes the header; lowering builds the constructor.
+    pub const NO_ARG_CONSTRUCTOR: u64 = 1 << 44;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

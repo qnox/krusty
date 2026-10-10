@@ -105,8 +105,9 @@ impl IrPlugin for AllOpenPlugin {
 /// The classifier identities a qualified name written as `a.b.C.D` can denote. The written form
 /// does not say where the package ends, and kotlinc compares it with each annotation's qualified
 /// name, so every package/classifier split is a candidate (`a/b/C/D`, `a/b/C$D`, …). A candidate
-/// no declaration has matches nothing.
-fn classifier_identities(qualified: &str) -> Vec<TypeName> {
+/// no declaration has matches nothing. kotlinc's annotation-driven plugins (no-arg too) share this
+/// reading of their `annotation` option.
+pub(crate) fn classifier_identities(qualified: &str) -> Vec<TypeName> {
     let segments = qualified.split('.').collect::<Vec<_>>();
     (1..=segments.len())
         .map(|package_len| {

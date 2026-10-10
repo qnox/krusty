@@ -685,7 +685,137 @@ pub(super) fn finalize_constructors(
             value: None,
         };
     }
+    push_no_arg_constructors(index, ir);
     Ok(())
+}
+
+/// The message of the `@Deprecated(level = HIDDEN)` kotlinc puts on the no-arg constructor.
+const NO_ARG_CONSTRUCTOR_HIDDEN_MESSAGE: &str = "No-arg constructor is hidden from direct usage";
+
+/// Build the zero-argument constructor of every class the frontend marked
+/// [`crate::fir::DeclarationFlags::NO_ARG_CONSTRUCTOR`] (kotlinc's no-arg plugin), after the class's
+/// declared constructors. It delegates to the superclass's `<init>()` and runs no initializer, as
+/// kotlinc's `generateNoArgConstructorBody` without `invokeInitializers`. `@Deprecated(HIDDEN)`
+/// keeps Kotlin callers from selecting it; `@java.lang.Deprecated` keeps it a public, non-synthetic
+/// method Java and frameworks can call.
+fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
+    let mut classifiers = ir
+        .checked_classifier_classes
+        .iter()
+        .map(|(declaration, class)| (*declaration, *class))
+        .filter(|(declaration, _)| {
+            index
+                .declaration_header(*declaration)
+                .is_some_and(|header| {
+                    header
+                        .flags
+                        .has(crate::fir::DeclarationFlags::NO_ARG_CONSTRUCTOR)
+                })
+        })
+        .collect::<Vec<_>>();
+    classifiers.sort_by_key(|(declaration, _)| declaration.raw());
+    for (classifier, class) in classifiers {
+        // kotlinc generates it in FIR: after every member the class declares and before the
+        // members lowering generates (a data class's `componentN`, `copy`, …). It takes the last
+        // declared member's place, and the member schedule keeps it after that member.
+        let source_order = index
+            .owned_declarations(classifier)
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                !index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| {
+                        header
+                            .flags
+                            .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                    })
+            })
+            .filter_map(|declaration| index.source_order(declaration))
+            .chain(index.source_order(classifier))
+            .max()
+            .unwrap_or(u32::MAX - 1);
+        let owner = &ir.classes[class as usize];
+        let superclass = owner.superclass;
+        // kotlinc maps the delegation to where the class declaration starts (its annotations
+        // included) and the return to the declaration's last line.
+        let (declaration_line, end_line) = (owner.decl_start_line, owner.decl_end_line);
+        let ordinal = u32::try_from(owner.secondary_ctors.len())
+            .expect("a class has fewer than u32::MAX constructors");
+        let deprecated = crate::ir::RetainedAnnotation {
+            retention: crate::types::AnnotationRetention::Runtime,
+            annotation: crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name("kotlin/Deprecated"),
+                values: vec![
+                    (
+                        "message".to_string(),
+                        crate::ir::AnnoValue::Const(crate::ir::IrConst::String(
+                            NO_ARG_CONSTRUCTOR_HIDDEN_MESSAGE.into(),
+                        )),
+                    ),
+                    (
+                        "level".to_string(),
+                        crate::ir::AnnoValue::Enum(
+                            crate::types::type_name("kotlin/DeprecationLevel"),
+                            "HIDDEN".to_string(),
+                        ),
+                    ),
+                ],
+            },
+            facts: crate::types::AnnotationSemanticFacts {
+                deprecated_hidden: true,
+                optional_expectation: false,
+            },
+        };
+        let java_deprecated = crate::ir::RetainedAnnotation {
+            retention: crate::types::AnnotationRetention::Runtime,
+            annotation: crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name("java/lang/Deprecated"),
+                values: Vec::new(),
+            },
+            facts: crate::types::AnnotationSemanticFacts::default(),
+        };
+        ir.classes[class as usize]
+            .secondary_ctors
+            .push(crate::ir::IrSecondaryCtor {
+                annotations: crate::ir::DeclarationAnnotations::new(vec![
+                    deprecated,
+                    java_deprecated,
+                ]),
+                source_order,
+                lines: crate::ir::IrSecondaryCtorLines::default(),
+                prefix_params: Vec::new(),
+                params: Vec::new(),
+                declared_spellings: Default::default(),
+                named_params: Vec::new(),
+                metadata_visibility: Some(crate::types::Visibility::Public),
+                generated_debug:
+                    crate::ir::IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(
+                        declaration_line,
+                        end_line,
+                    ),
+                vararg_index: None,
+                defaults: Vec::new(),
+                delegate_prelude: Vec::new(),
+                delegate_args: Vec::new(),
+                default_parameters: Vec::new(),
+                body: None,
+                delegate: crate::ir::CtorDelegateTarget::Super {
+                    owner: superclass,
+                    target_params: Vec::new(),
+                    target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                    default_masks: Vec::new(),
+                },
+                synthetic: false,
+                vc_params: false,
+                param_checks: Vec::new(),
+            });
+        ir.record_generated_secondary_constructor(
+            class,
+            crate::ir::IrSecondaryConstructorRole::NoArg,
+            ordinal,
+        );
+    }
 }
 
 struct SecondaryConstructorRealization {

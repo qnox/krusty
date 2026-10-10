@@ -16,6 +16,8 @@ mod cast_operand_reread_e2e;
 mod common_core;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
+#[path = "common/compiler_plugin_fixture.rs"]
+mod compiler_plugin_fixture;
 #[path = "common/e2e.rs"]
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
@@ -1954,6 +1956,8 @@ mod no_assertions_flags_e2e;
 mod no_expect_for_actual_e2e;
 #[path = "no_jdk_builtin_emit_e2e.rs"]
 mod no_jdk_builtin_emit_e2e;
+#[path = "noarg_plugin_e2e.rs"]
+mod noarg_plugin_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
 mod non_field_ctor_metadata_e2e;
 #[path = "non_generic_overload_wins_e2e.rs"]

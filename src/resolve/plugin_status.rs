@@ -3,10 +3,7 @@
 //!
 //! A plugin names annotations ([`crate::plugins::IrPlugin::open_by_default_annotations`]); a class
 //! they match takes `open` as its default modality, and so does every member it declares. Matching
-//! follows kotlinc's `AbstractSimpleClassPredicateMatchingService`: the class carries a named
-//! annotation, carries an annotation that is meta-annotated with one at any depth, or has a supertype
-//! that matches. Annotations and supertypes are the resolved identities of source declarations and
-//! the normalized dependency classifiers; nothing is looked up by spelling.
+//! is [`ClassPredicate`], kotlinc's `AbstractSimpleClassPredicateMatchingService`.
 //!
 //! The status is applied once, where the frontend publishes each declaration's header, so the
 //! checker, lowering and every backend read the transformed modality.
@@ -16,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::fir::{DeclarationFlags, DeclarationId, DeclarationKind, StreamedHeaderModule};
 use crate::types::TypeName;
 
+use super::plugin_class_predicate::ClassPredicate;
 use super::SymbolTable;
 
 /// The source declarations whose default modality a plugin's status transform makes `open`.
@@ -42,12 +40,7 @@ impl OpenByDefault {
         if annotations.is_empty() {
             return OpenByDefault::default();
         }
-        let mut matcher = Matcher {
-            table,
-            annotations: annotations.into_iter().collect(),
-            classes: HashMap::new(),
-            meta: HashMap::new(),
-        };
+        let mut matcher = ClassPredicate::new(table, annotations);
         let jvm_record = crate::types::type_name("kotlin/jvm/JvmRecord");
         let mut open = OpenByDefault::default();
         for stub in &headers.stubs {
@@ -139,74 +132,4 @@ fn is_class_kind(flags: DeclarationFlags) -> bool {
 
 fn is_value(flags: DeclarationFlags) -> bool {
     flags.has(DeclarationFlags::VALUE) || flags.has(DeclarationFlags::VALUE_KEYWORD)
-}
-
-/// kotlinc's predicate `annotated(names) or metaAnnotated(names, includeItself = true)`, extended to
-/// supertypes. Answers are memoized per classifier; a classifier is marked unmatched while it is
-/// being visited, so a cycle (an annotation annotated with itself) terminates.
-struct Matcher<'a> {
-    table: &'a SymbolTable,
-    annotations: HashSet<TypeName>,
-    classes: HashMap<TypeName, bool>,
-    meta: HashMap<TypeName, bool>,
-}
-
-impl Matcher<'_> {
-    fn class_matches(&mut self, classifier: TypeName) -> bool {
-        if let Some(&known) = self.classes.get(&classifier) {
-            return known;
-        }
-        self.classes.insert(classifier, false);
-        let (annotations, supertypes) = self.annotations_and_supertypes(classifier);
-        let matches = annotations
-            .into_iter()
-            .any(|annotation| self.annotation_matches(annotation))
-            || supertypes
-                .into_iter()
-                .any(|supertype| self.class_matches(supertype));
-        self.classes.insert(classifier, matches);
-        matches
-    }
-
-    /// Whether `annotation` is one of the plugin's, or is annotated with one at any depth.
-    fn annotation_matches(&mut self, annotation: TypeName) -> bool {
-        if self.annotations.contains(&annotation) {
-            return true;
-        }
-        if let Some(&known) = self.meta.get(&annotation) {
-            return known;
-        }
-        self.meta.insert(annotation, false);
-        let (meta_annotations, _) = self.annotations_and_supertypes(annotation);
-        let matches = meta_annotations
-            .into_iter()
-            .any(|meta| self.annotation_matches(meta));
-        self.meta.insert(annotation, matches);
-        matches
-    }
-
-    /// A classifier's resolved annotations and direct supertypes, from its source declaration or
-    /// its dependency provider.
-    fn annotations_and_supertypes(&self, classifier: TypeName) -> (Vec<TypeName>, Vec<TypeName>) {
-        if let Some(class) = self.table.classes.get(&classifier) {
-            let supertypes = class
-                .super_internal
-                .into_iter()
-                .chain(class.interfaces.iter())
-                .collect();
-            return (class.annotations.clone(), supertypes);
-        }
-        crate::symbol_source::SymbolSource::classifier(self.table.libraries.as_ref(), classifier)
-            .map(|shape| {
-                (
-                    shape
-                        .annotations
-                        .iter()
-                        .map(|annotation| annotation.annotation)
-                        .collect(),
-                    shape.supertypes.iter().collect(),
-                )
-            })
-            .unwrap_or_default()
-    }
 }

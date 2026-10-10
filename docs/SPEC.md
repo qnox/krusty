@@ -9978,7 +9978,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every native extension explicitly (`PluginRegistry::every_native_extension`); the Bazel worker and
   `krusty-build` refuse plugin flags, so their compiles now match kotlinc without the plugin.
   Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the
-  no-arg and Compose jars wherever the reference distribution ships them, fail; so does a `-P` for an
+  sam-with-receiver and Compose jars wherever the reference distribution ships them, fail; so does a `-P` for an
   unknown id; serialization with and without the plugin emits kotlinc's class set; comma lists; a
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
   `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
@@ -10025,6 +10025,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through a dependency each compiler builds for itself), `plugins::allopen` and `plugins::registry`
   unit tests (`allopen_resolves_to_native_and_reads_its_options`,
   `an_option_key_the_plugin_does_not_declare_is_kotlincs_error`).
+- **No-arg gives the classes its annotations match a hidden zero-argument constructor.**
+  `-Xplugin=noarg-compiler-plugin.jar` (registrar `NoArgComponentRegistrar`) with
+  `-P plugin:org.jetbrains.kotlin.noarg:annotation=<fqname>` or `preset=jpa` runs krusty's native
+  pass. Classes match as for all-open (own annotation, meta-annotation at any depth, supertype). A
+  matched `class` (not an interface, object, enum or annotation class) that is not inner, local or
+  a value class, declares no constructor callable as `<init>()` (no parameters, or all defaulted on
+  the primary or on a `@JvmOverloads` constructor), and whose superclass has such a constructor or
+  is matched itself, gets a public `<init>()` that calls the superclass's `<init>()` and runs no
+  initializer, so its properties keep their JVM defaults. It carries
+  `@Deprecated("No-arg constructor is hidden from direct usage", level = HIDDEN)` and
+  `@java.lang.Deprecated`, takes the `Deprecated` attribute, and is not `ACC_SYNTHETIC`: kotlinc
+  marks a HIDDEN declaration synthetic unless it also carries `@java.lang.Deprecated` (KT-80649),
+  and krusty now follows that rule for every declaration. It is published in metadata, emitted after
+  the class's declared members and before the members lowering generates (a data class's
+  `componentN`, `copy`, …), with its delegation on the line the declaration starts and its return
+  on the declaration's last line. kotlinc's checker reports, on the class name, `zero-argument
+  constructor was not found in the superclass.` for a matched class whose own constructors all need
+  arguments and whose superclass has no all-defaulted constructor and is not matched, and `noarg
+  constructor generation is not possible for inner classes.` kotlinc 2.4.20 reports nothing for a
+  matched value class and emits an unverifiable static `constructor-impl()` for it; krusty reports
+  nothing and generates nothing. `invokeInitializers=true` is not implemented and fails the
+  compile. A local class is not matched yet, as for all-open. Tests: `tests/noarg_plugin_e2e.rs`
+  (direct, meta and supertype matches, secondary-only, data, nested and private-constructor classes,
+  declared no-arg constructors, byte-identical to kotlinc and instantiated reflectively; the `jpa`
+  preset through a dependency each compiler builds for itself; the plugin's errors against
+  kotlinc's), `plugins::noarg` and `plugins::registry` unit tests
+  (`noarg_resolves_to_native_and_reads_its_options`,
+  `an_unimplemented_option_setting_fails_the_compile`).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,

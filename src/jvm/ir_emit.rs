@@ -3042,7 +3042,7 @@ fn emit_class(
             if primary_annotations.deprecated() {
                 cw.mark_method_deprecated("<init>", &ctor_desc);
             }
-            if primary_annotations.deprecated_hidden() {
+            if function_annotations::hidden_realization_is_synthetic(primary_annotations) {
                 cw.set_method_synthetic("<init>", &ctor_desc);
             }
         }
@@ -3206,7 +3206,7 @@ fn emit_class(
                     if annotations.deprecated() {
                         cw.mark_method_deprecated("<init>", "()V");
                     }
-                    if annotations.deprecated_hidden() {
+                    if function_annotations::hidden_realization_is_synthetic(annotations) {
                         cw.set_method_synthetic("<init>", "()V");
                     }
                 }
