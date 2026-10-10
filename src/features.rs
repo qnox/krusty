@@ -136,6 +136,7 @@ const MODELED_FEATURES: &[&str] = &[
     "FullValueClasses",
     "FunctionalTypeWithExtensionAsSupertype",
     "ImplicitSignedToUnsignedIntegerConversion",
+    "IntrinsicConstEvaluation",
     "IrCrossModuleInlinerBeforeKlibSerialization",
     "IrIntraModuleInlinerBeforeKlibSerialization",
     "JvmInlineMultiFieldValueClasses",

@@ -12304,6 +12304,53 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
+- **A `const val` initializer's value (`IntrinsicConstEvaluation`, `CONST_VAL_WITH_NON_CONST_INITIALIZER`,
+  `NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION`).** kotlinc's frontend evaluates every `const val`
+  initializer (`FirExpressionEvaluator`, reported by `FirConstPropertyChecker`); krusty ports both
+  (`resolve::const_initializer_evaluation`, values from `libraries::intrinsic_const_evaluation`)
+  over the checker's own decisions: the callable selected for each call and operator, the payload
+  of each constant read, and the selected enum entry. The value becomes the field's `ConstantValue`
+  and every read of it. Literals, string templates over constant-typed parts (and a `null`
+  literal), `==`/`!=` with boxed `equals` meaning (`0.0 == -0.0` is false, `NaN == NaN` is true),
+  `&&`/`||` over `Boolean` operands, `<`/`<=`/`>`/`>=` through `compareTo` (the total order:
+  `-0.0 < 0.0`), and `as` to a supertype of the value evaluate. `===`, `if`, `when`, `?:`, safe
+  calls and `!!` do not. A call evaluates when every receiver and argument has a constant type
+  (a non-null primitive, unsigned type or `String`) and value, and its selected declaration is a
+  compile-time operation. Without `IntrinsicConstEvaluation` (the default) that is a `kotlin`
+  package declaration named `unaryPlus`, `unaryMinus`, `not`, `inv`, `plus`, `minus`, `times`,
+  `div`, `rem`, `and`, `or`, `xor`, `shl`, `shr`, `ushr`, `compareTo`, `floorDiv`, `mod`, `code`,
+  `toString` or a signed number conversion, or `String.get`, never on an unsigned dispatch
+  receiver; and the readable builtin properties are `String.length` and `Char.code`. With the
+  feature it is a declaration in kotlinc's operation table (`OperationsMapGenerated.knownOps`,
+  vendored as `src/libraries/intrinsic_const_evaluation/known_operations.txt`, keyed by callable
+  identity and the receiver and first parameter's compile-time types): kotlinc keys it so rather
+  than by `@IntrinsicConstEvaluation`, which the JVM `kotlin-stdlib` omits on `trim`, `uppercase`
+  and `Char(Int)`. That adds `inc`/`dec`, `equals`, unsigned arithmetic and conversions,
+  `kotlin.experimental` bitwise operations, `Char(Int)`, `lowercase`/`uppercase`,
+  `trim`/`trimStart`/`trimEnd`/`trimIndent`/`trimMargin`, and the properties `Enum.name` on an
+  entry and `KCallable.name` on a callable reference (`<init>` for a constructor). Values are
+  Kotlin/JVM's: integral arithmetic wraps, an integral `div`/`rem` by zero has no value, a
+  floating value converts to an integral type toward zero and saturating, unsigned values
+  zero-extend, `UInt`/`ULong.toFloat()` round through `Double`, case mapping is full Unicode
+  mapping, and `trimIndent`/`trimMargin` split lines at `\r\n`, `\n` and `\r`. An initializer
+  without a value is reported at its start: `only 'const val' can be used in constant
+  expressions.` when it reads a non-`const` `val` initialized by a literal, otherwise `const 'val'
+  initializer must be a constant value.`; an unresolved read reports only itself. The check runs
+  on a top-level or singleton member `const val` that is not a `var` and has no getter or delegate
+  and a type usable for a constant. Not modeled: the non-`const`-`val` message for a `val` outside
+  the checked singleton (another top-level declaration or another file; the read reports a
+  non-constant initializer), a failed `const`'s reason propagating to a `const` reading it (kotlinc
+  re-evaluates the read declaration; krusty reports a non-constant initializer), the other
+  `FirConstPropertyChecker` errors (`const` on a `var`, outside a singleton, with a getter,
+  delegate or no initializer, or of an unusable type), annotation arguments that call these
+  operations, a constructor call of an unsigned type, and kotlinc's IR folding of a
+  `KCallable.name` read in a function body (`evaluate/intrinsicConst/kCallableNameWithSideEffect.kt`,
+  `kt58717.kt`), which is not part of this feature, nor its folding of unsigned conversions and
+  operations in a function body (`2u.toUByte()` in `evaluate/incDec.kt` and
+  `evaluate/u{byte,short,int,long}Operations.kt`), which kotlinc does with or without the feature;
+  those cases pass with divergent bytecode. (`tests/intrinsic_const_evaluation_e2e.rs`,
+  `libraries::intrinsic_const_evaluation::tests`, `kt_string::text_operations::tests`. Corpus:
+  `evaluate/intrinsicConst/*.kt`, `evaluate/u{byte,short,int,long}Operations.kt`.)
 - **Delegated property references (kotlinc's `PropertyReferenceLowering`).** The `KProperty` a
   class's, object's or file facade's delegated-property operators receive live in one
   `$$delegatedProperties` array per class: a leading `static final synthetic` field (after an enum's

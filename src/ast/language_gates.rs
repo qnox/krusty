@@ -33,6 +33,9 @@ pub struct LanguageGates {
     /// `ProhibitIntersectionReifiedTypeParameter`, the severity of an intersection type argument
     /// for a reified type parameter.
     pub intersection_reified_type_parameter: DeprecationGate,
+    /// `IntrinsicConstEvaluation`: the standard-library operations a constant expression may
+    /// apply, beyond the operators and conversions every language version folds.
+    pub intrinsic_const_evaluation: bool,
     /// The language features kotlinc's value-class declaration checker consults.
     pub value_classes: ValueClassRules,
 }

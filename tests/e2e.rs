@@ -1240,6 +1240,8 @@ mod internal_component_names_e2e;
 mod internal_member_names_e2e;
 #[path = "intersection_reified_type_of_e2e.rs"]
 mod intersection_reified_type_of_e2e;
+#[path = "intrinsic_const_evaluation_e2e.rs"]
+mod intrinsic_const_evaluation_e2e;
 #[path = "invariant_argument_wildcards_e2e.rs"]
 mod invariant_argument_wildcards_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]

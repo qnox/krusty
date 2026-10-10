@@ -19,6 +19,7 @@ mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+pub(crate) mod intrinsic_const_evaluation;
 mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;

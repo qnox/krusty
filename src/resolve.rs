@@ -91,6 +91,7 @@ mod common_supertype_identity_tests;
 mod companion_reference_gate;
 mod compound_assignments;
 mod conditional_branch;
+mod const_initializer_evaluation;
 mod constant_evaluation;
 mod context_capture;
 mod context_receiver_priority;
@@ -48620,27 +48621,9 @@ impl<'a> Checker<'a> {
             // the evaluator consumes those exact decisions and cannot mistake an overloaded
             // convention for a builtin operation. The payload is also attached to this root
             // expression so checked FIR emits a literal rather than a runtime `<clinit>` program.
-            if p.is_const && !resolved_property_ty.mentions_error() {
-                let context = constant_evaluation::CheckedConstantExpression {
-                    file: self.file,
-                    expression_types: &self.expr_types,
-                    resolved_constants: &self.resolved_constants,
-                    resolved_calls: &self.resolved_calls,
-                    resolved_operator_calls: &self.resolved_operator_calls,
-                };
-                let folded = checked_constant_expression(context, init, resolved_property_ty);
-                if let Some(folded) = folded {
-                    self.resolved_constants.insert(init, folded);
-                } else if checked_integer_constant(context, init)
-                    == Some(IntegerConstant::DivisionByZero)
-                {
-                    // The expression adapts as an `Int` constant, but it has no magnitude to
-                    // publish. kotlinc reports this instead of a type mismatch.
-                    self.diags.error(
-                        self.span(init),
-                        "const 'val' initializer must be a constant value.".to_string(),
-                    );
-                }
+            if p.is_const {
+                let excluded = p.is_var || p.getter.is_some() || p.delegate.is_some();
+                self.check_const_initializer(init, resolved_property_ty, excluded);
             }
         }
         // The signature passes leave the type `Error` without a diagnostic; the checker reports the
@@ -51831,6 +51814,12 @@ impl<'a> Checker<'a> {
                                 self.value_diagnostic_span(init, it),
                                 "property initializer",
                             );
+                        }
+                        let ty = declared.unwrap_or(it);
+                        if bp.is_const && cl.is_singleton() {
+                            let excluded =
+                                bp.is_var || bp.getter.is_some() || bp.delegate.is_some();
+                            self.check_const_initializer(init, ty, excluded);
                         }
                     }
                     // A delegated member property's delegate expression (`by Del()`) — type-check it so
