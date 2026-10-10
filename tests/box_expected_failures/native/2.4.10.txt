@@ -1029,8 +1029,6 @@ inlineClasses/customIterator.kt
 inlineClasses/defaultParameterValues/defaultValueOfInlineClassTypeInInlineFunInInlineClass.kt
 inlineClasses/defaultParameterValues/defaultValueOfInlineClassTypeInInlineFunInInlineClassGeneric.kt
 inlineClasses/defaultParameterValues/kt26554.kt
-inlineClasses/defaultWithInlineClassArgument.kt
-inlineClasses/defaultWithInlineClassArgumentGeneric.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/funInterface/argumentResult.kt
 inlineClasses/funInterface/kt51121.kt
@@ -1423,15 +1421,7 @@ propertyCallableReference/multipleModules.kt
 publishedApi/inlineFromFriendModule.kt
 publishedApi/simple.kt
 publishedApi/topLevel.kt
-ranges/contains/evaluationOrderForCollection.kt
-ranges/contains/evaluationOrderForComparableRange.kt
-ranges/contains/evaluationOrderForDownTo.kt
-ranges/contains/evaluationOrderForDownToReversed.kt
 ranges/contains/evaluationOrderForNullableArgument.kt
-ranges/contains/evaluationOrderForRangeLiteral.kt
-ranges/contains/evaluationOrderForRangeLiteralReversed.kt
-ranges/contains/evaluationOrderForUntil.kt
-ranges/contains/evaluationOrderForUntilReversed.kt
 ranges/contains/generated/doubleRangeUntil.kt
 ranges/contains/generated/floatRangeUntil.kt
 ranges/contains/inCharSequence.kt
