@@ -13,8 +13,10 @@
 //! `Eq`/`Hash` being the value's identity — the class-file constant pool dedups on it.
 
 mod float_text;
+mod text_operations;
 
 pub(crate) use float_text::{push_f32, push_f64};
+pub(crate) use text_operations::{lowercase, trim, trim_end, trim_start, uppercase};
 
 /// A Kotlin `String` value: a sequence of UTF-16 code units.
 ///
@@ -133,6 +135,35 @@ fn is_blank_line(line: &[u16]) -> bool {
 }
 
 const LF: u16 = b'\n' as u16;
+const CR: u16 = b'\r' as u16;
+
+/// Kotlin's `CharSequence.lines()`: the text split at each `\r\n`, `\n` or `\r`.
+fn lines(units: &[u16]) -> Vec<&[u16]> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < units.len() {
+        match units[index] {
+            LF => {
+                lines.push(&units[start..index]);
+                index += 1;
+                start = index;
+            }
+            CR => {
+                lines.push(&units[start..index]);
+                index += if units.get(index + 1) == Some(&LF) {
+                    2
+                } else {
+                    1
+                };
+                start = index;
+            }
+            _ => index += 1,
+        }
+    }
+    lines.push(&units[start..]);
+    lines
+}
 
 fn join_lines(lines: Vec<Vec<u16>>) -> KtString {
     let mut output = Vec::new();
@@ -148,7 +179,7 @@ fn join_lines(lines: Vec<Vec<u16>>) -> KtString {
 /// The value semantics of Kotlin's `String.trimIndent()` over UTF-16 code units.
 pub(crate) fn trim_indent(value: &KtString) -> KtString {
     let units = value.units().collect::<Vec<_>>();
-    let lines = units.split(|&unit| unit == LF).collect::<Vec<_>>();
+    let lines = lines(&units);
     let minimum_indent = lines
         .iter()
         .filter(|line| !is_blank_line(line))
@@ -179,7 +210,7 @@ pub(crate) fn trim_indent(value: &KtString) -> KtString {
 pub(crate) fn trim_margin(value: &KtString, margin: &KtString) -> KtString {
     let margin = margin.units().collect::<Vec<_>>();
     let units = value.units().collect::<Vec<_>>();
-    let lines = units.split(|&unit| unit == LF).collect::<Vec<_>>();
+    let lines = lines(&units);
     let last = lines.len().saturating_sub(1);
     join_lines(
         lines
@@ -400,6 +431,18 @@ mod tests {
 
         let nel = KtString::from("\u{85}a\n\u{85}b");
         assert_eq!(trim_indent(&nel), nel);
+    }
+
+    #[test]
+    fn lines_end_at_crlf_lf_or_cr_and_rejoin_with_lf() {
+        assert_eq!(
+            trim_indent(&KtString::from("\r\n  a\r  b\r\n   c\n")),
+            KtString::from("a\nb\n c")
+        );
+        assert_eq!(
+            trim_margin(&KtString::from("|x\r\n |y\r|z"), &KtString::from("|")),
+            KtString::from("x\ny\nz")
+        );
     }
 
     #[test]

@@ -174,15 +174,8 @@ fn fold_member_constant(
         carries_outer: false,
     });
     let _ = checker.expr_expected(&scope, initializer, declared_ty);
-    checked_constant_expression(
-        CheckedConstantExpression {
-            file,
-            expression_types: &checker.expr_types,
-            resolved_constants: &checker.resolved_constants,
-            resolved_calls: &checker.resolved_calls,
-            resolved_operator_calls: &checker.resolved_operator_calls,
-        },
-        initializer,
-        declared_ty,
-    )
+    match checker.evaluate_const_initializer(initializer, declared_ty) {
+        super::const_initializer_evaluation::ConstInitializer::Value(value) => Some(value),
+        _ => None,
+    }
 }

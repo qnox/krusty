@@ -818,10 +818,6 @@ enum/multipleModules.kt
 enum/openMethodNoOverrides.kt
 enum/sortEnumEntries.kt
 equivalentCalls/localEquivalentWins.kt
-evaluate/intrinsicConst/charConstructor.kt
-evaluate/intrinsicConst/constTrim.kt
-evaluate/intrinsicConst/kCallableName.kt
-evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/serialization/actualAnnotationOnFakeOverride.kt
 evaluate/serialization/annotationInArguments.kt
 evaluate/serialization/annotationOnFakeOverride.kt
@@ -835,11 +831,6 @@ evaluate/serialization/annotationWithDefaultValueOnFakeOverride.kt
 evaluate/serialization/annotationWithDefaults.kt
 evaluate/serialization/nestedTypeAnnotation.kt
 evaluate/serialization/typeAnnotation.kt
-evaluate/stdlibConst.kt
-evaluate/ubyteOperations.kt
-evaluate/uintOperations.kt
-evaluate/ulongOperations.kt
-evaluate/ushortOperations.kt
 expression/evaluationOrder/dangerousInline.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
