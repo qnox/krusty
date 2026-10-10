@@ -9,6 +9,8 @@
 //! selection candidates is lazy and memoized per lookup key. [`KlibDeclarationBodies`] answers the
 //! other half of that join: the decoded IR body serialized under a published signature.
 
+mod archives;
+mod builtin_realizations;
 mod classifier_records;
 mod classifier_signatures;
 mod declaration_bodies;
@@ -16,6 +18,7 @@ mod declaration_signatures;
 mod external_identities;
 mod inventory;
 mod lookup;
+mod platform;
 #[cfg(test)]
 mod tests;
 
@@ -23,12 +26,17 @@ use crate::metadata::semantic::KotlinPackage;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
+pub use archives::KlibLibrariesOpenError;
 pub use declaration_bodies::{KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.
+///
+/// The signed declarations are immutable and shared; the identities a compilation selects are its
+/// own. [`KlibLibraries::for_compilation`] starts another compilation over the same declarations
+/// without decoding or signing them again.
 pub struct KlibLibraries {
-    inventory: inventory::PackageInventory,
+    inventory: std::rc::Rc<inventory::PackageInventory>,
     identities: external_identities::ExternalIdentities,
     lookups: lookup::SymbolLookups,
 }
@@ -40,11 +48,22 @@ impl KlibLibraries {
     pub fn from_packages(
         packages: Vec<(Vec<String>, KotlinPackage)>,
     ) -> Result<Self, KlibLibraryError> {
-        Ok(Self {
-            inventory: inventory::PackageInventory::from_packages(packages)?,
+        Ok(Self::over(std::rc::Rc::new(
+            inventory::PackageInventory::from_packages(packages)?,
+        )))
+    }
+
+    /// The same declarations, for another compilation with no selected identities yet.
+    pub fn for_compilation(&self) -> Self {
+        Self::over(std::rc::Rc::clone(&self.inventory))
+    }
+
+    fn over(inventory: std::rc::Rc<inventory::PackageInventory>) -> Self {
+        Self {
+            inventory,
             identities: external_identities::ExternalIdentities::default(),
             lookups: lookup::SymbolLookups::default(),
-        })
+        }
     }
 }
 

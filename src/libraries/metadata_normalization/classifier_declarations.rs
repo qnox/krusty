@@ -289,10 +289,18 @@ pub(crate) fn declared_constructor(
 
 /// The named-argument parameter list of a normalized constructor.
 pub(crate) fn constructor_parameter_list(constructor: &LibraryMember) -> ParamList {
+    let names = &constructor.call_sig.param_names;
+    // A call signature omits its defaults when no parameter declares one; a parameter list
+    // states each parameter's.
+    let defaults = if constructor.call_sig.param_defaults.is_empty() {
+        vec![false; names.len()]
+    } else {
+        constructor.call_sig.param_defaults.clone()
+    };
     ParamList {
         visibility: constructor.visibility,
-        names: constructor.call_sig.param_names.clone(),
-        defaults: constructor.call_sig.param_defaults.clone(),
+        names: names.clone(),
+        defaults,
         types: constructor.params.clone(),
         recv_fun: constructor.call_sig.lambda_receiver_params.clone(),
         vararg: constructor.call_sig.vararg_index,
