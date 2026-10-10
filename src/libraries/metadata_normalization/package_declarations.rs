@@ -184,7 +184,7 @@ pub(crate) fn package_property(
         implicit_integer_coercion: property
             .annotations
             .iter()
-            .any(|annotation| annotation.matches("kotlin/internal/ImplicitIntegerCoercion")),
+            .any(|annotation| *annotation == crate::types::wk::implicit_integer_coercion()),
         compile_time_constant,
         metadata_constant_read: false,
         visibility: property.visibility,
