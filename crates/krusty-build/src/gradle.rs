@@ -945,8 +945,10 @@ mod tests {
                 ),
                 (
                     "jdk-release-free-argument",
-                    "-Xjdk-release=17",
-                    refused("-Xjdk-release=17"),
+                    "-Xjdk-release=21",
+                    "krusty: error: '-Xjdk-release=21' option conflicts with '-jvm-target 17'. \
+                     Please remove the '-jvm-target' option"
+                        .to_owned(),
                 ),
                 ("free-werror", "-Werror", refused("-Werror")),
                 (
@@ -2280,7 +2282,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
                 "-d=forbidden",
             )
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
-            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=17")
+            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=21")
             "free-werror" -> freeCompilerArgs.add("-Werror")
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
