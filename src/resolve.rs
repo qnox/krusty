@@ -286,6 +286,7 @@ pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
+use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -2800,35 +2801,6 @@ enum PropertyReadSelection {
     /// The selected extension, with the actual receiver when it mentions a postponed call's type
     /// variables: reading the property adds that receiver constraint to the call.
     Extension(Box<ResolvedPropertyAccess>, Option<Ty>),
-}
-
-struct PropertyReadMemberSelection {
-    name: String,
-    ty: Ty,
-    owner: TypeName,
-    interface: bool,
-    getter: Option<crate::symbol_resolver::ResolvedMember>,
-    accessor: Option<Box<crate::libraries::LibraryCallable>>,
-    /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
-    producer: crate::libraries::PropertyProducer,
-    /// Provider-published constant-value expression fact for this selected read.
-    metadata_constant_read: bool,
-    context_access: Option<Box<ResolvedPropertyAccess>>,
-    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-    compile_time_constant: Option<crate::libraries::LibraryConst>,
-    source_member: Option<crate::libraries::SourceMember>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    access: Option<(Visibility, TypeName)>,
-    /// Whether a second read through the same receiver returns the same value.
-    stable_read: bool,
-}
-
-enum PropertyReadAmbiguity {
-    MemberExtension,
-    Extension,
-    MissingContext,
-    /// Synthetic properties of one classifier declared by different accessor methods.
-    Accessors(Vec<String>),
 }
 
 type ModuleSymbolCache = HashMap<
