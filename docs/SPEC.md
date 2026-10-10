@@ -9555,6 +9555,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
   `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
 
+- **A `@Serializable` class's generated companion members join its hand-written companion.** When
+  the class declares its own `companion object`, kotlinc adds the plugin's `serializer()` to that
+  companion instead of synthesizing a second `Companion`, so `Token.serializer()` and the user's own
+  companion members (`make()`, an `operator fun invoke()` on a value class) resolve on one object.
+  Signature collection records each class's contributed companion members during the declaration
+  walk and installs them only after every declaration is collected, because a hand-written companion
+  is collected after its owner. Tests: `tests/serialization_explicit_companion_e2e.rs`, a box run
+  against kotlinc's output and a byte comparison of the generated `$serializer`.
+
 - **A generic `@Serializable` class builds each element that mentions a type parameter around
   that parameter's serializer.** A generic `$serializer` is constructed with one `typeSerialK`
   per type parameter. kotlinc builds each element whose type mentions a type parameter
