@@ -66,7 +66,7 @@ impl<'a> TypeParameterSerializers<'a> {
             stmts: vec![returned],
             value: None,
         });
-        ir.functions[function as usize].body = Some(body);
+        super::complete_generated_body(ir, function, body);
     }
 }
 

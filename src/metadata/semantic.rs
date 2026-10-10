@@ -199,6 +199,8 @@ pub struct KotlinFunction {
 #[derive(Default)]
 pub struct KotlinPackage {
     pub classes: HashMap<String, KotlinClass>,
+    /// The keys of `classes` in the order the fragment declares them.
+    pub class_order: Vec<String>,
     pub functions: Vec<KotlinFunction>,
     pub properties: Vec<KotlinProperty>,
 }

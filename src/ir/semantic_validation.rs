@@ -638,14 +638,6 @@ impl IrFile {
                 .iter()
                 .map(|alias| alias.expansion),
         )?;
-        for constructors in self.jvm_value_class_secondary_ctors.values() {
-            for constructor in constructors {
-                reject_all(
-                    "value-class secondary constructor parameter",
-                    constructor.params.iter().map(|(_, ty)| *ty),
-                )?;
-            }
-        }
         for property in &self.statics {
             reject("static property", property.ty)?;
         }

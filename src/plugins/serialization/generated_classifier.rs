@@ -14,16 +14,6 @@ pub(super) fn serializer_name(classifier: crate::types::TypeName) -> crate::type
     classifier.nested_child(SERIALIZER_OBJECT_NAME)
 }
 
-/// Backend spelling of the generated serializer object's stable identity.
-pub(super) fn serializer_fq(class_fq: &str) -> String {
-    serializer_name(type_name(class_fq)).render()
-}
-
-/// Backend spelling of the companion object that owns `serializer()`.
-pub(super) fn companion_fq(class_fq: &str) -> String {
-    crate::types::type_name_nested_child(type_name(class_fq), "Companion").render()
-}
-
 pub(super) fn publish_serializer_accessor_declaration(
     ctx: &FrontendClassContext<'_>,
     members: &mut Vec<FrontendCallable>,

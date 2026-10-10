@@ -1333,12 +1333,13 @@ fn semantic_property(
         tables.qnames,
         "property declaration",
     )?;
-    // `.kotlin_builtins` writes a property's annotations to `BuiltInsProtoBuf.propertyAnnotation`
-    // (field 150), the same extension number a function uses. The other annotation fields above are
-    // accessor and KLIB extensions; this one is the property declaration's own annotations.
+    // The property declaration's own annotations: `.kotlin_builtins` writes them to
+    // `BuiltInsProtoBuf.propertyAnnotation` (field 150), the same extension number a function uses,
+    // and a KLIB to `KlibMetadataProtoBuf.propertyAnnotation` (170). The other annotation fields
+    // above are accessor, backing-field and delegate annotations.
     let annotations = annotation_identities(
         body,
-        &[150],
+        &[150, 170],
         tables.strings,
         tables.qnames,
         "property declaration",
@@ -1982,6 +1983,7 @@ pub(super) fn parse(
         if result.classes.insert(name.clone(), class).is_some() {
             return Err(semantic_error(format!("duplicate class identity {name}")));
         }
+        result.class_order.push(name);
     }
     Ok(result)
 }

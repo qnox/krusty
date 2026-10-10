@@ -233,11 +233,7 @@ pub(super) fn add_object_serializer(
     // `serializer()` delegates to the helper. The frontend already declared it on the object;
     // kotlinc's generated members follow in this order: `serializer()`, the helper, then the
     // delegate's initializer.
-    let placeholder = ir.add_expr(IrExpr::Block {
-        stmts: Vec::new(),
-        value: None,
-    });
-    let accessor = super::complete_frontend_serializer_accessor(ir, object, placeholder)
+    let accessor = super::frontend_serializer_accessor(ir, object)
         .expect("a serializable object has its checked frontend serializer declaration");
     // Generated past the frontend's declaration-line transfer: kotlinc maps the accessor to the
     // annotated declaration's first line, like every other member it generates for the object.
@@ -245,9 +241,6 @@ pub(super) fn add_object_serializer(
         ir.fn_decl_lines.insert(accessor, owner_line);
         ir.fn_sig_lines.insert(accessor, owner_line);
     }
-    // A plugin-generated member has no source position: kotlinc appends it after the object's own
-    // declarations, in the class file and in `@Metadata` alike.
-    ir.fn_source_order.remove(&accessor);
     let cached_index = ir.classes[class_id as usize].methods.len() as u32;
     ir.classes[class_id as usize].methods.push(cached);
     let this = ir.add_expr(IrExpr::GetValue(0));
@@ -262,7 +255,7 @@ pub(super) fn add_object_serializer(
         stmts: vec![ret],
         value: None,
     });
-    ir.functions[accessor as usize].body = Some(body);
+    super::complete_frontend_serializer_accessor(ir, object, body);
 
     let name = ir.add_expr(IrExpr::Const(IrConst::String(
         super::annotations::class_serial_name(ir, class_id),

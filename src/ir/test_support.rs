@@ -7,6 +7,7 @@ pub(crate) fn blank_class(fq: &str) -> IrClass {
     IrClass {
         fq_name: fq.into(),
         is_source_declared: false,
+        is_compiler_generated: false,
         is_anonymous_object: false,
         enclosure: None,
         is_inner_class: false,

@@ -456,7 +456,7 @@ impl SerializeBody<'_> {
                 stmts: vec![unsupported],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
         } else if let Some(write_self) = delegated_write_self {
             if let Some(plan) = plan.as_ref() {
                 // `write$Self` is a static member of the class that OWNS the cache, so it reads the
@@ -531,7 +531,7 @@ impl SerializeBody<'_> {
                 stmts: vec![dvar, cvar, call_write_self, end],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
         } else {
             // The inlined shape (a generic class): open the structure, write the
             // elements here, close it.
@@ -571,7 +571,7 @@ impl SerializeBody<'_> {
                 stmts: block,
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
         }
     }
 }
@@ -601,11 +601,14 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        // Declared as the handoff declares it: with a placeholder body.
+        let declared =
+            super::super::generated_body_placeholder(&mut ir, type_name("demo/Foo$$serializer"));
         let serialize = ir.add_fun(IrFunction {
             name: "serialize".to_owned(),
             params: Vec::new(),
             ret: unit(),
-            body: None,
+            body: Some(declared),
             is_static: false,
             dispatch_receiver: Some(type_name("demo/Foo$$serializer")),
             param_checks: Vec::new(),

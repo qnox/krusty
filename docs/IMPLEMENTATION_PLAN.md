@@ -5333,12 +5333,17 @@ write the dependency libraries itself; kotlinc only supplies the expected progra
   extensions, and the package name. The manifest is the reference compiler's for a metadata
   library (`kotlinc-native -p library -Xmetadata-klib`); its `metadata_version` comes from the
   compilation's finalized language level or `-Xmetadata-version` (`klib::write::KlibStamp`), never
-  from the selected reference release. Top-level functions, properties and typealiases are written;
-  a class is declined by name. Unit tests beside `klib::write` and `metadata::klib_fragment` check
+  from the selected reference release. Top-level functions, properties and typealiases are written,
+  and so are classes (below). Unit tests beside `klib::write` and `metadata::klib_fragment` check
   the layout and read fragments back through the ordinary KLIB reader. The library has no
   serialized IR, so a dependent Native program cannot link a body from it yet: this is not module
   support.
-- **Class metadata (next).** The class record written for the KLIB carrier.
+- **Class metadata (this slice).** A class's record is built once from common IR
+  (`metadata::class_records`); a target realizes it through `ClassRealization`, the JVM with its
+  signatures, storage and generated members (`jvm::ir_emit::class_metadata`), a KLIB with nothing
+  (`klib::class_realization`). The fragment carries the file's classifiers in nesting order, each
+  with its own type table and file name. A value class, a `companion { }` block and
+  compiler-plugin members are declined by name.
 - **Serialized IR (next).** Bodies are written as the IR the `metadata::klib_ir` decoder reads back.
 - **Native `// MODULE:` box cases (later).** The shared Native box harness writes each dependency
   module's KLIB with this backend, the dependent compilation reads it through the KLIB library

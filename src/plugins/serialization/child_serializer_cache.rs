@@ -569,7 +569,7 @@ impl ChildSerializersBody<'_> {
         }
         stmts.push(ret);
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-        ir.functions[function as usize].body = Some(body);
+        super::complete_generated_body(ir, function, body);
     }
 }
 

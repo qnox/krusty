@@ -119,7 +119,72 @@ pub struct IrGeneratedMemberPublication {
     pub functions: Vec<IrGeneratedFunctionPublication>,
 }
 
+/// A compiler-generated function's semantic role within its owner. The producer records this
+/// exact edge when it declares the function; a later phase completing the function finds it here,
+/// never by its name, arity or synthetic flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum IrGeneratedFunctionRole {
+    SerializationDescriptor,
+    SerializationSerialize,
+    SerializationDeserialize,
+    SerializationChildSerializers,
+    SerializationTypeParameterSerializers,
+    /// kotlinx.serialization's `write$Self` on a serialized class.
+    SerializationWriteSelf,
+}
+
+/// A compiler-generated classifier's semantic role within its source owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum IrGeneratedClassRole {
+    /// kotlinx.serialization's nested `$serializer` classifier.
+    SerializationSerializer,
+}
+
 impl IrFile {
+    pub(crate) fn record_generated_class(
+        &mut self,
+        owner: TypeName,
+        role: IrGeneratedClassRole,
+        class: super::ClassId,
+    ) {
+        assert!(
+            self.generated_classes
+                .insert((owner, role), class)
+                .is_none(),
+            "a generated classifier role has one exact declaration"
+        );
+    }
+
+    pub(crate) fn generated_class(
+        &self,
+        owner: TypeName,
+        role: IrGeneratedClassRole,
+    ) -> Option<super::ClassId> {
+        self.generated_classes.get(&(owner, role)).copied()
+    }
+
+    pub(crate) fn record_generated_function(
+        &mut self,
+        owner: TypeName,
+        role: IrGeneratedFunctionRole,
+        function: FunId,
+    ) {
+        assert!(
+            self.generated_functions
+                .insert((owner, role), function)
+                .is_none(),
+            "a generated function role has one exact declaration"
+        );
+    }
+
+    pub(crate) fn generated_function(
+        &self,
+        owner: TypeName,
+        role: IrGeneratedFunctionRole,
+    ) -> Option<FunId> {
+        self.generated_functions.get(&(owner, role)).copied()
+    }
+
     pub(crate) fn publish_generated_members(
         &mut self,
         owner: TypeName,

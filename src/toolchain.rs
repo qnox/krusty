@@ -278,6 +278,24 @@ pub fn box_mock_jdk_rt_jar(box_dir: &Path) -> Result<PathBuf, String> {
 /// download fails (offline) or the process's download budget is spent (see `maven_download`). Cached
 /// under `~/.cache/krusty-deps` (overridable via `KRUSTY_DEPS_CACHE`).
 pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBuf> {
+    ensure_maven_artifact(group, artifact, version, "jar")
+}
+
+/// A Maven Central artifact with an explicit extension, cached and atomically published like
+/// [`ensure_maven`]. This is used for Kotlin/Native `.klib` dependencies as well as JVM jars.
+pub fn ensure_maven_artifact(
+    group: &str,
+    artifact: &str,
+    version: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    if extension.is_empty()
+        || !extension
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
     let cache = std::env::var("KRUSTY_DEPS_CACHE")
         .ok()
         .filter(|s| !s.is_empty())
@@ -288,13 +306,13 @@ pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBu
                 .map(|h| PathBuf::from(h).join(".cache/krusty-deps"))
         })?;
     let _ = std::fs::create_dir_all(&cache);
-    let file = cache.join(format!("{artifact}-{version}.jar"));
+    let file = cache.join(format!("{artifact}-{version}.{extension}"));
     if file.is_file() {
         return Some(file);
     }
     let url = format!(
-        "https://repo1.maven.org/maven2/{}/{artifact}/{version}/{artifact}-{version}.jar",
-        group.replace('.', "/")
+        "https://repo1.maven.org/maven2/{}/{artifact}/{version}/{artifact}-{version}.{extension}",
+        group.replace('.', "/"),
     );
     let download = maven_download_path(&file);
     let completed = maven_download::process_budget()
