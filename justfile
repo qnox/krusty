@@ -458,21 +458,13 @@ test-all *ARGS:
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    bin=$(cargo test --no-run --profile gate -p krusty-build --lib --message-format=json \
-      | jq -r 'select(.reason=="compiler-artifact" and .target.name=="krusty_build" and .executable != null) | .executable // empty' \
-      | tail -1)
-    [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate krusty-build test binary" >&2; exit 1; }
-    printf '%s\n' "$bin"
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
 
 # Build the conformance test binary and print its path.
 conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
-    bin=$(cargo test --no-run --profile gate --test conformance --message-format=json \
-      | jq -r 'select(.reason=="compiler-artifact" and .target.name=="conformance") | .executable // empty' \
-      | tail -1)
-    [ -n "$bin" ] && [ -x "$bin" ] || { echo "could not locate conformance test binary" >&2; exit 1; }
-    printf '%s\n' "$bin"
+    scripts/cargo-test-binary.sh conformance --test conformance
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
