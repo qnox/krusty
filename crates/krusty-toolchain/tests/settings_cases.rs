@@ -7,12 +7,23 @@
 mod reported;
 mod support;
 
+use std::path::Path;
+use std::process::{Command, Output};
+
 use krusty_toolchain::diagnostic::Diagnostics;
 use krusty_toolchain::{configuration, model, show};
 use reported::reported;
 use support::kotlin::{self, Invocation};
 use support::rendering::problems;
 use support::ExpectedSeverity;
+
+fn run_toolchain(root: &Path, arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_krusty-toolchain"))
+        .arg(format!("--project-dir={}", root.display()))
+        .args(arguments)
+        .output()
+        .expect("run krusty-toolchain")
+}
 
 #[test]
 fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
@@ -46,6 +57,18 @@ fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name}: the project was not read"));
         let configured = configuration::configure(&root, &model.modules, &mut diagnostics);
+        let mut command_stdout = Vec::new();
+        let mut command_stderr = Vec::new();
+        for diagnostic in diagnostics.iter() {
+            let rendered = format!("{diagnostic}\n").into_bytes();
+            match diagnostic.severity {
+                krusty_toolchain::diagnostic::Severity::Error => command_stderr.extend(rendered),
+                krusty_toolchain::diagnostic::Severity::Warning
+                | krusty_toolchain::diagnostic::Severity::WeakWarning => {
+                    command_stdout.extend(rendered)
+                }
+            }
+        }
         let mut actual_errors = Vec::new();
         let mut actual_warnings = Vec::new();
         for diagnostic in reported(&root, &diagnostics) {
@@ -76,12 +99,57 @@ fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
         } else {
             show::modules_settings(&model.modules, &configured, |_| true)
         };
+        command_stdout.extend(printed.as_bytes());
         if printed.as_bytes() != result {
             failures.push(format!(
                 "{name}: printed\n{printed}\nthe toolchain printed\n{}",
                 String::from_utf8_lossy(result)
             ));
         }
+        let command = run_toolchain(&root, &["show", "settings", "--all-modules"]);
+        let expected_code = toolchain.code;
+        if command.status.code() != Some(expected_code)
+            || command.stdout != command_stdout
+            || command.stderr != command_stderr
+        {
+            failures.push(format!(
+                "{name}: command boundary\n  expected status {expected_code}, stdout {command_stdout:?}, stderr {command_stderr:?}\n  actual   status {:?}, stdout {:?}, stderr {:?}",
+                command.status.code(), command.stdout, command.stderr
+            ));
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn the_command_selects_named_modules_and_requires_a_selection_for_multiple_modules() {
+    let case = support::cases("settings")
+        .into_iter()
+        .find(|case| case.name == "multi-module")
+        .expect("the multi-module case exists");
+    let temp = support::TempDir::new("settings-command-selection");
+    let root = support::materialize(&temp, &case.files);
+    let mut diagnostics = Diagnostics::default();
+    let model = model::read(model::Start::Discover(&root), &mut diagnostics)
+        .expect("read the project")
+        .expect("the project exists");
+    let configured = configuration::configure(&root, &model.modules, &mut diagnostics);
+    assert!(diagnostics.is_empty());
+
+    let selected = run_toolchain(&root, &["show", "settings", "-m", "b"]);
+    assert_eq!(selected.status.code(), Some(0));
+    assert_eq!(selected.stderr, b"");
+    assert_eq!(
+        selected.stdout,
+        show::modules_settings(&model.modules, &configured, |module| module.name == "b")
+            .into_bytes()
+    );
+
+    let missing = run_toolchain(&root, &["show", "settings"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(missing.stdout, b"");
+    assert_eq!(
+        missing.stderr,
+        b"ERROR: Please specify the module(s) to inspect with -m, or use --all-modules to inspect all modules\n"
+    );
 }
