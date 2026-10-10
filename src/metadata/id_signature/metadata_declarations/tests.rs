@@ -81,6 +81,8 @@ fn function(
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        return_value_status: Default::default(),
+        contract: None,
     }
 }
 
@@ -107,6 +109,7 @@ fn member(name: &str, params: Vec<KotlinType>, is_property: bool) -> KotlinMembe
         constant: None,
         vararg: None,
         annotations: Vec::new(),
+        contract: None,
     }
 }
 
@@ -244,6 +247,7 @@ fn an_extension_property_with_a_type_parameter() {
         context_kinds: Vec::new(),
         constant: None,
         annotations: Vec::new(),
+        return_value_status: Default::default(),
     };
     let signature =
         package_property_signature(top_level(&kotlin_collections), &last_index).unwrap();
@@ -330,6 +334,7 @@ fn an_extension_property_without_type_parameters() {
         context_kinds: Vec::new(),
         constant: None,
         annotations: Vec::new(),
+        return_value_status: Default::default(),
     };
     let signature = package_property_signature(top_level(&kotlin_text), &last_index).unwrap();
     assert_eq!(member_id(&signature), 1_266_685_057_648_611_082);
@@ -356,6 +361,7 @@ fn a_getter_is_a_function_with_the_property_receiver_and_type_parameters() {
         context_kinds: Vec::new(),
         constant: None,
         annotations: Vec::new(),
+        return_value_status: Default::default(),
     };
     let getter = package_property_accessor_signature(
         top_level(&kotlin_collections),

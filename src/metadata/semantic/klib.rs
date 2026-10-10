@@ -848,56 +848,6 @@ struct SemanticValueParameter {
     is_vararg: bool,
 }
 
-fn validate_contract_expression(
-    body: &[u8],
-    tables: &SemanticTables<'_>,
-    type_parameters: &TypeParameterScope,
-) -> Result<(), PackageFragmentDecodeError> {
-    let mut cursor = Cursor::new(body, 0);
-    let mut inline_types = Vec::new();
-    let mut type_ids = Vec::new();
-    while !cursor.at_end() {
-        let (number, wire) = field(&mut cursor, "contract expression")?;
-        match (number, wire) {
-            (4, 2) => inline_types.push(cursor.length_delimited("contract is-instance type")?.0),
-            (5, 0) => type_ids.push(cursor.varint("contract is-instance type id")?),
-            (6 | 7, 2) => {
-                let nested = cursor.length_delimited("nested contract expression")?.0;
-                validate_contract_expression(nested, tables, type_parameters)?;
-            }
-            (_, wire) => cursor.skip(wire, "contract expression")?,
-        }
-    }
-    match (inline_types.as_slice(), type_ids.as_slice()) {
-        ([], []) => Ok(()),
-        ([body], []) => tables
-            .ty(body, type_parameters, 0, "contract is-instance type")
-            .map(|_| ()),
-        ([], [id]) => tables
-            .ty_by_id(*id, type_parameters, 0, "contract is-instance type")
-            .map(|_| ()),
-        _ => Err(semantic_error(
-            "contract expression has duplicate or conflicting is-instance types",
-        )),
-    }
-}
-
-fn validate_contract(
-    body: &[u8],
-    tables: &SemanticTables<'_>,
-    type_parameters: &TypeParameterScope,
-) -> Result<(), PackageFragmentDecodeError> {
-    for effect in message_bodies(body, 1, "contract")? {
-        for argument in message_bodies(effect, 2, "contract effect")? {
-            validate_contract_expression(argument, tables, type_parameters)?;
-        }
-        for conclusion in message_bodies(effect, 3, "contract effect")? {
-            validate_contract_expression(conclusion, tables, type_parameters)?;
-        }
-    }
-    Ok(())
-}
-
 fn semantic_value_parameter(
     body: &[u8],
     tables: &SemanticTables<'_>,
@@ -1123,7 +1073,7 @@ fn semantic_function(
     if contracts.len() > 1 {
         return Err(semantic_error("duplicate function contract"));
     }
-    if let Some(contract) = contracts.first() {
+    let contract = if let Some(contract) = contracts.first() {
         // Contract type ids address the nearest declared table. A function-local table wins when
         // present; otherwise the ids address the containing class or package table. Kotlin/Native's
         // `kotlin.test` fragment relies on the latter shape for all of its declared contracts.
@@ -1137,8 +1087,27 @@ fn semantic_function(
             types,
             first_nullable,
         };
-        validate_contract(contract, &contract_tables, &type_parameters)?;
-    }
+        let bounds = metadata::semantic_bounds(&formals, &std::collections::HashMap::new());
+        let mut resolve_type = |reference| {
+            use crate::metadata::contract_decoder::ContractTypeRef;
+            let decoded = match reference {
+                ContractTypeRef::Inline(body) => {
+                    contract_tables.ty(body, &type_parameters, 0, "contract is-instance type")?
+                }
+                ContractTypeRef::Table(id) => contract_tables.ty_by_id(
+                    id,
+                    &type_parameters,
+                    0,
+                    "contract is-instance type",
+                )?,
+            };
+            Ok(metadata::semantic_ty(&decoded, &bounds))
+        };
+        crate::metadata::contract_decoder::decode_contract(contract, &mut resolve_type)?
+            .map(std::sync::Arc::new)
+    } else {
+        None
+    };
     let mut extras = Cursor::new(body, 0);
     while !extras.at_end() {
         let (number, wire) = field(&mut extras, "function declaration")?;
@@ -1291,6 +1260,7 @@ fn semantic_function(
         param_defaults: param_defaults[param_defaults.len() - written..].to_vec(),
         vararg: vararg.and_then(|index| index.checked_sub(leading)),
         annotations: annotations.clone(),
+        contract: contract.clone(),
     };
     let top = top_level.then_some(metadata::KotlinFunction {
         name,
@@ -1315,6 +1285,8 @@ fn semantic_function(
         context_count: context_types.len(),
         context_kinds,
         annotations,
+        return_value_status: function.return_value_status,
+        contract,
     });
     Ok((member, top))
 }
@@ -1539,6 +1511,7 @@ fn semantic_property(
         param_defaults: Vec::new(),
         vararg: None,
         annotations: annotations.clone(),
+        contract: None,
     };
     let property = top_level.then_some(metadata::KotlinProperty {
         name,
@@ -1558,6 +1531,7 @@ fn semantic_property(
         context_kinds,
         constant,
         annotations,
+        return_value_status: member.return_value_status,
     });
     Ok((member, property))
 }
@@ -2380,6 +2354,7 @@ mod tests {
         let package_table = type_table(&[class_type(1)], None);
         let contract_table = type_table(&[class_type(2)], None);
         let mut expression = Vec::new();
+        int_field(&mut expression, 2, 1);
         int_field(&mut expression, 5, 0);
         let mut effect = Vec::new();
         bytes_field(&mut effect, 3, &expression);
@@ -2396,6 +2371,21 @@ mod tests {
 
         let package = parse_package_fragment_checked(&bytes).expect("valid isolated tables");
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/Unit"));
+        assert_eq!(
+            package.functions[0].contract.as_deref(),
+            Some(&crate::contracts::Contract {
+                effects: vec![crate::contracts::Effect::ConditionalReturns {
+                    returns: crate::contracts::ReturnsValue::Any,
+                    conclusion: crate::contracts::Condition::IsType {
+                        param: crate::contracts::ParamRef::Param(0),
+                        ty: crate::contracts::ConditionType::Metadata(crate::types::Ty::obj(
+                            "kotlin/String",
+                        )),
+                        negated: false,
+                    },
+                }],
+            })
+        );
     }
 
     #[test]
@@ -2403,6 +2393,7 @@ mod tests {
         let (strings, qnames) = kotlin_types(&["Unit", "String"]);
         let package_table = type_table(&[class_type(1), class_type(2)], None);
         let mut expression = Vec::new();
+        int_field(&mut expression, 2, 1);
         int_field(&mut expression, 5, 1);
         let mut effect = Vec::new();
         bytes_field(&mut effect, 3, &expression);
@@ -2420,6 +2411,21 @@ mod tests {
             .expect("contract type id must resolve against the package table");
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/Unit"));
+        assert_eq!(
+            package.functions[0].contract.as_deref(),
+            Some(&crate::contracts::Contract {
+                effects: vec![crate::contracts::Effect::ConditionalReturns {
+                    returns: crate::contracts::ReturnsValue::Any,
+                    conclusion: crate::contracts::Condition::IsType {
+                        param: crate::contracts::ParamRef::Param(0),
+                        ty: crate::contracts::ConditionType::Metadata(crate::types::Ty::obj(
+                            "kotlin/String",
+                        )),
+                        negated: false,
+                    },
+                }],
+            })
+        );
     }
 
     #[test]

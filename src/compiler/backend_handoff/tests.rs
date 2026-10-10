@@ -736,6 +736,8 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        return_value_status: Default::default(),
+        contract: None,
     };
     let provider = crate::klib_libraries::KlibLibraries::from_packages(vec![(
         vec!["kotlin".to_string(), "io".to_string()],

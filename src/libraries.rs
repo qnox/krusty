@@ -64,6 +64,7 @@ pub(crate) use metadata_normalization::{
     function_generic_sig, function_parameter_identities, only_input_type_formals, package_function,
     package_property, property_parameter_identities, reified_type_parameter_ordinals,
     FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
+    TypeParameterIdentities,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

@@ -166,6 +166,7 @@ pub struct KotlinMember {
     pub vararg: Option<usize>,
     /// Qualified identities of annotations declared on this member.
     pub annotations: Vec<crate::types::TypeName>,
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 pub struct KotlinFunction {
@@ -194,6 +195,8 @@ pub struct KotlinFunction {
     pub context_kinds: Vec<crate::types::ContextParameterKind>,
     /// Qualified identities of annotations declared on this function.
     pub annotations: Vec<crate::types::TypeName>,
+    pub return_value_status: crate::types::ReturnValueStatus,
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 #[derive(Default)]
@@ -233,6 +236,7 @@ pub struct KotlinProperty {
     pub constant: Option<crate::libraries::LibConst>,
     /// Qualified identities of annotations declared on this property.
     pub annotations: Vec<crate::types::TypeName>,
+    pub return_value_status: crate::types::ReturnValueStatus,
 }
 
 pub struct KotlinConstructor {
@@ -538,6 +542,24 @@ fn source_suspend_function_type(ty: Ty) -> Ty {
 
 /// Convert a decoded Kotlin metadata type without consulting a target provider.
 pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<KotlinTypeParameterId, Ty>) -> Ty {
+    semantic_ty_with_identity_map(ty, bounds, None)
+}
+
+/// Convert a decoded type while replacing metadata parameter IDs with declaration-owned semantic
+/// identities. Providers establish those identities once they know the exact external declaration.
+pub fn semantic_ty_with_identities(
+    ty: &KotlinType,
+    bounds: &HashMap<KotlinTypeParameterId, Ty>,
+    identities: &HashMap<KotlinTypeParameterId, &'static str>,
+) -> Ty {
+    semantic_ty_with_identity_map(ty, bounds, Some(identities))
+}
+
+fn semantic_ty_with_identity_map(
+    ty: &KotlinType,
+    bounds: &HashMap<KotlinTypeParameterId, Ty>,
+    identities: Option<&HashMap<KotlinTypeParameterId, &'static str>>,
+) -> Ty {
     let semantic = match ty {
         KotlinType::Class {
             internal,
@@ -547,7 +569,7 @@ pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<KotlinTypeParameterId, Ty>)
         } => {
             let args = args
                 .iter()
-                .map(|argument| semantic_ty(argument, bounds))
+                .map(|argument| semantic_ty_with_identity_map(argument, bounds, identities))
                 .collect();
             kotlin_type(internal, args, *shape)
         }
@@ -556,10 +578,21 @@ pub fn semantic_ty(ty: &KotlinType, bounds: &HashMap<KotlinTypeParameterId, Ty>)
                 .get(id)
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            Ty::ty_param(name, bound)
+            let identity = match identities {
+                Some(identities) => identities
+                    .get(id)
+                    .copied()
+                    .expect("a provider-normalized type parameter has a declared identity"),
+                None => name,
+            };
+            Ty::ty_param(identity, bound)
         }
-        KotlinType::InProjection(inner) => Ty::in_projection(semantic_ty(inner, bounds)),
-        KotlinType::OutProjection(inner) => Ty::out_projection(semantic_ty(inner, bounds)),
+        KotlinType::InProjection(inner) => {
+            Ty::in_projection(semantic_ty_with_identity_map(inner, bounds, identities))
+        }
+        KotlinType::OutProjection(inner) => {
+            Ty::out_projection(semantic_ty_with_identity_map(inner, bounds, identities))
+        }
         KotlinType::Star => Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
     };
     if ty.nullable() {
@@ -574,6 +607,22 @@ pub fn semantic_bounds(
     params: &[KotlinTypeParameter],
     inherited: &HashMap<KotlinTypeParameterId, Ty>,
 ) -> HashMap<KotlinTypeParameterId, Ty> {
+    semantic_bounds_with_identity_map(params, inherited, None)
+}
+
+pub fn semantic_bounds_with_identities(
+    params: &[KotlinTypeParameter],
+    inherited: &HashMap<KotlinTypeParameterId, Ty>,
+    identities: &HashMap<KotlinTypeParameterId, &'static str>,
+) -> HashMap<KotlinTypeParameterId, Ty> {
+    semantic_bounds_with_identity_map(params, inherited, Some(identities))
+}
+
+fn semantic_bounds_with_identity_map(
+    params: &[KotlinTypeParameter],
+    inherited: &HashMap<KotlinTypeParameterId, Ty>,
+    identities: Option<&HashMap<KotlinTypeParameterId, &'static str>>,
+) -> HashMap<KotlinTypeParameterId, Ty> {
     let mut bounds = inherited.clone();
     for parameter in params {
         bounds.insert(parameter.id, Ty::nullable(Ty::obj("kotlin/Any")));
@@ -582,7 +631,7 @@ pub fn semantic_bounds(
         let bound = parameter
             .bounds
             .first()
-            .map(|bound| semantic_ty(bound, &bounds))
+            .map(|bound| semantic_ty_with_identity_map(bound, &bounds, identities))
             .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
         bounds.insert(parameter.id, bound);
     }
@@ -723,6 +772,47 @@ mod tests {
         assert_eq!(
             semantic_ty(&parameter(inner), &bounds).ty_param_bound(),
             Some(Ty::obj("kotlin/Number"))
+        );
+    }
+
+    #[test]
+    fn dependent_bounds_use_the_callers_type_parameter_identity_mode() {
+        let first = KotlinTypeParameterId(11);
+        let second = KotlinTypeParameterId(12);
+        let parameters = [
+            KotlinTypeParameter {
+                id: first,
+                name: "A".to_owned(),
+                bounds: Vec::new(),
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            },
+            KotlinTypeParameter {
+                id: second,
+                name: "B".to_owned(),
+                bounds: vec![KotlinType::Param {
+                    name: "A".to_owned(),
+                    id: first,
+                    nullable: false,
+                }],
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            },
+        ];
+
+        let source = semantic_bounds(&parameters, &HashMap::new());
+        assert_eq!(
+            source[&second],
+            Ty::ty_param("A", Ty::nullable(Ty::obj("kotlin/Any")))
+        );
+
+        let identities = HashMap::from([(first, "opaque-A"), (second, "opaque-B")]);
+        let provider = semantic_bounds_with_identities(&parameters, &HashMap::new(), &identities);
+        assert_eq!(
+            provider[&second],
+            Ty::ty_param("opaque-A", Ty::nullable(Ty::obj("kotlin/Any")))
         );
     }
 }

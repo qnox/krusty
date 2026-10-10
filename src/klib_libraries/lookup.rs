@@ -63,7 +63,12 @@ pub(super) fn declared_symbols(
     let overloads = inventory
         .functions(package, name)
         .map(|signed| {
-            let mut function = package_function(package, &signed.declaration, &signed.parameters);
+            let mut function = package_function(
+                package,
+                &signed.declaration,
+                &signed.parameters,
+                &signed.type_parameters,
+            );
             // A KLIB declaration's implementation is its serialized IR body. Do not replace it
             // with either a compiler intrinsic or an implementation role inferred from a stdlib
             // signature. A genuinely bodyless ABI declaration needs an explicit availability
@@ -80,8 +85,13 @@ pub(super) fn declared_symbols(
                 getter: signed.getter.name(),
                 setter: signed.setter.as_ref().map(|setter| setter.name()),
             };
-            let mut property =
-                package_property(package, &signed.declaration, &signed.parameters, accessors);
+            let mut property = package_property(
+                package,
+                &signed.declaration,
+                &signed.parameters,
+                &signed.type_parameters,
+                accessors,
+            );
             // As for functions, the implementation is the serialized IR body of each accessor.
             identities.assign_property(signed, &mut property);
             property

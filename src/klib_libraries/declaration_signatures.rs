@@ -2,13 +2,34 @@
 
 use crate::libraries::{
     function_parameter_identities, property_parameter_identities, FunctionParameterIdentities,
-    PropertyParameterIdentities,
+    PropertyParameterIdentities, TypeParameterIdentities,
 };
 use crate::metadata::id_signature::{
     package_function_signature, package_property_accessor_signature, package_property_signature,
     KlibAccessorIdSignature, KlibPublicIdSignature, MetadataAccessor, MetadataContainer,
 };
 use crate::metadata::semantic::{KotlinFunction, KotlinProperty};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+static TYPE_PARAMETER_IDENTITIES: OnceLock<
+    Mutex<HashMap<(KlibPublicIdSignature, usize), &'static str>>,
+> = OnceLock::new();
+
+fn type_parameter_identities(
+    signature: &KlibPublicIdSignature,
+    formals: &[crate::metadata::semantic::KotlinTypeParameter],
+) -> TypeParameterIdentities {
+    let mut identities = TYPE_PARAMETER_IDENTITIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    TypeParameterIdentities::from_provider(formals, |ordinal, parameter| {
+        *identities
+            .entry((signature.clone(), ordinal))
+            .or_insert_with(|| crate::types::metadata_type_parameter(&parameter.name))
+    })
+}
 
 /// A top-level function joined with the identity its library serialized it under and its
 /// validated parameter identities.
@@ -16,6 +37,7 @@ pub(super) struct SignedFunction {
     pub(super) declaration: KotlinFunction,
     pub(super) signature: KlibPublicIdSignature,
     pub(super) parameters: FunctionParameterIdentities,
+    pub(super) type_parameters: TypeParameterIdentities,
 }
 
 /// A top-level property joined with the identities its library serialized it and its accessors
@@ -27,6 +49,7 @@ pub(super) struct SignedProperty {
     /// Present exactly for a `var`.
     pub(super) setter: Option<KlibAccessorIdSignature>,
     pub(super) parameters: PropertyParameterIdentities,
+    pub(super) type_parameters: TypeParameterIdentities,
 }
 
 /// A declaration the provider cannot publish, because its identity or its parameter identities
@@ -82,10 +105,12 @@ pub(super) fn sign_package_function(
         .map_err(|error| unsignable(package, &declaration.name, error))?;
     let parameters = function_parameter_identities(&declaration)
         .map_err(|error| unsignable(package, &declaration.name, error))?;
+    let type_parameters = type_parameter_identities(&signature, &declaration.formals);
     Ok(SignedFunction {
         declaration,
         signature,
         parameters,
+        type_parameters,
     })
 }
 
@@ -114,6 +139,7 @@ pub(super) fn sign_package_property(
         .transpose()
         .map_err(|error| fail(&error))?;
     let parameters = property_parameter_identities(&declaration).map_err(|error| fail(&error))?;
+    let type_parameters = type_parameter_identities(&signature, &declaration.formals);
     // A constant read is folded at its use site, so a `const val` without its value would leave
     // the read with nothing to fold.
     if declaration.is_const && declaration.constant.is_none() {
@@ -128,6 +154,7 @@ pub(super) fn sign_package_property(
         getter,
         setter,
         parameters,
+        type_parameters,
     })
 }
 

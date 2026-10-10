@@ -2,9 +2,10 @@
 
 use super::parameter_identities::{FunctionParameterIdentities, PropertyParameterIdentities};
 use super::type_signatures::{
-    function_generic_sig, only_input_type_formals, property_generic_sig,
-    reified_type_parameter_ordinals,
+    function_generic_sig_with_identities, only_input_type_formals_with_identities,
+    property_generic_sig_with_identities, reified_type_parameter_ordinals,
 };
+use super::TypeParameterIdentities;
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, InlineKind, LibraryCallable, LibraryConst, PropKind,
     PropertyInfo, PropertyProducer, PropertyReadStability,
@@ -28,8 +29,9 @@ pub(crate) fn package_function(
     package: TypeName,
     function: &KotlinFunction,
     parameters: &FunctionParameterIdentities,
+    type_parameters: &TypeParameterIdentities,
 ) -> FunctionInfo {
-    let generic_sig = function_generic_sig(function);
+    let generic_sig = function_generic_sig_with_identities(function, type_parameters);
     let (contexts, values) = generic_sig
         .params
         .split_at_checked(function.context_count)
@@ -65,6 +67,10 @@ pub(crate) fn package_function(
     callable.reified_type_parameter_ordinals = reified.clone().into_boxed_slice();
     callable.context_count = function.context_count;
     callable.annotations = function.annotations.clone();
+    callable.contract = function
+        .contract
+        .as_ref()
+        .map(|contract| type_parameters.normalize_contract(contract));
 
     let mut normalized = FunctionInfo::plain(kind, generic_sig.receiver, callable);
     normalized.call_sig = CallSig::metadata_member(
@@ -74,7 +80,8 @@ pub(crate) fn package_function(
         function.vararg,
     );
     normalized.call_sig.parameter_identities = parameters.arguments.clone();
-    normalized.call_sig.only_input_type_formals = only_input_type_formals(&function.formals);
+    normalized.call_sig.only_input_type_formals =
+        only_input_type_formals_with_identities(&function.formals, type_parameters);
     normalized.call_sig.reified_type_parameter_ordinals = reified;
     normalized.generic_sig = Some(generic_sig);
     normalized.context_count = function.context_count;
@@ -88,7 +95,7 @@ pub(crate) fn package_function(
         is_abstract: false,
         is_final: true,
         inherited_by_delegation: false,
-        return_value_status: None,
+        return_value_status: Some(function.return_value_status),
     };
     normalized
 }
@@ -114,9 +121,10 @@ pub(crate) fn package_property(
     package: TypeName,
     property: &KotlinProperty,
     parameters: &PropertyParameterIdentities,
+    type_parameters: &TypeParameterIdentities,
     accessors: PropertyAccessorNames<'_>,
 ) -> PropertyInfo {
-    let generic_sig = property_generic_sig(property);
+    let generic_sig = property_generic_sig_with_identities(property, type_parameters);
     let receiver = generic_sig.receiver;
     let ty = generic_sig.ret;
     let getter_params: Vec<Ty> = generic_sig
@@ -198,6 +206,6 @@ pub(crate) fn package_property(
         producer: PropertyProducer::KotlinAccessor,
         // A dependency property's reads are never stable for smart casts.
         read_stability: PropertyReadStability::Unstable,
-        return_value_status: None,
+        return_value_status: Some(property.return_value_status),
     }
 }

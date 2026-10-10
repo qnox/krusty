@@ -6,6 +6,7 @@ pub mod annotations;
 pub use annotations::{AccessorMetadataAnnotations, MetadataAnnotations, NO_ANNOTATIONS};
 pub mod builder;
 pub mod class_builder;
+pub(crate) mod contract_decoder;
 pub(crate) mod declaration_records;
 pub(crate) mod decode;
 pub mod encoding;

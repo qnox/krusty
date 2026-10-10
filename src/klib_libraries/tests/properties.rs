@@ -36,6 +36,7 @@ fn property(name: &str, receiver: Option<KotlinType>, ty: KotlinType) -> KotlinP
         context_kinds: Vec::new(),
         constant: None,
         annotations: Vec::new(),
+        return_value_status: Default::default(),
     }
 }
 
@@ -204,6 +205,18 @@ fn a_val_resolves_with_its_semantic_type_and_realizes_its_getter() {
 }
 
 #[test]
+fn a_top_level_property_publishes_its_return_value_status() {
+    let mut declaration = property("answer", None, class("kotlin/Int", false));
+    declaration.return_value_status = crate::types::ReturnValueStatus::ExplicitlyIgnorable;
+    let libraries = libraries_of(&["p"], vec![declaration]);
+    let answer = single_property(&libraries, "p", "answer");
+    assert_eq!(
+        answer.return_value_status,
+        Some(crate::types::ReturnValueStatus::ExplicitlyIgnorable)
+    );
+}
+
+#[test]
 fn a_var_realizes_its_getter_and_setter_signatures() {
     let package = ["fixture", "signatures"];
     let libraries = libraries_of(&package, vec![counter()]);
@@ -275,7 +288,15 @@ fn an_extension_property_takes_its_receiver_as_an_accessor_parameter() {
         Some(type_name("kotlin/collections/List"))
     );
     assert_eq!(last_index.ty, Ty::Int);
-    assert_eq!(last_index.formals, ["T"]);
+    assert_eq!(
+        last_index
+            .formals
+            .iter()
+            .map(|formal| crate::types::type_parameter_source_name(formal))
+            .collect::<Vec<_>>(),
+        ["T"]
+    );
+    assert_ne!(last_index.formals, ["T"]);
     assert_eq!(last_index.getter.params, vec![list]);
     assert_eq!(last_index.getter.source_receiver, Some(list));
     let generic = last_index
@@ -283,7 +304,7 @@ fn an_extension_property_takes_its_receiver_as_an_accessor_parameter() {
         .generic_sig
         .as_deref()
         .expect("a generic property's getter carries its signature");
-    assert_eq!(generic.formals, ["T"]);
+    assert_eq!(generic.formals, last_index.formals);
     assert_eq!(generic.receiver, Some(list));
     assert!(generic.params.is_empty());
     assert_eq!(generic.ret, Ty::Int);
