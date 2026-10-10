@@ -2194,6 +2194,12 @@ pub struct PropertyInfo {
     /// Providers publish the semantic fact at their boundary; consumers must not rediscover it
     /// from an origin, owner, field shape, or spelling.
     pub metadata_constant_read: bool,
+    /// The declaration remains available to override matching but is absent from ordinary property
+    /// lookup because it is `@Deprecated(level = HIDDEN)`.
+    pub deprecated_hidden: bool,
+    /// The property cannot be overridden. Providers publish source modality rather than requiring
+    /// override planning to infer it from an accessor or target representation.
+    pub is_final: bool,
     /// The property's Kotlin visibility.
     pub visibility: Visibility,
     /// The declaring type's internal name — for the resolver's access check (`protected`/`private`).

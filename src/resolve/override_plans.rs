@@ -251,7 +251,7 @@ fn declared_properties(
     } else {
         PropKind::Member
     };
-    crate::symbol_resolver::declared_member_callables(source, owner, name)
+    crate::symbol_resolver::declared_member_declarations(source, owner, name)
         .into_parts()
         .1
         .overloads
@@ -261,6 +261,18 @@ fn declared_properties(
                 && property.context_count == 0
                 && property.visibility != Visibility::Private
         })
+        .collect()
+}
+
+fn overridable_declared_properties(
+    source: &dyn crate::symbol_source::SymbolSource,
+    owner: Ty,
+    name: &str,
+    member_extensions: bool,
+) -> Vec<PropertyInfo> {
+    declared_properties(source, owner, name, member_extensions)
+        .into_iter()
+        .filter(|property| !property.is_final)
         .collect()
 }
 
@@ -838,7 +850,7 @@ fn append_property_override_edges(
             .classifier(supertype.classifier)
             .is_some_and(|classifier| classifier.is_interface());
         let raw = declarations_by_target(
-            declared_properties(
+            overridable_declared_properties(
                 source,
                 Ty::obj_name(supertype.classifier),
                 name,
@@ -846,7 +858,8 @@ fn append_property_override_edges(
             ),
             |property| target(index, property),
         );
-        for applied in declared_properties(source, supertype.applied.get(), name, member_extension)
+        for applied in
+            overridable_declared_properties(source, supertype.applied.get(), name, member_extension)
         {
             let Some(overridden) = target(index, &applied) else {
                 continue;

@@ -338,7 +338,7 @@ pub(crate) fn specialize_member_function(
     }
 }
 
-/// All exact declarations in one classifier slot, including HIDDEN-deprecated functions used by
+/// All exact declarations in one classifier slot, including HIDDEN-deprecated callables used by
 /// override matching. This is a declaration-model query, not a call-candidate query.
 pub(crate) fn declared_member_declarations(
     source: &dyn SymbolSource,
@@ -361,11 +361,14 @@ pub(crate) fn declared_member_callables(
     receiver: Ty,
     name: &str,
 ) -> Callables {
-    let (mut functions, properties) =
+    let (mut functions, mut properties) =
         declared_member_declarations(source, receiver, name).into_parts();
     functions
         .overloads
         .retain(|function| !function.flags.deprecated_hidden);
+    properties
+        .overloads
+        .retain(|property| !property.deprecated_hidden);
     Callables::from_parts(functions, properties)
 }
 
@@ -423,7 +426,7 @@ pub(crate) fn members_in_hierarchy(
     members_in_hierarchy_for(source, receiver, name, HierarchyMemberView::CallCandidates)
 }
 
-/// All declarations in an applied receiver hierarchy, including HIDDEN-deprecated functions.
+/// All declarations in an applied receiver hierarchy, including HIDDEN-deprecated callables.
 /// Override validation consumes declaration semantics rather than the call-candidate view.
 pub(crate) fn member_declarations_in_hierarchy(
     source: &dyn SymbolSource,
@@ -484,6 +487,9 @@ fn members_in_hierarchy_for(
             current_functions
                 .overloads
                 .retain(|function| !function.flags.deprecated_hidden);
+            current_properties
+                .overloads
+                .retain(|property| !property.deprecated_hidden);
         }
         if depth > 0 {
             // Private declarations belong only to their declaring classifier. They are not an

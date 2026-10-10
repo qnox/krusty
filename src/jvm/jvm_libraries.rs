@@ -933,6 +933,8 @@ impl JvmLibraries {
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
                 metadata_constant_read: false,
+                deprecated_hidden: property.deprecated_hidden,
+                is_final: property.is_final,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -2380,6 +2382,12 @@ impl JvmLibraries {
                 })
                 .map(|declaration| declaration.kotlin_name.clone())
                 .collect::<std::collections::HashSet<_>>();
+            hidden_deprecated_callables.extend(
+                metadata::class_properties(&ci)
+                    .iter()
+                    .filter(|property| property.deprecated_hidden)
+                    .map(|property| property.name.clone()),
+            );
             if kotlin_scope_is_authoritative {
                 hidden_deprecated_callables.extend(
                     members
@@ -3420,6 +3428,8 @@ impl JvmLibraries {
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
                         metadata_constant_read: false,
+                        deprecated_hidden: mp.deprecated_hidden,
+                        is_final: mp.is_final,
                         visibility: mp.visibility,
                         owner: cn,
                         receiver_rank: 0,
@@ -3580,6 +3590,8 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
+                    deprecated_hidden: mp.deprecated_hidden,
+                    is_final: mp.is_final,
                     visibility: mp.visibility,
                     owner: cn,
                     receiver_rank: 0,
@@ -3697,6 +3709,8 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
+                    deprecated_hidden: false,
+                    is_final: false,
                     visibility,
                     owner: cn,
                     receiver_rank: 0,
@@ -3795,6 +3809,8 @@ impl JvmLibraries {
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
                         metadata_constant_read: false,
+                        deprecated_hidden: false,
+                        is_final: false,
                         visibility,
                         owner,
                         receiver_rank: 0,
@@ -4370,6 +4386,7 @@ impl JvmLibraries {
                 );
             }
         }
+        props.retain(|property| !property.deprecated_hidden);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {
             (false, false) => Callables::Both {
                 functions: FunctionSet { overloads },
@@ -5401,6 +5418,8 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
+                    deprecated_hidden: false,
+                    is_final: false,
                     visibility: function.visibility,
                     owner: function.callable.owner,
                     receiver_rank: 0,

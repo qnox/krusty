@@ -1198,6 +1198,12 @@ pub struct MetaProp {
     /// Explicit custom setter value-parameter name. An absent protobuf field denotes the implicit
     /// setter parameter; it must not be reconstructed from a JVM local or accessor spelling.
     pub setter_parameter_name: Option<String>,
+    /// Exact synthetic method carrying property-targeted JVM annotations, when metadata records
+    /// one. This is a declaration edge, not a spelling convention such as `$annotations`.
+    pub annotation_method: Option<MetaJvmMethodSig>,
+    /// `@Deprecated(level = HIDDEN)`: retained for declaration/override matching and excluded from
+    /// ordinary property lookup.
+    pub deprecated_hidden: bool,
     pub visibility: crate::types::Visibility,
     /// Decoded from the current `Property.flags` word only; `old_flags` predates the status bits.
     pub return_value_status: crate::types::ReturnValueStatus,
@@ -1208,6 +1214,9 @@ pub struct MetaProp {
     /// Semantic property modality from metadata. The classfile accessor can still be abstract when
     /// a legacy `$DefaultImpls` method realizes this concrete declaration.
     pub is_abstract: bool,
+    /// The property cannot be overridden. This is Kotlin declaration modality, independent of the
+    /// accessor method's JVM flags.
+    pub is_final: bool,
     /// `var` (has a setter) vs `val`.
     pub is_var: bool,
     /// This exact property is the value class's underlying storage declaration, joined by wire id.
@@ -1507,6 +1516,15 @@ pub fn decode_metadata_within(
         }
         functions
     };
+    let stamp_properties = |mut properties: Vec<MetaProp>| -> Vec<MetaProp> {
+        for property in &mut properties {
+            property.deprecated_hidden = property
+                .annotation_method
+                .as_ref()
+                .is_some_and(|method| realization_hidden(&method.name, Some(method.desc.as_str())));
+        }
+        properties
+    };
     let data_equality_bound = class_flags
         .is_some_and(|flags| flags & (1u64 << 10) != 0)
         .then(|| Ty::obj(this_class));
@@ -1530,7 +1548,8 @@ pub fn decode_metadata_within(
         constructor.deprecated_hidden =
             realization_hidden(constructor.jvm_name, constructor.jvm_desc);
     }
-    let class_properties = decode_properties(&ctx, 10, &scope_tparams, &scope_bounds)?.into();
+    let class_properties =
+        stamp_properties(decode_properties(&ctx, 10, &scope_tparams, &scope_bounds)?).into();
     Ok(KotlinMeta {
         class_visibility: class_flags
             .map(flags_visibility)
@@ -1546,7 +1565,7 @@ pub fn decode_metadata_within(
         class_functions,
         package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[], None)?).into(),
         class_properties,
-        package_properties: decode_properties(&ctx, 4, &[], &[])?.into(),
+        package_properties: stamp_properties(decode_properties(&ctx, 4, &[], &[])?).into(),
         type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
         constructors: constructors.into(),
         is_inner: class_flags.is_some_and(enclosing_type_parameters::is_inner),
