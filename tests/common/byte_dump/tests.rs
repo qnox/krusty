@@ -377,8 +377,8 @@ fn a_published_miss_stores_the_live_invocation_and_a_private_miss_does_not() {
 fn replayed_diagnostics_locate_the_sources_this_invocation_passed() {
     let root = std::env::temp_dir().join(format!("krusty_reroot_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let recorded_dir = root.join("recorded");
-    let current_dir = root.join("current");
+    let recorded_dir = root.join("recorded run");
+    let current_dir = root.join("current run");
     std::fs::create_dir_all(&recorded_dir).unwrap();
     std::fs::create_dir_all(&current_dir).unwrap();
     let recorded_src = recorded_dir.join("F.kt");

@@ -1402,20 +1402,27 @@ fn reroot_source_paths(stderr: &str, args: &[String]) -> String {
     rerooted
 }
 
+/// A location is the absolute source path followed by `:<line>:`; the path itself may contain any
+/// character, including spaces.
 fn reroot_located_line(line: &str, sources: &BTreeMap<String, Option<&str>>) -> String {
     if line.starts_with('/') {
         for (name, path) in sources {
             let Some(path) = path else { continue };
             let suffix = format!("/{name}:");
-            if let Some(end) = line.find(&suffix) {
-                let location = &line[..end + suffix.len() - 1];
-                if !location.contains(char::is_whitespace) {
-                    return format!("{path}{}", &line[location.len()..]);
+            for (start, _) in line.match_indices(&suffix) {
+                let location_end = start + suffix.len() - 1;
+                if starts_with_line_number(&line[location_end + 1..]) {
+                    return format!("{path}{}", &line[location_end..]);
                 }
             }
         }
     }
     line.to_string()
+}
+
+fn starts_with_line_number(rest: &str) -> bool {
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && rest[digits..].starts_with(':')
 }
 
 fn exit_code(bytes: &[u8]) -> i32 {
