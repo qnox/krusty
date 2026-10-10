@@ -284,23 +284,20 @@ impl Checker<'_> {
             })
     }
 
-    /// A postponed receiver-qualified callable reference is candidate evidence once the candidate
-    /// supplies a concrete function shape, exactly as in overload ranking: `replaceFirstChar` has
-    /// `(Char) -> Char` and `(Char) -> CharSequence` overloads, and `Char::uppercase` adapts only
-    /// to the second. Shaping the reference under an overload it cannot fit types it against the
-    /// wrong expectation and reports a reference the selected overload resolves. Any other
-    /// argument, or a shape that still mentions a type parameter, constrains nothing here.
+    /// A postponed callable reference is candidate evidence once the candidate supplies a concrete
+    /// function shape, exactly as in overload ranking: `replaceFirstChar` has `(Char) -> Char` and
+    /// `(Char) -> CharSequence` overloads, and `Char::uppercase` adapts only to the second. The same
+    /// applies to a receiver-less overloaded reference such as `::shout`. Shaping the reference
+    /// under an overload it cannot fit types it against the wrong expectation and reports a
+    /// reference the selected overload resolves. Any other argument, or a shape that still mentions
+    /// a type parameter, constrains nothing here.
     fn postponed_callable_reference_fits(
         &self,
         scope: &CheckerScope<'_>,
         argument: ExprId,
         expected: Option<Ty>,
     ) -> bool {
-        let Expr::CallableRef {
-            receiver: Some(receiver),
-            name,
-        } = self.file.expr(argument)
-        else {
+        let Expr::CallableRef { receiver, name } = self.file.expr(argument) else {
             return true;
         };
         let Some(expected) =
@@ -314,13 +311,18 @@ impl Checker<'_> {
         if expected.mentions_ty_param() {
             return true;
         }
-        self.receiver_qualified_callable_reference_adapts_to(
-            scope,
-            *receiver,
-            name,
-            expected_function,
+        receiver.map_or_else(
+            || self.callable_reference_adapts_to(scope, argument, expected),
+            |receiver| {
+                self.receiver_qualified_callable_reference_adapts_to(
+                    scope,
+                    receiver,
+                    name,
+                    expected_function,
+                )
+                .unwrap_or(true)
+            },
         )
-        .unwrap_or(true)
     }
 
     pub(super) fn lambda_shape_for_overload(

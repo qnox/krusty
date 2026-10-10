@@ -3298,11 +3298,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an overloaded `Char::shout` (`(): String` and `(times: Int): String`), `text.mapFirst(Char::shout)`
   selects the `CharSequence` overload in kotlinc: only there does a reference overload adapt. Lambda
   planning shapes a postponed argument through the first partially applicable callee overload; a
-  receiver-qualified reference used to count as fitting any function-typed parameter, so the
-  `(Char) -> Char` overload won and the reference was reported unresolved. Planning now asks the
-  read-only reference adaptation query against a concrete expected function type; an expected type
-  that still mentions a type parameter keeps the reference postponed. The same shape is
-  `"ok".replaceFirstChar(Char::uppercase)`. Test: `tests/callable_ref_extension_e2e.rs`
+  callable reference used to count as fitting any function-typed parameter, so the `(Char) -> Char`
+  overload won and the reference was reported unresolved. Planning now asks the read-only reference
+  adaptation query against a concrete expected function type; an expected type that still mentions
+  a type parameter keeps the reference postponed. The same shape occurs with a receiver-less
+  overloaded `::shout` and with `"ok".replaceFirstChar(Char::uppercase)`. Test:
+  `tests/callable_ref_extension_e2e.rs`
   (`an_overloaded_callee_selects_the_shape_its_overloaded_reference_fits`).
 - **A receiver-less classifier callable reference is the `Classifier.name(...)` family.** A Java
   static method, and any other classifier callable with no value receiver, is named by

@@ -202,12 +202,17 @@ const OVERLOADED_CALLEE_REFERENCE: &str = "class Text(val value: String)\n\
     @JvmName(\"mapFirstToText\")\n\
     fun Text.mapFirst(transform: (Char) -> CharSequence): String =\n\
         transform(value[0]).toString() + value.substring(1)\n\
+    @JvmName(\"extensionShout\")\n\
     fun Char.shout(): String = toString() + \"!\"\n\
+    @JvmName(\"extensionShoutTimes\")\n\
     fun Char.shout(times: Int): String = toString().repeat(times)\n\
+    fun shout(value: Char): String = value.toString() + \"!\"\n\
+    fun shout(value: Char, times: Int): String = value.toString().repeat(times)\n\
     fun box(): String {\n\
         val local = Text(\"ok\").mapFirst(Char::shout)\n\
+        val topLevel = Text(\"ok\").mapFirst(::shout)\n\
         val library = \"ok\".replaceFirstChar(Char::uppercase)\n\
-        return if (local == \"o!k\" && library == \"Ok\") \"OK\" else \"FAIL\"\n\
+        return if (local == \"o!k\" && topLevel == \"o!k\" && library == \"Ok\") \"OK\" else \"FAIL\"\n\
     }\n";
 
 #[test]
