@@ -1,19 +1,9 @@
 name: macos compile bench
 
 # Wall-clock compile of the kmp-ios-benchmark generated sources on an Apple Silicon
-# runner: krusty, kotlinc 2.4.20, and the image's swiftc. The job runs when this
-# workflow or the timing script changes, and on a manual dispatch.
+# runner: krusty, kotlinc 2.4.20, and the image's swiftc. This expensive benchmark is
+# deliberately manual-only: ordinary pushes and pull requests must never schedule it.
 on:
-  pull_request:
-    paths:
-      - .github/workflows/macos-compile-bench.yml
-      - scripts/bench-kmp-ios-compile.py
-      - scripts/tests/test_bench_kmp_ios_compile.py
-      - src/**
-      - crates/**
-      - Cargo.toml
-      - Cargo.lock
-      - build.rs
   workflow_dispatch:
 
 permissions:
