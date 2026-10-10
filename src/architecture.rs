@@ -412,6 +412,20 @@ mod tests {
     /// type engine. It hands out bytes and the packages they belong to; deciding what a declaration
     /// means is the caller's.
     #[test]
+    fn klib_library_provider_is_target_neutral() {
+        // The provider publishes metadata declarations through the common symbol boundary. It
+        // names no target: Native and Wasm consume it alike.
+        assert_allowed_crate_modules(
+            "src/klib_libraries.rs",
+            &["fir", "libraries", "metadata", "symbol_source", "types"],
+        );
+        assert_allowed_crate_modules_in_tree(
+            "src/klib_libraries",
+            &["fir", "libraries", "metadata", "symbol_source", "types"],
+        );
+    }
+
+    #[test]
     fn klib_container_reader_depends_on_no_compiler_module() {
         assert_allowed_crate_modules("src/klib.rs", &[]);
     }

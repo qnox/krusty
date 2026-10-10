@@ -1,0 +1,15 @@
+//! Target-free normalization of decoded Kotlin metadata into the common library model.
+//!
+//! Every provider that reads Kotlin metadata, whatever archive it came from, converts a decoded
+//! declaration here before any target representation is chosen. A target adapter may attach
+//! physical realization facts afterwards; it must not convert the declaration a second way.
+
+mod package_declarations;
+mod parameter_identities;
+mod type_signatures;
+
+pub(crate) use package_declarations::package_function;
+pub(crate) use parameter_identities::{function_parameter_identities, FunctionParameterIdentities};
+pub(crate) use type_signatures::{
+    function_generic_sig, only_input_type_formals, reified_type_parameter_ordinals,
+};

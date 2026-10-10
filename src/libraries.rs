@@ -19,6 +19,7 @@ mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
@@ -29,8 +30,8 @@ pub use annotation_application::{
 };
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, NonvirtualCallRealization, OverriddenCallKind,
-    OverriddenCallRealization,
+    ExternalPropertyRealization, KlibDeclarationSignature, NonvirtualCallRealization,
+    OverriddenCallKind, OverriddenCallRealization,
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
@@ -58,6 +59,10 @@ pub use inline_body::{
     InlineBodyRecovery, InlineBodySource, InlineBodyValue, InlineCollectionAppend,
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
+};
+pub(crate) use metadata_normalization::{
+    function_generic_sig, function_parameter_identities, only_input_type_formals, package_function,
+    reified_type_parameter_ordinals, FunctionParameterIdentities,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

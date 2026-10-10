@@ -705,6 +705,93 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
 }
 
 #[test]
+fn a_klib_declaration_signature_is_frozen_with_its_callable() {
+    use crate::metadata::semantic::{
+        KotlinFunction, KotlinFunctionTypeShape, KotlinPackage, KotlinType,
+    };
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+
+    let println = KotlinFunction {
+        name: "println".to_string(),
+        receiver: None,
+        params: vec![KotlinType::Class {
+            internal: "kotlin/Any".to_string(),
+            args: Vec::new(),
+            nullable: true,
+            shape: KotlinFunctionTypeShape::default(),
+        }],
+        ret: KotlinType::class("kotlin/Unit"),
+        formals: Vec::new(),
+        param_names: vec!["message".to_string()],
+        param_defaults: vec![false],
+        vararg: None,
+        visibility: crate::types::Visibility::Public,
+        is_inline: false,
+        has_reified_type_params: false,
+        is_suspend: false,
+        is_operator: false,
+        is_infix: false,
+        is_expect: false,
+        is_static: false,
+        context_count: 0,
+        context_kinds: Vec::new(),
+        annotations: Vec::new(),
+    };
+    let provider = crate::klib_libraries::KlibLibraries::from_packages(vec![(
+        vec!["kotlin".to_string(), "io".to_string()],
+        KotlinPackage {
+            functions: vec![println],
+            ..KotlinPackage::default()
+        },
+    )])
+    .expect("an in-memory kotlin.io package is signable");
+    let target = provider
+        .symbols(SymbolNamespace::Package(type_name("kotlin/io")), "println")
+        .callables
+        .functions()[0]
+        .callable
+        .external_identity
+        .expect("a KLIB function carries its provider identity");
+    let mut ir = crate::ir::IrFile::default();
+    ir.add_expr(crate::ir::IrExpr::Call {
+        callee: crate::ir::Callee::External {
+            target,
+            default_provider: None,
+            params: vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+            ret: Ty::Unit,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        },
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+
+    let facts = CheckedBackendCallables::freeze(&ir, &provider)
+        .expect("the KLIB provider answers for its identity");
+    let fact = facts.callable(target).expect("the selected call is frozen");
+    assert_eq!(
+        fact.declaration_signature,
+        provider
+            .external_callable(target)
+            .expect("realization")
+            .declaration_signature
+    );
+    let Some(crate::libraries::KlibDeclarationSignature::Public(signature)) =
+        &fact.declaration_signature
+    else {
+        panic!("a top-level KLIB function freezes its public signature");
+    };
+    assert_eq!(signature.package().segments(), ["kotlin", "io"]);
+    assert_eq!(signature.declaration().segments(), ["println"]);
+    assert_eq!(
+        signature.member_id().map(|id| id as i64),
+        Some(-3_363_048_611_743_956_379)
+    );
+    assert_eq!(fact.kind, ExternalCallableKind::TopLevel);
+}
+
+#[test]
 fn a_plugin_added_dependency_super_call_is_frozen_once() {
     let mut ir = crate::ir::IrFile::default();
     let mut facts = CheckedBackendCallables::freeze(&ir, &crate::libraries::EmptySymbolSource)
@@ -752,6 +839,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         kind: ExternalCallableKind::Member,
         declaration_owner: None,
         parameter_identities: Box::new([]),
+        declaration_signature: None,
     };
     let queries = std::cell::Cell::new(0);
     facts

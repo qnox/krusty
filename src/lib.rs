@@ -37,6 +37,7 @@ pub mod java_source;
 pub mod js;
 pub mod jvm;
 pub mod klib;
+pub mod klib_libraries;
 pub mod kotlin_version;
 pub mod kt_string;
 pub mod language_settings;

@@ -188,6 +188,10 @@ pub struct KotlinFunction {
     /// (`companion fun C.name`), which KLIB signature mangling marks static.
     pub is_static: bool,
     pub context_count: usize,
+    /// The role of each leading context parameter, one per context parameter: a legacy context
+    /// receiver (`context(String)`), an anonymous context parameter (`context(_: String)`) or a
+    /// named one.
+    pub context_kinds: Vec<crate::types::ContextParameterKind>,
     /// Qualified identities of annotations declared on this function.
     pub annotations: Vec<crate::types::TypeName>,
 }

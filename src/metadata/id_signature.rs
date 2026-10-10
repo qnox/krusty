@@ -139,6 +139,17 @@ impl KlibAccessorIdSignature {
     }
 }
 
+/// The exact serialized-IR identity of one dependency declaration a KLIB provider publishes.
+///
+/// A function, property, or class carries its public signature; a property accessor carries the
+/// accessor signature nested in its property's. This is the join key between a selected metadata
+/// declaration and its decoded IR body; it is never derived from a declaration spelling.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum KlibDeclarationSignature {
+    Public(KlibPublicIdSignature),
+    Accessor(KlibAccessorIdSignature),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KlibIdSignatureDecodeError {
     offset: usize,

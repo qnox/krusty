@@ -68,6 +68,7 @@ impl Classpath {
             kind,
             declaration_owner,
             parameter_identities: Box::new([]),
+            declaration_signature: None,
         });
         self.external_callable_ids
             .borrow_mut()

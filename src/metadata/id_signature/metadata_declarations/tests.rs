@@ -79,6 +79,7 @@ fn function(
         is_expect: false,
         is_static: false,
         context_count: 0,
+        context_kinds: Vec::new(),
         annotations: Vec::new(),
     }
 }
