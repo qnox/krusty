@@ -200,3 +200,175 @@ fn kotlin_codegen_box_wasm_wasi_conformance() {
         target: WasmTarget::Wasi,
     });
 }
+
+/// Run `src` on both Wasm targets after the JVM oracle has answered `OK` for it; every target
+/// must lower it and answer `OK` too. Skips where the lanes themselves cannot run.
+fn expect_wasm_box(src: &str, stem: &str) {
+    super::common::expect_box_ok_with_stdlib(src, stem);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        if lane.unavailable().is_some() {
+            return;
+        }
+        let outcome = lane.compile_and_run(
+            &std::env::temp_dir(),
+            stem,
+            &[(format!("{stem}.kt"), src.to_string())],
+            src,
+        );
+        assert_eq!(outcome, Outcome::Pass, "{stem} on {}", target.name());
+    }
+}
+
+/// Require both Wasm targets to decline `src` with exactly `reason`.
+fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        if lane.unavailable().is_some() {
+            return;
+        }
+        let outcome = lane.compile_and_run(
+            &std::env::temp_dir(),
+            stem,
+            &[(format!("{stem}.kt"), src.to_string())],
+            src,
+        );
+        assert_eq!(
+            outcome,
+            Outcome::Declined(reason.to_string()),
+            "{stem} on {}",
+            target.name()
+        );
+    }
+}
+
+#[test]
+fn wasm_classes_construct_store_fields_and_dispatch_virtually() {
+    expect_wasm_box(
+        r#"
+open class Shape(val sides: Int) {
+    var name: String = "shape"
+    constructor(name: String, sides: Int) : this(sides) { this.name = name }
+    open fun area(): Int = 0
+    fun describe(): Int = area() * 10 + sides
+}
+class Square(val side: Int) : Shape("square", 4) {
+    override fun area(): Int = side * side
+}
+open class Counter {
+    var count = 0
+    open fun step(): Int { count += 1; return count }
+}
+class Doubler : Counter() {
+    override fun step(): Int = super.step() * 2
+}
+fun box(): String {
+    val shape: Shape = Square(3)
+    if (shape.describe() != 94) return "fail: describe ${shape.describe()}"
+    if (shape.name != "square") return "fail: name ${shape.name}"
+    val plain = Shape(5)
+    if (plain.describe() != 5 || plain.name != "shape") return "fail: plain"
+    plain.name = "pentagon"
+    if (plain.name != "pentagon") return "fail: write"
+    val counter: Counter = Doubler()
+    counter.step()
+    if (counter.step() != 4 || counter.count != 2) return "fail: super"
+    return "OK"
+}
+"#,
+        "wasmClassesDispatch",
+    );
+}
+
+#[test]
+fn wasm_type_tests_and_casts_follow_the_class_hierarchy() {
+    expect_wasm_box(
+        r#"
+interface Named { fun name(): String }
+open class Animal
+class Cat : Animal(), Named { override fun name() = "cat" }
+class Rock : Named { override fun name() = "rock" }
+fun nameOf(value: Any?): String {
+    if (value is Named) return value.name()
+    return "none"
+}
+fun box(): String {
+    val cat: Any = Cat()
+    val animal: Animal = Animal()
+    if (cat !is Animal || animal is Cat) return "fail: is"
+    if (nameOf(cat) != "cat" || nameOf(Rock()) != "rock" || nameOf(animal) != "none") return "fail: interface"
+    if (nameOf(null) != "none" || nameOf("text") != "none") return "fail: other"
+    val unknown: Any = Cat()
+    if ((animal as? Cat) != null || (unknown as? Cat) == null) return "fail: as?"
+    val named = cat as Named
+    if (named.name() != "cat") return "fail: as"
+    val nothing: Any? = null
+    if ((nothing as Cat?) != null) return "fail: nullable as"
+    return "OK"
+}
+"#,
+        "wasmClassesTypeTests",
+    );
+}
+
+#[test]
+fn wasm_object_declarations_are_built_once_on_first_use() {
+    expect_wasm_box(
+        r#"
+var built = 0
+object Registry {
+    var size = 0
+    init { built += 1 }
+    fun add(): Int { size += 1; return size }
+}
+fun box(): String {
+    if (built != 0) return "fail: eager"
+    Registry.add()
+    if (Registry.add() != 2 || built != 1) return "fail: ${Registry.size} $built"
+    return "OK"
+}
+"#,
+        "wasmClassesObjects",
+    );
+}
+
+#[test]
+fn wasm_class_equality_and_rendering_use_the_class_own_members() {
+    expect_wasm_box(
+        r#"
+class Point(val x: Int, val y: Int) {
+    override fun equals(other: Any?): Boolean = other is Point && other.x == x && other.y == y
+    override fun hashCode(): Int = x * 31 + y
+    override fun toString(): String = "Point"
+}
+class Plain
+fun box(): String {
+    val a = Point(1, 2)
+    if (a != Point(1, 2) || a == Point(2, 1)) return "fail: equals"
+    val p = Plain()
+    if (p != p || p == Plain()) return "fail: identity"
+    if ("$a" != "Point") return "fail: toString"
+    return "OK"
+}
+"#,
+        "wasmClassesAnyMembers",
+    );
+}
+
+#[test]
+fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
+    expect_wasm_decline(
+        "class Plain\nfun box(): String = if (\"${Plain()}\" == \"\") \"fail\" else \"OK\"",
+        "wasmClassesDefaultToString",
+        "`kotlin.Any.toString`'s own rendering",
+    );
+}
+
+#[test]
+fn wasm_declines_an_enum_class_by_name() {
+    expect_wasm_decline(
+        "enum class Color { RED }\nfun box(): String = \"OK\"",
+        "wasmClassesEnum",
+        "an enum class (`Color`)",
+    );
+}
