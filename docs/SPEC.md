@@ -8419,6 +8419,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A visibility `@Suppress` is a lexical policy over signatures too.** A resolved `kotlin.Suppress`
+  application naming `INVISIBLE_REFERENCE` or `INVISIBLE_MEMBER` holds for the annotated
+  declaration and everything written inside it. Each declaration publishes the policy in force at
+  it (its file's, its lexically enclosing declarations', and its own applications), and a
+  signature scope reads only that declaration-owned fact: every resolver a signature scope builds
+  installs it as part of its access context, so classifier access in a supertype or member type,
+  constructor and function candidate visibility, and member access sites all consume one policy,
+  as the body checker consumes its policy stack. Signature solving is the one diagnostic authority
+  for a supertype reference, including one it resolves while publishing a classifier header; the
+  file-scope fallback no longer rechecks a superclass reference outside its declaration's policy.
+  Like kotlinc, an inaccessible superclass is reported twice: at the supertype reference and at
+  the constructor call's callee name (`: lib.Base(1)` reports at `lib` and at `Base`); the callee
+  report is checked under the class's own lexical policy. The policy relaxes visibility alone: a
+  final superclass is still rejected with kotlinc's FINAL_SUPERTYPE (`this type is final, so it
+  cannot be extended.`, at the superclass reference), and kotlinc's exposed-supertype and
+  exposed-signature checks are independent of it. An annotation whose resolved identity is not
+  `kotlin.Suppress` opens no policy. Tests:
+  `tests/internal_classpath_access_e2e.rs::invisible_reference_suppression_matches_kotlinc_exactly`
+  (`SupertypeSuppressed.kt`, `NestedSuppressed.kt`, `OuterSuppressed.kt`,
+  `MemberSignatureSuppressed.kt`, and the custom `Suppress` case),
+  `::signature_visibility_without_suppression_matches_kotlinc_exactly`,
+  `::invisible_reference_suppression_keeps_the_final_supertype_error`.
 - **A public-API `inline` function cannot call a non-public-API function.** Public and protected
   are public API, and so is `@PublishedApi internal`: the annotation's resolved classifier
   identity (`kotlin/PublishedApi`) is the declaration fact, on both the inline function and the
