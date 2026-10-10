@@ -1,4 +1,5 @@
-//! A top-level function or property defined in another file of the same module.
+//! A top-level function, a package property, or a class's member property defined in another file
+//! of the same module.
 //!
 //! The call is a direct symbol both files derive from the checked callable identity, and a
 //! property is reached through the getter and setter entry points both files derive from the
@@ -380,6 +381,247 @@ fn a_source_written_package_accessor_runs_in_its_own_file() {
                 fun box(): String {
                     greeting = "OX"
                     return if (length == 1) greeting else "FAIL: $length"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_member_val_is_read_from_the_file_that_declares_the_class() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Named(val n: Int, val label: String)
+                fun named(): Named = Named(2, "OK")
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val value = named()
+                    return if (value.n == 2 && value.label == "OK") "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_member_var_is_updated_from_another_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Counter(var n: Int)
+                fun counter(): Counter = Counter(1)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val count = counter()
+                    count.n += 2
+                    return if (count.n == 3) "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_initializer_in_another_file_reads_a_member() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class X(val n: Int)
+                val x: X = X(3)
+            "#,
+        ),
+        (
+            "more",
+            r#"
+                package demo
+                class Z(val n: Int)
+                val z: Z = Z(x.n)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String = if (z.n == 3) "OK" else "FAIL"
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_member_assignment_evaluates_the_receiver_before_the_value() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Cell(var n: Int)
+                fun cell(n: Int): Cell = Cell(n)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                var log: String = ""
+                lateinit var held: Cell
+                fun receiver(): Cell {
+                    log = log + "r"
+                    return held
+                }
+                fun value(): Int {
+                    log = log + "v"
+                    return 4
+                }
+                fun box(): String {
+                    held = cell(1)
+                    log = ""
+                    receiver().n = value()
+                    return if (log == "rv" && held.n == 4) "OK" else "FAIL: $log ${held.n}"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_lateinit_member_throws_until_assigned() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Holder {
+                    lateinit var label: String
+                }
+                fun holder(): Holder = Holder()
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val held = holder()
+                    try {
+                        return held.label
+                    } catch (e: kotlin.UninitializedPropertyAccessException) {
+                        held.label = "OK"
+                        return if (held.label == "OK") "OK" else "FAIL"
+                    }
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_value_class_typed_member_is_carried_as_its_value() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                @JvmInline value class Meters(val value: Int)
+                @JvmInline value class Name(val text: String)
+                class Track(val length: Meters, var owner: Name)
+                fun track(): Track = Track(Meters(41), Name("FAIL: unassigned"))
+                fun name(text: String): Name = Name(text)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val track = track()
+                    if (track.length.value != 41) return "FAIL: ${track.length.value}"
+                    track.owner = name("OK")
+                    return track.owner.text
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_generic_member_is_read_at_each_instantiation() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Box<T>(val value: T)
+                class Slot<T>(var value: T)
+                fun ints(): Box<Int> = Box(41)
+                fun names(): Box<String> = Box("O")
+                fun slot(): Slot<Int> = Slot(1)
+                fun labels(): Slot<String> = Slot("")
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val count: Int = ints().value + 1
+                    val slot = slot()
+                    slot.value = slot.value + 1
+                    val labels = labels()
+                    labels.value = names().value + "K"
+                    if (count != 42 || slot.value != 2) return "FAIL: $count ${slot.value}"
+                    return labels.value
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_open_member_and_a_source_written_getter_run_in_the_declaring_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                open class Base {
+                    open val label: String = "base"
+                }
+                class Derived : Base() {
+                    override val label: String = "O"
+                }
+                class Twice(val n: Int) {
+                    val doubled: Int
+                        get() = n * 2
+                }
+                fun base(): Base = Derived()
+                fun twice(): Twice = Twice(21)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    if (twice().doubled != 42) return "FAIL: ${twice().doubled}"
+                    return base().label + "K"
                 }
             "#,
         ),

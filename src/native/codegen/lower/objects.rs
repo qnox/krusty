@@ -2488,12 +2488,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         index: usize,
         value: Value,
     ) -> Result<Option<Value>, Unsupported> {
+        Ok(self
+            .value_property_read_typed(class, index, value)?
+            .map(|(value, _)| value))
+    }
+
+    /// [`Self::value_property_read_of`], with the type the produced value is carried at.
+    pub(super) fn value_property_read_typed(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        value: Value,
+    ) -> Result<Option<(Value, Ty)>, Unsupported> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
         if let Some(getter) = property.getter {
             let id = self.file.functions[getter as usize].expect("a getter has a body");
+            let produced = self.file.ir.functions[getter as usize].ret;
             let func_ref = self.func_ref(id);
             let call = self.emit_call(func_ref, &[value])?;
-            return Ok(self.builder.inst_results(call).first().copied());
+            return Ok(self
+                .builder
+                .inst_results(call)
+                .first()
+                .map(|value| (*value, produced)));
         }
         let Some(field) = property.backing_field else {
             return Err(format!(
@@ -2508,7 +2525,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             ));
         }
         let stored = model::field_storage_ty(self.file.values, self.file.ir, class, field)?;
-        self.convert(value, Some(stored), property.ty)
+        Ok(self
+            .convert(value, Some(stored), property.ty)?
+            .map(|value| (value, property.ty)))
     }
 
     /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.
@@ -2518,6 +2537,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         index: usize,
         object: Value,
     ) -> Result<Option<Value>, Unsupported> {
+        Ok(self
+            .property_read_typed(class, index, object)?
+            .map(|(value, _)| value))
+    }
+
+    /// [`Self::property_read_of`], with the type the produced value is carried at: the property's
+    /// own type through a dispatch slot, the getter's result, or the backing field's type.
+    pub(super) fn property_read_typed(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        object: Value,
+    ) -> Result<Option<(Value, Ty)>, Unsupported> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
         if property
             .storage_ty
@@ -2531,7 +2563,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let through_slot = model::local_property_target(self.file.ir, class, index)
             .and_then(|target| self.file.model.slot(class, &model::SlotKey::Getter(target)));
         if let Some(slot) = through_slot {
-            return self.dispatch(object, slot, &[], property.ty, &[]);
+            return Ok(self
+                .dispatch(object, slot, &[], property.ty, &[])?
+                .map(|value| (value, property.ty)));
         }
         if let Some(getter) = property.getter {
             // A value class's getter is its own member and takes the VALUE as `this`; what is in
@@ -2543,14 +2577,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 object
             };
             let id = self.file.functions[getter as usize].expect("a getter has a body");
+            let produced = self.file.ir.functions[getter as usize].ret;
             let func_ref = self.func_ref(id);
             let call = self.emit_call(func_ref, &[this])?;
-            return Ok(self.builder.inst_results(call).first().copied());
+            return Ok(self
+                .builder
+                .inst_results(call)
+                .first()
+                .map(|value| (*value, produced)));
         }
         match property.backing_field {
             Some(field) => {
                 let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
-                self.load_field(object, class, field, ty).map(Some)
+                self.load_field(object, class, field, ty)
+                    .map(|value| Some((value, ty)))
             }
             None => Err(format!(
                 "a property with neither storage nor a getter (`{}`)",

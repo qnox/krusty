@@ -287,7 +287,6 @@ contracts/contractOnContextParameter.kt
 contracts/fieldInConstructorParens.kt
 contracts/isNullString.kt
 contracts/kt39374.kt
-contracts/kt47300.kt
 contracts/referenceToGenericInDeserializedContract.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValue.kt
@@ -941,7 +940,6 @@ inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/plusAssignInsideLambda.kt
 inference/suspendExtensionRecevierFromConstraint.kt
 initializers/files/globalNotInitedAfterAccessingClassInternals.kt
-initializers/files/simple.kt
 initializers/files/simpleMultiModule.kt
 initializers/kt73691.kt
 initializers/multipleModules1.kt
