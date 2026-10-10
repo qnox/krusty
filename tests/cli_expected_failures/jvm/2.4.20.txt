@@ -11,7 +11,12 @@ XeagerLambdaAnalysis/executorSubmitEnabled.args
 XeagerLambdaAnalysis/unitConversionWithEla.args
 XexplicitApi/explicitApiAndExplicitReturnTypesAtTheSameTime.args
 XjdkRelease/jdkRelease.args
+XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
+XjdkRelease/jdkRelease6WithJvmTarget8Jdk8.args
+XjdkRelease/jdkRelease6WithJvmTarget9.args
 XjdkRelease/jdkRelease6WithoutExplicitJvmTarget.args
+XjdkRelease/jdkRelease7WithJvmTarget8Jdk11.args
+XjdkRelease/jdkRelease7WithJvmTarget8Jdk8.args
 XjdkRelease/jdkRelease8.args
 XjspecifyAnnotation/jspecifyDefault.args
 XjspecifyAnnotation/jspecifyFileRootsProgressive.args
@@ -161,6 +166,7 @@ jdkHome/wrongJdkPath.args
 jvm6Target.args
 jvmDefaultIncorrectValue.args
 jvmDefaultIncorrectValueOld.args
+jvmRecordWrongTarget.args
 k2SimpleMultiplatformGenericClass.args
 kmpDifferentAnnotationsSuppressed.args
 kmpMissingActual.args
