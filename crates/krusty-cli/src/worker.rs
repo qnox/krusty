@@ -392,9 +392,10 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                     translate_language_features(&mut unit, features, flag)?;
                 } else {
                     match value.as_str() {
-                        // Diagnostics/current-language policy only; the compiler already implements
-                        // its current semantics and records these no-ops for Bazel to print.
-                        "-progressive" | "-nowarn" => unit.inert.push(value),
+                        // Progressive mode changes no currently implemented semantics. Warning
+                        // suppression does: preserve it for the shared typed warning policy.
+                        "-progressive" => unit.inert.push(value),
+                        "-nowarn" => unit.kotlinc_args.push(value),
                         "-Xexplicit-api=disable" => unit.inert.push(value),
                         // kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with only a "flag is
                         // not supported by this version of the compiler" warning and emits
@@ -424,7 +425,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             "--warn" => {
                 let value = value_of(index, flag)?;
                 if value == "off" {
-                    unit.inert.push(format!("--warn {value}"));
+                    unit.kotlinc_args.push("-nowarn".to_string());
                 } else {
                     return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
@@ -859,9 +860,12 @@ mod tests {
                 unit.kotlinc_args
             );
         }
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            crate::cli::WarningDisposition::Disabled
+        );
         for inert in [
             "--progressive",
-            "--warn off",
             "--x_xlanguage +AllowEagerSupertypeAccessibilityChecks",
         ] {
             assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
