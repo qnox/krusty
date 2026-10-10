@@ -109,6 +109,7 @@ mod tests {
             presentable_name: "sample feature".to_string(),
             hint_url: None,
             flag: None,
+            issue: None,
         }
     }
 

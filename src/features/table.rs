@@ -70,15 +70,18 @@ pub struct LanguageFeature {
     /// The argument kotlinc's diagnostics name for enabling the feature (its `@Enables` argument,
     /// `-Xcontext-parameters`); `None` leaves `-XXLanguage:+Feature`.
     pub flag: Option<String>,
+    /// The tracker issue kotlinc's deprecation warnings cite for the feature (`KTLC-13`); `None`
+    /// for kotlinc's `NO_ISSUE_SPECIFIED`.
+    pub issue: Option<String>,
 }
 
 impl LanguageFeature {
     fn parse_row(row: &str) -> Result<Self, String> {
         let columns: Vec<&str> = row.split('\t').collect();
-        let [name, since, since_api, progressive, pre_release, pre_release_before, test_only, behavior, hint_url, flag, presentable_name] =
+        let [name, since, since_api, progressive, pre_release, pre_release_before, test_only, behavior, hint_url, flag, issue, presentable_name] =
             columns[..]
         else {
-            return Err(format!("expected 11 columns: {row:?}"));
+            return Err(format!("expected 12 columns: {row:?}"));
         };
         let optional_text = |text: &str| (!text.is_empty()).then(|| text.to_string());
         let version = |text: &str| {
@@ -110,6 +113,7 @@ impl LanguageFeature {
             presentable_name: presentable_name.to_string(),
             hint_url: optional_text(hint_url),
             flag: optional_text(flag),
+            issue: optional_text(issue),
         })
     }
 

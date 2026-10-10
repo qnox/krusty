@@ -2290,6 +2290,8 @@ mod reified_inline_check_e2e;
 mod reified_inline_return_infer_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]
 mod reified_inline_splice_ldc_wide_e2e;
+#[path = "reified_intersection_gate_e2e.rs"]
+mod reified_intersection_gate_e2e;
 #[path = "reified_local_delegate_e2e.rs"]
 mod reified_local_delegate_e2e;
 #[path = "reified_member_metadata_e2e.rs"]

@@ -100,6 +100,7 @@ pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 mod function_supertypes;
 mod operator_declarations;
+mod reified_intersection_arguments;
 mod value_class_checks;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
@@ -867,6 +868,8 @@ pub struct Signature {
     /// Per logical parameter, the `crossinline`/`noinline` modifier it wrote. Parallel to `params`;
     /// empty when the source publishes none.
     pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
+    /// Ordinals of the declared `reified` type parameters, ascending.
+    pub reified_type_parameter_ordinals: Vec<u32>,
     /// Source visibility.
     pub visibility: Visibility,
     /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
@@ -1028,10 +1031,6 @@ impl Signature {
         self.flags = self.flags.with_is_inline(on);
     }
 
-    pub fn single_param(&self) -> Option<Ty> {
-        (self.params.len() == 1).then(|| self.params[0])
-    }
-
     pub fn call_sig(&self) -> CallSig {
         let mut call_sig = CallSig::source(
             self.param_names.clone(),
@@ -1052,6 +1051,7 @@ impl Signature {
         call_sig.no_infer_params = self.no_infer_params.clone();
         call_sig.implicit_integer_coercion = self.implicit_integer_coercion.clone();
         call_sig.inline_modifiers = self.inline_modifiers.clone();
+        call_sig.reified_type_parameter_ordinals = self.reified_type_parameter_ordinals.clone();
         copy_parameter_identities(&mut call_sig, &self.parameter_identities, self.params.len());
         call_sig
     }
@@ -1232,9 +1232,6 @@ pub struct MemberExtFunSig {
     receiver_ty: Ty,
     physical_receiver: Ty,
     signature: Signature,
-    /// Exact declaration type-parameter capabilities retained from the normalized provider/header
-    /// record. Reconstructing `CallSig` from `Signature` cannot recover this sparse semantic fact.
-    reified_type_parameter_ordinals: Vec<u32>,
     /// Physical method parameters after the extension receiver, opaque to semantic resolution.
     physical_params: Vec<Ty>,
     /// Provider-owned physical method spelling, travelling with the selected target only so a
@@ -11144,9 +11141,7 @@ fn instantiate_member_extension_with(
     if !explicit_type_args.is_empty() && explicit_type_args.len() != method_type_params.len() {
         return None;
     }
-    let mut full_call_sig = function.signature.call_sig();
-    full_call_sig.reified_type_parameter_ordinals =
-        function.reified_type_parameter_ordinals.clone();
+    let full_call_sig = function.signature.call_sig();
     let mut bindings = shape.class_bindings.clone();
     for (_, parameter) in &method_type_params {
         bindings.remove(*parameter);
@@ -23275,6 +23270,7 @@ impl<'a> Checker<'a> {
             lambda_param_types: Vec::new(),
             lambda_recv: Vec::new(),
             inline_modifiers: f.params.iter().map(written_inline_modifier).collect(),
+            reified_type_parameter_ordinals: declared_reified_type_parameter_ordinals(f),
             visibility: f.visibility,
             context_count: f.context_count,
             source_decl: None,
@@ -55057,6 +55053,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.check_expression_opt_in(scope, e);
+        self.check_reified_intersection_arguments(e);
         self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
@@ -67817,6 +67814,7 @@ impl<'a> Checker<'a> {
             } else {
                 Vec::new()
             },
+            reified_type_parameter_ordinals: call_sig.reified_type_parameter_ordinals.clone(),
             visibility: member.visibility,
             context_count: member.context_count.min(semantic_params.len()),
             source_decl: None,
@@ -67832,7 +67830,6 @@ impl<'a> Checker<'a> {
             receiver_ty,
             physical_receiver,
             signature,
-            reified_type_parameter_ordinals: call_sig.reified_type_parameter_ordinals,
             physical_params,
             physical_name: member
                 .physical_name

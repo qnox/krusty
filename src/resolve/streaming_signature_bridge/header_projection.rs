@@ -43,6 +43,17 @@ pub(in crate::resolve) fn reified_type_parameter_ordinals(
         .collect()
 }
 
+/// The ordinals of the type parameters a parsed function declares `reified`, ascending.
+pub(in crate::resolve) fn declared_reified_type_parameter_ordinals(function: &FunDecl) -> Vec<u32> {
+    function
+        .type_params
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| function.reified_type_params.contains(*parameter))
+        .filter_map(|(ordinal, _)| u32::try_from(ordinal).ok())
+        .collect()
+}
+
 #[derive(Clone)]
 pub(in crate::resolve) struct StreamedCallableParameter {
     pub(in crate::resolve) name: String,

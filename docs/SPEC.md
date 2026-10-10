@@ -4742,6 +4742,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inliner as well to avoid inconsistent configuration.`, reported with the other configuration
   errors before the pre-release warning. Tests: `tests/language_feature_arguments_e2e.rs`
   (`klib_inliner_features_*`: messages, exit status and output tree byte for byte vs kotlinc).
+- **Intersection type arguments for reified type parameters
+  (`ProhibitIntersectionReifiedTypeParameter`, `TYPE_INTERSECTION_AS_REIFIED`).** After a call is
+  selected, each type argument bound to a reified type parameter of the callee (the selected
+  callable's declared reified ordinals, normalized by every provider) that is an intersection type,
+  or an array type whose invariant element type is one, is reported at the callee name: `type
+  argument for reified type parameter 'T' was inferred to the intersection of ['X' & 'Y'].
+  Reification of an intersection type results in the common supertype being used. …`. kotlinc
+  declares it as a deprecation of the feature, so it is an error with the feature (the default since
+  2.3) and otherwise a warning followed by `This will become an error in language version 2.3. See
+  https://youtrack.jetbrains.com/issue/KTLC-13.`; the version and issue come from the vendored
+  feature table. The warning is suppressed only by its kotlinc factory name
+  `@Suppress("TYPE_INTERSECTION_AS_REIFIED_WARNING")`; the bare name suppresses nothing. Not
+  modeled: kotlinc's suppression of the error by `TYPE_INTERSECTION_AS_REIFIED_ERROR` (krusty
+  models no error suppression), and the cases where krusty infers a different type argument than
+  kotlinc — a common supertype of unrelated value arguments (`sel(A, B)` passed on as a value
+  argument, `combine(flowOf("1"), flowOf(2))`) and a smart cast to `X & Y` — which krusty infers
+  as a single classifier and therefore does not report. Tests:
+  `tests/reified_intersection_gate_e2e.rs` (complete errors with the feature, complete warnings,
+  suppression and the reified common supertype at run time without it, all vs kotlinc).
 
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and

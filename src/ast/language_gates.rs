@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::diag::Span;
-use crate::features::FeatureGate;
+use crate::features::{DeprecationGate, FeatureGate};
 
 /// One use of syntax whose language feature is disabled, with the error kotlinc reports for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +27,9 @@ pub struct LanguageGates {
     /// `FunctionalTypeWithExtensionAsSupertype`, for supertypes that expand to an extension or
     /// contextual function type.
     pub functional_type_with_extension_as_supertype: FeatureGate,
+    /// `ProhibitIntersectionReifiedTypeParameter`, the severity of an intersection type argument
+    /// for a reified type parameter.
+    pub intersection_reified_type_parameter: DeprecationGate,
     /// The language features kotlinc's value-class declaration checker consults.
     pub value_classes: ValueClassRules,
 }
