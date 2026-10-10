@@ -231,6 +231,7 @@ mod streaming_signature_bridge;
 mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
+mod superclass_validation;
 mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
@@ -50091,77 +50092,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
-            cl.base_class.as_ref()?;
-            self.resolved_body_local_supertypes
-                .get(&owner)
-                .and_then(|supertypes| supertypes.first())
-                .and_then(|supertype| supertype.kotlin_class_internal())
-                .or_else(|| self.direct_superclass_name(owner))
-                .map(|superclass| {
-                    (
-                        owner,
-                        superclass,
-                        self.resolved_type_name(superclass)
-                            .is_none_or(|class| class.source_file != Some(self.file_index)),
-                    )
-                })
-        }) {
-            let shape = self.resolver().classifier(superclass);
-            let inheritance = shape.as_ref().map(|shape| shape.inheritance);
-            crate::trace_compiler!(
-                "resolve",
-                "superclass capability class={} declaration={d:?} superclass={} separate_emission={separate_emission} inheritance={inheritance:?}",
-                cl.name,
-                superclass.render(),
-            );
-            let cyclic_header = self.diags.diags.iter().any(|diagnostic| {
-                diagnostic.file == self.file_index
-                    && cl.span.lo <= diagnostic.span.lo
-                    && diagnostic.span.hi <= cl.span.hi
-                    && diagnostic
-                        .msg
-                        .contains("cycle in supertypes and/or containing declarations")
-            });
-            let diagnostic = match &shape {
-                _ if cyclic_header || cl.is_enum() => None,
-                Some(shape) if !shape.inheritance.is_extensible => {
-                    Some(if shape.kind == crate::libraries::TypeKind::Class {
-                        let final_supertype = "this type is final, so it cannot be extended.";
-                        (
-                            cl.base_class_span.unwrap_or(cl.span),
-                            final_supertype.into(),
-                        )
-                    } else {
-                        let superclass = superclass.render();
-                        (cl.span, format!("krusty: superclass '{superclass}' cannot be subclassed: it is not extensible"))
-                    })
-                }
-                _ => None,
-            };
-            if let Some((span, message)) = diagnostic {
-                self.diags.error(span, message);
-            }
-            // `sealed` is abstract: its own subclasses discharge members the sealed class leaves
-            // open, including members inherited from a superclass emitted in another unit.
-            let leaves_abstract_members = !cl.is_enum()
-                && separate_emission
-                && inheritance.is_some_and(|shape| shape.is_abstract)
-                && !cl.modality.is_abstract()
-                && !self.has_no_unimplemented_abstract_members(owner);
-            if leaves_abstract_members {
-                // This is a Kotlin declaration error, not an emitter capability gate. Diagnose it
-                // while the complete semantic hierarchy is live so an invalid concrete class can
-                // never reach common lowering.
-                self.diags.error(
-                    cl.span,
-                    format!(
-                        "class '{}' is not abstract and does not implement all abstract members",
-                        cl.name
-                    ),
-                );
-            }
-        }
+        self.validate_class_superclass(d, cl, current_owner);
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
         // does a LOCAL class — it is entered from the body it was written in and captures the
         // enclosing instance, so the outer receivers and type parameters stay reachable.
