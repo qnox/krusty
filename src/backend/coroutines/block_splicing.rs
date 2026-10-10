@@ -1,7 +1,11 @@
 //! Lifting a statement's value-position block into the statement list, so a suspension buried in
 //! the block's statements surfaces where the hoister and the flattener see it.
 
-use super::*;
+use std::collections::HashSet;
+
+use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
+
+use super::control_flow::stmt_diverges;
 
 /// Lift a value-position `Block` out of a top-level statement's direct operand, so a suspension buried in
 /// the block's statements surfaces at the top level where the hoister/flattener handle it. An elvis /
@@ -14,7 +18,7 @@ use super::*;
 /// A value-bearing block is spliced into its consumer. A value-less block is spliced only when it
 /// definitely diverges, in which case the consumer can never execute and is removed. Re-runs until
 /// settled, so nested blocks (safe-call inside elvis) fully unfold; lifted statements are reprocessed.
-pub(super) fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
+pub(crate) fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
     // Normalize lexical child blocks before their parent. A return/value wrapper can sit inside an
     // `if`/`when` or catch body just as legitimately as at the function body's top level; making the
     // transform depend on that container was the source of a private conditional-tail regression.
@@ -185,7 +189,7 @@ pub(super) fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
 
 /// Statements of a structural block that cannot produce a value or fall through. Checked
 /// coercions around it are observationally irrelevant because control never reaches the coercion.
-pub(super) fn diverging_control_core(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
+pub(crate) fn diverging_control_core(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
     if !stmt_diverges(ir, expression) {
         return None;
     }

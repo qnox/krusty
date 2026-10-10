@@ -26,8 +26,6 @@
 //! a conditional sub-expression like elvis/`&&`, an extension suspend fn, or a member suspend fn with its
 //! own parameters — its continuation would also have to capture them) skip the file.
 
-mod block_splicing;
-mod bottom_completion;
 mod bytecode_machine;
 mod continuation_class;
 mod coroutine_context;
@@ -48,10 +46,8 @@ pub(crate) use emission_facts::{
 };
 use emission_facts::{MachineOutputs, MachineSubject};
 mod get_or_create;
-mod hoisting;
 mod intrinsic_probes;
 mod live_scopes;
-use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
 };
@@ -59,11 +55,10 @@ mod residual_trace;
 use residual_trace::{trace_residual_parents, trace_residual_suspension};
 mod spill_layout;
 use spill_layout::{
-    is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty, spill_order,
-    suspension_points_in_order, SpillLayout,
+    kind_positions, rematerialized_nulls, spill_field_ty, spill_order, suspension_points_in_order,
+    SpillLayout,
 };
 mod specialized_lambda_classes;
-mod statement_normalization;
 pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
 mod tail_forward;
@@ -71,35 +66,63 @@ mod value_class_results;
 pub(crate) use value_class_results::completion_box;
 use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
-mod value_try;
 
+use crate::backend::coroutines::desugar_value_try;
+use crate::backend::coroutines::desugar_value_when;
+pub(in crate::jvm) use crate::backend::coroutines::suspend_call_fid;
+use crate::backend::coroutines::{
+    count_suspensions, expr_calls_suspend, is_suspension_point, recorded_suspension_result,
+    value_class_suspension_result,
+};
+use crate::backend::coroutines::{diverging_control_core, splice_return_blocks};
+use crate::backend::coroutines::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
+use crate::backend::coroutines::{function_value_types, max_value_index};
+use crate::backend::coroutines::{hoist_spliced_inline_bodies, hoist_suspensions};
+use crate::backend::coroutines::{
+    normalize_block_inits, normalize_statement_try_results, split_unit_conditional_returns,
+};
+use crate::backend::coroutines::{
+    suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
+};
+use crate::backend::coroutines::{CoroutineRepresentation, SuspensionTyping};
 use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp,
 };
 use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
-use block_splicing::{
-    diverging_control_core, diverging_value_consumer_statements, preserve_replacement_logical_type,
-    splice_return_blocks, value_block,
-};
-use bottom_completion::{suspension_completion, unwrap_suspend_cast, SuspensionCompletion};
 use call_operand_realization::append_continuation;
 use debug_metadata::capture_suspension_lines;
 use get_or_create::build_get_or_create;
-use statement_normalization::{
-    demote_block_value_to_statement, normalize_block_inits, normalize_statement_try_results,
-    split_unit_conditional_returns,
-};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tail_forward::{record_return_adaptations, rewrite_forward_body, tail_forward};
 use value_liveness::{kills_value, pending_reads_after};
-use value_try::{
-    assign_branch_to_tmp, bind_value_try_to_fresh_local, bind_value_try_to_local,
-    suspending_value_try, ValueBranchWrap,
-};
 
 const I32_MIN: i32 = i32::MIN;
+
+/// The JVM's answers to the shared suspend normalizations' representation questions.
+struct JvmCoroutineRepresentation;
+
+impl CoroutineRepresentation for JvmCoroutineRepresentation {
+    fn zero(&self, ty: &Ty) -> IrConst {
+        IrConst::zero_for_value_type(super::physical_type::ir_ty_to_jvm(ty))
+    }
+}
+
+fn jvm_typing(orig_rets: &[Ty]) -> SuspensionTyping<'_> {
+    SuspensionTyping {
+        orig_rets,
+        representation: &JvmCoroutineRepresentation,
+    }
+}
+
+/// A type-correct zero/`null` placeholder for `ty` in the JVM representation, used as a
+/// value-parameter argument when `invokeSuspend` re-enters the outer function: the real value is
+/// restored from the continuation field at the loop top, so this placeholder is immediately
+/// overwritten (kotlinc passes `iconst_0`).
+pub(crate) fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
+    crate::backend::coroutines::zero_value(ir, &JvmCoroutineRepresentation, ty)
+}
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
 type Branches = Vec<(Option<ExprId>, ExprId)>;
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId, completion)`.
@@ -320,7 +343,13 @@ pub(crate) fn lower_suspend(
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
         if let (Some(b), None) = (body, forward.as_ref()) {
             let mut value_types = function_value_types(ir, fid, b);
-            hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
+            hoist_suspensions(
+                ir,
+                b,
+                &suspend_set,
+                &jvm_typing(&orig_rets),
+                &mut value_types,
+            );
         }
         // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
@@ -347,8 +376,8 @@ pub(crate) fn lower_suspend(
                 // outer return is removed before suspension hoisting/state flattening.
                 splice_return_blocks(ir, b);
             }
-            desugar_value_try(ir, b, &suspend_set, &ret_ty);
-            desugar_value_when(ir, b, &suspend_set, &ret_ty);
+            desugar_value_try(ir, &JvmCoroutineRepresentation, b, &suspend_set, &ret_ty);
+            desugar_value_when(ir, &JvmCoroutineRepresentation, b, &suspend_set, &ret_ty);
             normalize_statement_try_results(ir, b, true);
             // A leaf suspend function is emitted as an ordinary JVM method with an added continuation
             // parameter; its structured try/finally already implements returns correctly. Pending
@@ -364,7 +393,13 @@ pub(crate) fn lower_suspend(
             // value-type map (the desugars declared new locals); already-normalized statements pass
             // through unchanged.
             let mut value_types = function_value_types(ir, fid, b);
-            hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
+            hoist_suspensions(
+                ir,
+                b,
+                &suspend_set,
+                &jvm_typing(&orig_rets),
+                &mut value_types,
+            );
             promote_diverging_tail_to_statement(ir, b);
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
@@ -421,7 +456,7 @@ pub(crate) fn lower_suspend(
         // be normalized inside a retained inline body.
         let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
             (false, Some(b)) => {
-                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
+                hoist_spliced_inline_bodies(ir, b, &suspend_set, &jvm_typing(&orig_rets), &ret_ty);
                 // Do not let an explicitly unsupported control transfer fall through to emission
                 // and masquerade as an unrelated continuation-arity error. This backend pass owns
                 // the limitation and declines the file at the exact boundary that detects it.
@@ -1021,303 +1056,6 @@ fn desugar_returns_under(ir: &mut IrFile, s: ExprId, suspend_set: &HashSet<u32>,
     }
 }
 
-/// Desugar a VALUE-position `try` whose body suspends into a STATEMENT-position one binding a temp, so the
-/// flattener (which models a `try` STATEMENT) can handle it: `return try { … } catch { … }` becomes
-/// `var tmp = <default>; try { … tmp = <body value> } catch { … tmp = <catch value> }; return tmp`. A
-/// suspending branch value is bound to a fresh `Variable` first (the flattener's `stmt_suspension` handles
-/// a suspend `Variable` init, not a `SetValue`), then copied to `tmp`. Both `return <try>` and a bound
-/// `val v = <try>` are rewritten (the latter targets the bound local directly), and a result COERCION
-/// wrapping the `try` (`suspend fun f(): Base = try { sub() } …`) moves onto each selected branch, like
-/// `desugar_value_when`'s branch wrap. A `SetValue` of a suspending `try` is left to skip the file.
-fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
-    for nested in owned_nested_blocks(ir, b) {
-        desugar_value_try(ir, nested, suspend_set, ret_ty);
-    }
-    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
-        return;
-    };
-    let mut new_stmts: Vec<ExprId> = Vec::with_capacity(stmts.len() + 2);
-    let mut changed = false;
-    for s in stmts {
-        if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if let Some((decl, new_try, get)) =
-                bind_value_try_to_fresh_local(ir, e, ret_ty, suspend_set)
-            {
-                let ret = ir.add_expr(IrExpr::Return(Some(get)));
-                new_stmts.push(decl);
-                new_stmts.push(new_try);
-                new_stmts.push(ret);
-                changed = true;
-                continue;
-            }
-        }
-        // The same value-position `try`, already bound to a local (`val v = try { … } …` — spelled
-        // in source, or produced by an earlier pass binding an expression body's result): rewrite in
-        // place, using the BOUND local as the branch-assignment target (`var v = <default>; try { …
-        // v = <body value> } catch { … v = <catch value> }`).
-        if let IrExpr::Variable {
-            index,
-            ty,
-            init: Some(init),
-            named,
-        } = ir.exprs[s as usize].clone()
-        {
-            if let Some(parts) = suspending_value_try(ir, init, suspend_set) {
-                let dflt = zero_value(ir, &ty);
-                let decl = ir.add_expr(IrExpr::Variable {
-                    index,
-                    ty,
-                    init: Some(dflt),
-                    named,
-                });
-                let new_try = bind_value_try_to_local(ir, parts, index, &ty, suspend_set);
-                new_stmts.push(decl);
-                new_stmts.push(new_try);
-                changed = true;
-                continue;
-            }
-        }
-        // Storage writes do not acquire their new value until the complete `try` expression returns.
-        // Bind the selected body/catch result to a fresh local first, then perform the original write.
-        // Local/static targets and a captured-cell holder read have no receiver effect to reorder.
-        match ir.exprs[s as usize].clone() {
-            IrExpr::SetValue { var, value } => {
-                if let Some(ty) = ir.logical_types.get(&value).copied() {
-                    if let Some((decl, new_try, get)) =
-                        bind_value_try_to_fresh_local(ir, value, &ty, suspend_set)
-                    {
-                        new_stmts.push(decl);
-                        new_stmts.push(new_try);
-                        new_stmts.push(ir.add_expr(IrExpr::SetValue { var, value: get }));
-                        changed = true;
-                        continue;
-                    }
-                }
-            }
-            IrExpr::SetStatic { index, value } => {
-                let ty = ir.statics.get(index as usize).map(|field| field.ty);
-                if let Some(ty) = ty {
-                    if let Some((decl, new_try, get)) =
-                        bind_value_try_to_fresh_local(ir, value, &ty, suspend_set)
-                    {
-                        new_stmts.push(decl);
-                        new_stmts.push(new_try);
-                        new_stmts.push(ir.add_expr(IrExpr::SetStatic { index, value: get }));
-                        changed = true;
-                        continue;
-                    }
-                }
-            }
-            IrExpr::RefSet {
-                holder,
-                elem,
-                value,
-            } if matches!(ir.exprs[holder as usize], IrExpr::GetValue(_)) => {
-                if let Some((decl, new_try, get)) =
-                    bind_value_try_to_fresh_local(ir, value, &elem, suspend_set)
-                {
-                    new_stmts.push(decl);
-                    new_stmts.push(new_try);
-                    new_stmts.push(ir.add_expr(IrExpr::RefSet {
-                        holder,
-                        elem,
-                        value: get,
-                    }));
-                    changed = true;
-                    continue;
-                }
-            }
-            _ => {}
-        }
-        new_stmts.push(s);
-    }
-    if changed {
-        ir.exprs[b as usize] = IrExpr::Block {
-            stmts: new_stmts,
-            value,
-        };
-    }
-}
-
-/// Desugar a VALUE-position `when`/`if` in `return` position whose BRANCH VALUES suspend (but whose
-/// CONDITIONS do not — a suspending condition is hoisted earlier) into a STATEMENT-position `when` binding
-/// a temp: `return when (x) { a -> v0; else -> v1 }` becomes `var tmp = <default>; when (x) { a -> { …
-/// tmp = v0 }; else -> { … tmp = v1 } }; return tmp`. The flattener models a `when` STATEMENT with
-/// suspending branch bodies (`emit_when_stmt`), so each branch's suspension surfaces there.
-fn desugar_value_when(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
-    for nested in owned_nested_blocks(ir, b) {
-        desugar_value_when(ir, nested, suspend_set, ret_ty);
-    }
-    let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
-        return;
-    };
-    let mut new_stmts: Vec<ExprId> = Vec::with_capacity(stmts.len() + 2);
-    let mut changed = false;
-    for s in stmts {
-        if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if let Some((decl, new_when, get)) =
-                bind_value_when_to_fresh_local(ir, e, ret_ty, suspend_set)
-            {
-                let ret = ir.add_expr(IrExpr::Return(Some(get)));
-                new_stmts.push(decl);
-                new_stmts.push(new_when);
-                new_stmts.push(ret);
-                changed = true;
-                continue;
-            }
-        }
-        new_stmts.push(s);
-    }
-    if changed {
-        ir.exprs[b as usize] = IrExpr::Block {
-            stmts: new_stmts,
-            value,
-        };
-    }
-}
-
-/// Immediate nested block regions owned by `root`, excluding lambda bodies (which have an independent
-/// value namespace and coroutine machine). Each returned block owns its deeper recursion, so shared
-/// arena nodes are visited once per normalization entry without moving statements across a branch,
-/// loop, or protected-region boundary.
-fn owned_nested_blocks(ir: &IrFile, root: ExprId) -> Vec<ExprId> {
-    let mut blocks = Vec::new();
-    let mut pending = Vec::new();
-    let mut seen = HashSet::from([root]);
-    for_each_child(&ir.exprs, root, &mut |child| pending.push(child));
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        match ir.exprs[expression as usize] {
-            IrExpr::Lambda { .. } => {}
-            IrExpr::Block { .. } => blocks.push(expression),
-            _ => for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
-        }
-    }
-    blocks
-}
-
-/// Bind a suspending value-`when` to one fresh typed local and return the declaration, the
-/// statement-position conditional, and the final read. This is the one normalization shared by
-/// returns and storage writes; callers decide only where the final read is consumed.
-fn bind_value_when_to_fresh_local(
-    ir: &mut IrFile,
-    expression: ExprId,
-    ty: &Ty,
-    suspend_set: &HashSet<u32>,
-) -> Option<(ExprId, ExprId, ExprId)> {
-    // A result coercion belongs on each selected branch, after its suspension resumes.
-    let (when_expr, branch_wrap) = match ir.exprs[expression as usize].clone() {
-        IrExpr::When { .. } => (expression, None),
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
-            (arg, Some(ValueBranchWrap::TypeOp(op, type_operand)))
-        }
-        _ => return None,
-    };
-    let suspends = expr_calls_suspend(ir, when_expr, suspend_set);
-    let exits_loop = expr_contains_owned_loop_jump(ir, when_expr);
-    if !suspends && !exits_loop {
-        return None;
-    }
-    let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
-        return None;
-    };
-    let tmp = max_value_index(ir) + 1;
-    let dflt = zero_value(ir, ty);
-    let declaration = ir.add_expr(IrExpr::Variable {
-        index: tmp,
-        ty: *ty,
-        init: Some(dflt),
-        named: false,
-    });
-    let branches = branches
-        .into_iter()
-        .map(|(condition, body)| {
-            (
-                condition,
-                assign_branch_to_tmp(ir, body, tmp, ty, suspend_set, branch_wrap.clone()),
-            )
-        })
-        .collect();
-    let conditional = ir.add_expr(IrExpr::When { branches });
-    let value = ir.add_expr(IrExpr::GetValue(tmp));
-    Some((declaration, conditional, value))
-}
-
-/// Hoist each suspension call that sits at an *unconditional* position inside a top-level statement's
-/// expression (e.g. `val a = foo() + 2`, `sum = sum + foo()`) into a preceding `val tmp = foo()`, so the
-/// flattener only meets a suspension as a bound-local / bare statement (the positions it models). A
-/// suspension inside a conditional sub-expression (an `if`/`when`/elvis/loop) is left in place — those
-/// are handled structurally by the flattener (or skip the file if not yet modeled). Order of hoisted
-/// temps follows left-to-right evaluation.
-/// Whether `e` is an `if`/`when` EXPRESSION at least one of whose CONDITIONS calls a suspension — the
-/// pure guard for the arms that route to [`hoist_when_cond_suspensions`].
-fn when_cond_suspends(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    matches!(&ir.exprs[e as usize], IrExpr::When { branches }
-        if branches.iter().any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set))))
-}
-
-fn value_when(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
-    match ir.exprs[expression as usize] {
-        IrExpr::When { .. } => Some(expression),
-        IrExpr::TypeOp { arg, .. } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
-            Some(arg)
-        }
-        _ => None,
-    }
-}
-
-/// Expose a checked conversion wrapped around a value conditional by applying that same operation
-/// to each selected branch value. This is a structural equality:
-/// `convert(if (c) a else b)` becomes `if (c) convert(a) else convert(b)`; branch statements and
-/// divergent branches remain inside their original control-flow region.
-fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
-    match ir.exprs[expression as usize].clone() {
-        IrExpr::When { .. } => Some(expression),
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } => {
-            let IrExpr::When { branches } = ir.exprs[arg as usize].clone() else {
-                return None;
-            };
-            let branches = branches
-                .into_iter()
-                .map(|(condition, body)| {
-                    let body = if let Some((stmts, value)) = value_block(ir, body) {
-                        let value = ir.add_expr(IrExpr::TypeOp {
-                            op,
-                            arg: value,
-                            type_operand,
-                        });
-                        ir.add_expr(IrExpr::Block {
-                            stmts,
-                            value: Some(value),
-                        })
-                    } else if matches!(ir.exprs[body as usize], IrExpr::Block { value: None, .. }) {
-                        body
-                    } else {
-                        ir.add_expr(IrExpr::TypeOp {
-                            op,
-                            arg: body,
-                            type_operand,
-                        })
-                    };
-                    (condition, body)
-                })
-                .collect();
-            Some(ir.add_expr(IrExpr::When { branches }))
-        }
-        _ => None,
-    }
-}
-
 /// Snapshot the semantic types in one function's value-index namespace before suspend hoisting.
 /// `IrFile::exprs` is a module-wide arena while `GetValue(n)` is function-local, so any type query
 /// based on a global scan is inherently ambiguous. Nested lambda bodies own another namespace and are
@@ -1340,174 +1078,6 @@ fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
             .any(|class| class.fq_name == receiver && class.is_interface)
     });
     function.dispatch_receiver.is_some() && !owner_is_interface && !ir.open_methods.contains(&fid)
-}
-
-fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
-    function_value_types_with(ir, fid, &ir.functions[fid as usize].params, body)
-}
-
-/// The value-type table of a lambda's `inline_body`, numbered as the impl method is: captures, then
-/// the lambda's own parameters, then the locals the body declares. A `suspend`-typed lambda may
-/// already have been through this pass — it precedes the frame it is spliced into in `suspend_funs`
-/// — and then carries a trailing `Continuation` at the index its body's first local uses. The
-/// declared signature is the one the body was numbered against.
-pub(super) fn spliced_body_value_types(
-    ir: &IrFile,
-    impl_fn: u32,
-    body: ExprId,
-) -> HashMap<u32, Ty> {
-    let params = ir
-        .suspend_declared_sigs
-        .get(&impl_fn)
-        .map(|(params, _)| params.as_slice())
-        .unwrap_or(&ir.functions[impl_fn as usize].params);
-    function_value_types_with(ir, impl_fn, params, body)
-}
-
-fn function_value_types_with(
-    ir: &IrFile,
-    fid: u32,
-    params: &[Ty],
-    body: ExprId,
-) -> HashMap<u32, Ty> {
-    fn collect(ir: &IrFile, expression: ExprId, out: &mut HashMap<u32, Ty>) {
-        match &ir.exprs[expression as usize] {
-            IrExpr::Variable {
-                index, ty, init, ..
-            } => {
-                out.entry(*index).or_insert(*ty);
-                if let Some(init) = init {
-                    collect(ir, *init, out);
-                }
-            }
-            IrExpr::Lambda { captures, .. } => {
-                for &capture in captures {
-                    collect(ir, capture, out);
-                }
-            }
-            _ => for_each_child(&ir.exprs, expression, &mut |child| collect(ir, child, out)),
-        }
-    }
-
-    let function = &ir.functions[fid as usize];
-    let physical_receiver = function.dispatch_receiver.filter(|_| !function.is_static);
-    let receiver_offset = u32::from(physical_receiver.is_some());
-    let mut out = HashMap::new();
-    if let Some(receiver) = physical_receiver {
-        out.insert(0, Ty::obj_name(receiver));
-    }
-    for (index, ty) in params.iter().copied().enumerate() {
-        out.insert(receiver_offset + index as u32, ty);
-    }
-    collect(ir, body, &mut out);
-    out
-}
-
-/// For a same-file suspend call, the callee `FunId` — used to recover the callee's LOGICAL return type
-/// (its index into `orig_rets`). Handles a static call (`Call{Local}`), the same function's `$default`
-/// edge after omitted arguments are realized (`LocalDefault` / `ClassStaticDefault`), and a same-file
-/// member call (`MethodCall`, whose `FunId` is the class's method at `index`). The default edge is
-/// still that suspend declaration: its continuation belongs before the mask and marker, and dropping
-/// it here leaves the call with the pre-CPS arity. Returns `None` for a cross-unit suspend call (a
-/// `Callee::Static` to another file / the classpath) — that call has no local `FunId`; its logical
-/// type comes from `ir.suspend_calls` instead.
-pub(in crate::jvm) fn suspend_call_fid(
-    ir: &IrFile,
-    e: ExprId,
-    suspend_set: &HashSet<u32>,
-) -> Option<u32> {
-    match &ir.exprs[e as usize] {
-        IrExpr::Call {
-            callee: Callee::Local(fid) | Callee::LocalDefault(fid),
-            ..
-        } if suspend_set.contains(fid) => Some(*fid),
-        IrExpr::Call {
-            callee:
-                Callee::ClassStatic { function, .. } | Callee::ClassStaticDefault { function, .. },
-            ..
-        } if suspend_set.contains(function) => Some(*function),
-        IrExpr::MethodCall { class, index, .. } => {
-            let fid = *ir.classes[*class as usize].methods.get(*index as usize)?;
-            suspend_set.contains(&fid).then_some(fid)
-        }
-        _ => None,
-    }
-}
-
-/// Whether evaluating `e` is one atomic SUSPENSION POINT: either a direct suspend-function call
-/// (same-file via [`suspend_call_fid`], or cross-unit via `ir.suspend_calls`) or an inlined intrinsic
-/// expression recorded in `ir.intrinsic_suspension_points`. The latter already contains its
-/// continuation behavior, so [`append_continuation`] deliberately leaves its non-call node unchanged.
-fn is_suspension_point(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    suspend_call_fid(ir, e, suspend_set).is_some()
-        || ir.suspend_calls.contains_key(&e)
-        || ir.intrinsic_suspension_points.contains_key(&e)
-}
-
-/// The logical source result of a non-local call or intrinsic suspension point. Same-file calls use
-/// `orig_rets` through [`suspend_call_fid`]; the two side maps cover only nodes whose result cannot be
-/// recovered from a local `FunId`.
-fn recorded_suspension_result(ir: &IrFile, e: ExprId) -> Option<Ty> {
-    ir.suspend_calls.get(&e).copied().or_else(|| {
-        ir.intrinsic_suspension_points
-            .get(&e)
-            .map(|point| point.result)
-    })
-}
-
-fn value_class_suspension_result(
-    ir: &IrFile,
-    e: ExprId,
-    suspend_set: &HashSet<u32>,
-) -> Option<crate::ir::IrValueClassSuspendResult> {
-    suspend_call_fid(ir, e, suspend_set)
-        .and_then(|fid| ir.value_class_suspend_returns.get(&fid).copied())
-        .or_else(|| ir.value_class_suspend_calls.get(&e).copied())
-}
-
-fn when_has_non_direct_suspending_branch(
-    ir: &IrFile,
-    expression: ExprId,
-    suspend_set: &HashSet<u32>,
-) -> bool {
-    let Some(when) = value_when(ir, expression) else {
-        return false;
-    };
-    let IrExpr::When { branches } = &ir.exprs[when as usize] else {
-        return false;
-    };
-    branches.iter().any(|(_, branch)| {
-        expr_calls_suspend(ir, *branch, suspend_set)
-            && !is_suspension_point(
-                ir,
-                unwrap_suspend_cast(ir, *branch, suspend_set, false).point,
-                suspend_set,
-            )
-    })
-}
-
-/// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
-/// restructure — a suspend call nested in an expression, a branch, a loop, etc.).
-fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if is_suspension_point(ir, e, suspend_set) {
-        return true;
-    }
-    // Constructing a lambda evaluates its captures, but its body belongs to the generated invoke
-    // method and cannot suspend the enclosing body. `for_each_child` deliberately exposes the
-    // `inline_body` for generic IR transforms, so suspension analysis must enforce this semantic
-    // ownership boundary itself.
-    if let IrExpr::Lambda { captures, .. } = &ir.exprs[e as usize] {
-        return captures
-            .iter()
-            .any(|&capture| expr_calls_suspend(ir, capture, suspend_set));
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, e, &mut |c| {
-        if expr_calls_suspend(ir, c, suspend_set) {
-            found = true;
-        }
-    });
-    found
 }
 
 /// Build the coroutine state machine for `fid` (whose body `b` is a top-level block). The body is
@@ -1555,12 +1125,18 @@ fn build_state_machine(
     // still retain their snapshotted declared result types in `orig_rets`.
     let orig_rets = context.orig_rets;
     let return_ty = orig_rets.get(fid as usize).copied().unwrap_or(Ty::Unit);
-    desugar_value_try(ir, b, &suspend_set, &return_ty);
-    desugar_value_when(ir, b, &suspend_set, &return_ty);
+    desugar_value_try(ir, &JvmCoroutineRepresentation, b, &suspend_set, &return_ty);
+    desugar_value_when(ir, &JvmCoroutineRepresentation, b, &suspend_set, &return_ty);
     normalize_statement_try_results(ir, b, true);
     normalize_block_inits(ir, b);
     let mut value_types = function_value_types(ir, fid, b);
-    hoist_suspensions(ir, b, &suspend_set, orig_rets, &mut value_types);
+    hoist_suspensions(
+        ir,
+        b,
+        &suspend_set,
+        &jvm_typing(orig_rets),
+        &mut value_types,
+    );
     // Give the body a terminal `return`. A value-less body that FALLS THROUGH (a `Unit` fn whose last
     // statement is a suspension / loop, with no explicit `return`) needs `return Unit.INSTANCE` —
     // otherwise its final resume state runs off the end of the `when(label)` dispatch, falls back to the
@@ -3704,47 +3280,6 @@ impl Flat<'_> {
     }
 }
 
-/// Whether `expression` contains a `break`/`continue` that must escape this value position. A nested
-/// loop owns its own unlabeled exits, and a lambda is always a control-flow boundary. A labeled exit
-/// is safe to expose without resolving it here: branch binding preserves its label and `Flat` uses
-/// the active loop stack to route that exact target.
-fn expr_contains_owned_loop_jump(ir: &IrFile, expression: ExprId) -> bool {
-    match &ir.exprs[expression as usize] {
-        IrExpr::Break { .. } | IrExpr::Continue { .. } => true,
-        IrExpr::While { .. } | IrExpr::Lambda { .. } => false,
-        _ => {
-            let mut found = false;
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                found = found || expr_contains_owned_loop_jump(ir, child);
-            });
-            found
-        }
-    }
-}
-
-/// Whether `e`'s subtree contains a bare `return` (a function return), NOT descending into a nested
-/// lambda (whose `return` is its own). A `return` inside a suspending try body needs a
-/// finally-before-return transfer the flattener does not yet model, so the try-finally path declines it.
-fn expr_has_return(ir: &IrFile, e: ExprId) -> bool {
-    match &ir.exprs[e as usize] {
-        IrExpr::Return(_) => true,
-        IrExpr::Lambda { .. } => false,
-        _ => {
-            let mut found = false;
-            crate::ir::for_each_child(&ir.exprs, e, &mut |c| {
-                found = found || expr_has_return(ir, c);
-            });
-            found
-        }
-    }
-}
-
-/// Whether statement `s` always transfers control away (never falls through): a `return`/`throw`, or a
-/// block/`when` all of whose exits do. Used to suppress a dead fall-through transition after it.
-fn stmt_diverges(ir: &IrFile, s: ExprId) -> bool {
-    ir.expr_discarding_diverges_by(s, &|_, _| false)
-}
-
 /// Collect the value-indices read (`GetValue`) anywhere in `e`'s subtree.
 fn collect_reads(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
     visit_subtree(&ir.exprs, e, &mut |node| {
@@ -3823,15 +3358,6 @@ fn find_var_init(ir: &IrFile, e: ExprId, idx: u32) -> Option<ExprId> {
         }
     });
     found
-}
-
-/// The number of suspend-call nodes in the subtree under `e`.
-fn count_suspensions(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> usize {
-    let mut n = usize::from(is_suspension_point(ir, e, suspend_set));
-    for_each_child(&ir.exprs, e, &mut |c| {
-        n += count_suspensions(ir, c, suspend_set);
-    });
-    n
 }
 
 /// Collect every suspend-call expression id reachable under `e` (the final, post-transform body).
@@ -3980,17 +3506,6 @@ fn local_storage_ty(ir: &IrFile, semantic: Ty, init: Option<ExprId>) -> Ty {
         _ => None,
     })
     .unwrap_or(semantic)
-}
-
-/// Synthesize the `Facade$fn$1 extends ContinuationImpl` continuation class: `result`/`label` fields, a
-/// field per spilled local, a `<init>(Continuation)` delegating to super, and `invokeSuspend` (store the
-/// resume value, set the `MIN_VALUE` label bit, re-enter the outer function).
-/// A type-correct zero/`null` placeholder for `ty`, used as a value-parameter argument when
-/// `invokeSuspend` re-enters the outer function — the real value is restored from the continuation
-/// field at the loop top, so this placeholder is immediately overwritten (kotlinc passes `iconst_0`).
-pub(crate) fn zero_value(ir: &mut IrFile, ty: &Ty) -> ExprId {
-    let c = IrConst::zero_for_value_type(super::physical_type::ir_ty_to_jvm(ty));
-    ir.add_expr(IrExpr::Const(c))
 }
 
 fn add_static_call(
@@ -4495,23 +4010,4 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
     // from 0 to 1, leaving `GetValue(1)` unallocated in the extracted lambda method (a class method escaped
     // because its lambda `it`=0 was below the threshold 1).
     crate::ir::shift_value_indices(ir, e, threshold, 1);
-}
-
-/// The maximum value-index referenced anywhere in the arena (params, locals). New state-machine locals
-/// are allocated above this so they never collide with an existing index in any function.
-fn max_value_index(ir: &IrFile) -> u32 {
-    let mut m = 0u32;
-    for e in &ir.exprs {
-        match e {
-            IrExpr::GetValue(i) | IrExpr::GetStatic(i) => m = m.max(*i),
-            IrExpr::SetValue { var, .. } => m = m.max(*var),
-            IrExpr::Variable { index, .. } => m = m.max(*index),
-            // A handler binds its exception to a value index of its own.
-            IrExpr::Try { catches, .. } => {
-                m = catches.iter().map(|catch| catch.var).fold(m, u32::max);
-            }
-            _ => {}
-        }
-    }
-    m
 }
