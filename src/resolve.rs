@@ -68,6 +68,10 @@ mod callable_reference_lhs;
 mod callable_reference_prefilter;
 mod callable_reference_selection;
 mod candidate_display;
+use candidate_display::{
+    ambiguous_classifier_message, classifier_access_display_from_shape,
+    inaccessible_classifier_message,
+};
 mod capture_analysis;
 mod capture_field_order;
 mod capture_storage;
@@ -138,10 +142,11 @@ mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
+mod missing_dependency_supertypes;
 mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
-use operator_calls::{range_operator, ResolvedInRangeComparison};
+use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
 mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
@@ -22012,6 +22017,7 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
         let policy_depth = self.push_statement_policies(scope, s);
         self.stmt_inner(scope, s);
+        self.check_statement_missing_supertypes(s);
         self.active_lexical_policies.truncate(policy_depth);
     }
 
@@ -23338,152 +23344,6 @@ impl<'a> Checker<'a> {
         expected
     }
 
-    fn stmt_for(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: StmtId,
-        name: String,
-        range: ForRange,
-        body: ExprId,
-        label: Option<String>,
-    ) {
-        let st = self.expr(scope, range.start);
-        let et = self.expr(scope, range.end);
-        let semantic_st = self.builtin_operator_operand(scope, st);
-        let semantic_et = self.builtin_operator_operand(scope, et);
-        // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
-        // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
-        // A `Byte`/`Short` range widens to an `IntRange` (kotlinc's `Short.rangeTo(Short): IntRange`),
-        // so the counter is `Int` and the bounds coerce up — exactly like a range *value*.
-        let counter = if st == Ty::Nothing {
-            semantic_et.range_counter_type()
-        } else if et == Ty::Nothing {
-            semantic_st.range_counter_type()
-        } else {
-            Ty::range_counter_type_for(semantic_st, semantic_et)
-        };
-        let elem = if let Some(counter) = counter {
-            // The loop counts over a range class's selected members and helpers.
-            self.record_progression_plans();
-            counter
-        } else {
-            let convention = range_operator(range.kind);
-            let span = self.file.stmt_spans[statement.0 as usize];
-            match self.operator_call_ret(
-                scope,
-                range.start,
-                st,
-                convention.name,
-                &[et],
-                &[range.end],
-                span,
-                None,
-            ) {
-                Some((range_ty, range_call)) if range_ty != Ty::Error => {
-                    match self.iterator_protocol_target(
-                        scope,
-                        Some(statement),
-                        range_ty,
-                        span,
-                        true,
-                    ) {
-                        Ok(Some(protocol)) => {
-                            let elem = protocol.elem_ty;
-                            self.resolved_stmt_operator_calls
-                                .insert((statement, convention.key), range_call.clone());
-                            self.resolved_stmt_operator_arg_slots
-                                .insert((statement, convention.key), vec![Some(range.end)]);
-                            self.for_range_iterator_protocols.insert(
-                                statement,
-                                ForRangeIteratorTarget {
-                                    range: Box::new(range_call),
-                                    protocol,
-                                },
-                            );
-                            elem
-                        }
-                        Ok(None) => {
-                            self.diags.error(
-                                span,
-                                format!(
-                                    "krusty: 'for' over '{}' is not supported (missing iterator convention)",
-                                    range_ty.source_name()
-                                ),
-                            );
-                            Ty::Error
-                        }
-                        Err(()) => Ty::Error,
-                    }
-                }
-                Some(_) => Ty::Error,
-                None => {
-                    self.diags.error(
-                        span,
-                        format!(
-                            "operator '{}' cannot be applied to '{}' and '{}'",
-                            convention.name,
-                            st.source_name(),
-                            et.source_name()
-                        ),
-                    );
-                    Ty::Error
-                }
-            }
-        };
-        {
-            let body_scope = scope.child(ScopeKind::Block);
-            let scope = &body_scope;
-            self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
-            self.check_loop_body(scope, body, &label);
-        }
-    }
-
-    fn stmt_for_each(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: StmtId,
-        name: String,
-        iterable: ExprId,
-        body: ExprId,
-        label: Option<String>,
-    ) {
-        let it = self.expr(scope, iterable);
-        self.record_iteration_plans(scope, statement, iterable);
-        // Java collection accessors yield flexible platform types (`Set<E>!`). A `for` loop is a
-        // value-consuming operation, so it selects the non-null lower bound exactly as a member call
-        // would; source `Set<E>?` remains nullable and is still rejected.
-        let iteration_ty = it.platform_lower_bound();
-        // An array element type covers primitive arrays and a boxed `Array<T>`
-        // (`Obj("kotlin/Array", [T])`) — iterate either as an array. The variable is a read of
-        // that element: `Array<out T>` and `Array<*>` yield `T`, not the projection wrapper.
-        let elem = if let Some(e) = iteration_ty.array_read_elem() {
-            e
-        } else {
-            if iteration_ty == Ty::String {
-                Ty::Char // iterating a String yields its chars
-            } else if iteration_ty == Ty::Error {
-                Ty::Error
-            } else {
-                match self.record_iterator_protocol(scope, Some(statement), iterable, iteration_ty)
-                {
-                    Ok(Some(elem)) => elem,
-                    Ok(None) => {
-                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
-                        Ty::Error
-                    }
-                    Err(()) => Ty::Error,
-                }
-            }
-        };
-        {
-            let body_scope = scope.child(ScopeKind::Block);
-            let scope = &body_scope;
-            let flow_identity = self.declare(scope, &name, elem, false);
-            self.record_enhanced_loop_variable(flow_identity, iterable);
-            self.check_loop_body(scope, body, &label);
-        }
-    }
-
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
@@ -24018,73 +23878,11 @@ impl<'a> Checker<'a> {
     }
 }
 
-fn inaccessible_classifier_message(
-    name: &str,
-    access: crate::symbol_source::ClassifierAccess,
-) -> String {
-    use crate::symbol_source::ClassifierAccess;
-
-    let kind = match access {
-        ClassifierAccess::Private => "private",
-        ClassifierAccess::Protected => "protected",
-        ClassifierAccess::Internal => "internal",
-        ClassifierAccess::PackagePrivate => "package-private",
-        ClassifierAccess::Public => "public",
-    };
-    format!("cannot access '{name}': it is {kind}")
-}
-
-/// kotlinc's `OVERLOAD_RESOLUTION_AMBIGUITY` for a classifier name: each equally visible
-/// classifier rendered as its declaration header, in candidate order.
-fn ambiguous_classifier_message<Shape: std::ops::Deref<Target = crate::libraries::LibraryType>>(
-    candidates: &[TypeName],
-    shape: impl Fn(TypeName) -> Option<Shape>,
-) -> String {
-    let mut message = "overload resolution ambiguity between candidates:".to_string();
-    for &candidate in candidates {
-        if let Some(shape) = shape(candidate) {
-            message.push('\n');
-            message.push_str(&classifier_access_display_from_shape(candidate, &shape));
-        }
-    }
-    message
-}
-
-fn classifier_access_display_from_shape(
-    internal: TypeName,
-    shape: &crate::libraries::LibraryType,
-) -> String {
-    let kind = match shape.kind {
-        crate::libraries::TypeKind::Class => "class",
-        crate::libraries::TypeKind::Interface => "interface",
-        crate::libraries::TypeKind::Annotation => "annotation class",
-        crate::libraries::TypeKind::Enum => "enum class",
-        crate::libraries::TypeKind::Object => "object",
-    };
-    let supertypes = shape
-        .supertypes
-        .iter_ids()
-        .map(|supertype| {
-            let ty = Ty::obj_name(supertype);
-            if ty.is_erased_top() {
-                "Any".to_string()
-            } else {
-                ty.source_name()
-            }
-        })
-        .collect::<Vec<_>>();
-    let supertypes = if supertypes.is_empty() {
-        String::new()
-    } else {
-        format!(" : {}", supertypes.join(", "))
-    };
-    format!("{} {}{supertypes}", kind, internal.nested_segment_ref())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::LangFeatures;
+    use crate::frontend::{PlatformLibraries, PlatformProvider};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features};
 
@@ -24106,6 +23904,10 @@ mod tests {
     ) -> crate::jvm::jvm_libraries::JvmLibraries {
         crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization")
+    }
+
+    fn jvm_platform(libraries: impl Into<PlatformLibraries>) -> PlatformProvider {
+        PlatformProvider::jvm(libraries)
     }
 
     #[test]
@@ -24965,7 +24767,8 @@ val result = object { fun value(): String = captured }
         platform: Box<dyn crate::libraries::SemanticPlatform>,
     ) -> (File, TypeInfo, DiagSink) {
         let mut diagnostics = DiagSink::new();
-        let (file, _, info) = crate::frontend::analyze_source(src, platform, &mut diagnostics);
+        let (file, _, info) =
+            crate::frontend::analyze_source(src, jvm_platform(platform), &mut diagnostics);
         let info = info.expect("production frontend must retain checked platform analysis");
         (file, info, diagnostics)
     }
@@ -24985,7 +24788,7 @@ val result = object { fun value(): String = captured }
             .collect::<Vec<_>>();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             prepare_symbols,
             &mut diagnostics,
@@ -25025,7 +24828,7 @@ val result = object { fun value(): String = captured }
         ];
         let mut analysis = crate::frontend::analyze_source_set(
             &sources,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &mut diagnostics,
         );
         let info = analysis.types.get_mut(3).and_then(Option::take);
@@ -28094,7 +27897,7 @@ fun box(): String {
              }";
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[crate::source::SourceInput::kotlin(source).with_file_stem("Diamond")],
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &crate::features::LangFeatures::new(),
             &mut diagnostics,
         );
@@ -28396,10 +28199,10 @@ fun box(): String {
         let source = "val String.length: String get() = \"bad\"\n\
              fun len(s: String, n: String?): Int = s.length + (n?.length ?: 0)";
         let mut diagnostics = DiagSink::new();
-        let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
+        let cp = std::rc::Rc::new(crate::toolchain::stdlib_and_jdk_classpath());
         let (file, symbols, info) = crate::frontend::analyze_source(
             source,
-            Box::new(initialized_jvm_libraries(cp)),
+            jvm_platform(Box::new(initialized_jvm_libraries(cp))),
             &mut diagnostics,
         );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
@@ -28475,8 +28278,9 @@ fun box(): String {
         let source = "enum class Direct { VALUE }\n\
              class Owner { enum class Nested { VALUE } }\n\
              fun inspect() { Direct.entries; Owner.Nested.entries }";
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
+            crate::toolchain::stdlib_and_jdk_classpath(),
+        ));
         let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         let reads = file
             .expr_arena
@@ -28545,8 +28349,9 @@ fun box(): String {
     fn enum_name_and_ordinal_are_ordinary_inherited_properties() {
         let source = "enum class State { READY }\n\
              fun inspect(state: State): String = state.name + state.ordinal";
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
+            crate::toolchain::stdlib_and_jdk_classpath(),
+        ));
         let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         assert_no_diags(&diagnostics);
 
@@ -29729,8 +29534,11 @@ fun box(): String {
                  if ((PREFIX as String?) == \"ignored\") return \"early\"\n\
                  return consume(PREFIX)\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert_no_diags(&diagnostics);
     }
 
@@ -29802,7 +29610,7 @@ fun box(): String {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
-            Box::new(platform),
+            jvm_platform(Box::new(platform)),
             &LangFeatures::from_source(source),
             &mut diagnostics,
         );
@@ -30677,8 +30485,11 @@ fun use() {
                  execute(Command::Add); execute(Command(), Command::InnerAdd)\n\
                  use0(o::Inner).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30691,8 +30502,11 @@ fun use() {
              fun withO(block: (String) -> String): String = \"\"\n\
              object Host { fun hostFoo(vararg values: String): String = \"\" }\n\
              fun use() { consume(::of); withO(::hostFoo) }";
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let _ = info.expect("production frontend must check the source");
         let files = vec![file];
@@ -30752,8 +30566,11 @@ fun use() {
                  use0(o::Inner1).result; use1(o::Inner1).result\n\
                  use0(o::Inner2).result; use1(o::Inner2).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30839,8 +30656,11 @@ fun use() {
     fn unannotated_delegated_properties_infer_classpath_extension_getvalue_return() {
         let source = "package test\nclass Delegate\nval prop by Delegate()";
         let mut diagnostics = DiagSink::new();
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let info = info.expect("production frontend must check the source");
         assert!(
@@ -31985,7 +31805,7 @@ fun use(counter: Counter) {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             |_, symbols| {
                 // Keep interface search active when superclass metadata is external.
@@ -32180,8 +32000,11 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
         let platform = initialized_jvm_libraries(classpath);
-        let (_, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(platform), &mut diagnostics);
+        let (_, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(platform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         assert!(info.is_some(), "production frontend must check the source");
         {
@@ -33540,8 +33363,10 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
         resolved_operator_calls: HashMap::new(),
+        resolved_builtin_operator_accesses: HashMap::new(),
         resolved_in_range_comparisons: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
+        resolved_stmt_builtin_operator_accesses: HashMap::new(),
         resolved_stmt_operator_arg_slots: HashMap::new(),
         indexed_operator_ambiguous: false,
         resolved_inc_dec: HashMap::new(),
@@ -36164,8 +35989,15 @@ struct Checker<'a> {
     extension_receiver_expr_uses: Vec<Vec<Span>>,
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
+    /// Builtin scalar operators lower without a callable target, but checking still records
+    /// their exact semantic dispatch classifier for qualified-access diagnostics.
+    resolved_builtin_operator_accesses:
+        HashMap<(ExprId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
     resolved_in_range_comparisons: HashMap<ExprId, ResolvedInRangeComparison>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    /// Statement counterpart of [`Self::resolved_builtin_operator_accesses`].
+    resolved_stmt_builtin_operator_accesses:
+        HashMap<(StmtId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
     indexed_operator_ambiguous: bool,
@@ -46506,6 +46338,8 @@ impl<'a> Checker<'a> {
         let checked = self.type_ref_ty(scope, bound);
         if checked.contains_error() {
             self.report_unresolved_type_ref(bound);
+        } else {
+            self.check_bound_missing_supertypes(bound, checked);
         }
         let bound_is_interface =
             crate::fir::ResolvedTypeParameterBound::is_interface_type(checked, |owner| {
@@ -50088,6 +49922,9 @@ impl<'a> Checker<'a> {
                         .insert(owner, supertypes.into_boxed_slice());
                 }
             }
+        }
+        if !self.fragment.is_type_use_annotations() {
+            self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
         self.validate_class_superclass(d, cl, current_owner);
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
@@ -55653,6 +55490,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.check_expression_opt_in(scope, e);
+        self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;
@@ -58380,7 +58218,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             });
-            if let Some((selected, params, ret)) = selected_get {
+            if let Some((selected, params, ret, bindings)) = selected_get {
                 let vararg = selected
                     .call_sig
                     .vararg_index
@@ -58391,12 +58229,7 @@ impl<'a> Checker<'a> {
                     return self.set(e, Ty::Error);
                 }
                 if !self.commit_indexed_operator_arguments(
-                    e,
-                    &selected.call_sig.param_defaults,
-                    selected.context_count,
-                    &params,
-                    vararg,
-                    &indices,
+                    e, &selected, &bindings, &params, vararg, &indices,
                 ) {
                     return self.set(e, Ty::Error);
                 }
@@ -58890,9 +58723,13 @@ impl<'a> Checker<'a> {
             IncDecSite::Expression(expression) => {
                 self.resolved_operator_calls
                     .remove(&(expression, operator_key));
+                self.resolved_builtin_operator_accesses
+                    .remove(&(expression, operator_key));
             }
             IncDecSite::Statement(statement) => {
                 self.resolved_stmt_operator_calls
+                    .remove(&(statement, operator_key));
+                self.resolved_stmt_builtin_operator_accesses
                     .remove(&(statement, operator_key));
             }
         }
@@ -58910,6 +58747,18 @@ impl<'a> Checker<'a> {
         let mut selected = None;
         for receiver_ty in receivers {
             if let Some(updated_ty) = builtin_inc_dec_result(receiver_ty) {
+                if let Some(access) = SelectedBuiltinOperatorAccess::member(receiver_ty) {
+                    match site {
+                        IncDecSite::Expression(expression) => {
+                            self.resolved_builtin_operator_accesses
+                                .insert((expression, operator_key), access);
+                        }
+                        IncDecSite::Statement(statement) => {
+                            self.resolved_stmt_builtin_operator_accesses
+                                .insert((statement, operator_key), access);
+                        }
+                    }
+                }
                 selected = Some((receiver_ty, updated_ty, None));
                 break;
             }
@@ -60618,6 +60467,17 @@ impl<'a> Checker<'a> {
             operator_span,
             prepared_lhs,
         } = operands;
+        let operator_key = match op {
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(SyntheticOperatorCall::CompareTo),
+            _ => op
+                .arith_operator_name()
+                .and_then(SyntheticOperatorCall::from_name),
+        };
+        if let Some(operator) = operator_key {
+            self.resolved_operator_calls.remove(&(e, operator));
+            self.resolved_builtin_operator_accesses
+                .remove(&(e, operator));
+        }
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
                 let lt = match prepared_lhs {
@@ -60927,7 +60787,17 @@ impl<'a> Checker<'a> {
             }
             let builtin_lt = self.builtin_operator_operand(scope, lt);
             let builtin_rt = self.builtin_operator_operand(scope, rt);
-            self.check_binary(op, builtin_lt, builtin_rt, self.span(e))
+            let result = self.check_binary(op, builtin_lt, builtin_rt, self.span(e));
+            if result != Ty::Error {
+                if let (Some(operator), Some(access)) = (
+                    operator_key,
+                    SelectedBuiltinOperatorAccess::member(builtin_lt),
+                ) {
+                    self.resolved_builtin_operator_accesses
+                        .insert((e, operator), access);
+                }
+            }
+            result
         };
         self.set(e, t)
     }
@@ -63649,10 +63519,18 @@ impl<'a> Checker<'a> {
         // Expected-type checking may revisit the same arena node.
         self.resolved_operator_calls
             .remove(&(expression, target_key));
+        self.resolved_builtin_operator_accesses
+            .remove(&(expression, target_key));
         // Treat boxed Kotlin primitives as built-in unary operands.
         let semantic_operand = self.builtin_operator_operand(scope, ot);
         match builtin_unary_result(self.libraries, semantic_operand, op) {
-            Some(result) => result,
+            Some(result) => {
+                if let Some(access) = SelectedBuiltinOperatorAccess::member(semantic_operand) {
+                    self.resolved_builtin_operator_accesses
+                        .insert((expression, target_key), access);
+                }
+                result
+            }
             _ if ot == Ty::Error => Ty::Error,
             _ => {
                 let operator_span = Span::new(span.lo, span.lo.saturating_add(1));

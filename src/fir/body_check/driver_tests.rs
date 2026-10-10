@@ -26,7 +26,7 @@ fn property_initializers_and_accessors_stream_as_distinct_body_units() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Properties")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -80,7 +80,7 @@ fn anonymous_property_initializer_reads_same_named_lexical_capture() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("AnonymousPropertyCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -149,7 +149,7 @@ fn enum_entry_property_accessor_streams_as_checked_fir() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("EnumEntryAccessor")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -195,15 +195,15 @@ fn local_classifier_property_reference_streams_with_captured_type_arguments() {
         fun box(): String = genericFun("OK")"#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("LocalPropertyReference")];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for(source),
+        crate::toolchain::jvm_classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -276,7 +276,7 @@ fn script_body_streams_as_one_checked_body_unit() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin_script("val value = 1\nvalue + 2\n").with_file_stem("BuildScript")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -319,7 +319,7 @@ fn class_init_block_uses_its_stable_body_unit_anchor() {
             SourceInput::kotlin("class Initialized(val seed: Int) { init { seed + 2 } }\n")
                 .with_file_stem("Initialized"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -365,7 +365,7 @@ fn enum_init_block_uses_the_current_dispatch_receiver() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("EnumInitReceiver")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -433,7 +433,7 @@ fn enum_property_initializer_reads_a_prior_property_on_current_dispatch() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("EnumPropertyReceiver")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -487,7 +487,7 @@ fn class_initializer_keeps_property_parameter_slots_without_rebinding_their_name
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("PropertyParameterSlot")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -587,7 +587,7 @@ fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instan
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("CapturedPropertyDispatch")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -722,7 +722,7 @@ fn sibling_local_function_supplies_the_local_class_shared_capture_operand() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("SiblingConstructorCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -820,7 +820,7 @@ fn local_class_recaptures_the_selected_local_constructor_closure() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("LocalClassRecapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -931,7 +931,7 @@ fn local_class_member_keeps_the_enclosing_body_local_callable_identity() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("LocalCallableCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1050,7 +1050,7 @@ fn anonymous_class_mutable_capture_is_a_shared_cell_in_checked_fir() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("SharedClassCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1120,7 +1120,7 @@ fn anonymous_class_inferred_property_increment_keeps_outer_capture_mutable() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("AnonymousLambdaCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1220,7 +1220,7 @@ fn nested_anonymous_class_forwards_a_mutable_destructure_capture() {
     let features = LangFeatures::from_source(source);
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("DestructureCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &features,
         &mut diagnostics,
     );
@@ -1305,7 +1305,7 @@ fn inner_local_class_super_lambda_reads_the_enclosing_class_capture() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("NestedClassCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1375,7 +1375,7 @@ fn local_class_inside_setter_keeps_enclosing_backing_field_identity() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("LocalSetterField")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1441,7 +1441,7 @@ fn nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix(
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("NestedAnonymousReceiver")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1581,7 +1581,7 @@ fn class_initialization_units_stream_in_source_order() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Ordered")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1649,7 +1649,7 @@ fn enum_entry_constructor_mapping_is_final_in_checked_fir() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Choice")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1715,7 +1715,7 @@ fn enum_entry_property_initializers_stream_with_the_entry_receiver() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("EnumEntryProperties")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1838,7 +1838,7 @@ fn enum_entry_inner_class_reads_entry_property_through_outer_enum_receiver() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("EnumEntryInnerClass")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1967,7 +1967,7 @@ fn enum_entry_property_anonymous_object_captures_prior_entry_storage() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("EnumEntryAnonymousCapture")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2020,7 +2020,7 @@ fn anonymous_object_nested_inner_class_publishes_outer_capture_dependent_signatu
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("AnonymousNestedInner")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2082,7 +2082,7 @@ fn public_anonymous_result_call_uses_the_finalized_stable_approximation() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &[SourceInput::kotlin(source).with_file_stem("PublicAnonymousResult")],
-        super::test_support::jvm_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_semantics()),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -2116,7 +2116,7 @@ fn production_stream_does_not_publish_anonymous_super_arguments_as_properties() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &[SourceInput::kotlin(source).with_file_stem("AnonymousSuperCapture")],
-        super::test_support::jvm_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_semantics()),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -2140,7 +2140,7 @@ fn production_stream_republishes_anonymous_delegate_as_synthetic_constructor_par
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &[SourceInput::kotlin(source).with_file_stem("AnonymousDelegate")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2162,7 +2162,7 @@ fn production_stream_infers_nested_classifier_companion_invoke() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &[SourceInput::kotlin(source).with_file_stem("NestedCompanionInvoke")],
-        super::test_support::jvm_stdlib_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_stdlib_semantics()),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2183,7 +2183,7 @@ fn production_stream_finalizes_defaulted_member_through_interface_delegation() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &[SourceInput::kotlin(source).with_file_stem("DelegatedDefault")],
-        super::test_support::jvm_stdlib_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_stdlib_semantics()),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2209,7 +2209,7 @@ fn production_stream_checks_expect_constructor_default_against_actual_signature(
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects"),
         &mut diagnostics,
     );
@@ -2230,7 +2230,7 @@ fn qualified_array_factory_is_folded_as_annotation_array_payload() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &[SourceInput::kotlin(source).with_file_stem("QualifiedAnnotationArray")],
-        super::test_support::jvm_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_semantics()),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -2258,7 +2258,7 @@ fn annotation_folding_uses_resolved_enum_identity_for_every_source_spelling() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &[SourceInput::kotlin(source).with_file_stem("EnumAnnotationArguments")],
-        super::test_support::jvm_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_semantics()),
         &LangFeatures::from_source(source),
         |_, _| {},
         &mut diagnostics,
@@ -2288,7 +2288,7 @@ fn expected_classifier_resolves_a_java_static_property_as_a_semantic_property() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        super::test_support::jvm_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_semantics()),
         &LangFeatures::from_source(kotlin),
         |_, _| {},
         &mut diagnostics,
@@ -2322,7 +2322,7 @@ fn accessor_property_inherited_through_java_keeps_exact_source_accessor_targets(
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        super::test_support::jvm_stdlib_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_stdlib_semantics()),
         &LangFeatures::from_source(kotlin),
         &mut diagnostics,
     );
@@ -2342,7 +2342,7 @@ fn inferred_signature_approximates_recursive_star_capture_to_denotable_type() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("RecursiveGeneric")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2387,7 +2387,7 @@ fn pass_one_prepares_inline_members_of_parser_hoisted_nested_classifiers() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -2415,7 +2415,7 @@ fn pass_one_checks_anonymous_member_bodies_owned_by_an_inline_function() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -2458,7 +2458,7 @@ fn production_stream_captures_unnamed_context_in_crossinline_lambda() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        super::test_support::jvm_stdlib_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_stdlib_semantics()),
         &features,
         &mut diagnostics,
     );
@@ -2479,7 +2479,7 @@ fn production_stream_types_contextual_sam_lambda_with_implicit_receiver() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &[SourceInput::kotlin(source).with_file_stem("ContextSam")],
-        super::test_support::jvm_stdlib_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_stdlib_semantics()),
         &features,
         &mut diagnostics,
     );
@@ -2500,7 +2500,7 @@ fn production_stream_publishes_cross_file_suspend_function_fun_interface() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        super::test_support::jvm_stdlib_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_stdlib_semantics()),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2523,7 +2523,7 @@ fn enum_entry_without_primary_constructor_targets_selected_secondary_callable() 
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("SecondaryEnum")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2603,7 +2603,7 @@ fn parameter_default_is_owned_by_fir_even_without_an_ordinary_body() {
             SourceInput::kotlin("interface Config { fun value(input: Int = 41): Int }\n")
                 .with_file_stem("Config"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2657,7 +2657,7 @@ fn member_constant_payload_survives_into_authoritative_pass_two() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("ConstantReceiver")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2680,7 +2680,7 @@ fn member_constant_payload_survives_into_authoritative_pass_two() {
     let inputs = [SourceInput::kotlin(source).with_file_stem("ConstantReceiver")];
     let production = crate::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2698,7 +2698,7 @@ fn overloaded_functions_keep_parameter_referencing_defaults_in_their_own_signatu
              fun choose(a: Int = 3, b: Int = a + 1, c: Int = a + b): Int = a + b + c\n",
         )
         .with_file_stem("Defaults")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2793,7 +2793,7 @@ fn imported_nested_typealiases_publish_bound_constructions_and_unbound_construct
             SourceInput::kotlin(declarations).with_file_stem("Aliases"),
             SourceInput::kotlin(use_site).with_file_stem("UseSite"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2885,7 +2885,7 @@ fn secondary_constructor_delegation_is_final_in_checked_fir() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Built")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2959,7 +2959,7 @@ fn secondary_constructor_val_initialization_is_a_checked_backing_field_write() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("DeferredValConstructor")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3017,7 +3017,7 @@ fn primary_super_delegation_uses_the_selected_module_constructor() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Constructors")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3098,7 +3098,7 @@ fn nested_class_super_argument_selects_its_enclosing_object_receiver() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("ObjectHeaderReceiver")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3181,7 +3181,7 @@ fn primary_super_callable_reference_captures_the_available_enclosing_receiver() 
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("OuterCapture")],
-        super::test_support::jvm_semantics(),
+        crate::frontend::PlatformProvider::jvm(super::test_support::jvm_semantics()),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3263,7 +3263,7 @@ fn inner_super_constructor_delegation_keeps_the_checked_enclosing_receiver() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("InnerSuperOuter")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3335,7 +3335,7 @@ fn anonymous_inner_super_delegation_reads_checked_constructor_capture_parameters
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("AnonymousInnerSuper")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );

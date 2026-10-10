@@ -198,7 +198,14 @@ pub fn compile<B: Backend>(
         .iter()
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
-    let features = krusty::conformance::test_features(directive_source, target);
+    let compilation_target = backend.compilation_target();
+    if compilation_target != target.compilation_target() {
+        return Err(Outcome::Harness(format!(
+            "the {target:?} corpus lane received a {compilation_target:?} backend"
+        )));
+    }
+    let platform = krusty::frontend::PlatformProvider::new(compilation_target, platform);
+    let features = krusty::features::LangFeatures::from_source(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,

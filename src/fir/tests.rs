@@ -2241,12 +2241,18 @@ impl SignatureSemantics for TestSignatureSemantics {
         arguments: &[ResolvedSigCallArgument<'_>],
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
+        qualified_namespace: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId> {
-        self.operations
-            .borrow_mut()
-            .push(format!("call:{spelling}"));
+        self.operations.borrow_mut().push(format!(
+            "{}call:{spelling}",
+            if qualified_namespace {
+                "namespace-"
+            } else {
+                ""
+            }
+        ));
         if let Some(declaration) = self.call_dependency {
             return demand(declaration).map(|signature| signature.result);
         }
@@ -2263,6 +2269,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
+        _qualified: bool,
         _expected: Option<ResolvedTy>,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId> {
@@ -2341,6 +2348,18 @@ impl SignatureSemantics for TestSignatureSemantics {
         _scope: SignatureScope,
         _root: &str,
     ) -> Result<bool, DiagnosticId> {
+        Ok(false)
+    }
+
+    fn qualified_call_receiver_is_value(
+        &self,
+        _scope: SignatureScope,
+        root: &str,
+        first_selector: &str,
+    ) -> Result<bool, DiagnosticId> {
+        self.operations
+            .borrow_mut()
+            .push(format!("qualified-root:{root}.{first_selector}"));
         Ok(false)
     }
 
@@ -2554,7 +2573,11 @@ fn resolver_selection_demands_the_selected_declaration_through_the_solver() {
         trailing_lambda: false,
     });
     let arguments = graph.add_call_arguments([]);
-    let call = graph.add_expr(SigExpr::Call { target, arguments });
+    let call = graph.add_expr(SigExpr::Call {
+        target,
+        arguments,
+        qualified: None,
+    });
     let selected_result = graph.add_expr(SigExpr::Known(
         ResolvedTy::new(Ty::String).expect("String is publishable"),
     ));
@@ -2583,6 +2606,76 @@ fn resolver_selection_demands_the_selected_declaration_through_the_solver() {
             "call:selected",
             "parameters",
             "parameters"
+        ]
+    );
+}
+
+#[test]
+fn a_namespace_bound_qualified_call_stays_a_namespace_at_final_selection() {
+    let declaration = DeclarationId::from_raw(32);
+    let origin = OriginId::from_raw(4);
+    let mut graph = SignatureGraph::default();
+    let scope = graph.add_scope(SignatureScope {
+        owner: declaration,
+        source: SourceFileId::from_raw(0),
+    });
+    let result = graph.add_expr(SigExpr::Known(ResolvedTy::new(Ty::String).unwrap()));
+    let spelling = graph.intern_name("pkg.selected");
+    let member_name = graph.intern_name("selected");
+    let member = graph.add_member_selection(DeferredMemberSelection {
+        scope,
+        spelling: member_name,
+        origin,
+        expected: None,
+        type_arguments: OperandRange::default(),
+        trailing_lambda: false,
+    });
+    let target = graph.add_callable_selection(DeferredCallableSelection {
+        scope,
+        spelling,
+        lexical_classifier: None,
+        origin,
+        expected: Some(result),
+        type_arguments: OperandRange::default(),
+        trailing_lambda: false,
+    });
+    let arguments = graph.add_call_arguments([]);
+    let root = graph.intern_name("pkg");
+    let first_selector = graph.intern_name("selected");
+    let qualified = graph.add_qualified_call_coordinate(QualifiedCallCoordinate {
+        receiver: result,
+        root,
+        first_selector,
+        member,
+        origin,
+    });
+    let call = graph.add_expr(SigExpr::Call {
+        target,
+        arguments,
+        qualified: Some(qualified),
+    });
+    graph.add_inferred_constraint(
+        &inferred_stub(declaration, InferredSignatureKind::ExpressionFunction),
+        call,
+        OriginId::from_raw(0),
+    );
+
+    let semantics = TestSignatureSemantics::new();
+    let index = SignatureSolver::new(graph, [declaration])
+        .finalize(&ResolverBackedSignatureEvaluator::new(&semantics))
+        .unwrap();
+
+    assert_eq!(
+        index.signature(declaration).unwrap().result.get(),
+        Ty::String
+    );
+    assert_eq!(
+        semantics.operations.into_inner(),
+        [
+            "qualified-root:pkg.selected",
+            "call-expectations",
+            "namespace-call:pkg.selected",
+            "parameters",
         ]
     );
 }
@@ -2619,6 +2712,7 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     let call = graph.add_expr(SigExpr::Call {
         target: call_selection,
         arguments: call_arguments,
+        qualified: None,
     });
     let member_selection = graph.add_member_selection(DeferredMemberSelection {
         scope,

@@ -20,11 +20,18 @@ use super::super::decline::KlibBodyDeclineReason;
 impl BodyLowering<'_, '_, '_> {
     /// The function's body. Checked FIR lowering lowers a block body as the source block, typed
     /// by its checked type, inside the callable's own block; both are the callable's scope. A
-    /// function whose result is not `Unit` must leave its body through a jump, so that body is
-    /// typed `Nothing`; one that can reach its end declines.
+    /// function whose result is not `Unit` must not reach the end of its body: the body is typed
+    /// `Nothing`, or, as the checker's missing-return check accepts, ends in a `while (true)` or
+    /// `do`-`while (true)` loop, which source lowering keeps a `Unit` statement. One that can reach
+    /// its end declines.
     pub(in super::super) fn body(mut self, statements: &[KlibIrStatement]) -> Lowered<ExprId> {
         let source = self.block(statements)?;
-        if self.header.result() != Ty::Unit && self.lowered_type(source) != Ty::Nothing {
+        if self.header.result() != Ty::Unit
+            && self.lowered_type(source) != Ty::Nothing
+            && !statements
+                .last()
+                .is_some_and(|statement| self.loops_forever(statement))
+        {
             return Err(KlibBodyDeclineReason::MissingReturn);
         }
         let body = self.ir.add_expr(IrExpr::Block {
@@ -34,6 +41,22 @@ impl BodyLowering<'_, '_, '_> {
         self.ir.callable_scopes.insert(source);
         self.ir.callable_scopes.insert(body);
         Ok(body)
+    }
+
+    /// Whether `statement` is a loop whose condition is the constant `true`.
+    fn loops_forever(&self, statement: &KlibIrStatement) -> bool {
+        let KlibIrStatement::Expression(expression) = statement else {
+            return false;
+        };
+        let (KlibIrExprKind::While(serialized) | KlibIrExprKind::DoWhile(serialized)) =
+            &self.arena.expr(*expression).kind
+        else {
+            return false;
+        };
+        matches!(
+            self.arena.expr(serialized.condition).kind,
+            KlibIrExprKind::Const(KlibIrConstant::Boolean(true))
+        )
     }
 
     /// A source block of `statements`, typed as checked FIR lowering types it.

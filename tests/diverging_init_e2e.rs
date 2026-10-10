@@ -34,12 +34,12 @@ fn diverging_property_initializer_runs() {
     let inputs = [SourceInput::kotlin(SRC)];
     let _ = analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        krusty::frontend::PlatformProvider::jvm(Box::new(
             krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 krusty::jvm::classpath::Classpath::new(vec![stdlib.clone(), jdk.clone()]),
             ))
             .expect("JVM provider initialization"),
-        ),
+        )),
         &krusty::features::LangFeatures::new(),
         &mut d,
     );

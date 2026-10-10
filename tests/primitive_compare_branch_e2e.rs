@@ -47,7 +47,7 @@ fn an_explicit_floating_compare_keeps_total_ordering() {
         src,
         "explicit_floating_compare",
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
     ) else {
         eprintln!("skipping: JVM runner unavailable");
         return;
@@ -65,9 +65,12 @@ fn a_fused_comparison_still_orders_correctly() {
                \x20       .joinToString(\",\") { (a, b) -> \"\" + (a < b) + (a <= b) + (a > b) + (a >= b) }\n\
                \x20   return order\n\
                }\n";
-    let Some(actual) =
-        common::compile_and_run_box(src, "fused_compare", &[common::stdlib_jar()], None)
-    else {
+    let Some(actual) = common::compile_and_run_box(
+        src,
+        "fused_compare",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    ) else {
         eprintln!("skipping: JVM runner unavailable");
         return;
     };

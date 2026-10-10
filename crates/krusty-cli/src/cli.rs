@@ -1,27 +1,65 @@
-//! kotlinc-compatible command-line parsing, so `krusty` can stand in for `kotlinc` in a build:
-//! same common flags (`-d`, `-classpath`/`-cp`, `-include-runtime`, `-module-name`, `-jvm-target`,
-//! `-version`, `-help`, …), source files **or directories**, `@argfile`s, and graceful handling of
-//! options krusty doesn't implement (ignored with a note, rather than treated as source files).
-//! An explicit option that selects an output shape krusty cannot emit is instead a fatal error: it
-//! must never compile successfully under a different shape.
+//! kotlinc-compatible command line, so `krusty` can stand in for `kotlinc` in a build. The command
+//! line is split by kotlinc's own rules and argument table ([`crate::kotlinc_arguments`]); this
+//! module applies the arguments krusty implements and accepts source files **or directories**. A
+//! kotlinc argument krusty does not implement is a fatal error: the same command line must never
+//! compile successfully into something other than what it asks kotlinc for.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
-use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode, LambdaModes};
+use krusty::jvm::classpath::Classpath;
+use krusty::jvm::compilation_inputs::{selected_jdk_feature_release, JvmCompilationInputInventory};
+use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaModes};
+use krusty::jvm::JvmBackend;
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 use krusty::plugins::cli::PluginConfig;
 use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
 
+use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, ValueKind};
+
+mod arguments;
+mod language_features;
 mod warning_policy;
+
+use arguments::{
+    apply, collect_sources, finish_jvm_target, finish_language_settings, finish_warning_policy,
+    take_reference_version, unsupported, ParsedSettings,
+};
 pub use warning_policy::{WarningDisposition, WarningLevel, WarningName, WarningPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CliWarning {
-    pub name: WarningName,
+    /// The diagnostic `-Xwarning-level` addresses; `None` for a warning kotlinc reports without a
+    /// name, which no level changes.
+    pub name: Option<WarningName>,
     pub message: String,
+}
+
+/// A problem kotlinc reports while reading its arguments, after the syntax warnings: a
+/// `-XXLanguage` value it cannot use. An error fails the invocation once everything is reported.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArgumentProblem {
+    pub is_error: bool,
+    /// kotlinc's message before rendering ([`kotlinc_arguments::render`]).
+    pub message: String,
+}
+
+impl ArgumentProblem {
+    fn warning(message: String) -> Self {
+        Self {
+            is_error: false,
+            message,
+        }
+    }
+
+    fn error(message: String) -> Self {
+        Self {
+            is_error: true,
+            message,
+        }
+    }
 }
 
 pub struct Options {
@@ -38,13 +76,24 @@ pub struct Options {
     pub module_name: String,
     /// Standard per-compilation language/API versions and their finalized feature baseline.
     pub language_settings: LanguageSettings,
-    /// Options accepted for compatibility but not acted on (reported once).
+    /// Inputs krusty skips (Kotlin scripts), each reported once.
     pub ignored: Vec<String>,
-    /// Flags kotlinc itself accepts but warns about ("flag is not supported by this version of the
-    /// compiler") while compiling exactly as if the flag were absent. Unlike `ignored`, these are
-    /// part of kotlinc's accepted surface: the driver prints kotlinc's warning and compilation is
-    /// unchanged. Currently only `-Xwasm-kclass-fqn` — see the match arm for the measured contract.
-    pub unsupported_flag_warnings: Vec<String>,
+    /// kotlinc's own command-line syntax errors (`Invalid argument: -foo`), in its words. Any one
+    /// stops the invocation before compiling, exactly as kotlinc does.
+    pub argument_errors: Vec<String>,
+    /// kotlinc's command-line syntax warnings (an unknown `-X` flag, a deprecated spelling, an
+    /// unreadable argfile), in its words; compilation is unchanged.
+    pub argument_warnings: Vec<String>,
+    /// Advanced options absent from the selected kotlinc release. The normal CLI follows kotlinc
+    /// and only warns; the persistent worker refuses them because its build action cannot safely
+    /// assume an unknown option is output-neutral.
+    pub(crate) unknown_extra_flags: Vec<String>,
+    /// What kotlinc reports about the `-XXLanguage` arguments after the syntax warnings: the
+    /// unsafe-arguments notice and each value it cannot use.
+    pub language_feature_problems: Vec<ArgumentProblem>,
+    /// kotlinc's configuration errors (a feature that cannot be disabled), in its words. They are
+    /// reported before the configuration warnings and fail the invocation.
+    pub configuration_errors: Vec<String>,
     /// Named CLI warnings and their configured severity. These are evaluated before compilation;
     /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.
     pub warning_policy: WarningPolicy,
@@ -81,6 +130,10 @@ pub struct Options {
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
+    /// `-Xjdk-release=<v>`: the JDK release whose API the sources compile against. kotlinc also
+    /// derives the JVM target from it. krusty compiles against the selected JDK's own API only, so
+    /// [`Options::check_jdk_release`] refuses a release other than that JDK's.
+    pub jdk_release: Option<u16>,
     /// The compiler-plugin switches (`-Xplugin`, `-P`, `-Xcompiler-plugin`), resolved against krusty's
     /// extension registry by [`Options::resolve_plugins`].
     pub plugins: PluginConfig,
@@ -95,6 +148,12 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
+    /// `-Xassertions=always-enable|always-disable`: an unconditional `assert(...)` mode, applied to
+    /// the language settings once they are built.
+    pub assertions: Option<String>,
+    /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
+    /// the JVM target.
+    pub inline_string_concat: bool,
     /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
     /// accepted module-wide, applied to the language settings once they are built.
     pub opt_in: Vec<String>,
@@ -111,9 +170,21 @@ impl Default for Options {
             friend_paths: Vec::new(),
             sources: Vec::new(),
             module_name: "main".to_string(),
-            language_settings: LanguageSettings::default(),
+            // Parsing replaces this once it knows the selected release. Building it must not fix the
+            // process-wide reference version, which `-Xkotlin-reference-version` may still choose.
+            language_settings: LanguageSettings::for_release(
+                KotlinVersion::newest(),
+                krusty::language_version::LanguageVersion::default(),
+                None,
+                &[],
+            )
+            .expect("the default language/API versions are compatible"),
             ignored: Vec::new(),
-            unsupported_flag_warnings: Vec::new(),
+            argument_errors: Vec::new(),
+            argument_warnings: Vec::new(),
+            unknown_extra_flags: Vec::new(),
+            language_feature_problems: Vec::new(),
+            configuration_errors: Vec::new(),
             warning_policy: WarningPolicy::default(),
             warnings: Vec::new(),
             errors: Vec::new(),
@@ -124,6 +195,7 @@ impl Default for Options {
             no_reflect: false,
             no_jdk: false,
             jvm_target_major: None,
+            jdk_release: None,
             kotlin_reference_version: None,
             metadata_version: None,
             jvm_default: JvmDefaultMode::default(),
@@ -133,6 +205,8 @@ impl Default for Options {
             no_call_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
+            assertions: None,
+            inline_string_concat: false,
             opt_in: Vec::new(),
             suppress_version_warnings: false,
         }
@@ -154,423 +228,141 @@ pub fn jvm_target_to_major(v: &str) -> Option<u16> {
     }
 }
 
-/// kotlinc flags that take a following value but which krusty ignores (accept + drop the value).
-const IGNORED_WITH_VALUE: &[&str] = &["-kotlin-home", "-script-templates", "-expression", "-e"];
-/// kotlinc valueless flags that krusty ignores (accept + drop).
-const IGNORED_FLAGS: &[&str] = &[
-    "-include-runtime",
-    "-verbose",
-    "-progressive",
-    "-script",
-    "-Xuse-ir",
-];
-
-/// Record a `-jvm-default`/`-Xjvm-default` value, reporting one krusty does not model instead of
-/// silently compiling under a different interface shape than the build asked for.
-fn apply_jvm_default(
-    opts: &mut Options,
-    flag: &str,
-    value: &str,
-    parse_value: fn(&str) -> Option<JvmDefaultMode>,
-) {
-    // An unknown value is fatal. Merely recording it as an ignored option would let the driver
-    // continue with `Enable`, silently emitting a different interface shape than the invocation
-    // requested. Every value kotlinc accepts is emitted, so there is no second rejection class.
-    match parse_value(value) {
-        Some(mode) => opts.jvm_default = mode,
-        None => opts
-            .errors
-            .push(format!("invalid value '{value}' for {flag}")),
-    }
-}
-
-fn supported_stamp_levels() -> String {
-    LanguageVersion::supported_metadata_stamps_text()
-}
-
-/// Parse a `major.minor` level on the shared stamp contract. Anything else — a patch segment,
-/// a sign, or a level outside the internal 2.0 through 2.4 stamp domain — is unknown.
-fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
-    LanguageVersion::parse_supported_metadata_stamp(value).map(LanguageVersion::metadata_version)
-}
-
-fn settings_warnings(
-    settings: &LanguageSettings,
-    feature_arguments: &[String],
-    suppress_version_warnings: bool,
-) -> Vec<CliWarning> {
-    let mut warnings = Vec::new();
-    if suppress_version_warnings {
-        return redundant_feature_warnings(settings, feature_arguments);
-    }
-    if settings.language_version >= LanguageVersion::V2_2
-        && settings.api_version <= LanguageVersion::V2_1
-    {
-        warnings.push(CliWarning {
-            name: WarningName::DeprecatedLanguageVersion,
-            message: format!(
-                "API version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
-                settings.api_version
-            ),
-        });
-    }
-    match settings.language_version {
-        LanguageVersion::V2_0 | LanguageVersion::V2_1 => warnings.push(CliWarning {
-            name: WarningName::DeprecatedLanguageVersion,
-            message: format!(
-                "language version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
-                settings.language_version
-            ),
-        }),
-        LanguageVersion::V2_5 | LanguageVersion::V2_6 => warnings.push(CliWarning {
-            name: WarningName::ExperimentalLanguageVersion,
-            message: format!(
-                "language version {} is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.",
-                settings.language_version
-            ),
-        }),
-        _ => {}
-    }
-    warnings.extend(redundant_feature_warnings(settings, feature_arguments));
-    warnings
-}
-
-fn redundant_feature_warnings(
-    settings: &LanguageSettings,
-    feature_arguments: &[String],
-) -> Vec<CliWarning> {
-    let mut warnings = Vec::new();
-    let mut applied = krusty::features::LangFeatures::for_versions(
-        settings.language_version,
-        settings.api_version,
-    );
-    for argument in feature_arguments {
-        let before = applied.clone();
-        let recognized = applied.apply_cli_arg(argument);
-        debug_assert!(
-            recognized,
-            "the parser retained only language feature arguments"
-        );
-        if applied == before {
-            warnings.push(CliWarning {
-                name: WarningName::RedundantCliArg,
-                message: format!(
-                    "the argument '{argument}' is redundant for the current language version {}.",
-                    settings.language_version
-                ),
-            });
-        }
-    }
-    warnings
-}
-
-/// Split a classpath string on the platform separator (`:` on Unix).
-fn split_classpath(v: &str) -> Vec<PathBuf> {
-    let sep = if cfg!(windows) { ';' } else { ':' };
-    v.split(sep)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect()
-}
-
-fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>) {
-    let p = std::path::Path::new(path);
-    if p.is_dir() {
-        if let Ok(rd) = std::fs::read_dir(p) {
-            let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-            entries.sort();
-            for e in entries {
-                collect_sources(&e.to_string_lossy(), out, ignored);
-            }
-        }
-    } else if krusty::source::is_batch_compilable_path(p) {
-        out.push(path.to_string());
-    } else if krusty::source::kind(p).is_some() {
-        ignored.push(format!("{path} (script compilation is not supported yet)"));
-    }
-}
-
-/// Parse argv (already skipping the program name). `@file` argfiles are expanded inline.
+/// Parse argv (already skipping the program name) the way kotlinc does: `@file` argfiles expand
+/// inline, the reference release's argument table decides what each token is, and krusty then
+/// applies the arguments it implements.
 pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
-    let mut opts = Options::default();
-    let mut language_version_text = None;
-    let mut api_version_text = None;
-    let mut language_feature_arguments = Vec::new();
-    let mut raw: Vec<String> = Vec::new();
-    for a in argv {
-        if let Some(file) = a.strip_prefix('@') {
-            if let Ok(contents) = std::fs::read_to_string(file) {
-                raw.extend(contents.split_whitespace().map(|s| s.to_string()));
-                continue;
-            }
-        }
-        raw.push(a);
-    }
+    read(argv, Reading::Compilation)
+}
 
-    let mut it = raw.into_iter().peekable();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "-d" => opts.dest = PathBuf::from(it.next().unwrap_or_else(|| ".".into())),
-            "-cp" | "-classpath" | "-class-path" => {
-                if let Some(v) = it.next() {
-                    opts.classpath.extend(split_classpath(&v));
-                }
-            }
-            flag if flag.starts_with("-Xfriend-paths=") => {
-                let (_, value) = flag
-                    .split_once('=')
-                    .expect("the guard above already matched an `=`");
-                opts.friend_paths.extend(split_classpath(value));
-            }
-            "-module-name" => {
-                if let Some(v) = it.next() {
-                    opts.module_name = v;
-                }
-            }
-            // Public `-language-version` selects the source semantics. The feature baseline is
-            // rebuilt after all arguments have been read so explicit `-XXLanguage` overrides stay
-            // ordered independently of where this option appears.
-            "-language-version" => match it.next() {
-                Some(v) => language_version_text = Some(v),
-                None => opts
-                    .errors
-                    .push("missing value for -language-version".to_string()),
-            },
-            "-api-version" => match it.next() {
-                Some(v) => api_version_text = Some(v),
-                None => opts
-                    .errors
-                    .push("missing value for -api-version".to_string()),
-            },
-            "-Xmetadata-version" => match it.next() {
-                Some(v) => match parse_metadata_level(&v) {
-                    Some(version) => opts.metadata_version = Some(version),
-                    None => opts.errors.push(format!(
-                        "unknown metadata version: {v}\nSupported metadata versions: {}",
-                        supported_stamp_levels()
-                    )),
-                },
-                None => opts
-                    .errors
-                    .push("missing value for -Xmetadata-version".to_string()),
-            },
-            // `-Xwarning-level=<NAME>:<SEVERITY>` configures one exact diagnostic identity. Like
-            // kotlinc, reject an unknown or repeated name; retaining an opaque spelling as an
-            // ignored option would claim a warning policy the compiler never applies.
-            flag if flag.starts_with("-Xwarning-level=") => {
-                let value = flag.strip_prefix("-Xwarning-level=").unwrap_or_default();
-                if let Err(error) = opts.warning_policy.configure(value) {
-                    opts.errors.push(error);
-                }
-            }
-            "-jdk-home" => {
-                if let Some(v) = it.next() {
-                    opts.jdk_home = Some(PathBuf::from(v));
-                }
-            }
-            "-Xno-param-assertions" => opts.no_param_assertions = true,
-            "-Xno-call-assertions" => opts.no_call_assertions = true,
-            // `-Xlambdas` / `-Xsam-conversions` select how a lambda and a SAM conversion are
-            // realized: `indy` is a `LambdaMetafactory` call site (kotlinc's default since 2.0),
-            // `class` gives each lambda its own class extending `kotlin.jvm.internal.Lambda`. The
-            // two differ in the emitted class SET, so each value selects its own emitter strategy
-            // rather than being advisory.
-            flag if flag.starts_with("-Xlambdas=") || flag.starts_with("-Xsam-conversions=") => {
-                let (name, value) = flag
-                    .split_once('=')
-                    .expect("the guard above already matched an `=`");
-                match value {
-                    "indy" | "class" => {
-                        let mode = if value == "indy" {
-                            LambdaMode::Indy
-                        } else {
-                            LambdaMode::Class
-                        };
-                        if name == "-Xlambdas" {
-                            opts.lambda_modes.lambdas = mode;
-                        } else {
-                            opts.lambda_modes.sam_conversions = mode;
-                        }
-                    }
-                    _ => opts.errors.push(format!(
-                        "{name}={value} selects an output shape krusty does not emit"
-                    )),
-                }
-            }
-            "-no-stdlib" => opts.no_stdlib = true,
-            "-no-reflect" => opts.no_reflect = true,
-            "-no-jdk" => opts.no_jdk = true,
-            "-jvm-target" => {
-                // Honor the target: it sets the emitted class-file version. An unrecognized value is
-                // reported like any other ignored option rather than silently defaulting.
-                match it.next() {
-                    Some(v) => match jvm_target_to_major(&v) {
-                        Some(major) => opts.jvm_target_major = Some(major),
-                        None => opts.ignored.push(format!("-jvm-target {v}")),
-                    },
-                    None => opts.ignored.push("-jvm-target".to_string()),
-                }
-            }
-            // `-jvm-default` decides the JVM shape of an interface's members with bodies. It takes
-            // both the `flag value` and `flag=value` forms; the legacy `-Xjvm-default` spelling names
-            // the same three shapes differently and, like every kotlinc `-X…` flag, takes its value
-            // with `=` only — accepting a space form there would swallow the next source file.
-            "-jvm-default" => match it.next() {
-                Some(v) => apply_jvm_default(&mut opts, "-jvm-default", &v, JvmDefaultMode::parse),
-                None => opts
-                    .errors
-                    .push("missing value for -jvm-default".to_string()),
-            },
-            flag if flag.starts_with("-jvm-default=") => {
-                let value = flag
-                    .strip_prefix("-jvm-default=")
-                    .unwrap_or_default()
-                    .to_string();
-                apply_jvm_default(&mut opts, "-jvm-default", &value, JvmDefaultMode::parse);
-            }
-            flag if flag.starts_with("-Xjvm-default=") => {
-                let value = flag
-                    .strip_prefix("-Xjvm-default=")
-                    .unwrap_or_default()
-                    .to_string();
-                apply_jvm_default(
-                    &mut opts,
-                    "-Xjvm-default",
-                    &value,
-                    JvmDefaultMode::parse_legacy,
-                );
-            }
-            // kotlinc 2.4.10 (JVM) ACCEPTS `-Xwasm-kclass-fqn`: it prints `warning: flag is not
-            // supported by this version of the compiler: -Xwasm-kclass-fqn` and produces
-            // byte-identical output with and without the flag (measured). Mirror that contract —
-            // accept, warn, change nothing. Deliberately scoped to this one flag; other `-Xwasm-*`
-            // flags keep falling through to `ignored` until each is measured.
-            flag @ "-Xwasm-kclass-fqn" => opts.unsupported_flag_warnings.push(flag.to_string()),
-            // kotlinc's `-X` help: suppress warnings about outdated, inconsistent, or experimental
-            // language or API versions. A warning that is not queued cannot be promoted by
-            // `-Xwarning-level` either.
-            "-Xsuppress-version-warnings" => opts.suppress_version_warnings = true,
-            // `-Xexplicit-api=<mode>` requires public API to state its visibility and types. It
-            // selects diagnostics, not a language feature, so `disable` is never redundant.
-            flag if flag.starts_with("-Xexplicit-api=") => {
-                let value = flag.strip_prefix("-Xexplicit-api=").unwrap_or_default();
-                if matches!(value, "strict" | "warning" | "disable") {
-                    opts.explicit_api = Some(value.to_string());
-                } else {
-                    opts.errors.push(format!(
-                        "unknown value for parameter -Xexplicit-api: '{value}'. Value should be \
-                         one of {{disable, strict, warning}}"
-                    ));
-                }
-            }
-            // `-opt-in` is an array argument: each occurrence holds comma-separated marker names.
-            flag if flag == "-opt-in" || flag.starts_with("-opt-in=") => {
-                let value = match flag.strip_prefix("-opt-in=") {
-                    Some(value) => Some(value.to_string()),
-                    None => it.next().map(|value| value.to_string()),
-                };
-                opts.opt_in.extend(
-                    value
-                        .iter()
-                        .flat_map(|value| value.split(','))
-                        .filter(|marker| !marker.is_empty())
-                        .map(str::to_string),
-                );
-            }
-            flag if flag.starts_with("-Xkotlin-reference-version=") => {
-                let value = flag
-                    .strip_prefix("-Xkotlin-reference-version=")
-                    .unwrap_or_default();
-                match KotlinVersion::parse(value)
-                    .filter(|version| KotlinVersion::supported().contains(version))
-                {
-                    Some(version) => opts.kotlin_reference_version = Some(version),
-                    None => opts.errors.push(format!(
-                        "-Xkotlin-reference-version={value} names no supported Kotlin release \
-                         (supported: {})",
-                        supported_kotlin_versions()
-                    )),
-                }
-            }
-            // Compiler plugins, in kotlinc's syntax. They are resolved against the extension registry
-            // before compiling, never dropped: a plugin that changes the output must either run
-            // natively or fail the compile.
-            flag if opts.plugins.accept(flag, || it.next()) => {}
-            // Global warning policy is kept in the same object as named overrides. `-Werror`
-            // dominates `-nowarn` regardless of ordering; an explicit `-Xwarning-level` entry
-            // still wins for its diagnostic.
-            "-Werror" => opts.warning_policy.promote_warnings(),
-            "-nowarn" => opts.warning_policy.suppress_compiler_warnings(),
-            "-java-parameters" => opts.java_parameters = true,
-            "-version" => opts.print_version = true,
-            "-help" | "-h" | "-X" => opts.print_help = true,
-            flag if IGNORED_WITH_VALUE.contains(&flag) => {
-                let _ = it.next(); // consume + drop the value
-                opts.ignored.push(flag.to_string());
-            }
-            flag if IGNORED_FLAGS.contains(&flag) => opts.ignored.push(flag.to_string()),
-            // Language-feature flags (`-XXLanguage:+Foo,-Bar`, `-Xname-based-destructuring=…`) — a
-            // drop-in honors the same toggles kotlinc does so flag-gated syntax compiles.
-            flag if opts.language_settings.features.apply_cli_arg(flag) => {
-                language_feature_arguments.push(flag.to_string());
-            }
-            // Unknown option: ignore it (don't mistake it for a source file). kotlinc's `-X...` and
-            // `-P...` advanced flags land here.
-            flag if flag.starts_with('-') => opts.ignored.push(flag.to_string()),
-            // A positional argument: a source file or directory.
-            other => collect_sources(other, &mut opts.sources, &mut opts.ignored),
-        }
+/// The language settings a kotlinc command line selects, and the errors that make them unusable.
+pub struct LanguageArguments {
+    pub settings: LanguageSettings,
+    /// In kotlinc's order: a refused or invalid language argument, a `-XXLanguage` value kotlinc
+    /// rejects, then a configuration error (a feature that cannot be disabled).
+    pub errors: Vec<String>,
+}
+
+/// The one construction of [`LanguageSettings`] from kotlinc arguments, shared by the command line,
+/// the build worker and the language server: [`parse`]'s reading of every language argument, with
+/// no source discovery and no plugin resolution. Arguments that do not concern the language are
+/// read and otherwise ignored.
+pub fn language_settings(argv: impl IntoIterator<Item = String>) -> LanguageArguments {
+    let opts = read(argv, Reading::LanguageOnly);
+    let mut errors = opts.errors;
+    errors.extend(
+        opts.language_feature_problems
+            .into_iter()
+            .filter(|problem| problem.is_error)
+            .map(|problem| problem.message),
+    );
+    errors.extend(opts.configuration_errors);
+    LanguageArguments {
+        settings: opts.language_settings,
+        errors,
     }
-    opts.plugins.finish();
-    opts.errors.append(&mut opts.plugins.errors);
+}
+
+/// How a language argument occupies a command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanguageArgument {
+    /// The argument stands alone (`-progressive`, `-XXLanguage:+F`, `-Xcontext-parameters`).
+    Alone,
+    /// The argument's value is the next one (`-language-version 2.3`).
+    WithValue,
+}
+
+/// Whether `argument` selects language settings in the reference release's argument table: the
+/// language or API version, `-progressive`, `-XXLanguage`, or an `@Enables`/`@Disables`
+/// argument. A caller that mixes its own options with kotlinc's uses this to hand exactly these to
+/// [`language_settings`].
+pub fn language_argument(argument: &str) -> Option<LanguageArgument> {
+    if argument.starts_with("-XXLanguage:") {
+        return Some(LanguageArgument::Alone);
+    }
+    let reference =
+        krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest());
+    let catalog = Catalog::for_version(reference)
+        .expect("every supported reference release has an argument table");
+    let key = argument.split_once('=').map_or(argument, |(key, _)| key);
+    let spec = catalog.by_name(key)?;
+    let selects_language = matches!(
+        spec.name.as_str(),
+        "-language-version" | "-api-version" | "-progressive"
+    ) || spec.changes_language_features();
+    if !selects_language {
+        return None;
+    }
+    let separate_value =
+        spec.kind == ValueKind::String && !spec.is_advanced() && !argument.contains('=');
+    Some(if separate_value {
+        LanguageArgument::WithValue
+    } else {
+        LanguageArgument::Alone
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    Compilation,
+    LanguageOnly,
+}
+
+fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
+    let mut opts = Options::default();
+    let mut argfile_problems = Vec::new();
+    let expanded = kotlinc_arguments::argfile::expand(argv, &mut argfile_problems);
+    let arguments = take_reference_version(expanded, &mut opts);
     let reference_version = opts.kotlin_reference_version.unwrap_or_else(|| {
         krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest())
     });
-    let language_version = match language_version_text {
-        Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
-            Some(version) => version,
-            None => {
-                opts.errors.push(format!(
-                    "unknown language version: {text}\nSupported language versions: {}",
-                    LanguageVersion::supported_text_for(reference_version)
-                ));
-                LanguageVersion::default_for(reference_version)
-            }
-        },
-        None => LanguageVersion::default_for(reference_version),
-    };
-    let api_version = match api_version_text {
-        Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
-            Some(version) => Some(version),
-            None => {
-                opts.errors.push(format!(
-                    "unknown API version: {text}\nSupported API versions: {}",
-                    LanguageVersion::supported_text_for(reference_version)
-                ));
-                None
-            }
-        },
-        None => None,
-    };
-    match LanguageSettings::new(language_version, api_version, &language_feature_arguments) {
-        Ok(settings) => {
-            opts.warnings = settings_warnings(
-                &settings,
-                &language_feature_arguments,
-                opts.suppress_version_warnings,
-            );
-            opts.language_settings = settings;
-            if let Some(mode) = &opts.explicit_api {
-                opts.language_settings
-                    .features
-                    .apply_explicit_api_mode(mode);
-            }
-            for marker in &opts.opt_in {
-                opts.language_settings.features.opt_in(marker);
+    let catalog = Catalog::for_version(reference_version)
+        .expect("every supported reference release has an argument table");
+    let tokenized = kotlinc_arguments::tokenize(catalog, arguments, argfile_problems);
+    opts.argument_errors = tokenized.errors();
+    opts.argument_warnings = tokenized.warnings();
+    opts.unknown_extra_flags = tokenized.unknown_extra_flags().to_vec();
+
+    let mut parsed = ParsedSettings::default();
+    for occurrence in &tokenized.occurrences {
+        // kotlinc parses a removed argument only to warn that it has no effect.
+        if occurrence.spec.origin == Origin::Removed {
+            continue;
+        }
+        match kotlinc_arguments::disposition::of(&occurrence.spec.name) {
+            Some(Disposition::Applied) => apply(&mut opts, &mut parsed, occurrence),
+            Some(Disposition::Inert) => {}
+            Some(Disposition::Unsupported) | None => {
+                // A refused argument that changes language features is a language error too;
+                // any other is the compilation's concern alone.
+                if reading == Reading::Compilation || occurrence.spec.changes_language_features() {
+                    opts.errors.push(unsupported(occurrence));
+                }
             }
         }
-        Err(error) => opts.errors.push(error),
     }
+    if reading == Reading::LanguageOnly {
+        finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, Vec::new());
+        return opts;
+    }
+    for source in &tokenized.free {
+        collect_sources(source, &mut opts.sources, &mut opts.ignored);
+    }
+    opts.plugins.finish();
+    opts.errors.append(&mut opts.plugins.errors);
+    let lifecycle = kotlinc_arguments::lifecycle_warnings(&tokenized, reference_version)
+        .into_iter()
+        .map(|(lifecycle, message)| CliWarning {
+            name: Some(match lifecycle {
+                Lifecycle::Deprecated => WarningName::DeprecatedCliArg,
+                Lifecycle::Removed => WarningName::RemovedCliArg,
+            }),
+            message: kotlinc_arguments::render(&message),
+        })
+        .collect();
+    finish_warning_policy(&mut opts, &parsed);
+    finish_jvm_target(&mut opts, &parsed);
+    finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, lifecycle);
     opts
 }
 
@@ -643,6 +435,30 @@ fn plugin_jar_problems(plugins: &PluginConfig) -> Vec<String> {
 }
 
 impl Options {
+    /// Refuse an `-Xjdk-release` whose API krusty would not compile against. kotlinc compiles
+    /// against the JDK's own modules when the release is the JDK's own, and against that release's
+    /// signatures in the JDK's `lib/ct.sym` otherwise; krusty implements only the first. Kept out
+    /// of `parse` so parsing stays env-independent.
+    pub fn check_jdk_release(&self) -> Result<(), String> {
+        let Some(release) = self.jdk_release else {
+            return Ok(());
+        };
+        if self.no_jdk {
+            return Ok(());
+        }
+        match selected_jdk_feature_release(self.jdk_home.as_deref()) {
+            Some(jdk) if jdk == release => Ok(()),
+            Some(jdk) => Err(format!(
+                "-Xjdk-release={release} compiles against the JDK {release} API from ct.sym, \
+                 which krusty does not implement; the selected JDK is {jdk}"
+            )),
+            None => Err(format!(
+                "-Xjdk-release={release} needs the selected JDK's release, and its `release` file \
+                 does not name one"
+            )),
+        }
+    }
+
     /// The classpath to drive resolution with: the user's `-cp` entries plus kotlinc's implicit
     /// standard library and JDK modules, unless their corresponding `-no-*` option disables them.
     /// Kept out of `parse` so parsing stays env-independent.
@@ -675,6 +491,61 @@ impl Options {
             .to_vec();
         }
         Ok(cp)
+    }
+
+    /// The JVM backend this command line selects, emitting against `classpath`. The `krusty`
+    /// executable and every in-process compile that runs under a parsed command line build their
+    /// backend here, so the two cannot select different output shapes from the same arguments.
+    pub fn jvm_backend(&self, classpath: Rc<Classpath>) -> JvmBackend {
+        // The selected source-language level stamps `@kotlin.Metadata` and `.kotlin_module`, as
+        // kotlinc does; the internal metadata override is kept separate for controlled emission
+        // comparisons.
+        let metadata_version = self
+            .metadata_version
+            .unwrap_or_else(|| self.language_settings.language_version.metadata_version());
+        JvmBackend::new(classpath)
+            .with_class_major(self.jvm_target_major)
+            .with_jvm_default(self.jvm_default)
+            .with_java_parameters(self.java_parameters)
+            .with_lambda_modes(self.lambda_modes)
+            .with_inline_string_concat(self.inline_string_concat)
+            .with_param_assertions(!self.no_param_assertions)
+            .with_call_assertions(!self.no_call_assertions)
+            .with_annotations_in_metadata(
+                self.language_settings.features.has("AnnotationsInMetadata"),
+            )
+            .with_pre_release_metadata(self.language_settings.features.is_pre_release())
+            .with_metadata_version(Some(metadata_version))
+    }
+
+    /// Replace the source/API level after ordinary command-line parsing while preserving every
+    /// other language setting that parsing selected. The conformance harness uses this for Kotlin
+    /// 1.x levels which current kotlinc still models but no longer accepts on its public CLI.
+    pub fn override_language_versions(
+        &mut self,
+        language_version: LanguageVersion,
+        api_version: Option<LanguageVersion>,
+        feature_settings: &[krusty::features::FeatureSetting],
+    ) -> Result<(), String> {
+        let settings = LanguageSettings::new(language_version, api_version, feature_settings)?;
+        self.install_language_settings(settings);
+        Ok(())
+    }
+
+    /// Apply the non-version language modes retained by [`Options`] to a freshly based setting.
+    /// Both normal CLI finalization and the typed conformance override go through this boundary so
+    /// changing the version cannot discard opt-ins, explicit-API mode, or assertion mode.
+    pub(super) fn install_language_settings(&mut self, mut settings: LanguageSettings) {
+        if let Some(mode) = &self.explicit_api {
+            settings.features.apply_explicit_api_mode(mode);
+        }
+        if let Some(mode) = &self.assertions {
+            settings.features.apply_assertions_mode(mode);
+        }
+        for marker in &self.opt_in {
+            settings.features.opt_in(marker);
+        }
+        self.language_settings = settings;
     }
 }
 
@@ -792,8 +663,8 @@ supported language subset (kotlinc-equivalent ABI, verified by a differential ha
 Common options (kotlinc-compatible):
   -d <dir|jar>          destination for generated .class files (a directory or a .jar)
   -classpath / -cp <p>  classpath entries (dirs and .jars), ':'-separated
+  -Xfriend-paths=<p,…>  classpath entries whose internal declarations are visible, ','-separated
   -module-name <name>   name of the generated <name>.kotlin_module (default: main)
-  -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
   -language-version <v>  source semantics to compile (accepted/default level follows kotlinc release)
   -api-version <v>       Kotlin API surface available to source (defaults to language version)
@@ -815,16 +686,37 @@ Common options (kotlinc-compatible):
   -help                 print this help and exit
 
 Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
-Unsupported compatibility options are ignored with a note. Invalid values and options that request
-an unemittable output shape are errors; krusty never substitutes a different artifact shape.";
+Arguments are parsed by kotlinc's rules for the selected release. A kotlinc argument krusty does not
+implement is an error, as are invalid values; an unknown option is kotlinc's own error or warning.
+krusty never compiles a command line into anything other than what kotlinc would produce.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty::jvm::ir_emit::LambdaMode;
+    use krusty::language_version::LanguageVersion;
     use krusty::plugins::registry::PluginDiagnostic;
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    /// `-progressive` turns on the selected release's progressive features, so it is refused while
+    /// one of them is a feature krusty does not model; every supported release has such a feature.
+    #[test]
+    fn progressive_is_refused_while_it_turns_on_an_unmodeled_feature() {
+        for release in ["2.4.0", "2.4.10", "2.4.20"] {
+            let o = parse_args(&[
+                &format!("-Xkotlin-reference-version={release}"),
+                "-progressive",
+                "f.kt",
+            ]);
+            assert_eq!(
+                o.errors,
+                ["krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()],
+                "kotlinc {release}"
+            );
+        }
     }
 
     /// `-Xkotlin-reference-version` selects a supported release and refuses any other, rather than
@@ -914,19 +806,47 @@ mod tests {
     }
 
     #[test]
-    fn name_based_destructuring_complete_is_modeled_not_ignored() {
-        let parsed = parse_args(&["-Xname-based-destructuring=complete", "x.kt"]);
+    fn name_based_destructuring_only_syntax_is_modeled_not_ignored() {
+        let parsed = parse_args(&["-Xname-based-destructuring=only-syntax", "x.kt"]);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed
             .language_settings
             .features
             .has("NameBasedDestructuring"));
-        assert!(parsed
+        assert!(!parsed
             .language_settings
             .features
             .has("EnableNameBasedDestructuringShortForm"));
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
+    #[test]
+    fn feature_argument_values_cannot_enable_unmodeled_semantics() {
+        for mode in ["name-mismatch", "complete"] {
+            let flag = format!("-Xname-based-destructuring={mode}");
+            let parsed = parse_args(&[&flag, "x.kt"]);
+            assert_eq!(
+                parsed.errors,
+                ["krusty does not implement the language feature \
+                  'DeprecateNameMismatchInShortDestructuringWithParentheses' selected by \
+                  '-Xname-based-destructuring'"
+                    .to_string()],
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_false_boolean_feature_flag_does_not_enable_the_feature() {
+        let parsed = parse_args(&[
+            "-language-version",
+            "2.2",
+            "-Xcontext-parameters=false",
+            "x.kt",
+        ]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(!parsed.language_settings.features.has("ContextParameters"));
     }
 
     /// `indy` is what krusty emits, so asking for it is honored silently. Any other value asks for a
@@ -1036,16 +956,19 @@ mod tests {
         );
     }
 
-    /// kotlinc's `-X…` flags take their value with `=` only. Consuming a following argument would
-    /// eat the source file that comes after the flag.
+    /// kotlinc still reads an `-X…` value from the next argument, with a warning that the form is
+    /// obsolete (measured on 2.4.20): `-Xjvm-default x.kt` takes `x.kt` as the mode.
     #[test]
-    fn the_legacy_spelling_never_consumes_the_next_argument() {
-        let parsed = parse_args(&["-Xjvm-default", "x.kt"]);
+    fn the_legacy_spelling_takes_the_next_argument_with_kotlincs_warning() {
+        let parsed = parse_args(&["-Xjvm-default", "all", "x.kt"]);
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
         assert_eq!(
-            parsed.sources,
-            vec!["x.kt".to_string()],
-            "the source file must survive: {parsed:?}",
-            parsed = parsed.ignored
+            parsed.jvm_default,
+            JvmDefaultMode::parse_legacy("all").unwrap()
+        );
+        assert_eq!(
+            parsed.argument_warnings,
+            vec!["Advanced option value is passed in an obsolete form. Please use the '=' character to specify the value: -Xjvm-default=..."]
         );
     }
 
@@ -1060,6 +983,48 @@ mod tests {
             parsed.errors
         );
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+    }
+
+    /// The unconditional assertion modes reach the frontend; the runtime-checked ones and an
+    /// unknown mode are refused, the unknown one in kotlinc's words.
+    #[test]
+    fn assertions_select_the_unconditional_modes_only() {
+        for (mode, feature) in [
+            ("always-enable", "AssertionsAlwaysEnable"),
+            ("always-disable", "AssertionsAlwaysDisable"),
+        ] {
+            let parsed = parse_args(&[&format!("-Xassertions={mode}"), "x.kt"]);
+            assert_eq!(parsed.errors, Vec::<String>::new(), "{mode}");
+            assert!(parsed.language_settings.features.has(feature), "{mode}");
+        }
+        assert_eq!(
+            parse_args(&["-Xassertions=jvm", "x.kt"]).errors,
+            vec!["-Xassertions=jvm selects an output shape krusty does not emit"]
+        );
+        assert_eq!(
+            parse_args(&["-Xassertions=sideways", "x.kt"]).errors,
+            vec![
+                "unknown assertions mode: sideways, supported modes: [always-enable, always-disable, jvm, legacy]"
+            ]
+        );
+    }
+
+    #[test]
+    fn string_concat_selects_inline_only() {
+        let parsed = parse_args(&["-Xstring-concat=inline", "x.kt"]);
+        assert_eq!(parsed.errors, Vec::<String>::new());
+        assert!(parsed.inline_string_concat);
+        assert!(!parse_args(&["x.kt"]).inline_string_concat);
+        assert_eq!(
+            parse_args(&["-Xstring-concat=indy", "x.kt"]).errors,
+            vec!["-Xstring-concat=indy selects an output shape krusty does not emit"]
+        );
+        assert_eq!(
+            parse_args(&["-Xstring-concat=sideways", "x.kt"]).errors,
+            vec![
+                "unknown `-Xstring-concat` mode: sideways\nSupported modes: inline, indy-with-constants, indy"
+            ]
+        );
     }
 
     #[test]
@@ -1087,9 +1052,10 @@ mod tests {
         let o = parse_args(&[
             "-cp",
             "ordinary.jar:friend/classes",
-            "-Xfriend-paths=friend/classes:second.jar",
+            "-Xfriend-paths=friend/classes,second.jar",
             "x.kt",
         ]);
+        // kotlinc splits friend paths on `,`, not on the path separator.
         assert_eq!(
             o.friend_paths,
             vec![PathBuf::from("friend/classes"), PathBuf::from("second.jar")]
@@ -1116,8 +1082,61 @@ mod tests {
         );
     }
 
+    /// One well-formed spelling of an argument: `-name` for a boolean, `-name=value` otherwise,
+    /// with a legal value for a feature switch.
+    fn well_formed(spec: &kotlinc_arguments::ArgumentSpec) -> String {
+        match spec.kind {
+            kotlinc_arguments::ValueKind::Bool => spec.name.clone(),
+            _ if spec.name == "-XXLanguage" => "-XXLanguage:+ContextParameters".to_string(),
+            _ => {
+                let value = spec.legal_values().first().copied().unwrap_or("x");
+                format!("{}={value}", spec.name)
+            }
+        }
+    }
+
+    /// Every current argument of every supported release takes the path its disposition names:
+    /// an unsupported argument is refused and nothing else is reported, an inert one is accepted
+    /// silently, and an applied one is never refused.
     #[test]
-    fn accepts_standard_api_version_and_ignores_unrelated_unsupported_options() {
+    fn every_kotlinc_argument_takes_its_dispositions_path() {
+        for version in KotlinVersion::supported() {
+            let catalog = Catalog::for_version(version).unwrap();
+            for spec in catalog.arguments() {
+                // kotlinc itself rejects an obsolete argument and only warns about a removed one.
+                if spec.origin == Origin::Removed || spec.obsolete {
+                    continue;
+                }
+                let argument = well_formed(spec);
+                let reference = format!("-Xkotlin-reference-version={version}");
+                let parsed = parse_args(&[&reference, &argument, "f.kt"]);
+                let refusal =
+                    format!("krusty does not implement the kotlinc argument '{argument}'");
+                let context = format!("kotlinc {version} {argument}");
+                match kotlinc_arguments::disposition::of(&spec.name) {
+                    Some(Disposition::Unsupported) => {
+                        assert_eq!(parsed.errors, vec![refusal], "{context}");
+                        assert_eq!(parsed.argument_errors, Vec::<String>::new(), "{context}");
+                        assert_eq!(parsed.ignored, Vec::<String>::new(), "{context}");
+                    }
+                    Some(Disposition::Inert) => {
+                        assert_eq!(parsed.errors, Vec::<String>::new(), "{context}");
+                        assert_eq!(parsed.argument_errors, Vec::<String>::new(), "{context}");
+                        assert_eq!(parsed.ignored, Vec::<String>::new(), "{context}");
+                    }
+                    Some(Disposition::Applied) => {
+                        assert!(!parsed.errors.contains(&refusal), "{context}");
+                    }
+                    None => panic!("{context} has no disposition"),
+                }
+            }
+        }
+    }
+
+    /// A kotlinc argument krusty does not implement is an error; a `-X` flag kotlinc does not
+    /// declare gets kotlinc's own warning; any other unknown option is kotlinc's error.
+    #[test]
+    fn accepts_standard_api_version_and_refuses_unimplemented_options() {
         let o = parse_args(&[
             "-include-runtime",
             "-api-version",
@@ -1127,8 +1146,19 @@ mod tests {
         ]);
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
         assert_eq!(o.language_settings.api_version, LanguageVersion::V2_0);
-        assert!(o.ignored.contains(&"-include-runtime".to_string()));
-        assert!(o.ignored.contains(&"-Xsomething".to_string()));
+        assert_eq!(o.ignored, Vec::<String>::new());
+        assert_eq!(
+            o.errors,
+            vec!["krusty does not implement the kotlinc argument '-include-runtime'"]
+        );
+        assert_eq!(
+            o.argument_warnings,
+            vec!["Flag is not supported by this version of the compiler: -Xsomething"]
+        );
+        assert_eq!(
+            parse_args(&["-something", "f.kt"]).argument_errors,
+            vec!["Invalid argument: -something"]
+        );
     }
 
     /// Public `-language-version` selects source semantics. `-Xmetadata-version` remains an
@@ -1226,18 +1256,93 @@ mod tests {
         }
 
         assert_eq!(
-            parse_args(&["-language-version"]).errors,
-            ["missing value for -language-version".to_string()]
+            parse_args(&["-language-version"]).argument_errors,
+            ["No value passed for argument -language-version".to_string()]
         );
         assert_eq!(
-            parse_args(&["-Xmetadata-version"]).errors,
-            ["missing value for -Xmetadata-version".to_string()]
+            parse_args(&["-Xmetadata-version"]).argument_errors,
+            ["No value passed for argument -Xmetadata-version".to_string()]
         );
 
         let metadata = parse_args(&["-Xmetadata-version", "2.5", "f.kt"]);
         assert_eq!(
             metadata.errors,
             ["unknown metadata version: 2.5\nSupported metadata versions: 2.0, 2.1, 2.2, 2.3, 2.4".to_owned()]
+        );
+    }
+
+    /// Raw language toggles are read against the selected kotlinc release's table, as kotlinc
+    /// reads them: a release-declared feature krusty models is applied; an invented one, or one
+    /// the release does not declare, is reported in kotlinc's words and skipped.
+    #[test]
+    fn xxlanguage_uses_the_selected_releases_feature_table() {
+        let modeled = parse_args(&[
+            "-Xkotlin-reference-version=2.4.20",
+            "-XXLanguage:+FullValueClasses",
+            "f.kt",
+        ]);
+        assert!(modeled.errors.is_empty(), "{:?}", modeled.errors);
+        assert!(modeled.language_settings.features.has("FullValueClasses"));
+
+        for (release, feature) in [
+            ("2.4.20", "ShapeKrustyDoesNotModel"),
+            ("2.4.0", "FullValueClasses"),
+        ] {
+            let unknown = parse_args(&[
+                &format!("-Xkotlin-reference-version={release}"),
+                &format!("-XXLanguage:+{feature}"),
+                "f.kt",
+            ]);
+            assert!(unknown.errors.is_empty(), "{:?}", unknown.errors);
+            assert_eq!(
+                unknown.language_feature_problems,
+                [ArgumentProblem::warning(format!(
+                    "Unknown language feature '{feature}' in passed internal argument \
+                     '-XXLanguage:+{feature}'"
+                ))]
+            );
+            assert!(!unknown.language_settings.features.has(feature));
+        }
+    }
+
+    /// A release-known `-XXLanguage` setting reaches the shared feature set. This is kotlinc's raw,
+    /// unsafe feature interface, not a second support declaration: the compiler phases that own a
+    /// feature consume the same identity, and conformance runs use this channel for upstream test
+    /// directives. As in kotlinc, enabling a progressive feature is left out of the unsafe-arguments
+    /// notice and disabling one is listed.
+    #[test]
+    fn xxlanguage_applies_a_release_known_feature_without_a_second_capability_list() {
+        let enabled = parse_args(&[
+            "-Xkotlin-reference-version=2.4.20",
+            "-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange",
+            "f.kt",
+        ]);
+        assert!(enabled.errors.is_empty(), "{:?}", enabled.errors);
+        assert!(enabled.language_feature_problems.is_empty());
+        assert!(enabled
+            .language_settings
+            .features
+            .has("ErrorAboutDataClassCopyVisibilityChange"));
+        let disabled = parse_args(&[
+            "-Xkotlin-reference-version=2.4.20",
+            "-XXLanguage:-ErrorAboutDataClassCopyVisibilityChange",
+            "f.kt",
+        ]);
+        assert!(disabled.errors.is_empty(), "{:?}", disabled.errors);
+        assert!(!disabled
+            .language_settings
+            .features
+            .has("ErrorAboutDataClassCopyVisibilityChange"));
+        assert_eq!(
+            disabled.language_feature_problems,
+            [ArgumentProblem::warning(
+                "ATTENTION!\nThis build uses unsafe internal compiler arguments:\n\n\
+                 -XXLanguage:-ErrorAboutDataClassCopyVisibilityChange\n\n\
+                 This mode is not recommended for production use,\n\
+                 as no stability/compatibility guarantees are given on\n\
+                 compiler or generated code. Use it at your own risk!\n"
+                    .to_string()
+            )]
         );
     }
 
@@ -1287,7 +1392,7 @@ mod tests {
         assert_eq!(
             parse_args(&["-language-version", "2.0", "f.kt"]).warnings,
             [CliWarning {
-                name: WarningName::DeprecatedLanguageVersion,
+                name: Some(WarningName::DeprecatedLanguageVersion),
                 message: "language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
             }]
         );
@@ -1302,11 +1407,11 @@ mod tests {
             .warnings,
             [
                 CliWarning {
-                    name: WarningName::DeprecatedLanguageVersion,
+                    name: Some(WarningName::DeprecatedLanguageVersion),
                     message: "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
                 },
                 CliWarning {
-                    name: WarningName::ExperimentalLanguageVersion,
+                    name: Some(WarningName::ExperimentalLanguageVersion),
                     message: "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
                 },
             ]
@@ -1350,7 +1455,7 @@ mod tests {
         assert_eq!(
             redundant.warnings,
             [CliWarning {
-                name: WarningName::RedundantCliArg,
+                name: Some(WarningName::RedundantCliArg),
                 message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
@@ -1454,7 +1559,7 @@ mod tests {
         assert_eq!(
             parsed.warnings,
             [CliWarning {
-                name: WarningName::RedundantCliArg,
+                name: Some(WarningName::RedundantCliArg),
                 message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
@@ -1468,7 +1573,7 @@ mod tests {
         assert_eq!(
             parsed.warnings,
             [CliWarning {
-                name: WarningName::RedundantCliArg,
+                name: Some(WarningName::RedundantCliArg),
                 message: "the argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
             }]
         );
@@ -1572,22 +1677,22 @@ mod tests {
         );
     }
 
-    /// kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with `warning: flag is not supported by
-    /// this version of the compiler: -Xwasm-kclass-fqn` and produces byte-identical output with and
-    /// without it (measured). The flag must therefore not land in `ignored` (the worker refuses
-    /// requests with ignored options) or `errors`; it is recorded for the warning only.
+    /// kotlinc warns about any `-X` flag its JVM compiler does not declare (`-Xwasm-kclass-fqn`
+    /// belongs to the Wasm compiler) and compiles as if it were absent. The flag is therefore not
+    /// `ignored` (the worker refuses requests with ignored options) nor an error.
     #[test]
-    fn wasm_kclass_fqn_is_warned_not_ignored() {
+    fn an_undeclared_advanced_flag_is_warned_not_ignored() {
         let parsed = parse_args(&["-Xwasm-kclass-fqn", "f.kt"]);
-        assert!(
-            parsed.ignored.is_empty(),
-            "kotlinc accepts the flag, so it must not be reported unsupported: {:?}",
-            parsed.ignored
-        );
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(
+            parsed.argument_errors.is_empty(),
+            "{:?}",
+            parsed.argument_errors
+        );
         assert_eq!(
-            parsed.unsupported_flag_warnings,
-            vec!["-Xwasm-kclass-fqn".to_string()]
+            parsed.argument_warnings,
+            vec!["Flag is not supported by this version of the compiler: -Xwasm-kclass-fqn"]
         );
         assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
     }

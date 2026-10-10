@@ -118,10 +118,11 @@ impl KrustyCli {
             args.push("-cp".into());
             args.push(join_classpath(&classpath));
         }
+        // kotlinc splits `-Xfriend-paths` on `,`, not on the path separator.
         if !module.friend_paths.is_empty() {
             args.push(format!(
                 "-Xfriend-paths={}",
-                join_classpath(&module.friend_paths)
+                join_friend_paths(&module.friend_paths)
             ));
         }
         if let Some(name) = &module.module_name {
@@ -455,6 +456,14 @@ fn collect_artifacts(
     Ok(())
 }
 
+fn join_friend_paths(entries: &[PathBuf]) -> String {
+    entries
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn join_classpath(entries: &[PathBuf]) -> String {
     let separator = if cfg!(windows) { ";" } else { ":" };
     entries
@@ -630,7 +639,7 @@ mod tests {
                     PathBuf::from("/out/main"),
                     PathBuf::from("/out/generated"),
                 ]),
-                format!("-Xfriend-paths={}", join_classpath(&friends)),
+                format!("-Xfriend-paths={}", join_friend_paths(&friends)),
                 "-no-stdlib".to_string(),
                 "-no-reflect".to_string(),
                 "-no-jdk".to_string(),

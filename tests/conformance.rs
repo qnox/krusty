@@ -26,6 +26,8 @@ mod kotlin_box_ir_jvm_conformance;
 mod kotlin_box_native_conformance;
 #[path = "kotlin_box_wasm_conformance.rs"]
 mod kotlin_box_wasm_conformance;
+#[path = "kotlin_cli_jvm_conformance.rs"]
+mod kotlin_cli_jvm_conformance;
 #[path = "ksp_real_e2e.rs"]
 mod ksp_real_e2e;
 #[path = "serialization_conformance.rs"]

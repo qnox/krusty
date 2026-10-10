@@ -356,6 +356,27 @@ fn a_valued_body_that_can_end_declines() {
 }
 
 #[test]
+fn a_valued_body_ending_in_an_endless_loop_lowers_as_its_source_does() {
+    for post_test in [false, true] {
+        let demo = demo(&[("f", &[T::Int], T::Int)], move |_, body| {
+            let block = body.block(Vec::new(), T::Unit);
+            let forever = body.boolean(true);
+            Some(vec![body.loop_(1, forever, block, post_test)])
+        });
+        let source = if post_test {
+            "fun f(a: Int): Int {\n do {\n } while (true)\n}\n"
+        } else {
+            "fun f(a: Int): Int {\n while (true) {\n }\n}\n"
+        };
+        assert_eq!(
+            lowered(&demo, "f", &[]),
+            source_body(source, "f", 1),
+            "{post_test}"
+        );
+    }
+}
+
+#[test]
 fn a_statement_after_a_jump_declines() {
     let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
         let a = body.param(0);

@@ -4,8 +4,8 @@
 
 use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
 
+use krusty::backend::Backend as _;
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, Entry, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -20,8 +20,10 @@ fn expect_ok_everywhere(source: &str, stem: &str) {
 /// linker or runtime: the allocation decision is already final in the Cranelift object.
 fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     let target = NativeTarget::host()?;
-    let jar = krusty::toolchain::stdlib_jar().expect("the native tests require the stdlib jar");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    krusty::toolchain::stdlib_jar().expect("the native tests require the stdlib jar");
+    krusty::toolchain::jdk_modules()?;
+    // The JVM front end resolves against the classpath kotlinc would: the stdlib and the JDK.
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -29,10 +31,11 @@ fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     let inputs = [SourceInput::kotlin(source).with_file_stem(stem)];
     let features = krusty::features::LangFeatures::new();
     let mut diags = DiagSink::new();
+    let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
+    let platform = krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform);
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
     let artifacts =
         krusty::compiler::emit_analyzed(analysis, &[stem.to_string()], &backend, stem, &mut diags);
     let messages = diags
