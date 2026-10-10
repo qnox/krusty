@@ -324,6 +324,18 @@ fn fq_source_classifier_still_enforces_private_file_visibility() {
 }
 
 #[test]
+fn dollar_in_a_top_level_private_classifier_name_is_not_a_nesting_boundary() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &["package pkg1\n\
+           private class `Cash$Box`\n\
+           private fun retain(value: `Cash$Box`): Any = value\n"],
+        &[],
+        None,
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
 fn source_private_nested_classifier_uses_lexical_owner_visibility() {
     let diagnostics = common::front_end_diagnostics_files(
         &["package pkg1\n\

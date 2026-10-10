@@ -61,7 +61,7 @@ impl SymbolResolver<'_> {
             return true;
         }
         if classifier.access == crate::libraries::ClassifierAccess::Private
-            && !internal.contains("$")
+            && !classifier.is_nested
             && classifier.source_file == self.access_file
         {
             return true;
@@ -104,7 +104,7 @@ impl SymbolResolver<'_> {
                 return true;
             }
         }
-        if internal.nested_owner().is_none() {
+        if !classifier.is_nested {
             return false;
         }
         let simple = internal.nested_segment_ref();
