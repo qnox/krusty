@@ -1230,7 +1230,7 @@ fn a_provider_member_without_an_identity_fails_as_missing_stable_call_target() {
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(SOURCE).with_file_stem("UnidentifiedSam")],
-        Box::new(unidentified_action()),
+        crate::frontend::PlatformProvider::jvm(Box::new(unidentified_action())),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );

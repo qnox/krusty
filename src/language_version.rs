@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use crate::features::LanguageVersionPolicy;
 use crate::kotlin_version::KotlinVersion;
 
 /// A stable Kotlin source-language level, written as `major.minor` on the command line.
@@ -23,27 +24,6 @@ impl LanguageVersion {
     pub const V2_4: Self = Self::new(2, 4);
     pub const V2_5: Self = Self::new(2, 5);
     pub const V2_6: Self = Self::new(2, 6);
-
-    /// Source/API levels recorded for the concrete 2.4.0 and 2.4.10 compiler releases. `2.5` is
-    /// experimental. Keep this keyed by exact compiler versions: a future manifest entry must add
-    /// its own observed domain instead of inheriting one through a version range.
-    const SUPPORTED_FOR_2_4_0_AND_2_4_10: [Self; 6] = [
-        Self::V2_0,
-        Self::V2_1,
-        Self::V2_2,
-        Self::V2_3,
-        Self::V2_4,
-        Self::V2_5,
-    ];
-    const SUPPORTED_FOR_2_4_20: [Self; 7] = [
-        Self::V2_0,
-        Self::V2_1,
-        Self::V2_2,
-        Self::V2_3,
-        Self::V2_4,
-        Self::V2_5,
-        Self::V2_6,
-    ];
 
     /// Metadata stamps intentionally supported by krusty's internal emission override. This is a
     /// separate contract from the public source/API levels above.
@@ -73,15 +53,10 @@ impl LanguageVersion {
         Some(Self::new(major.parse().ok()?, minor.parse().ok()?))
     }
 
-    /// The language/API option domain of one concrete kotlinc release.
+    /// The language/API option domain of one concrete kotlinc release: the levels its recorded
+    /// policy still supports. A release without a recorded policy has none.
     pub fn supported_for(compiler: KotlinVersion) -> &'static [Self] {
-        if compiler == KotlinVersion::V2_4_0 || compiler == KotlinVersion::V2_4_10 {
-            &Self::SUPPORTED_FOR_2_4_0_AND_2_4_10
-        } else if compiler == KotlinVersion::V2_4_20 {
-            &Self::SUPPORTED_FOR_2_4_20
-        } else {
-            &[]
-        }
+        LanguageVersionPolicy::for_release(compiler).map_or(&[], LanguageVersionPolicy::supported)
     }
 
     pub fn parse_supported_for(text: &str, compiler: KotlinVersion) -> Option<Self> {
@@ -91,13 +66,26 @@ impl LanguageVersion {
             .then_some(version)
     }
 
+    /// The domain as kotlinc lists it: a deprecated level marked `(deprecated)`, an unreleased one
+    /// `(experimental)`.
     pub fn supported_text_for(compiler: KotlinVersion) -> String {
-        Self::supported_for(compiler)
+        let Some(policy) = LanguageVersionPolicy::for_release(compiler) else {
+            return String::new();
+        };
+        policy
+            .supported()
             .iter()
-            .map(|version| match *version {
-                Self::V2_0 | Self::V2_1 => format!("{version} (deprecated)"),
-                Self::V2_5 | Self::V2_6 => format!("{version} (experimental)"),
-                _ => version.to_string(),
+            .map(|&version| {
+                let status = policy
+                    .language(version)
+                    .expect("a supported level is declared");
+                if status.deprecated {
+                    format!("{version} (deprecated)")
+                } else if !status.stable {
+                    format!("{version} (experimental)")
+                } else {
+                    version.to_string()
+                }
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -123,15 +111,18 @@ impl LanguageVersion {
         [self.major as i32, self.minor as i32, 0]
     }
 
-    /// The standard no-option language/API default of a selected compiler release.
-    pub const fn default_for(compiler: KotlinVersion) -> Self {
-        Self::new(compiler.major, compiler.minor)
+    /// The standard no-option language/API default of a selected compiler release: its recorded
+    /// `LanguageVersion.LATEST_STABLE`.
+    pub fn default_for(compiler: KotlinVersion) -> Self {
+        LanguageVersionPolicy::for_release(compiler)
+            .unwrap_or_else(|| panic!("kotlinc {compiler} has no recorded language version policy"))
+            .latest_stable()
     }
 }
 
 impl Default for LanguageVersion {
     fn default() -> Self {
-        Self::default_for(KotlinVersion::V2_4_20)
+        Self::default_for(KotlinVersion::newest())
     }
 }
 

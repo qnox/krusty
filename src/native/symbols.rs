@@ -55,6 +55,15 @@ pub(super) fn module_constructor_symbol(
     Some(symbol)
 }
 
+/// Symbols of the entry points that box a value of a module value class and read one back, which
+/// the file declaring the class defines for every other file of the module. Named from the
+/// class's qualified name, which both files hold, and not from anything either file interned.
+pub(super) fn module_value_box_symbols(classifier: crate::types::TypeName) -> (String, String) {
+    let mut name = String::new();
+    mangle_name(&mut name, &classifier.render());
+    (format!("kt_modvbox_{name}"), format!("kt_modvunbox_{name}"))
+}
+
 /// Letters and digits stand for themselves; every other character, `_` included, is `_<hex>_`.
 fn mangle_name(out: &mut String, text: &str) {
     for character in text.chars() {

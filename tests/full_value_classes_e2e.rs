@@ -45,6 +45,20 @@ fn value_class_without_jvm_inline_is_rejected_until_the_feature_is_enabled() {
     common::assert_errors_match_kotlinc(&[("Value.kt", SRC)], &[]);
 }
 
+/// A multi-field `value class` is never inline, so what it lacks is the feature, not the annotation.
+#[test]
+fn multi_field_value_class_is_rejected_as_an_experimental_feature() {
+    const SRC: &str = "value class P(val x: Int, val y: Int)\nfun box() = \"OK\"\n";
+    assert_eq!(
+        common::front_end_diagnostics_located(SRC, &[], None),
+        vec![
+            "1:1: error: the feature \"full value classes\" is experimental and should be enabled explicitly. This can be done by supplying the compiler argument '-XXLanguage:+FullValueClasses', but note that no stability guarantees are provided."
+                .to_string()
+        ]
+    );
+    common::assert_errors_match_kotlinc(&[("Value.kt", SRC)], &[]);
+}
+
 #[test]
 fn full_value_class_matches_data_class_equality() {
     const SRC: &str = "\
