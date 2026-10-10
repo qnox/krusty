@@ -177,11 +177,18 @@ impl Emitter<'_> {
                         ..
                     } if inline.can_inline()
                 );
-                let slot = match self.ir.physical_types.get(arg).copied() {
-                    Some(slot) if jvm_is_erased_top(ir_ty_to_jvm(&slot)) || inline_producer => slot,
-                    Some(_) => return None,
-                    None => self.value_ty(*arg),
-                };
+                // Without a recorded result the producer's own value type is the slot. Only an
+                // erased top is the generic-result contract; a narrower slot is a smart cast
+                // (`p.type` proven `Ref.Cls`), which this coercion itself checks.
+                let slot = self
+                    .ir
+                    .physical_types
+                    .get(arg)
+                    .copied()
+                    .unwrap_or_else(|| self.value_ty(*arg));
+                if !jvm_is_erased_top(ir_ty_to_jvm(&slot)) && !inline_producer {
+                    return None;
+                }
                 narrows(slot, *type_operand).then_some(ErasedResult::Coerced { call: *arg, slot })
             }
             crate::ir::IrExpr::InvokeFunction { ret, .. } => {

@@ -479,10 +479,10 @@ pub fn capture_common_ir(
     (files, report.diagnostics)
 }
 
-struct InProcessCompileReport {
-    classes: Vec<(String, Vec<u8>)>,
-    diagnostics: Vec<String>,
-    has_errors: bool,
+pub(crate) struct InProcessCompileReport {
+    pub(crate) classes: Vec<(String, Vec<u8>)>,
+    pub(crate) diagnostics: Vec<String>,
+    pub(crate) has_errors: bool,
 }
 
 /// Run the production streaming compiler once while retaining its diagnostics. Test helpers that
@@ -495,7 +495,15 @@ fn compile_in_process_report(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> InProcessCompileReport {
-    let cp = cached_classpath(cp_jars, jdk_modules);
+    compile_in_process_report_with_classpath(src, stem, cached_classpath(cp_jars, jdk_modules))
+}
+
+/// [`compile_in_process_report`] against an explicitly configured classpath (friend modules).
+pub(crate) fn compile_in_process_report_with_classpath(
+    src: &str,
+    stem: &str,
+    cp: std::rc::Rc<Classpath>,
+) -> InProcessCompileReport {
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),

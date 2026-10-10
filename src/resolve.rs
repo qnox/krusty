@@ -9730,6 +9730,10 @@ impl TypeInfo {
                 InvokeKind::Operator { target, .. } => specialize(target),
             }),
             Some(ExprLowering::ReceiverFnInvoke { ret, .. }) => Some(*ret),
+            // The getter selection records the declaration's result, while a stable property path
+            // may have proved a narrower type for this exact read. The resolver owns both facts and
+            // publishes their final semantic result here; FIR remains generic over lowering kinds.
+            Some(ExprLowering::MemberPropertyRead { .. }) => Some(self.semantic_ty(expression)),
             _ => self.resolved_calls.get(&expression).map(specialize),
         }
     }

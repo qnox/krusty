@@ -573,7 +573,22 @@ impl JvmLibraries {
             setter_declaration: None,
             source_member: None,
             producer: crate::libraries::PropertyProducer::KotlinAccessor,
-            read_stability: crate::libraries::PropertyReadStability::Unstable,
+            read_stability: self.module_read_stability(mp, owner),
         })
+    }
+
+    /// A compiled property's read stability as this compilation may rely on it. kotlinc treats a
+    /// property of another module as unstable for smart casts; a friend module (a test compilation's
+    /// main) shares the declaring module's stability.
+    pub(super) fn module_read_stability(
+        &self,
+        mp: &super::metadata::MetaProp,
+        owner: TypeName,
+    ) -> crate::libraries::PropertyReadStability {
+        if self.cp.grants_internal_access(owner) {
+            mp.read_stability
+        } else {
+            crate::libraries::PropertyReadStability::Unstable
+        }
     }
 }

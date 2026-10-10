@@ -1202,6 +1202,9 @@ pub struct MetaProp {
     /// Decoded from the current `Property.flags` word only; `old_flags` predates the status bits.
     pub return_value_status: crate::types::ReturnValueStatus,
     pub is_const: bool,
+    /// Whether repeated reads observe one value, from the declaration's flags alone. Only a reader
+    /// in the declaring module or a friend of it may rely on it (kotlinc's smart-cast stability).
+    pub read_stability: crate::libraries::PropertyReadStability,
     /// Semantic property modality from metadata. The classfile accessor can still be abstract when
     /// a legacy `$DefaultImpls` method realizes this concrete declaration.
     pub is_abstract: bool,
