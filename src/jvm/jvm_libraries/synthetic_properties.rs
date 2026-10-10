@@ -139,14 +139,19 @@ pub(super) fn hierarchy_inventory(source: &dyn SymbolSource, receiver: Ty) -> Ac
         let Some(classifier) = source.classifier(internal) else {
             continue;
         };
-        methods.extend(
-            classifier
-                .members
-                .iter()
-                .filter(|member| !member.is_member_extension())
-                .map(|member| member.name.clone()),
-        );
-        methods.extend(classifier.declared_callable_order.iter().cloned());
+        // Synthetic accessor properties are Java interop. A Kotlin `fun getName()` remains a
+        // function even when reached through a Java supertype elsewhere in the hierarchy; Kotlin
+        // metadata is the authoritative declaration model for that classifier.
+        if !classifier.is_kotlin {
+            methods.extend(
+                classifier
+                    .members
+                    .iter()
+                    .filter(|member| !member.is_member_extension())
+                    .map(|member| member.name.clone()),
+            );
+            methods.extend(classifier.declared_callable_order.iter().cloned());
+        }
         pending.extend(crate::symbol_resolver::direct_supertypes(source, current));
     }
     AccessorInventory::from_methods(methods.iter().map(String::as_str))

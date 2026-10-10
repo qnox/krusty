@@ -3852,13 +3852,17 @@ impl JvmLibraries {
                         .collect::<Vec<_>>();
                     let member_names =
                         self.member_scope_names(internal_name, &classifier, &mapped_members);
-                    let accessors = AccessorInventory::from_methods(
-                        classifier
-                            .members
-                            .iter()
-                            .filter(|member| !member.is_member_extension())
-                            .map(|member| member.name.as_str()),
-                    );
+                    let accessors = if classifier.is_kotlin {
+                        AccessorInventory::default()
+                    } else {
+                        AccessorInventory::from_methods(
+                            classifier
+                                .members
+                                .iter()
+                                .filter(|member| !member.is_member_extension())
+                                .map(|member| member.name.as_str()),
+                        )
+                    };
                     for name in member_names {
                         let declarations = self.declared_callables_for(
                             receiver,

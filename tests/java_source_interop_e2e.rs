@@ -918,6 +918,19 @@ fun box(): String {
     );
 }
 
+#[test]
+fn kotlin_getter_shaped_function_is_not_a_java_synthetic_property() {
+    let library = common::compile_lib(
+        "kotlin-getter-is-not-property",
+        "package lib\nclass K { fun getFoo(): String = \"K\" }\n",
+    )
+    .expect("Kotlin dependency");
+    let source = "import lib.K\nfun probe(k: K): String = k.foo\n";
+    let result =
+        common::compiler_diagnostics(&[("Use.kt", source)], &[library, common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "Kotlin getter-shaped function");
+}
+
 /// Compile the Java sources with javac, then the Kotlin source with krusty against the javac output
 /// dir on the classpath, and run `box()` with both class sets in one loader. Asserts "OK".
 fn run_mixed(java: &[(&str, &str)], kotlin: &str) {
