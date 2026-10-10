@@ -2240,6 +2240,9 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         optIn.set(
             when (krustyNegative) {
                 "empty-opt-in" -> listOf("krusty.fixture.ExperimentalFirstApi", "")
+                // Only the redundant-argument warning may remain, so `-Werror` has nothing else to
+                // promote.
+                "werror-warning-exception" -> emptyList<String>()
                 "duplicate-opt-in" -> listOf(
                     "krusty.fixture.ExperimentalFirstApi",
                     "krusty.fixture.ExperimentalFirstApi",
