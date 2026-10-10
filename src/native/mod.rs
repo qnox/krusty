@@ -20,6 +20,7 @@
 
 mod c_abi;
 mod captures;
+pub mod cinterop;
 mod classes;
 mod codegen;
 mod dependency_references;
