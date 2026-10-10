@@ -56436,16 +56436,14 @@ impl<'a> Checker<'a> {
                     trailing_lambda,
                     &candidate.call_sig,
                 )?;
+                let whole_array =
+                    named_whole_array_varargs(&argument_parameters, arg_names, &candidate.call_sig);
                 self.lambda_overload_partially_applicable(
+                    scope,
                     &candidate,
                     None,
                     (args, partial),
-                    &argument_parameters,
-                    &named_whole_array_varargs(
-                        &argument_parameters,
-                        arg_names,
-                        &candidate.call_sig,
-                    ),
+                    (&argument_parameters, &whole_array),
                     type_args,
                 )
                 .then_some((candidate, argument_parameters))

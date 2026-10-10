@@ -3293,6 +3293,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member taking a callable reference (`HashMap.merge("a", 2, Int::plus)`) now selects in Pass 1
   instead of declining. Test: `tests/test_set_parser_gaps_e2e.rs`
   (`an_int_literal_selects_a_long_parameter_beside_a_defaulted_one`).
+- **An overloaded callee is shaped by the overload its callable reference fits.** With
+  `fun Text.mapFirst(f: (Char) -> Char)` beside `fun Text.mapFirst(f: (Char) -> CharSequence)` and
+  an overloaded `Char::shout` (`(): String` and `(times: Int): String`), `text.mapFirst(Char::shout)`
+  selects the `CharSequence` overload in kotlinc: only there does a reference overload adapt. Lambda
+  planning shapes a postponed argument through the first partially applicable callee overload; a
+  receiver-qualified reference used to count as fitting any function-typed parameter, so the
+  `(Char) -> Char` overload won and the reference was reported unresolved. Planning now asks the
+  read-only reference adaptation query against a concrete expected function type; an expected type
+  that still mentions a type parameter keeps the reference postponed. The same shape is
+  `"ok".replaceFirstChar(Char::uppercase)`. Test: `tests/callable_ref_extension_e2e.rs`
+  (`an_overloaded_callee_selects_the_shape_its_overloaded_reference_fits`).
 - **A receiver-less classifier callable reference is the `Classifier.name(...)` family.** A Java
   static method, and any other classifier callable with no value receiver, is named by
   `Classifier::member` the same way `Classifier.member(...)` names it. Pass 1 sees that family only

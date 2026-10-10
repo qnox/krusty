@@ -189,3 +189,45 @@ fun use(parser: Parser) { val decode = parser::decode }\n";
     };
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
+
+/// An overloaded callee whose function-typed parameters differ only in result type takes an
+/// overloaded extension reference: `mapFirst` has `(Char) -> Char` and `(Char) -> CharSequence`
+/// overloads, and `Char::shout` adapts only to the second (its zero-argument overload returns
+/// `String`; the other needs an extra `Int`). Shaping the reference under the first overload used to
+/// report "unresolved reference 'shout'" although overload selection then chose the second.
+const OVERLOADED_CALLEE_REFERENCE: &str = "class Text(val value: String)\n\
+    @JvmName(\"mapFirstToChar\")\n\
+    fun Text.mapFirst(transform: (Char) -> Char): String =\n\
+        transform(value[0]) + value.substring(1)\n\
+    @JvmName(\"mapFirstToText\")\n\
+    fun Text.mapFirst(transform: (Char) -> CharSequence): String =\n\
+        transform(value[0]).toString() + value.substring(1)\n\
+    fun Char.shout(): String = toString() + \"!\"\n\
+    fun Char.shout(times: Int): String = toString().repeat(times)\n\
+    fun box(): String {\n\
+        val local = Text(\"ok\").mapFirst(Char::shout)\n\
+        val library = \"ok\".replaceFirstChar(Char::uppercase)\n\
+        return if (local == \"o!k\" && library == \"Ok\") \"OK\" else \"FAIL\"\n\
+    }\n";
+
+#[test]
+fn an_overloaded_callee_selects_the_shape_its_overloaded_reference_fits() {
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", OVERLOADED_CALLEE_REFERENCE)],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(
+        result.reference_code, 0,
+        "kotlinc must accept the fixture: {}",
+        result.reference_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), []);
+    assert_eq!(
+        result.krusty_code, 0,
+        "krusty rejected the fixture: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    common::expect_box_same_as_kotlinc(OVERLOADED_CALLEE_REFERENCE, "OverloadedCalleeReference");
+}
