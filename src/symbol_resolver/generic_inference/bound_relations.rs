@@ -6,9 +6,9 @@
 //! completes formals no argument reached and rejects bindings the declaration forbids.
 
 use super::{
-    formal_variance_in_type, merge_inferred_ty, ty_subst, ty_subst_keep_unbound,
-    unify_ty_from_symbols, ExplicitTypeArgumentFixity, GSigBinds, GenericSig, SourceOracle,
-    SymbolSource,
+    formal_variance_in_type, merge_inferred_lower_bounds_from_symbols, merge_inferred_ty, ty_subst,
+    ty_subst_keep_unbound, unify_ty_from_symbols, ExplicitTypeArgumentFixity, GSigBinds,
+    GenericSig, SourceOracle, SymbolSource,
 };
 use crate::types::Ty;
 
@@ -265,7 +265,7 @@ pub(crate) fn resolve_bound_violating_bindings(
     // normal unifier extracts only declaration-owned variables from matching positions.
     loop {
         let mut additions = GSigBinds::new();
-        let mut widened = GSigBinds::new();
+        let mut widening_inputs = std::collections::HashMap::<String, Vec<Ty>>::new();
         for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
             let Some(actual) = bindings.get(formal).copied() else {
                 continue;
@@ -301,21 +301,21 @@ pub(crate) fn resolve_bound_violating_bindings(
                         // A covariant occurrence in the bound is one more LOWER bound on an
                         // already-inferred formal: `<T, C : Collection<T>> C.has(t: T)` on a
                         // `List<Base>` receiver with a `Sub` argument has `Sub <: T` and
-                        // `Base <: T`, so `T = Base`. Widen only to a supertype of the known
-                        // solution; anything else is an ordinary bound violation. A bare
-                        // type-parameter bound (`C : T`) carries no class position to read.
+                        // `Base <: T`, so `T = Base`. Keep every input: two bounded parameters may
+                        // contribute sibling types whose common supertype is the answer, and a
+                        // traversal-order overwrite would be unstable. A bare type-parameter bound
+                        // (`C : T`) carries no class position to read.
                         if known != solution
                             && matches!(bound.non_null(), Ty::Obj(..))
                             && formal_variance_in_type(source, *bound, &candidate)
                                 == Some(crate::types::TypeVariance::Out)
-                            && crate::assignable::is_subtype(
-                                &crate::assignable::TyCtx::new(),
-                                &oracle,
-                                known,
-                                solution,
-                            )
                         {
-                            widened.insert(candidate, solution);
+                            let inputs = widening_inputs
+                                .entry(candidate)
+                                .or_insert_with(|| vec![known]);
+                            if !inputs.contains(&solution) {
+                                inputs.push(solution);
+                            }
                         }
                         continue;
                     }
@@ -328,6 +328,13 @@ pub(crate) fn resolve_bound_violating_bindings(
                 }
             }
         }
+        let widened = widening_inputs
+            .into_iter()
+            .filter_map(|(formal, inputs)| {
+                let solution = merge_inferred_lower_bounds_from_symbols(source, &inputs);
+                (bindings.get(&formal).copied() != Some(solution)).then_some((formal, solution))
+            })
+            .collect::<GSigBinds>();
         if additions.is_empty() && widened.is_empty() {
             break;
         }

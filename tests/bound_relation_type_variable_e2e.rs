@@ -156,7 +156,9 @@ fn a_violating_call_with_no_solution_stays_rejected() {
 /// argument: the argument gives `Circle <: T` and the receiver, through `C`'s bound, gives
 /// `Shape <: T`, so `T = Shape`. Keeping the argument's `Circle` left `C`'s bound violated and
 /// rejected the candidate with a receiver type mismatch. The `Iterable` form, the infix form, and an
-/// argument already at the bound's element type are covered together.
+/// argument already at the bound's element type are covered together. Two bounded parameters also
+/// contribute sibling element types in both orders, pinning the common-supertype calculation rather
+/// than an order-dependent last write.
 const COVARIANT_BOUND: &str = "sealed class Shape {\n\
         class Circle(val r: Int) : Shape()\n\
         class Square(val side: Int) : Shape()\n\
@@ -173,6 +175,10 @@ const COVARIANT_BOUND: &str = "sealed class Shape {\n\
         for (item in this) if (item == element) return item\n\
         throw IllegalStateException(\"missing\")\n\
     }\n\
+    fun <T, L : Collection<T>, R : Iterable<T>> joinBounds(left: L, right: R, element: T): T {\n\
+        if (left.isEmpty() || !right.iterator().hasNext()) throw IllegalStateException(\"empty\")\n\
+        return element\n\
+    }\n\
     val circle = Shape.Circle(1)\n\
     val square = Shape.Square(2)\n\
     fun shapes(): Bag<Shape> = Bag(listOf(circle, square))\n\
@@ -180,7 +186,10 @@ const COVARIANT_BOUND: &str = "sealed class Shape {\n\
         val held: Bag<Shape> = shapes() holds circle\n\
         val found: Shape = shapes().firstAs(circle)\n\
         val exact: Shape = shapes().firstAs(square as Shape)\n\
-        return if (held.size == 2 && found === circle && exact === square) \"OK\" else \"FAIL\"\n\
+        val joined = joinBounds(Bag(listOf(circle)), Bag(listOf(square)), circle)\n\
+        val reversed = joinBounds(Bag(listOf(square)), Bag(listOf(circle)), square)\n\
+        return if (held.size == 2 && found === circle && exact === square &&\n\
+            joined === circle && reversed === square) \"OK\" else \"FAIL\"\n\
     }\n";
 
 #[test]
