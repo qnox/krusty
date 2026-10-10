@@ -9,7 +9,6 @@
 //! The analysis is one walk over the body and decides only from the IR the lowering already has:
 //! which local each construction initializes, and the node that reads each use of that local.
 
-use super::objects::CheckedProperty;
 use super::*;
 use crate::ir::{ClassId, ExprId, IrCheckedOperation};
 use std::collections::{HashMap, HashSet};
@@ -140,11 +139,12 @@ impl BodyLowering<'_, '_, '_> {
             }) => {
                 *receiver == read
                     && context_arguments.is_empty()
-                    && matches!(
-                        self.checked_property(target),
-                        Ok(CheckedProperty::Member(owner, index))
-                            if owner == class && self.property_field(owner, index).is_some()
-                    )
+                    && self.checked_property(target).is_ok_and(|property| {
+                        let super::objects::CheckedProperty::Member(owner, index) = property else {
+                            return false;
+                        };
+                        owner == class && self.property_field(owner, index).is_some()
+                    })
             }
             _ => false,
         }
