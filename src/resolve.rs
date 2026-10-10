@@ -8947,6 +8947,7 @@ enum UnboundRefSelection {
 enum NestedConstructorRefSelection {
     Selected(Ty),
     Inapplicable,
+    ReceiverMismatch(Ty),
     Missing,
 }
 
@@ -62298,60 +62299,6 @@ impl<'a> Checker<'a> {
         Some(signature)
     }
 
-    /// Apply the selected enclosing classifier to an inner classifier token. The stable type layout
-    /// stores the inner declaration's own parameters first and its captured outer parameters next.
-    /// A nested constructor reference has no runtime receiver expression, but its qualified LHS
-    /// still fixes the type of the leading outer parameter (`Foo<String>::Inner`).
-    fn apply_inner_classifier_outer(&self, target: Ty, outer: Ty) -> Ty {
-        let Some(internal) = target.kotlin_class_internal() else {
-            return target;
-        };
-        let source = self.fed_source();
-        let Some(classifier) = source.classifier(internal) else {
-            return target;
-        };
-        let Some(outer_owner) = classifier.outer_instance else {
-            return target;
-        };
-        let Some(applied_outer) = crate::symbol_resolver::applied_hierarchy(&source, outer)
-            .into_iter()
-            .find_map(|(owner, applied, _)| (owner == outer_owner).then_some(applied))
-        else {
-            return target;
-        };
-        let own_count = classifier
-            .own_type_parameter_count
-            .min(classifier.type_params().len());
-        let captured_count = classifier.type_params().len().saturating_sub(own_count);
-        if applied_outer.type_args().len() < captured_count {
-            return target;
-        }
-        let mut arguments = target
-            .type_args()
-            .iter()
-            .copied()
-            .take(own_count)
-            .collect::<Vec<_>>();
-        for index in arguments.len()..own_count {
-            let formal = &classifier.type_params()[index];
-            let bound = classifier
-                .type_param_bounds()
-                .get(index)
-                .and_then(|bounds| bounds.first())
-                .copied()
-                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            arguments.push(Ty::ty_param(formal, bound));
-        }
-        arguments.extend(
-            applied_outer
-                .type_args()
-                .iter()
-                .copied()
-                .take(captured_count),
-        );
-        Ty::obj_args_name(internal, &arguments)
-    }
-
     /// Select `Owner::Nested` through the classifier namespace before deciding whether `Owner`
     /// contributes a singleton value receiver. A nested constructor and an object member are not
     /// alternative interpretations of a failed value lookup: the `Nested` declaration fixes which
@@ -62385,7 +62332,15 @@ impl<'a> Checker<'a> {
             }
         };
         if let Some(alias) = nested_alias {
-            let target = self.apply_inner_classifier_outer(alias.expansion, applied_owner);
+            let target = match self.apply_inner_alias_outer(alias.expansion, applied_owner) {
+                inner_constructor_calls::InnerAliasOuterApplication::Applied(target) => target,
+                inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch => {
+                    return NestedConstructorRefSelection::ReceiverMismatch(alias.expansion);
+                }
+                inner_constructor_calls::InnerAliasOuterApplication::NotInner => {
+                    return NestedConstructorRefSelection::Missing;
+                }
+            };
             return self
                 .constructor_reference(
                     scope,
@@ -62436,21 +62391,18 @@ impl<'a> Checker<'a> {
                 // classifier tower, then intersect its resolved target with `owner`; never retry a
                 // package/provider spelling or reinterpret the LHS after it has bound.
                 let (selection, _, alias) = self.select_classifier_binding(scope, name);
-                let (InheritedNestedClassifier::Found(target), Some(alias)) = (selection, alias)
-                else {
+                let (InheritedNestedClassifier::Found(_), Some(alias)) = (selection, alias) else {
                     return NestedConstructorRefSelection::Missing;
                 };
-                let Some(alias_outer) = self
-                    .fed_source()
-                    .classifier(target)
-                    .and_then(|classifier| classifier.outer_instance)
-                else {
-                    return NestedConstructorRefSelection::Missing;
+                let target = match self.apply_inner_alias_outer(alias.expansion, applied_owner) {
+                    inner_constructor_calls::InnerAliasOuterApplication::Applied(target) => target,
+                    inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch => {
+                        return NestedConstructorRefSelection::ReceiverMismatch(alias.expansion);
+                    }
+                    inner_constructor_calls::InnerAliasOuterApplication::NotInner => {
+                        return NestedConstructorRefSelection::Missing;
+                    }
                 };
-                if !self.receiver_is_assignable(Ty::obj_name(owner), Ty::obj_name(alias_outer)) {
-                    return NestedConstructorRefSelection::Missing;
-                }
-                let target = self.apply_inner_classifier_outer(alias.expansion, applied_owner);
                 self.constructor_reference(
                     scope,
                     expression,
@@ -62511,9 +62463,13 @@ impl<'a> Checker<'a> {
             ) {
                 NestedConstructorRefSelection::Selected(ty) => UnboundRefSelection::Selected(ty),
                 NestedConstructorRefSelection::Inapplicable => UnboundRefSelection::Missing,
+                NestedConstructorRefSelection::ReceiverMismatch(_) => {
+                    UnboundRefSelection::NotClassifier
+                }
                 NestedConstructorRefSelection::Missing => UnboundRefSelection::NotClassifier,
             };
         }
+        let mut inner_alias_receiver_mismatch = None;
         let selected = (|| {
             let receiver_ty = receiver_ty.unboxed_primitive().unwrap_or_else(|| {
                 if internal.matches("kotlin/String") {
@@ -62771,6 +62727,9 @@ impl<'a> Checker<'a> {
             ) {
                 NestedConstructorRefSelection::Selected(ty) => return Some(ty),
                 NestedConstructorRefSelection::Inapplicable => {}
+                NestedConstructorRefSelection::ReceiverMismatch(target) => {
+                    inner_alias_receiver_mismatch = Some(target);
+                }
                 NestedConstructorRefSelection::Missing => {}
             }
             crate::trace_compiler!(
@@ -62937,6 +62896,11 @@ impl<'a> Checker<'a> {
                         self.record_companion_ref_receiver(receiver, companion, companion_ty);
                     }
                     return Some(ty);
+                }
+            }
+            if let Some(target) = inner_alias_receiver_mismatch {
+                if self.report_inner_alias_receiver_mismatch(expression, name, target) {
+                    return Some(Ty::Error);
                 }
             }
             None

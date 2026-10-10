@@ -20,6 +20,12 @@ enum BoundInnerClassifier {
     },
 }
 
+pub(super) enum InnerAliasOuterApplication {
+    Applied(Ty),
+    ReceiverMismatch,
+    NotInner,
+}
+
 /// One receiver-bound construction being committed.
 #[derive(Clone, Copy)]
 pub(super) struct BoundInnerConstruction<'a> {
@@ -98,25 +104,170 @@ impl Checker<'_> {
             InheritedNestedClassifier::Ambiguous => BoundInnerClassifier::Ambiguous,
             InheritedNestedClassifier::NotFound => {
                 let target = self.scoped_source_alias_call_ty(scope, call, name, expected);
-                let selected = target
-                    .and_then(Ty::kotlin_class_internal)
-                    .filter(|classifier| {
-                        self.fed_source()
-                            .classifier(*classifier)
-                            .and_then(|shape| shape.outer_instance)
-                            .is_some_and(|outer| {
-                                self.receiver_is_assignable(receiver, Ty::obj_name(outer))
-                            })
-                    });
-                match selected {
-                    Some(internal) => BoundInnerClassifier::Found {
-                        internal,
-                        alias_target: target,
-                    },
-                    None => BoundInnerClassifier::NotFound,
+                match target.map(|target| self.apply_inner_alias_outer(target, receiver)) {
+                    Some(InnerAliasOuterApplication::Applied(target)) => {
+                        BoundInnerClassifier::Found {
+                            internal: target
+                                .kotlin_class_internal()
+                                .expect("an applied inner alias keeps its classifier"),
+                            alias_target: Some(target),
+                        }
+                    }
+                    Some(InnerAliasOuterApplication::ReceiverMismatch) => {
+                        BoundInnerClassifier::NotFound
+                    }
+                    Some(InnerAliasOuterApplication::NotInner) | None => {
+                        BoundInnerClassifier::NotFound
+                    }
                 }
             }
         }
+    }
+
+    /// Apply the receiver's exact outer-class application to an alias of an inner classifier.
+    /// The alias template remains authoritative: fixed captured arguments must accept the receiver,
+    /// while alias formals are inferred from it and substituted into every occurrence (including
+    /// the inner classifier's own arguments).
+    pub(super) fn apply_inner_alias_outer(
+        &self,
+        target: Ty,
+        receiver: Ty,
+    ) -> InnerAliasOuterApplication {
+        let Some(internal) = target.kotlin_class_internal() else {
+            return InnerAliasOuterApplication::NotInner;
+        };
+        let source = self.fed_source();
+        let Some(classifier) = source.classifier(internal) else {
+            return InnerAliasOuterApplication::NotInner;
+        };
+        let Some(outer_owner) = classifier.outer_instance else {
+            return InnerAliasOuterApplication::NotInner;
+        };
+        let Some(applied_outer) = crate::symbol_resolver::applied_hierarchy(
+            &source,
+            crate::symbol_resolver::member_scope_receiver(receiver),
+        )
+        .into_iter()
+        .find_map(|(owner, applied, _)| (owner == outer_owner).then_some(applied)) else {
+            return InnerAliasOuterApplication::ReceiverMismatch;
+        };
+        let own_count = classifier
+            .own_type_parameter_count
+            .min(classifier.type_params().len());
+        let captured_count = classifier.type_params().len().saturating_sub(own_count);
+        let arguments = target.type_args();
+        if arguments.len() < own_count + captured_count {
+            return InnerAliasOuterApplication::ReceiverMismatch;
+        }
+        let expected_outer = Ty::obj_args_name(
+            outer_owner,
+            &arguments[own_count..own_count + captured_count],
+        );
+        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        crate::symbol_resolver::unify_ty_from_symbols(
+            &source,
+            expected_outer,
+            applied_outer,
+            &mut bindings,
+        );
+        let expected_outer =
+            crate::symbol_resolver::ty_subst_keep_unbound(expected_outer, &bindings);
+        if !self.receiver_is_assignable(applied_outer, expected_outer) {
+            return InnerAliasOuterApplication::ReceiverMismatch;
+        }
+        let target = crate::types::ty_subst_alias_expansion(target, &bindings);
+        InnerAliasOuterApplication::Applied(self.apply_inner_classifier_outer(target, receiver))
+    }
+
+    /// Report kotlinc's declaration-shaped receiver mismatch when one alias constructor is the
+    /// rejected candidate. With several constructors the ordinary unresolved-reference path owns
+    /// the terminal diagnostic until overload diagnostics can list that whole family exactly.
+    pub(super) fn report_inner_alias_receiver_mismatch(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+        target: Ty,
+    ) -> bool {
+        let Some(internal) = target.kotlin_class_internal() else {
+            return false;
+        };
+        let Some(classifier) = self.resolved_type_name(internal) else {
+            return false;
+        };
+        let mut constructors = self.constructor_declarations(internal, &classifier);
+        if constructors.len() != 1 {
+            return false;
+        }
+        let constructor = constructors.pop().expect("one constructor");
+        let parameters =
+            Self::access_parameter_display(&constructor.params, &constructor.call_sig.param_names);
+        if !self.silent_error_exprs.insert(expression) {
+            return true;
+        }
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "candidate 'constructor({parameters}): {}' is inapplicable because of a receiver type mismatch.",
+                target.source_name(),
+            ),
+        );
+        true
+    }
+
+    /// Apply the selected enclosing classifier to an inner classifier token. The stable type layout
+    /// stores the inner declaration's own parameters first and its captured outer parameters next.
+    /// A nested constructor reference has no runtime receiver expression, but its qualified LHS
+    /// still fixes the type of the leading outer parameter (`Foo<String>::Inner`).
+    pub(super) fn apply_inner_classifier_outer(&self, target: Ty, outer: Ty) -> Ty {
+        let Some(internal) = target.kotlin_class_internal() else {
+            return target;
+        };
+        let source = self.fed_source();
+        let Some(classifier) = source.classifier(internal) else {
+            return target;
+        };
+        let Some(outer_owner) = classifier.outer_instance else {
+            return target;
+        };
+        let Some(applied_outer) = crate::symbol_resolver::applied_hierarchy(
+            &source,
+            crate::symbol_resolver::member_scope_receiver(outer),
+        )
+        .into_iter()
+        .find_map(|(owner, applied, _)| (owner == outer_owner).then_some(applied)) else {
+            return target;
+        };
+        let own_count = classifier
+            .own_type_parameter_count
+            .min(classifier.type_params().len());
+        let captured_count = classifier.type_params().len().saturating_sub(own_count);
+        if applied_outer.type_args().len() < captured_count {
+            return target;
+        }
+        let mut arguments = target
+            .type_args()
+            .iter()
+            .copied()
+            .take(own_count)
+            .collect::<Vec<_>>();
+        for index in arguments.len()..own_count {
+            let formal = &classifier.type_params()[index];
+            let bound = classifier
+                .type_param_bounds()
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            arguments.push(Ty::ty_param(formal, bound));
+        }
+        arguments.extend(
+            applied_outer
+                .type_args()
+                .iter()
+                .copied()
+                .take(captured_count),
+        );
+        Ty::obj_args_name(internal, &arguments)
     }
 
     /// The constructors of `internal` as member candidates of `receiver`, from the same

@@ -1697,6 +1697,57 @@ fun box(): String {
 }
 
 #[test]
+fn inner_alias_outer_inference_substitutes_the_same_formal_in_own_arguments() {
+    let src = r#"
+class Outer<T>(val outer: T) {
+    inner class Inner<U>(val inner: U) {
+        fun result(): String = outer.toString() + inner.toString()
+    }
+}
+typealias Same<T> = Outer<T>.Inner<T>
+
+fun box(): String {
+    val outer = Outer("O")
+    val construct = Outer<String>::Same
+    return construct(outer, "K").result()
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverInnerAliasSharedOuterFormal");
+}
+
+#[test]
+fn fixed_inner_alias_outer_rejects_a_different_applied_receiver() {
+    let src = r#"
+class Container<T> {
+    inner class Item
+}
+typealias StringItem = Container<String>.Item
+
+fun byType() = Container<Int>::StringItem
+"#;
+    assert_rejection_same_as_kotlinc("ResolverInnerAliasFixedOuterMismatch", src);
+}
+
+#[test]
+fn inapplicable_inner_alias_does_not_hide_an_applicable_extension() {
+    let src = r#"
+class Container<T> {
+    inner class Item
+}
+typealias StringItem = Container<String>.Item
+
+fun Container<Int>.StringItem(): String = "OK"
+
+fun box(): String {
+    if (Container<Int>().StringItem() != "OK") return "direct"
+    val reference = Container<Int>::StringItem
+    return reference(Container())
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverInnerAliasReceiverMismatchExtension");
+}
+
+#[test]
 fn enabled_when_guard_uses_the_type_test_scope_and_short_circuits() {
     let src = r#"
 // LANGUAGE: +WhenGuards
