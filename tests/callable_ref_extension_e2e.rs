@@ -236,3 +236,32 @@ fn an_overloaded_callee_selects_the_shape_its_overloaded_reference_fits() {
     assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
     common::expect_box_same_as_kotlinc(OVERLOADED_CALLEE_REFERENCE, "OverloadedCalleeReference");
 }
+
+const GENERIC_CALLEE_REFERENCE: &str = "class Host\n\
+    @JvmName(\"genericConsume\")\n\
+    fun <T> Host.consume(project: (T) -> Int, render: (T) -> String): String = \"OK\"\n\
+    @JvmName(\"anyConsume\")\n\
+    fun Host.consume(project: (Any) -> Int, render: (Any) -> String): String = \"FAIL\"\n\
+    fun box(): String = Host().consume(String::length) { it }\n";
+
+#[test]
+fn a_callable_reference_keeps_an_unbound_callee_formal_postponed() {
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", GENERIC_CALLEE_REFERENCE)],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(
+        result.reference_code, 0,
+        "kotlinc must accept the fixture: {}",
+        result.reference_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), []);
+    assert_eq!(
+        result.krusty_code, 0,
+        "krusty rejected the fixture: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    common::expect_box_same_as_kotlinc(GENERIC_CALLEE_REFERENCE, "GenericCalleeReference");
+}

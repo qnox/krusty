@@ -3334,11 +3334,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   planning shapes a postponed argument through the first partially applicable callee overload; a
   callable reference used to count as fitting any function-typed parameter, so the `(Char) -> Char`
   overload won and the reference was reported unresolved. Planning now asks the read-only reference
-  adaptation query against a concrete expected function type; an expected type that still mentions
-  a type parameter keeps the reference postponed. The same shape occurs with a receiver-less
-  overloaded `::shout` and with `"ok".replaceFirstChar(Char::uppercase)`. Test:
+  adaptation query against a concrete expected function type. A declared parameter that still
+  depends on an unbound callee formal keeps the reference postponed before substituting that formal
+  with its upper bound. The same shape occurs with a receiver-less overloaded `::shout`, with
+  `"ok".replaceFirstChar(Char::uppercase)`, and when `String::length` is what binds a generic
+  callee's `T`. Tests:
   `tests/callable_ref_extension_e2e.rs`
-  (`an_overloaded_callee_selects_the_shape_its_overloaded_reference_fits`).
+  (`an_overloaded_callee_selects_the_shape_its_overloaded_reference_fits`,
+  `a_callable_reference_keeps_an_unbound_callee_formal_postponed`).
 - **A generic subscript operator publishes its solved type arguments.** `m["k"]` on a `Map<*, *>`
   selects the stdlib `operator fun <K, V> Map<out K, V>.get(key: K): V?`; the star-projected receiver
   binds `V` to `Any?`, as it does for the call form `m.get("k")`. Subscript selection solved the

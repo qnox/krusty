@@ -153,19 +153,24 @@ impl Checker<'_> {
                 .collect::<Vec<_>>();
             (params, bindings)
         });
+        let unbound_formals = generic
+            .as_ref()
+            .map(|(_, bindings)| {
+                semantic
+                    .formals
+                    .iter()
+                    .filter(|formal| !bindings.contains_key(*formal))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if generic.as_ref().is_some_and(|(_, bindings)| {
             // This is the pre-lambda applicability probe. A bound that still depends on an
             // unbound callable formal is completed by the postponed lambda result, so it cannot
             // eliminate this overload yet. Final selection validates the complete signature.
-            let unresolved = semantic
-                .formals
-                .iter()
-                .filter(|formal| !bindings.contains_key(*formal))
-                .cloned()
-                .collect::<Vec<_>>();
             let mut partial_signature = semantic.clone().into_owned();
             for bounds in &mut partial_signature.formal_bounds {
-                bounds.retain(|bound| !ty_mentions_param(*bound, &unresolved));
+                bounds.retain(|bound| !ty_mentions_param(*bound, &unbound_formals));
             }
             !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 &partial_signature,
@@ -201,6 +206,9 @@ impl Checker<'_> {
                                 scope,
                                 argument_expr,
                                 expected,
+                                declared.is_some_and(|declared| {
+                                    ty_mentions_param(declared, &unbound_formals)
+                                }),
                             );
                         };
                         let Some(expected) = expected else {
@@ -290,16 +298,21 @@ impl Checker<'_> {
     /// applies to a receiver-less overloaded reference such as `::shout`. Shaping the reference
     /// under an overload it cannot fit types it against the wrong expectation and reports a
     /// reference the selected overload resolves. Any other argument, or a shape that still mentions
-    /// a type parameter, constrains nothing here.
+    /// a currently unbound callee formal, constrains nothing here. That fact is read from the
+    /// declared shape before substitution can erase the formal to its upper bound.
     fn postponed_callable_reference_fits(
         &self,
         scope: &CheckerScope<'_>,
         argument: ExprId,
         expected: Option<Ty>,
+        declared_has_unbound_formal: bool,
     ) -> bool {
         let Expr::CallableRef { receiver, name } = self.file.expr(argument) else {
             return true;
         };
+        if declared_has_unbound_formal {
+            return true;
+        }
         let Some(expected) =
             expected.map(|expected| self.declared_function_semantic_type(expected))
         else {
