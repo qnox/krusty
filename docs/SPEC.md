@@ -14903,23 +14903,113 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `stdlib_local_variable_flags_have_the_decoded_layout`.
 
 - **A KLIB body's implicit cast to the value's own type is no conversion.** An `IMPLICIT_CAST`
-  whose target is the operand's semantic type adds no node, as the source has none; any other
-  implicit cast, and every other type operator, declines by name. Tests:
+  whose target is the operand's semantic type adds no node, as the source has none. One from `T?` to
+  `T` is the smart cast the source relies on (`if (a != null) return a`) and lowers as checked FIR
+  lowers a smart cast: a `Cast` of a reference, an `ImplicitCoercion` of a primitive value. Any
+  other implicit cast is a widening or a narrowing the lowering cannot tell apart without the
+  classes' supertypes, and declines. Tests:
   `an_implicit_cast_to_the_value_type_adds_nothing`,
-  `a_converting_or_unmodelled_type_operator_declines`.
+  `a_converting_or_unmodelled_type_operator_declines`,
+  `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
+
+- **A KLIB body's `null` is the null literal.** Kotlin serializes `null` as a constant typed
+  `Nothing?`; it lowers to the `null` constant typed as the null literal, as checked FIR records
+  it. A `null` of another type is an inconsistency. Test:
+  `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its
   type; one of origin `IF` is an `if`-`else if` chain and lowers to nested two-branch `when`s, each
   typed with the chain's type, recording only a `Unit` one as exhaustive, as checked FIR lowers the
-  source. `&&`/`||` (origins `ANDAND`/`OROR`) and a `when` without an `else` decline. Tests:
+  source. An `if` without an `else` (a statement, typed `Unit`) gains the empty `Unit` block checked
+  FIR lowering gives the source statement as its `else`, and is exhaustive. A `when` without an
+  `else` must be typed `Unit`, lowers flat with its branch values as written and records no
+  exhaustiveness; a valued one is an inconsistency. Tests:
   `a_flat_when_lowers_as_the_source_when_does`,
   `a_flat_if_chain_lowers_as_the_source_else_if_chain_does`,
-  `a_short_circuit_or_a_when_without_else_declines`.
+  `control_forms::an_if_without_else_lowers_as_the_source_statement_does`,
+  `an_if_without_else_of_an_assignment_lowers_as_the_source_does`,
+  `an_if_chain_without_else_lowers_as_the_source_chain_does`,
+  `a_when_without_else_lowers_as_the_source_statement_does`,
+  `a_valued_when_without_else_declines`.
+
+- **A KLIB body's `Unit` coercions follow the source context.** Kotlin wraps a statement whose
+  value is discarded, and a `Unit` `if` branch of another type, in `IMPLICIT_COERCION_TO_UNIT`.
+  Checked FIR lowering has no node for a discarded statement or a `when` branch's value, so the
+  coercion is dropped there and at the end of a `Unit` block; in a `Unit` `if` branch it becomes
+  what checked FIR lowering gives the source branch: a `Unit` call is followed by the `Unit` value
+  (`{call; Unit}`), a call of another type is coerced, a jump or `throw` stays as written, and an
+  assignment or other statement form is wrapped in its own `Unit` block. A coercion anywhere else
+  declines as an implicit conversion. Tests: the `if`-without-`else` tests above,
+  `unit_bodies_without_a_return_lower_as_their_source_does`.
+
+- **A KLIB body's `&&` and `||` are the source operators.** The `when`s of origin `ANDAND`
+  (`[a -> b, else -> false]`) and `OROR` (`[a -> true, else -> b]`) lower to the same two-branch
+  `when` with the short-circuit fact checked FIR lowering records, its synthesized constant
+  untyped as there. A short circuit of any other shape is an inconsistency. Tests:
+  `control_forms::short_circuit_operators_lower_as_the_source_operators_do`,
+  `a_short_circuit_with_another_constant_declines`,
+  `a_short_circuit_condition_of_an_if_lowers_as_the_source_does`.
+
+- **A KLIB block is typed as the source block.** A plain block (no origin) lowers to a block whose
+  value is its last statement when that is a source expression (not a `return`, `break`,
+  `continue`, assignment, loop or declaration). Its type is that value's type, or `Nothing` when it
+  ends in a jump, or `Unit`, regardless of the type a KLIB gives a braced branch by its use. A
+  function body is such a block: one whose result is not `Unit` must not be able to reach its end
+  (it then declines as ending without a `return`); a final constant-`true` loop only satisfies that
+  rule when no lowered `break` names it. A `Unit` body needs no trailing `return`. A statement after
+  a jump, which checked FIR lowering never sees, declines. Blocks of a
+  compiler-introduced origin (inlined function bodies among them) and composite blocks decline by
+  form. Tests: `control_forms::a_block_branch_lowers_as_the_source_block_does`,
+  `a_returning_block_is_typed_by_its_jump`,
+  `unit_bodies_without_a_return_lower_as_their_source_does`,
+  `a_valued_body_that_can_end_declines`, `a_statement_after_a_jump_declines`,
+  `a_valued_body_ending_in_a_constant_loop_that_can_break_declines`,
+  `stdlib_unit_bodies_lower_as_their_source_does`.
+
+- **A KLIB `throw` throws its lowered operand.** It lowers as the source `throw`, typed `Nothing`
+  and raw in a `Unit` branch. A constructor call (`throw IllegalArgumentException(…)`, the
+  stdlib's usual operand) declines by form: a frozen `KlibBodyCallable` describes top-level
+  functions only, with no owner classifier to construct. Tests:
+  `control_forms::throw_lowers_as_the_source_throw_does`,
+  `a_constructor_call_declines_by_its_form`, `a_body_that_constructs_declines_by_its_form`,
+  `stdlib_coerce_in_declines_by_its_exception_construction`.
+
+- **A KLIB string template is the source template.** Its literal parts are merged run by run into
+  one untyped `String` constant each, and its values lowered as written, the concatenation typed
+  `String`, as checked FIR lowers `"x${a}y$b"` and `"a" + "b$a"`. A template part checked FIR
+  lowering would fold (a constant of another type, a nested template, a template of literal text
+  alone) declines. Tests: `control_forms::string_templates_lower_as_the_source_templates_do`,
+  `a_string_constant_lowers_as_the_source_constant_does`,
+  `a_string_template_checked_fir_folds_declines`,
+  `stdlib_string_template_lowers_as_its_source_does` (`kotlin.random.boundsErrorMessage`),
+  `stdlib_null_checked_template_lowers_as_its_source_does` (`kotlin.test.messagePrefix`).
+
+- **A KLIB loop is the source loop.** A `while` or `do`-`while` (origins `WHILE_LOOP`,
+  `DO_WHILE_LOOP`) with a plain block body lowers to an untyped `While` statement, condition first
+  as checked FIR lowers it (so a `do`-`while` condition reading a variable its body declares
+  declines as a foreign read). Every loop gets a label unique in the unit, built from the unit
+  function and the loop's file-unique KLIB identity, and every `break`/`continue` names its loop's
+  label, so a jump out of an outer loop names that loop. A jump naming no enclosing loop is an
+  inconsistency; a loop the compiler introduced (`for` lowering) declines. Tests:
+  `control_forms::while_loops_lower_as_the_source_loops_do`,
+  `break_and_continue_lower_as_the_source_jumps_do`,
+  `a_jump_out_of_an_outer_loop_names_that_loop`,
+  `a_loop_body_with_a_trailing_value_lowers_as_the_source_body_does`,
+  `a_jump_naming_no_enclosing_loop_declines`.
+
+- **A KLIB body's type checks and casts are the source operators.** `is T`/`!is T` of a non-null
+  class type lower to `InstanceOf`/`NotInstanceOf` typed `Boolean`; `as T` to a `CastNonNull`
+  (recorded as written) for a non-null target and a `Cast` for a nullable one. Forms checked FIR
+  lowering expands into control flow or settles otherwise decline by name: `as?`, `is` of a
+  nullable type or of `Nothing`, the implicit non-null assertion of a platform value, and every
+  other operator. Tests: `control_forms::type_checks_and_casts_lower_as_the_source_operators_do`,
+  `type_operators_checked_fir_expands_decline_by_name`.
 
 - **Every value a KLIB body lowers to has a checked type.** Each value expression of a lowered body
   answers `IrFile::checked_type`, so a backend that types every value (Wasm) never meets an
-  untyped one. Test: `every_lowered_value_has_a_checked_type`.
+  untyped one; the `Unit` value a coerced branch gains is typed `Unit`. Loops, local declarations
+  and jumps are statements and need none. Test: `every_lowered_value_has_a_checked_type`.
 
 - **Open-end membership names `rangeUntil`.** `x in a..<b`, `x in a until b`, and
   `x in a downTo b` first select that syntax's operator. The result then uses `contains` unless the
@@ -16717,3 +16807,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compilation with `krusty: the wasm backend does not support <construct> yet` and writes nothing.
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
+
+- **Wasm classes are WasmGC struct subtypes dispatched through shared class tables.** A class's
+  instance is a struct whose first field is its dispatch table, followed by its superclasses'
+  fields root first and then its own; it is declared a subtype of its superclass's struct, so
+  `is`, `!is`, `as` and `as?` against a class are `ref.test`/`ref.cast`, and against an interface
+  test every class of the file implementing it. Slot numbers come from the target-neutral tables
+  Native also uses (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role,
+  one reserved slot, the class's own members, then a program-wide interface region in which an
+  interface member has the same number in every implementing class. Class, interface and `Any`
+  values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
+  override carried differently from the member it overrides (a bridge) declines. `==` on a class
+  value calls its `equals` slot null-safely, whose default is identity. `kotlin.Any`'s own
+  `hashCode` and `toString` have no body in the module yet: their slots trap, and a call or
+  template that could reach one on a class that does not override it declines the compilation by
+  name rather than print something kotlinc would not. An `object` is built on first use and
+  stored before its constructor runs, as on the JVM. Tests: `wasm::codegen::tests`, the
+  `wasm_*` regressions in `tests/kotlin_box_wasm_conformance.rs`, and
+  `backend::class_tables::tests`.

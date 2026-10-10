@@ -14,6 +14,7 @@
 mod codegen;
 mod encode;
 mod host;
+mod objects;
 mod runtime;
 mod target;
 

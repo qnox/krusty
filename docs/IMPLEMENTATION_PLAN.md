@@ -4683,6 +4683,22 @@ code is the one the code generator already names: provider-owned bodies through 
   inlined function blocks, `throw`, `&&`/`||` and object construction.
   Next: members and classes in the provider, `throw` and object construction, `&&`/`||`, then
   wiring the unit into the Native lane switch (nothing is wired into a backend yet).
+- **Lowering (third slice).** Control and value forms, each lowered to what checked FIR lowering
+  produces for the equivalent source (`klib_lowering/body_lowering/` by form: `blocks`,
+  `conditionals`, `loops`, `string_templates`, `type_operators`, `calls`): `&&`/`||` with their
+  short-circuit facts; `if` and `when` without `else` as statements; nested plain blocks typed as
+  the source block and `Unit` bodies without a trailing `return`; the `Unit` coercions a KLIB adds,
+  dropped or converted by context; `throw`; string templates with merged literal runs; `while` and
+  `do`-`while` with labelled `break`/`continue`; `is`/`!is`, `as` and the `T?`-to-`T` smart cast;
+  `null` typed as the null literal. Still declining by form: constructor calls (a frozen
+  `KlibBodyCallable` has no classifier to construct, so `throw IllegalArgumentException(…)` and
+  `coerceIn` stop there), `as?`, `is` of a nullable type, implicit non-null assertions, other
+  implicit casts (a widening is not told from a narrowing without supertypes), blocks of a
+  compiler-introduced origin (inlined bodies, `for` loops) and composite blocks. The stdlib's
+  `boundsErrorMessage`, `messagePrefix`, `ensureNeverFrozen` and `initRuntimeIfNeeded` now lower
+  too; the remaining declines are led by generics, inlined blocks, file-private and member callees
+  and constructor calls.
+  Next: constructors and member callees in the provider, then the Native lane switch.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
@@ -5391,10 +5407,24 @@ non-inline callers, still reads the field directly. Test:
   the selected operator's declared result (`IrFile::add_arithmetic`, proven complete by
   `IrFile::validate_complete_facts`). Native deleted its promotion table (`arithmetic_result`);
   Native and Wasm only choose operand widening and narrowing to that result.
+- Classes: final, open and abstract classes, interfaces declared in the same file and `object`
+  declarations, with primary and secondary constructors, fields, properties, virtual and `super`
+  calls, interface dispatch, `is`/`!is`/`as`/`as?`, and `equals`/`hashCode`/`toString` a class
+  declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
+  program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
+  keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
+  struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Declined by name:
+  enum, value, annotation, inner and local capturing classes, companions, bridged overrides,
+  supertypes from another file or the library, and a call that could reach `kotlin.Any`'s own
+  `toString`/`hashCode`, which have no body in the module until the library's bodies are.
+  Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
+  181/181/182; Native's counts are unchanged by the shared tables.
+- Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
+  checked type, which Wasm declines rather than infer one.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
-- Next: classes as struct subtypes with vtables, exceptions on wasm EH, library calls keyed by the
-  selected declaration, multi-file and `// MODULE:` programs, then a klib-backed library provider
-  shared with Native.
+- Next: exceptions on wasm EH, library calls keyed by the selected declaration, enums and
+  companions on the class tables, multi-file and `// MODULE:` programs, then a klib-backed library
+  provider shared with Native.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 
