@@ -231,17 +231,89 @@ fn constructors(
                 .map(|constructor| Constructor {
                     declaration: None,
                     primary: constructor.is_primary_constructor(),
+                    // Default PRESENCE is a source-call fact. `default_values` is only the
+                    // provider's optional closed-value payload and may be empty for a call or
+                    // parameter reference that the dependency realizes in its own constructor.
                     parameter_defaults: (0..constructor.params.len())
-                        .map(|index| {
-                            constructor
-                                .default_values
-                                .get(index)
-                                .is_some_and(Option::is_some)
-                        })
+                        .map(|index| constructor.call_sig.param_has_default(index))
                         .collect(),
                     jvm_overloads: constructor.annotations.contains(&jvm_overloads),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::libraries::{LibraryMember, LibraryType, ResolvedSymbols, SemanticPlatform};
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+    use crate::types::Ty;
+
+    struct DefaultedConstructorPlatform {
+        identity: TypeName,
+        classifier: Arc<LibraryType>,
+    }
+
+    impl SymbolSource for DefaultedConstructorPlatform {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
+            let key = SymbolNamespace::classifier_key(self.identity);
+            if namespace == key.0 && name == key.1 {
+                Rc::new(ResolvedSymbols {
+                    classifier_name: Some(self.identity),
+                    classifier: Some(Arc::clone(&self.classifier)),
+                    ..ResolvedSymbols::default()
+                })
+            } else {
+                Rc::new(ResolvedSymbols::default())
+            }
+        }
+    }
+
+    impl SemanticPlatform for DefaultedConstructorPlatform {}
+
+    #[test]
+    fn dependency_constructor_defaults_come_from_its_call_shape() {
+        let identity = crate::types::type_name("fixture/Base");
+        let mut constructor = LibraryMember::new(
+            "<init>".to_owned(),
+            vec![Ty::Int],
+            Ty::Unit,
+            "(I)V".to_owned(),
+        );
+        constructor.call_sig.param_defaults = vec![true];
+        assert!(constructor.default_values.is_empty());
+        let unknown = LibraryMember::new(
+            "<init>".to_owned(),
+            vec![Ty::String],
+            Ty::Unit,
+            "(Ljava/lang/String;)V".to_owned(),
+        );
+        assert!(unknown.call_sig.param_defaults.is_empty());
+        let mut classifier = LibraryType::declaration_header();
+        classifier.constructors.extend([constructor, unknown]);
+        let platform = DefaultedConstructorPlatform {
+            identity,
+            classifier: Arc::new(classifier),
+        };
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let table = super::super::signature_collection::collect_signatures_with_cp(
+            &[],
+            Box::new(platform),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let headers = crate::fir::inventory_parsed_source_headers(&[], &[]);
+
+        let constructors = constructors(&headers, &table, identity);
+        let [defaulted, unknown] = constructors.as_slice() else {
+            panic!("two dependency constructors")
+        };
+        assert_eq!(defaulted.parameter_defaults, [true]);
+        assert_eq!(unknown.parameter_defaults, [false]);
+    }
 }

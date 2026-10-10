@@ -155,6 +155,46 @@ fn the_jpa_preset_matches_through_a_dependency() {
     assert_same_classes_and_box(&reference, &krusty, &[stdlib, krusty_lib]);
 }
 
+const DEFAULTED_SUPER_LIBRARY: &[(&str, &str)] = &[(
+    "Base.kt",
+    "package lib\n\
+     fun defaultBase(): String = \"base\"\n\
+     open class Base(val value: String = defaultBase())\n",
+)];
+
+const DEFAULTED_SUPER_MAIN: &str = r#"import lib.Base
+
+annotation class NoArg
+
+@NoArg
+class Child(val child: String) : Base()
+
+fun box(): String {
+    val made = Child::class.java.getDeclaredConstructor().newInstance()
+    return if (made.value == "base") "OK" else "base=${made.value}"
+}
+"#;
+
+/// A dependency's call shape, not an optional constant payload, says that its constructor has a
+/// default. The non-constant call above still gives `Base` the no-argument ABI that `Child` may
+/// delegate to.
+#[test]
+fn a_dependency_superclass_keeps_its_non_constant_constructor_default() {
+    let fixture = PluginFixture::new("noarg-dependency-default");
+    let reference_lib = fixture.kotlinc("lib", DEFAULTED_SUPER_LIBRARY, &[], &[]);
+    let krusty_lib = fixture.krusty("lib", DEFAULTED_SUPER_LIBRARY, &[], &[]);
+    let sources = [("Main.kt", DEFAULTED_SUPER_MAIN)];
+    let switches = noarg_switches(&["annotation=NoArg"]);
+    let reference = fixture.kotlinc("main", &sources, &[reference_lib], &switches);
+    let krusty = fixture.krusty(
+        "main",
+        &sources,
+        std::slice::from_ref(&krusty_lib),
+        &switches,
+    );
+    assert_same_classes_and_box(&reference, &krusty, &[common::stdlib_jar(), krusty_lib]);
+}
+
 const INITIALIZERS: &str = r#"annotation class NoArg
 
 @NoArg

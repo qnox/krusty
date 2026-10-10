@@ -10182,7 +10182,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a value class, declares no constructor callable as `<init>()` (no parameters, or all defaulted on
   the primary or on a `@JvmOverloads` constructor), and whose superclass has such a constructor or
   is matched itself, gets a public `<init>()` that calls the superclass's `<init>()` and runs no
-  initializer, so its properties keep their JVM defaults. It carries
+  initializer, so its properties keep their JVM defaults. A dependency constructor's default
+  PRESENCE comes from its provider-normalized call shape; the optional closed-value payload is not
+  consulted, so a non-constant default remains a valid no-argument ABI fact. It carries
   `@Deprecated("No-arg constructor is hidden from direct usage", level = HIDDEN)` and
   `@java.lang.Deprecated`, takes the `Deprecated` attribute, and is not `ACC_SYNTHETIC`: kotlinc
   marks a HIDDEN declaration synthetic unless it also carries `@java.lang.Deprecated` (KT-80649),
@@ -10200,7 +10202,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor, the superclass constructor the frontend selected. A local class is not matched yet, as for all-open. Tests: `tests/noarg_plugin_e2e.rs`
   (direct, meta and supertype matches, secondary-only, data, nested and private-constructor classes,
   a sealed superclass, declared no-arg constructors, mixed-case `invokeInitializers`, byte-identical to kotlinc and instantiated reflectively; the `jpa`
-  preset through a dependency each compiler builds for itself; the plugin's errors against
+  preset through a dependency each compiler builds for itself, and a dependency superclass with a
+  non-constant default; the plugin's errors against
   kotlinc's), `plugins::noarg` and `plugins::registry` unit tests
   (`noarg_resolves_to_native_and_reads_its_options`,
   `an_unimplemented_option_setting_fails_the_compile`).
