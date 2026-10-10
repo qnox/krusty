@@ -1362,7 +1362,7 @@ impl<'a> SymbolResolver<'a> {
         args: &[CallArgKind],
         type_args: &[Ty],
         callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
+    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty, GSigBinds)> {
         let selected = match select_receiver_overload_from_functions_tracking(
             self.lib,
             receiver,
@@ -1391,36 +1391,36 @@ impl<'a> SymbolResolver<'a> {
         if selected.call_sig.vararg_index.is_none() {
             let params =
                 logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            let resolved = if selected.is_extension() {
+            // The bindings are published with the call; the receiver binds `V` of `Map.get`.
+            let (resolved, bindings) = if selected.generic_sig.is_some() && selected.is_extension()
+            {
                 let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-                selected.generic_sig.as_ref().map_or(
-                    selected.ret.apply(selected.callable.ret),
-                    |signature| {
-                        specialized_extension_return(
-                            self.lib,
-                            &selected,
-                            bind_ext_ret(
-                                &self.src,
-                                signature,
-                                binding_receiver,
-                                &arg_tys,
-                                type_args,
-                            ),
-                        )
-                    },
+                let semantic = selected.semantic_signature();
+                let (ret, bindings) = bind_ext_ret_tracking(
+                    &self.src,
+                    &semantic,
+                    binding_receiver,
+                    &arg_tys,
+                    type_args,
+                );
+                (
+                    specialized_extension_return(self.lib, &selected, ret),
+                    bindings,
                 )
+            } else if selected.is_extension() {
+                (selected.ret.apply(selected.callable.ret), GSigBinds::new())
             } else {
-                resolved_member_from_info(
+                let member = resolved_member_from_info(
                     self.lib,
                     &self.src,
                     receiver,
                     args,
                     type_args,
                     selected.clone(),
-                )
-                .ret
+                );
+                (member.ret, GSigBinds::new())
             };
-            return CandidateSelection::Selected((selected, params, resolved));
+            return CandidateSelection::Selected((selected, params, resolved, bindings));
         }
         let Some((params, ret)) = indexed_call_shape(
             self.lib,
@@ -1433,7 +1433,7 @@ impl<'a> SymbolResolver<'a> {
         ) else {
             return CandidateSelection::None;
         };
-        CandidateSelection::Selected((selected, params, ret))
+        CandidateSelection::Selected((selected, params, ret, GSigBinds::new()))
     }
 
     /// Select the `set` convention used by indexed assignment. The assignment RHS binds the final

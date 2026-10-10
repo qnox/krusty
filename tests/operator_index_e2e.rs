@@ -99,3 +99,56 @@ fn function_value_is_not_a_different_function_classifier() {
         }]
     );
 }
+
+/// A dependency's generic `get` operator extension read through a star-projected receiver:
+/// `operator fun <K, V> Table<out K, V>.get(key: K): V?` on `Table<*, *>`. The receiver alone binds
+/// `V` (to the star's `Any?`), exactly as the equivalent `t.get(key)` call does. The subscript form
+/// published no solved type arguments, so an expectation-free `val local = table["a"]` read its
+/// `Any?` result as the unsolved fallback and reported "cannot infer type for type parameter 'V'".
+/// The stdlib `Map<*, *>` subscript is the same extension shape.
+const STAR_PROJECTED_LIB: &str = "package lib\n\
+    class Table<K, V>(private val keys: List<K>, private val values: List<V>) {\n\
+        fun find(key: Any?): V? = keys.indexOf(key).let { if (it < 0) null else values[it] }\n\
+    }\n\
+    operator fun <K, V> Table<out K, V>.get(key: K): V? = find(key)\n";
+
+const STAR_PROJECTED_MAIN: &str = "import lib.Table\n\
+    import lib.get\n\
+    fun cell(table: Table<*, *>): Any? = table[\"b\"]\n\
+    fun entry(map: Map<*, *>): Any? = map[\"b\"]\n\
+    fun box(): String {\n\
+        val table: Table<*, *> = Table(listOf(\"a\", \"b\"), listOf(1, 2))\n\
+        val local = table[\"a\"]\n\
+        val map: Map<*, *> = mapOf(\"b\" to \"K\")\n\
+        return if (cell(table) == 2 && local == 1 && entry(map) == \"K\") \"OK\" else \"FAIL\"\n\
+    }\n";
+
+#[test]
+fn a_star_projected_receiver_binds_an_indexed_extension_result() {
+    let Some(library) = common::kotlinc_library(STAR_PROJECTED_LIB) else {
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", STAR_PROJECTED_MAIN)],
+        &[library, common::stdlib_jar()],
+    );
+    assert_eq!(
+        result.reference_code, 0,
+        "kotlinc must accept the fixture: {}",
+        result.reference_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), []);
+    assert_eq!(
+        result.krusty_code, 0,
+        "krusty rejected the fixture: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    let Some(boxed) =
+        common::expect_box_run_against_kotlinc(STAR_PROJECTED_LIB, STAR_PROJECTED_MAIN)
+    else {
+        return;
+    };
+    assert_eq!(boxed, "OK");
+}

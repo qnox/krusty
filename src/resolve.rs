@@ -58383,7 +58383,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             });
-            if let Some((selected, params, ret)) = selected_get {
+            if let Some((selected, params, ret, bindings)) = selected_get {
                 let vararg = selected
                     .call_sig
                     .vararg_index
@@ -58395,8 +58395,8 @@ impl<'a> Checker<'a> {
                 }
                 if !self.commit_indexed_operator_arguments(
                     e,
-                    &selected.call_sig.param_defaults,
-                    selected.context_count,
+                    &selected,
+                    &bindings,
                     &params,
                     vararg,
                     &indices,
