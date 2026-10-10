@@ -340,7 +340,7 @@ pub(crate) fn lower_suspend(
                 IrExpr::Block { value: Some(value), .. }
                     if expr_calls_suspend(ir, *value, &suspend_set));
             if suspending_tail {
-                ensure_tail_return(ir, b, ret_ty == Ty::Unit);
+                let _ = ensure_tail_return(ir, b, ret_ty == Ty::Unit);
                 // Materializing the tail can expose an inline non-local return that was previously
                 // the block's value (`run { return await() }`). Re-run the same structural splicer so
                 // the inner return becomes the function statement and the now-unreachable synthetic
@@ -548,7 +548,7 @@ pub(crate) fn lower_suspend(
             if !box_returns(ir, b) {
                 return false;
             }
-            ensure_tail_return(ir, b, orig_rets[fid as usize] == Ty::Unit);
+            let _ = ensure_tail_return(ir, b, orig_rets[fid as usize] == Ty::Unit);
             // The standalone `invoke` of each such lambda is not emitted: it has no continuation of
             // its own to pass, and every call to it is spliced.
             for implementation in cps::spliced_suspension_lambda_impls(ir, b, &suspend_set) {
@@ -564,7 +564,7 @@ pub(crate) fn lower_suspend(
                     return false;
                 }
                 let unit_ret = orig_rets[fid as usize] == Ty::Unit;
-                ensure_tail_return(ir, b, unit_ret);
+                let _ = ensure_tail_return(ir, b, unit_ret);
             }
         } else {
             let unit_ret = orig_rets[fid as usize] == Ty::Unit;
@@ -1575,7 +1575,7 @@ fn build_state_machine(
         _ => false,
     };
     if convert_tail {
-        ensure_tail_return(ir, b, unit_ret);
+        let _ = ensure_tail_return(ir, b, unit_ret);
     }
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         crate::trace_compiler!(

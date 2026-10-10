@@ -311,7 +311,7 @@ jobs:
         env:
           # A cold lane compiles every missing kotlinc reference before it can publish the cache.
           # Keep the 120-second local default; give GHA enough time to bootstrap an empty cache.
-          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
+          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "1800"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
