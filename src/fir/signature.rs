@@ -8,8 +8,8 @@ use super::header::{
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
     DeferredValueSelectionId, DiagnosticId, ExternalCallableId, HeaderDeclaration,
     HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames,
-    OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap,
-    StableDeclarationAnchor, TypeParameterId,
+    OriginId, PropertyId, QualifiedCallCoordinateId, SigExprId, SigNameId, SignatureScopeId,
+    SourceFileId, SourceMap, StableDeclarationAnchor, TypeParameterId,
 };
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
@@ -149,6 +149,7 @@ pub struct SignatureGraph {
     callable_selections: Vec<DeferredCallableSelection>,
     member_selections: Vec<DeferredMemberSelection>,
     value_selections: Vec<DeferredValueSelection>,
+    qualified_call_coordinates: Vec<QualifiedCallCoordinate>,
     delegate_sites: Vec<SignatureDelegateSite>,
     type_syntax: HeaderSyntaxArena,
     type_names: LookupNames,
@@ -327,6 +328,27 @@ impl SignatureGraph {
         self.value_selections.get(id.raw() as usize).copied()
     }
 
+    pub fn add_qualified_call_coordinate(
+        &mut self,
+        coordinate: QualifiedCallCoordinate,
+    ) -> QualifiedCallCoordinateId {
+        let id = QualifiedCallCoordinateId::from_raw(next_id(
+            self.qualified_call_coordinates.len(),
+            "qualified call coordinates",
+        ));
+        self.qualified_call_coordinates.push(coordinate);
+        id
+    }
+
+    pub fn qualified_call_coordinate(
+        &self,
+        id: QualifiedCallCoordinateId,
+    ) -> Option<QualifiedCallCoordinate> {
+        self.qualified_call_coordinates
+            .get(id.raw() as usize)
+            .copied()
+    }
+
     /// Add the graph root extracted for an inferred declaration stub. Explicit signatures and
     /// ordinary/default bodies cannot enter through this API because their stubs carry no inference
     /// kind.
@@ -465,6 +487,7 @@ impl SignatureGraph {
             + self.callable_selections.len() * std::mem::size_of::<DeferredCallableSelection>()
             + self.member_selections.len() * std::mem::size_of::<DeferredMemberSelection>()
             + self.value_selections.len() * std::mem::size_of::<DeferredValueSelection>()
+            + self.qualified_call_coordinates.len() * std::mem::size_of::<QualifiedCallCoordinate>()
             + self.delegate_sites.len() * std::mem::size_of::<SignatureDelegateSite>()
             + self.type_syntax.storage_payload_bytes()
             + self.type_names.storage_payload_bytes()

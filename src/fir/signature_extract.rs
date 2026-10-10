@@ -1939,16 +1939,19 @@ impl SignatureConstraintExtractor {
                                         type_arguments,
                                         trailing_lambda,
                                     });
+                            let qualified =
+                                self.graph
+                                    .add_qualified_call_coordinate(QualifiedCallCoordinate {
+                                        receiver: qualified_receiver,
+                                        root,
+                                        first_selector,
+                                        member,
+                                        origin: selector_origin,
+                                    });
                             self.graph.add_expr(SigExpr::Call {
                                 target,
                                 arguments,
-                                qualified: Some(QualifiedCallCoordinate {
-                                    receiver: qualified_receiver,
-                                    root,
-                                    first_selector,
-                                    member,
-                                    origin: selector_origin,
-                                }),
+                                qualified: Some(qualified),
                             })
                         } else {
                             let receiver =

@@ -59,7 +59,7 @@ pub enum SigExpr {
         target: DeferredCallableSelectionId,
         arguments: CallArgumentRange,
         /// Both semantic interpretations of parser qualification, before the root is bound.
-        qualified: Option<QualifiedCallCoordinate>,
+        qualified: Option<QualifiedCallCoordinateId>,
     },
     CallableReference(DeferredCallableSelectionId),
     BoundCallableReference {

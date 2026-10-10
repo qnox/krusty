@@ -2642,16 +2642,17 @@ fn a_namespace_bound_qualified_call_stays_a_namespace_at_final_selection() {
     let arguments = graph.add_call_arguments([]);
     let root = graph.intern_name("pkg");
     let first_selector = graph.intern_name("selected");
+    let qualified = graph.add_qualified_call_coordinate(QualifiedCallCoordinate {
+        receiver: result,
+        root,
+        first_selector,
+        member,
+        origin,
+    });
     let call = graph.add_expr(SigExpr::Call {
         target,
         arguments,
-        qualified: Some(QualifiedCallCoordinate {
-            receiver: result,
-            root,
-            first_selector,
-            member,
-            origin,
-        }),
+        qualified: Some(qualified),
     });
     graph.add_inferred_constraint(
         &inferred_stub(declaration, InferredSignatureKind::ExpressionFunction),

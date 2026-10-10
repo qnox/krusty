@@ -123,6 +123,7 @@ fun cmp(d: JDerived) =
     else {
         panic!("classifier-qualified base must remain a deferred call")
     };
+    let qualified = graph.qualified_call_coordinate(qualified).unwrap();
     let selection = graph.callable_selection(target).unwrap();
     assert_eq!(graph.name(selection.spelling), Some("Comparator.comparing"));
     assert_eq!(graph.name(qualified.root), Some("Comparator"));

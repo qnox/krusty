@@ -544,7 +544,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             target: DeferredCallableSelectionId,
             arguments: CallArgumentRange,
-            qualified: Option<QualifiedCallCoordinate>,
+            qualified: Option<QualifiedCallCoordinateId>,
             forced_expected: Option<ResolvedTy>,
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
@@ -564,7 +564,11 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 )?),
                 (None, None) => None,
             };
-            if let Some(qualified) = qualified {
+            if let Some(qualified) = qualified.map(|qualified| {
+                graph
+                    .qualified_call_coordinate(qualified)
+                    .expect("a qualified call coordinate must belong to its graph")
+            }) {
                 let root = graph
                     .name(qualified.root)
                     .expect("a qualified call root must belong to its graph");
