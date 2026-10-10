@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run every test in one prebuilt conformance binary except the JVM and Native box corpora. The JVM
-# suite keeps its scored shards; Native deliberately runs once under its larger suite deadline.
+# Run every test in one prebuilt conformance binary except the JVM and Native box corpora. Both box
+# corpora have their own single-process runners and suite-wide deadlines.
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -51,6 +51,7 @@ run_with_deadline "$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
   "$bin" \
   --skip kotlin_codegen_box_conformance \
   --skip kotlin_codegen_box_native_conformance \
+  --skip kotlin_codegen_box_wasm \
   --test-threads "$threads"
 status=$?
 set -e

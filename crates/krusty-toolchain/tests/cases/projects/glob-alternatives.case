@@ -1,0 +1,13 @@
+Groups and classes.
+--- project.yaml
+modules: ["libs/{a,b}", "libs/[c-d]"]
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/b/module.yaml
+product: jvm/lib
+--- libs/c/module.yaml
+product: jvm/lib
+--- libs/d/module.yaml
+product: jvm/lib
+--- libs/e/module.yaml
+product: jvm/lib

@@ -1,0 +1,48 @@
+A Gradle module metadata variant available at a module whose version would leave the repository
+names no file.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:lib:1.0
+--- m2/org/example/lib/1.0/lib-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>lib</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/lib/1.0/lib-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": { "group": "org.example", "module": "lib", "version": "1.0" },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": { "url": "../../x", "group": "org.example", "module": "lib-jvm", "version": "../.." }
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "available-at": { "url": "../../x", "group": "org.example", "module": "lib-jvm", "version": "../.." }
+    }
+  ]
+}
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/lib/1.0/lib-1.0.module: ERROR: org.example:lib-jvm:../.. names no file in a Maven repository: its version `../..` is not a file name

@@ -1,0 +1,18 @@
+A POM's parent whose version would leave the repository names no file.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:lib:1.0
+--- m2/org/example/lib/1.0/lib-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>org.example</groupId><artifactId>parent</artifactId><version>..</version></parent>
+  <artifactId>lib</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/lib/1.0/lib-1.0.jar
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/lib/1.0/lib-1.0.pom:4:3: ERROR: org.example:parent:.. names no file in a Maven repository: its version `..` is not a file name

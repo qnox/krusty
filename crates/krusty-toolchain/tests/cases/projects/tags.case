@@ -1,0 +1,5 @@
+A custom tag on a value of the project file is refused at the tag, and module files are not read.
+--- project.yaml
+modules: !list [libs/a, !entry libs/b]
+--- libs/a/module.yaml
+product: !foo jvm/lib

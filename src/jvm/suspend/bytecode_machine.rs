@@ -105,11 +105,11 @@ pub(super) fn route(
         return Routed::Failed;
     }
     // kotlinc maps a `Unit` function's implicit return to the body's closing `}`.
-    if let (Some(unit), Some(&close)) = (
-        ensure_tail_return(ir, body, unit_return),
-        ir.fn_close_lines.get(&fid),
-    ) {
-        ir.expr_source_lines.insert(unit, close);
+    let units = ensure_tail_return(ir, body, unit_return);
+    if let Some(&close) = ir.fn_close_lines.get(&fid) {
+        for unit in units {
+            ir.expr_source_lines.insert(unit, close);
+        }
     }
 
     // A member's continuation nests under its class, a top-level function's under the facade.

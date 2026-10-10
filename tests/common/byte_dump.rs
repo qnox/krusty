@@ -955,6 +955,15 @@ fn flush_dirty_archives() {
     }
 }
 
+/// Publish every class-dump recording made by this test process.
+///
+/// The scored corpus runner flushes before returning from the test so the GHA cache contains the
+/// complete recording, and so a publication failure remains an ordinary test diagnostic instead
+/// of being swallowed by the best-effort process-exit hook.
+pub fn flush_recorded_class_dumps() {
+    flush_dirty_archives();
+}
+
 fn flush_archive(root: &Path) {
     let path = archive_path(root);
     let Some(parent) = path.parent() else {

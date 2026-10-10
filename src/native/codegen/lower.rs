@@ -26,6 +26,7 @@ mod defaults;
 mod entry;
 mod enums;
 mod exceptions;
+mod frame_objects;
 mod intrinsic_operations;
 use arithmetic::{arithmetic_result, scalar_bound};
 use carrier::{box_suffix, machine_carrier, scalar_suffix, Carrier};
@@ -63,7 +64,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrStatic, IrTypeOp,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp, MainEntryParameters,
 };
 use crate::types::{Ty, TypeName};
 
@@ -230,38 +231,20 @@ pub fn lower_file(
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init = lowering.define_file_init(source, statics_init)?;
-    let mut defines_entry = false;
+    let selected = entry.selected(ir);
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        let function = &ir.functions[index];
-        let is_entry = function.params.is_empty()
-            && function.is_static
-            && function.dispatch_receiver.is_none()
-            && match entry {
-                Entry::Main => function.name == "main",
-                Entry::Box => {
-                    function.name == "box" && lowering.carrier(function.ret) == Carrier::Ref
-                }
-            };
-        if is_entry {
-            lowering.define_program_entry(index, entry, file_init, statics_init.is_some())?;
-            defines_entry = true;
+        if let Some((_, parameters)) = selected.filter(|(function, _)| *function == index as u32) {
+            lowering.define_program_entry(
+                index,
+                entry,
+                file_init,
+                statics_init.is_some(),
+                parameters == MainEntryParameters::Arguments,
+            )?;
         }
     }
-    // Kotlin's other entry point, `fun main(args: Array<String>)`, is a program whose arguments
-    // this target does not pass yet. Declining here names it; without this the file lowers with no
-    // entry and the link fails on an undefined symbol that says nothing about `main`.
-    if matches!(entry, Entry::Main)
-        && !defines_entry
-        && ir.functions.iter().any(|function| {
-            function.name == "main"
-                && function.is_static
-                && function.dispatch_receiver.is_none()
-                && function.params.len() == 1
-        })
-    {
-        return Err("a `main` that takes its arguments".to_string());
-    }
+    let defines_entry = selected.is_some();
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
 
@@ -552,6 +535,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    frame_objects: std::collections::HashSet::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -641,6 +625,7 @@ impl<'a> FileLowering<'a> {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
                     lowering.builder.def_var(variable, *value);
                 }
+                lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
             },
         );
@@ -725,6 +710,8 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The constructions of this body whose object lives in this frame; see `frame_objects`.
+    frame_objects: std::collections::HashSet<u32>,
 }
 
 /// One `finally` the current position is inside.
@@ -1535,11 +1522,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .iter()
                     .map(|ordinal| ordinal + default_prefix_count)
                     .collect();
+                let placement = if self.frame_objects.contains(&id) {
+                    frame_objects::Placement::Frame
+                } else {
+                    frame_objects::Placement::Heap
+                };
                 self.construction(
                     internal,
                     &args,
                     ctor_params.as_deref(),
                     (!omitted.is_empty()).then_some(omitted.as_slice()),
+                    placement,
                 )
             }
             IrExpr::MethodCall {
