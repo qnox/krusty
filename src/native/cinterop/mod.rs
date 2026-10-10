@@ -7,5 +7,8 @@
 //! Kotlin/Native's direct-call format. See `docs/NATIVE.md`, "C interop".
 
 mod compiler_headers;
+mod declarations;
+mod layout;
 mod lexer;
+mod model;
 mod preprocessor;

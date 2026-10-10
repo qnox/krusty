@@ -169,6 +169,19 @@ unchanged.
 - **Per-target ABI, never the host's.** Struct layout, integer widths (`long` is 64-bit on LP64
   Linux and macOS, 32-bit on LLP64 Windows) and how a struct is passed by value are computed for
   the target: SysV x86-64, AAPCS64 (and Apple's variant), RISC-V LP64D, and Win64.
+- **Headers are read in three stages** under `src/native/cinterop/`: the preprocessor (clang's
+  predefined macros and krusty's own freestanding headers per target), the declaration parser
+  (`declarations/`), and the layout engine (`layout.rs`). The parser builds an index-based model
+  (`model.rs`) of the typedefs, functions, records, enums and globals a header set declares,
+  including the GNU extensions glibc uses (`__attribute__`, `__asm__` labels, `__extension__`,
+  `__mode__`, `__typeof__`). A `static inline` function's body is skipped and the function is
+  recorded as defined, because Kotlin/Native does not bind those by default. A constant
+  expression can measure a type (`sizeof`, `_Alignof`, `__builtin_offsetof`), so parsing is done
+  per target. Layout follows clang's algorithm: SysV bitfield placement, `packed` and
+  `aligned(n)`, and AAPCS64's rule that an unnamed bitfield counts toward a struct's alignment.
+  Against clang for the posix, linux, zlib and sqlite3 header sets on Kotlin/Native's x86_64
+  glibc 2.19 sysroot, every record's size, alignment and field offsets (bitfields included) and
+  every typedef's size match. `#pragma pack` is not read yet; no header in those sets uses it.
 
 ## Other operating systems
 

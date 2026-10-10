@@ -74,6 +74,14 @@ mod tests {
     }
 
     #[test]
+    fn every_target_evaluates_floating_expressions_in_their_own_type() {
+        // glibc chooses `float_t` by this builtin, which clang's `-dM` output leaves out.
+        for target in NativeTarget::ALL {
+            assert_eq!(expand(*target, "__FLT_EVAL_METHOD__"), "0", "{target}");
+        }
+    }
+
+    #[test]
     fn the_freestanding_headers_define_their_names_from_the_target() {
         let source = "#include <stddef.h>\n#include <limits.h>\n#include <stdbool.h>\n\
                       size_t; INT_MAX CHAR_MIN bool";
