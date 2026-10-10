@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::body_lowering::{BodyLowering, LinkedCallee};
+use super::body_lowering::{BodyLowering, LinkedCallee, LoweredFunction};
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::{declare_function, function_header, FunctionHeader};
@@ -104,9 +104,13 @@ impl DependencyBodyUnit {
             .declare(&mut self.ir, callable)
             .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
         while let Some(body) = linker.pending.pop_front() {
+            let function = LoweredFunction {
+                symbol: body.symbol,
+                function: body.function,
+            };
             let lowered = BodyLowering::new(
                 body.arena,
-                body.symbol,
+                function,
                 &body.header,
                 &self.builtins,
                 &mut self.ir,
@@ -237,6 +241,9 @@ impl UnitCheckpoint {
             .retain(|expression, _| *expression < first);
         ir.callable_scopes.retain(|expression| *expression < first);
         ir.negations.retain(|expression| *expression < first);
+        ir.short_circuits
+            .retain(|expression, _| *expression < first);
+        ir.written_casts.retain(|expression| *expression < first);
         ir.whens
             .exhaustive
             .retain(|expression, _| *expression < first);

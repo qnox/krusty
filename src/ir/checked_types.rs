@@ -4,11 +4,11 @@
 //! [`IrFile::logical_types`]. A node lowering synthesizes on its own (a constant chunk of a string
 //! template, the zero a relational comparison is tested against, a coercion it inserts) either has
 //! its type recorded there by its producer, or names that type in its own operands: a constant
-//! carries its type's identity, a type operation its target, an intrinsic call its declared
-//! result, and a comparison or equality is a `Boolean`. This is that contract in one place, so a
-//! backend reads the checked type and chooses only the carrier. Nothing here looks at a child to
-//! work out what its parent yields; a node whose type depends on its children has its type
-//! recorded by its producer or has none.
+//! carries its type's identity, the `Unit` singleton is `Unit`, a type operation its target, an
+//! intrinsic call its declared result, and a comparison or equality is a `Boolean`. This is that
+//! contract in one place, so a backend reads the checked type and chooses only the carrier.
+//! Nothing here looks at a child to work out what its parent yields; a node whose type depends on
+//! its children has its type recorded by its producer or has none.
 //!
 //! A `PrimitiveBinOp` that does not answer a `Boolean` is such a node. Its result is the result of
 //! the operator the checker selected (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
@@ -44,6 +44,7 @@ impl IrFile {
             IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
             IrExpr::StringConcat(_) => Ty::String,
+            IrExpr::UnitInstance => Ty::Unit,
             _ => return None,
         })
     }
