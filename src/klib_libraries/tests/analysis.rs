@@ -109,3 +109,20 @@ fun box(): String = "OK"
 "#;
     assert_eq!(diagnostics(&libraries, source), Vec::<String>::new());
 }
+
+#[test]
+fn an_omitted_constant_default_is_the_klib_parameter_default() {
+    let Some(libraries) = native_stdlib() else {
+        return;
+    };
+    let source = r#"
+import kotlin.test.assertEquals
+
+fun box(): String {
+    assertEquals(3, 1 + 2)
+    val joined = listOf("O", "K").joinToString("")
+    return joined
+}
+"#;
+    assert_eq!(diagnostics(&libraries, source), Vec::<String>::new());
+}

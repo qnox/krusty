@@ -6,7 +6,9 @@ use super::classifier_signatures::{sign_package_classes, SignedClassifier};
 use super::declaration_signatures::{
     sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
 };
+use super::parameter_defaults::ParameterDefaults;
 use crate::libraries::{declared_type_alias, AliasExpansion};
+use crate::metadata::klib_ir::KlibIrSignature;
 use crate::metadata::semantic::KotlinPackage;
 use crate::types::{existing_type_name_child, type_name, type_name_child, TypeName, Visibility};
 
@@ -145,6 +147,26 @@ impl PackageInventory {
             }
         }
         Ok(inventory)
+    }
+
+    /// Give every function the constant defaults its library's IR declares for it.
+    pub(super) fn attach_defaults(&mut self, defaults: &ParameterDefaults) {
+        let mut attach = |function: &mut SignedFunction| {
+            let signature = KlibIrSignature::Public(function.signature.clone());
+            function.defaults = defaults.of(&signature);
+        };
+        self.functions.values_mut().flatten().for_each(&mut attach);
+        self.companion_functions
+            .values_mut()
+            .flatten()
+            .for_each(|extension| attach(&mut extension.signed));
+        for classifier in self.classifiers.values_mut() {
+            classifier.functions.iter_mut().for_each(&mut attach);
+            classifier
+                .associated_functions
+                .iter_mut()
+                .for_each(&mut attach);
+        }
     }
 
     fn declare_package(&mut self, segments: &[String]) -> TypeName {

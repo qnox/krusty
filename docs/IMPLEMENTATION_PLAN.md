@@ -4644,6 +4644,13 @@ code is the one the code generator already names: provider-owned bodies through 
   each target's stdlib KLIB must carry an operation: `klib_libraries::tests::external_coverage`
   checks Native, JS, wasm-js and wasm-wasi against `tests/klib_uncovered_externals/<target>/`,
   lists that may only shrink (2.4.20: 402, 25, 16 and 1 uncovered).
+- **Parameter defaults (constants done).** `KlibLibraries::open` reads each library's IR
+  declarations and publishes the constant default of every value parameter
+  (`klib_libraries::parameter_defaults`), so a call that omits it passes the constant itself, as
+  for any library default the provider states. A non-constant default stays unpublished and the
+  call is rejected. `parameter_default` also gives body lowering the default's IR expression.
+  The Native corpus passes 3991 of 7089 against the stdlib KLIB (from 3542); reading the whole IR
+  at open is a known compile-time cost to narrow to the declarations a compilation selects.
 - **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
   decoded trees of a library set by linkable identity and answers a selected callable's frozen
   `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.
