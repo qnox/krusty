@@ -41,6 +41,7 @@ pub(super) use stub_overlay::StubOverlayGuard;
 mod test_support;
 mod value_class_erasure;
 
+use crate::language_version::LanguageVersion;
 pub(crate) use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
 };
@@ -342,9 +343,11 @@ macro_rules! cache_stat {
 
 mod builtin_members;
 mod inline_plan_cache;
+mod versioned_records;
 
 pub(super) use inline_plan_cache::InlinePlanCacheInput;
 use inline_plan_cache::{global_plan_cache, PlanCache, PlanMemo};
+use versioned_records::{ResolvedTypeCache, SymbolsMemo};
 
 /// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance
 /// caches are short-lived, so only a process-global tally shows whole-run efficiency).
@@ -1443,7 +1446,6 @@ type MetaOverloadCache =
 const OPEN_ARCHIVE_CAP: usize = 16;
 const ALIAS_PACKAGE_CAP: usize = 1024;
 const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
-const SYMBOLS_CAP: usize = 65536;
 
 pub struct Classpath {
     entries: Vec<Entry>,
@@ -1509,9 +1511,9 @@ pub struct Classpath {
     /// `Classpath` (NOT the per-compile `JvmLibraries`) so repeated classifier metadata reads — which
     /// asks for the same stdlib types across thousands of snippets — warms across compiles instead of
     /// rebuilding each `LibraryType` (descriptor parses + `@Metadata` decodes) from cold every file.
-    resolved_types: RefCell<
-        crate::lru::LruCache<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
-    >,
+    /// One LRU per compilation API version: a record withholds `@SinceKotlin` members newer than
+    /// the API version it was built for, so one compile's view never serves another's.
+    resolved_types: RefCell<HashMap<LanguageVersion, ResolvedTypeCache>>,
     /// Parsed `.kotlin_builtins` fragments by package name.
     builtins: RefCell<HashMap<TypeName, std::sync::Arc<BuiltinsFile>>>,
     /// Complete-catalog validation succeeded once. Failures stay unset and are retried.
@@ -1537,13 +1539,9 @@ pub struct Classpath {
     package_facades_memo: RefCell<HashMap<TypeName, Vec<TypeName>>>,
     /// The classpath `SymbolSource` result memo. Namespace identity is the first key so a package and a
     /// same-named classifier cannot collide; the nested LRU accepts `&str` leaves without allocating on
-    /// cache hits.
-    symbols_memo: RefCell<
-        HashMap<
-            SymbolNamespace,
-            crate::lru::LruCache<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>,
-        >,
-    >,
+    /// cache hits. The API version is part of that first key for the same reason as
+    /// [`Self::resolved_types`].
+    symbols_memo: RefCell<HashMap<(LanguageVersion, SymbolNamespace), SymbolsMemo>>,
     /// Exact JVM realizations behind the opaque dependency declaration identities carried by FIR.
     /// This is bounded by the classpath callable working set and shared with the backend through the
     /// same `Rc<Classpath>` as the symbol provider.
@@ -1755,7 +1753,7 @@ impl Classpath {
             inline_plans: RefCell::new(PlanMemo::new(META_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
-            resolved_types: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
+            resolved_types: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
             builtins_validated: Cell::new(false),
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
@@ -1986,50 +1984,6 @@ impl Classpath {
             || build_jar_packages(&self.entries[entry_id]),
             |packages| packages.complete,
         )
-    }
-
-    /// Memoized `resolve_type` result for `internal` (the outer `Option` = cached-vs-not; the inner =
-    /// resolved-vs-absent). Warm across compiles because this `Classpath` is reused per worker thread.
-    pub fn cached_library_type(
-        &self,
-        internal: &str,
-    ) -> Option<Option<std::sync::Arc<crate::libraries::LibraryType>>> {
-        self.cached_library_type_name(type_name(internal))
-    }
-
-    pub fn cached_library_type_name(
-        &self,
-        internal: TypeName,
-    ) -> Option<Option<std::sync::Arc<crate::libraries::LibraryType>>> {
-        if !self.catalog_complete() {
-            cache_stat!(resolved_types, false);
-            return None;
-        }
-        // Deliberately per-INSTANCE only: a `LibraryType` embeds whole-classpath facts (mapped
-        // builtins from whichever stdlib wins THIS set, shadowable supertype walks, member-scope
-        // recursion), so no entry-keyed process-global layer can serve it across compositions.
-        let hit = self.resolved_types.borrow_mut().get(&internal).cloned();
-        cache_stat!(resolved_types, hit.is_some());
-        hit
-    }
-
-    pub fn cache_library_type(
-        &self,
-        internal: &str,
-        ty: Option<std::sync::Arc<crate::libraries::LibraryType>>,
-    ) {
-        self.cache_library_type_name(type_name(internal), ty);
-    }
-
-    pub fn cache_library_type_name(
-        &self,
-        internal: TypeName,
-        ty: Option<std::sync::Arc<crate::libraries::LibraryType>>,
-    ) {
-        if !self.catalog_complete() {
-            return;
-        }
-        self.resolved_types.borrow_mut().insert(internal, ty);
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
@@ -2942,11 +2896,17 @@ impl Classpath {
         crate::libraries::TypeKind,
         crate::libraries::ClassifierAccess,
         bool,
+        u16,
     )> {
         let file = self.builtins_file_for_package(Self::builtins_package_for(internal));
         let canonical = file.canonical_name(internal)?;
         let class = file.get_name(canonical)?;
-        Some((class.kind, class.visibility.into(), class.is_nested))
+        Some((
+            class.kind,
+            class.visibility.into(),
+            class.is_nested,
+            class.access,
+        ))
     }
 
     /// Canonical semantic identity of a classifier declared in `.kotlin_builtins`. Nested source
@@ -3955,53 +3915,6 @@ impl Classpath {
     /// `PkgMembers`; NOT a whole-classpath scan. A package is consulted at most once.
     pub fn functions_in_scope(&self, name: &str, packages: &[TypeName]) -> Vec<ExtCandidate> {
         candidate_union::functions_in_scope(self, name, packages)
-    }
-
-    /// The spec's top-level memo lookup: the already-composed [`ResolvedSymbols`](crate::libraries::ResolvedSymbols)
-    /// namespace record for a declaration key, or `None` on a cold miss. The classpath `SymbolSource`
-    /// composes the record once (classifier + callables) and stores it with
-    /// [`memoize_symbols`](Self::memoize_symbols).
-    pub fn cached_symbols(
-        &self,
-        namespace: SymbolNamespace,
-        name: &str,
-    ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
-        if !self.catalog_complete() {
-            cache_stat!(symbols_memo, false);
-            return None;
-        }
-        let hit = self
-            .symbols_memo
-            .borrow_mut()
-            .get_mut(&namespace)
-            .and_then(|symbols| symbols.get(name))
-            .cloned();
-        cache_stat!(symbols_memo, hit.is_some());
-        hit
-    }
-
-    /// Store the composed namespace record for a declaration key, returning the shared `Rc` the caller
-    /// hands back. See [`cached_symbols`](Self::cached_symbols).
-    pub fn memoize_symbols(
-        &self,
-        namespace: SymbolNamespace,
-        name: &str,
-        symbols: crate::libraries::ResolvedSymbols,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        let rc = std::rc::Rc::new(symbols);
-        // Misses are records too. Repeating an absent library probe is common when a source module
-        // contributes a same-named local/top-level declaration: the composite source must still ask
-        // every provider so overloads can mix, but the classpath answer stays empty. Cache that answer
-        // under the textual leaf just like a hit. This does not intern the leaf in the name tree, and
-        // the per-namespace LRU keeps the negative working set bounded.
-        if self.catalog_complete() {
-            self.symbols_memo
-                .borrow_mut()
-                .entry(namespace)
-                .or_insert_with(|| crate::lru::LruCache::new(SYMBOLS_CAP))
-                .insert(name.to_string(), rc.clone());
-        }
-        rc
     }
 
     /// The memoized rebuild for `method_name`, shared across threads and grouped by receiver — a hot name
@@ -5341,7 +5254,16 @@ mod fq_tests {
             .chain(malformed_type_parameter.into_iter().map(char::from))
             .collect::<String>();
         let mut class = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
-        class.set_kotlin_metadata(2, &[2, 2, 0], 0, &[d1], &[]);
+        class.set_kotlin_metadata(
+            2,
+            crate::jvm::classfile::MetadataStamp {
+                version: [2, 2, 0],
+                pre_release: false,
+            },
+            0,
+            &[d1],
+            &[],
+        );
         let file = directory.join(format!("{internal}.class"));
         std::fs::create_dir_all(file.parent().expect("facade package")).expect("create package");
         std::fs::write(file, class.finish()).expect("write invalid Kotlin facade");
@@ -5647,7 +5569,16 @@ mod fq_tests {
             .collect::<String>();
         let mut invalid =
             crate::jvm::classfile::ClassWriter::new("shadow/Chosen", "java/lang/Object");
-        invalid.set_kotlin_metadata(1, &[2, 2, 0], 0, &[d1], &[]);
+        invalid.set_kotlin_metadata(
+            1,
+            crate::jvm::classfile::MetadataStamp {
+                version: [2, 2, 0],
+                pre_release: false,
+            },
+            0,
+            &[d1],
+            &[],
+        );
         std::fs::write(earlier.join("shadow/Chosen.class"), invalid.finish())
             .expect("write invalid Kotlin class");
         let valid =
@@ -6666,14 +6597,18 @@ mod fq_tests {
         assert!(libs.symbols(collections, MISSING_LEAF).is_empty());
         assert!(crate::types::existing_type_name(MISSING).is_none());
         let cached_miss = cp
-            .cached_symbols(collections, MISSING_LEAF)
+            .cached_symbols(LanguageVersion::default(), collections, MISSING_LEAF)
             .expect("empty symbol lookup is memoized");
         assert!(cached_miss.is_empty());
         assert!(crate::types::existing_type_name(MISSING).is_none());
         // Memoized (LRU): the same fqn returns the same `Rc` from the classpath's top-level memo.
         libs.symbols(kotlin, "Pair");
-        let a = cp.cached_symbols(kotlin, "Pair").expect("memoized");
-        let b = cp.cached_symbols(kotlin, "Pair").expect("memoized");
+        let a = cp
+            .cached_symbols(LanguageVersion::default(), kotlin, "Pair")
+            .expect("memoized");
+        let b = cp
+            .cached_symbols(LanguageVersion::default(), kotlin, "Pair")
+            .expect("memoized");
         assert!(std::rc::Rc::ptr_eq(&a, &b));
     }
 
@@ -6873,9 +6808,15 @@ mod fq_tests {
         let cp = Classpath::new(vec![]);
         let kotlin = SymbolNamespace::Package(type_name("kotlin"));
         let package_p = SymbolNamespace::Package(type_name("p"));
-        let warm_symbols =
-            cp.memoize_symbols(kotlin, "run", crate::libraries::ResolvedSymbols::default());
+        let api = LanguageVersion::default();
+        let warm_symbols = cp.memoize_symbols(
+            api,
+            kotlin,
+            "run",
+            crate::libraries::ResolvedSymbols::default(),
+        );
         cp.memoize_symbols(
+            api,
             package_p,
             "Widget",
             crate::libraries::ResolvedSymbols::default(),
@@ -6883,8 +6824,8 @@ mod fq_tests {
         let warm_type = type_name("kotlin/String");
         let affected_type = type_name("p/Widget");
         cp.local_cache.borrow_mut().insert(warm_type, None);
-        cp.resolved_types.borrow_mut().insert(warm_type, None);
-        cp.resolved_types.borrow_mut().insert(affected_type, None);
+        cp.cache_library_type_name(api, warm_type, None);
+        cp.cache_library_type_name(api, affected_type, None);
 
         let stubs = crate::jvm::java_stub::stub_classes(
             &[("W.java".into(), "package p; public class Widget {}".into())],
@@ -6896,22 +6837,22 @@ mod fq_tests {
 
         assert!(std::rc::Rc::ptr_eq(
             &warm_symbols,
-            &cp.cached_symbols(kotlin, "run")
+            &cp.cached_symbols(api, kotlin, "run")
                 .expect("unrelated symbol memo")
         ));
-        assert!(cp.cached_symbols(package_p, "Widget").is_none());
+        assert!(cp.cached_symbols(api, package_p, "Widget").is_none());
         assert!(cp.local_cache.borrow().contains_key(&warm_type));
-        assert!(cp.resolved_types.borrow().contains_key(&warm_type));
-        assert!(!cp.resolved_types.borrow().contains_key(&affected_type));
+        assert!(cp.cached_library_type_name(api, warm_type).is_some());
+        assert!(cp.cached_library_type_name(api, affected_type).is_none());
 
         cp.clear_stub_overlay();
         assert!(std::rc::Rc::ptr_eq(
             &warm_symbols,
-            &cp.cached_symbols(kotlin, "run")
+            &cp.cached_symbols(api, kotlin, "run")
                 .expect("warm memo after overlay")
         ));
         assert!(cp.local_cache.borrow().contains_key(&warm_type));
-        assert!(cp.resolved_types.borrow().contains_key(&warm_type));
+        assert!(cp.cached_library_type_name(api, warm_type).is_some());
     }
 
     #[test]

@@ -142,11 +142,13 @@ const KOTLINC_LIB_USE: &str = "import lib.*\n\
 fn a_kotlinc_inner_class_member_returns_its_outer_parameter() {
     let lib = common::kotlinc_lib_out(&[("Lib.kt", KOTLINC_LIB)])
         .expect("reference kotlinc is provisioned");
-    let output =
-        common::compile_and_run_box(KOTLINC_LIB_USE, "Main", &[lib, common::stdlib_jar()], None)
-            .expect(
-                "krusty compiles against the kotlinc library and the JVM runs the box function",
-            );
+    let output = common::compile_and_run_box(
+        KOTLINC_LIB_USE,
+        "Main",
+        &[lib, common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles against the kotlinc library and the JVM runs the box function");
     assert_eq!(output, "OK");
 }
 

@@ -70,7 +70,8 @@ pub(super) struct BuiltinGenericShape {
 
 impl JvmLibraries {
     pub(super) fn builtin_library_type(&self, internal: TypeName) -> Option<LibraryType> {
-        let (kind, access, is_nested) = self.cp.builtin_classifier_shape_name(internal)?;
+        let (kind, access, is_nested, class_access) =
+            self.cp.builtin_classifier_shape_name(internal)?;
         let (formals, supertype_templates) = self
             .cp
             .builtin_class_gsig_name(internal)
@@ -113,6 +114,20 @@ impl JvmLibraries {
         );
         classifier.companion_object = self.cp.builtin_companion_object(internal);
         classifier.constants = std::collections::HashMap::new();
+        // The builtin's own modality, as a class file would state it: `kotlin.Throwable` stays
+        // open when no JDK supplies `java/lang/Throwable`.
+        let is_interface = class_access & crate::jvm::classfile::ACC_INTERFACE != 0;
+        classifier.inheritance = crate::libraries::ClassifierInheritance {
+            is_abstract: class_access & crate::jvm::classfile::ACC_ABSTRACT != 0,
+            is_extensible: class_access & crate::jvm::classfile::ACC_FINAL == 0 && !is_interface,
+            has_no_arg_constructor: classifier.constructors.iter().any(|constructor| {
+                constructor.params.is_empty()
+                    && matches!(
+                        constructor.visibility,
+                        crate::types::Visibility::Public | crate::types::Visibility::Protected
+                    )
+            }),
+        };
         Some(classifier)
     }
 }

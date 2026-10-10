@@ -77,7 +77,7 @@ pub(super) fn build_class_metadata_with_facts(
     if is_coroutine_state_machine(c) {
         return Some(KotlinMetadata {
             k: 3,
-            mv: opts.metadata_version().to_vec(),
+            stamp: opts.metadata_stamp(),
             xi: synthetic_class_xi(if is_continuation_class(c) {
                 SYNTHETIC_PROTECTED
             } else {
@@ -159,7 +159,7 @@ pub(super) fn build_class_metadata_with_facts(
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
     Some(KotlinMetadata {
         k: 1,
-        mv: opts.metadata_version().to_vec(),
+        stamp: opts.metadata_stamp(),
         xi: 48,
         d1,
         d2,

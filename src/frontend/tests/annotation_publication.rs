@@ -51,7 +51,7 @@ fn checked_target_applications_publish_valid_policies_and_isolate_invalid_recove
     let mut diagnostics = DiagSink::new();
     let platform = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for("")),
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for("")),
         ))
         .expect("JVM provider initialization"),
     );

@@ -158,9 +158,13 @@ fn break_and_continue_keep_the_index_in_step() {
                \x20   for ((i, _) in (1..9 step 3).withIndex()) out += \"#$i\"\n\
                \x20   return out\n\
                }\n";
-    let actual =
-        common::compile_and_run_box(src, "with_index_jumps", &[common::stdlib_jar()], None)
-            .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        src,
+        "with_index_jumps",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(
         actual,
         "0:0 2:20 3:30 0a 2c 0~v 2~x 0=10 2=12 0/5 2/3 #0#1#2"

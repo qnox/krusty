@@ -1195,7 +1195,7 @@ fn omitted_constructor_vararg_is_an_explicit_empty_pack() {
 fn dependency_constructor_keeps_backend_neutral_external_identity() {
     let platform = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_STDLIB",
             )),
         ))

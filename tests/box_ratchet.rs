@@ -195,7 +195,7 @@ pub fn write_not_applicable(
 }
 
 /// Replace one inventory without exposing a truncated or partially written tracked file.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest has no parent")
     })?;

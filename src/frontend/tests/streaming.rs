@@ -300,7 +300,7 @@ fn pass_two_uses_stable_header_flags_for_top_level_val_smart_casts() {
     let mut diagnostics = DiagSink::new();
     let platform = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_REFLECT",
             )),
         ))
@@ -933,7 +933,7 @@ fn enum_entry_generic_member_signature_finalizes_from_compact_headers() {
     let mut diagnostics = DiagSink::new();
     let platform = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_STDLIB",
             )),
         ))
@@ -2019,7 +2019,7 @@ fn dependency_receiver_function_typealias_keeps_its_function_shape() {
     let mut diagnostics = DiagSink::new();
     let platform = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_STDLIB",
             )),
         ))

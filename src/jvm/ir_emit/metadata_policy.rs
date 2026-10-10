@@ -5,7 +5,7 @@
 #[derive(Clone)]
 pub struct KotlinMetadata {
     pub k: i32,
-    pub mv: Vec<i32>,
+    pub stamp: crate::jvm::classfile::MetadataStamp,
     pub xi: i32,
     pub d1: Vec<String>,
     pub d2: Vec<String>,
@@ -54,7 +54,7 @@ pub(super) fn finish_local_synthetic_class(
 ) -> Vec<u8> {
     cw.set_kotlin_metadata(
         3,
-        &env.metadata_version,
+        env.metadata_stamp,
         synthetic_class_xi(SYNTHETIC_LOCAL),
         &[],
         &[],

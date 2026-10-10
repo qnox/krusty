@@ -32,6 +32,7 @@ mod nesting;
 mod properties;
 mod return_labels;
 mod superclass_references;
+mod type_parameters;
 mod value_parameters;
 use class_recovery::error_class_decl;
 use declaration_modifiers::{
@@ -112,6 +113,8 @@ fn parse_with_features_and_script(
     hoist_local_classes(&mut p.file, script_scope);
     fixup_parenless_base_classes(&mut p.file);
     debug_lines::attach(&mut p.file, src);
+    p.file.binary_reference_tokens =
+        crate::ast::BinaryReferenceTokens::new(tokens, std::mem::take(&mut p.function_spans));
     if !p.diags.has_errors() {
         if let Err(error) = p.file.validate_integrity(src) {
             p.diags
@@ -681,6 +684,9 @@ struct Parser<'a> {
     /// about a declaration as a whole point at its name rather than at its keyword.
     declaration_name_span: Span,
     declaration_prefix: declaration_modifiers::PrefixInProgress,
+    /// The type parameters of the declaration whose `<…>` list was parsed last, with their spans,
+    /// so its `where` clause can name the parameter each bound constrains.
+    type_parameter_spans: Vec<(String, crate::diag::Span)>,
     is_script: bool,
     script_stmts: Vec<StmtId>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -705,6 +711,8 @@ struct Parser<'a> {
     /// (a trailing argument of `f`) from `(f()) { ... }` (an `invoke` on the value returned by
     /// `f`). This state is parser-local and disappears with the parser.
     parenthesized_expressions: std::collections::HashSet<u32>,
+    /// Each function parsed so far in this unit, for [`crate::ast::BinaryReferenceTokens`].
+    function_spans: Vec<Span>,
     lambda_label_scopes: lambda_literals::LambdaLabelScopes,
 }
 
@@ -800,6 +808,7 @@ impl<'a> Parser<'a> {
             member_declaration_prefix: None,
             declaration_name_span: Span::new(0, 0),
             declaration_prefix: Default::default(),
+            type_parameter_spans: Vec::new(),
             is_script,
             script_stmts: Vec::new(),
             expr_depth: 0,
@@ -807,6 +816,7 @@ impl<'a> Parser<'a> {
             stmt_depth: 0,
             parsing_anonymous_function_receiver: false,
             parenthesized_expressions: Default::default(),
+            function_spans: Vec::new(),
             lambda_label_scopes: Default::default(),
         }
     }
@@ -2507,61 +2517,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse an optional generic constraint clause `where T : Bound, U : Bound2` after a function or
-    /// class signature, returning the `(type parameter, bound)` pairs it declares.
-    ///
-    /// A `where` bound is the SAME constraint as the inline `<T : Bound>` form — Kotlin offers both
-    /// spellings, and the second is required once a parameter has more than one bound. The pairs join
-    /// the declaration's `type_param_bounds` so every consumer (erasure, member resolution on a value
-    /// of the parameter's type) sees one list regardless of spelling; previously the clause was parsed
-    /// for its diagnostics and then discarded, so `where T : Named` resolved no members at all while
-    /// `<T : Named>` did.
-    ///
-    /// `where` may sit on a following line, so newlines are skipped only when the clause is actually
-    /// present (otherwise the position is restored). Physical specialization of a bound belongs to
-    /// emission; the parser retains every source-valid bound unchanged.
-    fn parse_where_clause(
-        &mut self,
-        declared_type_params: &[String],
-        declaration_name: &str,
-    ) -> Vec<(String, TypeRef)> {
-        let mut bounds: Vec<(String, TypeRef)> = Vec::new();
-        let save = self.i;
-        self.skip_newlines();
-        if !(self.at(TokenKind::Ident) && self.keyword_text("where")) {
-            self.i = save;
-            return bounds;
-        }
-        self.bump(); // 'where'
-        loop {
-            self.skip_newlines();
-            let mut tp_name = String::new();
-            let type_parameter_span = self.tok().span;
-            if self.at(TokenKind::Ident) {
-                tp_name = self.text().to_string();
-                self.bump(); // type-parameter name
-            }
-            if !tp_name.is_empty() && !declared_type_params.iter().any(|name| name == &tp_name) {
-                self.diags.error(
-                    type_parameter_span,
-                    format!(
-                        "'{tp_name}' does not refer to a type parameter of '{declaration_name}'."
-                    ),
-                );
-            }
-            if self.eat(TokenKind::Colon) {
-                let bound = self.parse_type();
-                if !tp_name.is_empty() {
-                    bounds.push((tp_name.clone(), bound));
-                }
-            }
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-        }
-        bounds
-    }
-
     fn parse_qualified_name(&mut self) -> String {
         self.parse_qualified_name_segments()
             .into_iter()
@@ -2655,6 +2610,7 @@ impl<'a> Parser<'a> {
         };
         let end = self.t[self.i.saturating_sub(1)].span;
         self.pop_lexical_type_params(lexical_type_param_lens);
+        self.function_spans.push(Span::new(start.lo, end.hi));
         FunDecl {
             name,
             receiver,
@@ -4290,107 +4246,6 @@ impl<'a> Parser<'a> {
             }),
             declaration_name,
         )
-    }
-
-    /// Parse a `<T, reified U : Bound, out V>` type-parameter list, returning the parameter names,
-    /// the `: Any`-bounded (non-null) names, and the `reified` names (which an `inline` function may
-    /// use concretely — `is T`, `as T`, `T::class` — and which codegen specializes per call site).
-    #[allow(clippy::type_complexity)]
-    fn parse_type_params(
-        &mut self,
-        declaration_start: u32,
-    ) -> (
-        Vec<String>,
-        std::collections::HashSet<String>,
-        std::collections::HashSet<String>,
-        Vec<(String, TypeRef)>,
-        Vec<crate::types::TypeVariance>,
-    ) {
-        let mut names = Vec::new();
-        let mut non_null = std::collections::HashSet::new();
-        let mut reified = std::collections::HashSet::new();
-        let mut bounds: Vec<(String, TypeRef)> = Vec::new();
-        let mut variances = Vec::new();
-        if !self.eat(TokenKind::Lt) {
-            return (names, non_null, reified, bounds, variances);
-        }
-        loop {
-            self.skip_plain_newlines();
-            // Annotations and variance/reified modifiers may be interleaved. `in` is a keyword;
-            // `out`/`reified` are idents.
-            let mut is_reified = false;
-            let mut variance = crate::types::TypeVariance::Invariant;
-            let mut annotations = Vec::new();
-            let mut annotation_args = Vec::new();
-            loop {
-                self.skip_plain_newlines();
-                if self.at(TokenKind::At) {
-                    let (annotation, args) = self.parse_annotation();
-                    if let Some(annotation) = annotation {
-                        annotations.push(annotation);
-                        annotation_args.push(args);
-                    }
-                } else if self.at(TokenKind::Ident) && self.keyword_text("reified") {
-                    is_reified = true;
-                    self.bump();
-                } else if self.at(TokenKind::Ident) && self.keyword_text("out") {
-                    variance = crate::types::TypeVariance::Out;
-                    self.bump();
-                } else if self.at(TokenKind::KwIn) {
-                    variance = crate::types::TypeVariance::In;
-                    self.bump();
-                } else {
-                    break;
-                }
-            }
-            let (tname, tname_span) = if self.at(TokenKind::Ident) {
-                let span = self.tok().span;
-                let n = self.text().to_string();
-                self.bump();
-                (n, span)
-            } else {
-                (String::new(), self.tok().span)
-            };
-            if !tname.is_empty() {
-                names.push(tname.clone());
-                variances.push(variance);
-                if is_reified {
-                    reified.insert(tname.clone());
-                }
-                if !annotations.is_empty() {
-                    self.file
-                        .declaration_type_parameter_annotations
-                        .entry(declaration_start)
-                        .or_default()
-                        .push(AnnotatedTypeParameter {
-                            name: tname.clone(),
-                            span: tname_span,
-                            annotations,
-                            annotation_args,
-                        });
-                }
-            }
-            self.skip_plain_newlines();
-            if self.eat(TokenKind::Colon) {
-                self.skip_plain_newlines();
-                let bound = self.parse_type();
-                // `T: Any` → the type param can't be null (erased to Object but non-null).
-                if bound.name == "Any" && !bound.nullable() && !tname.is_empty() {
-                    non_null.insert(tname.clone());
-                }
-                // Retain the semantic bound. JVM specialization/boxing is not syntax validity.
-                // Retain explicit bounds independently of erasure.
-                if !tname.is_empty() {
-                    bounds.push((tname.clone(), bound));
-                }
-            }
-            self.skip_plain_newlines();
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(TokenKind::Gt, "'>'");
-        (names, non_null, reified, bounds, variances)
     }
 
     // ---- statements ----

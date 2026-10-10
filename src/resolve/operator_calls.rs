@@ -12,6 +12,59 @@
 
 use super::*;
 
+/// Exact classifier roles selected for a builtin operator that has no retained [`ResolvedCall`].
+/// Builtin scalar arithmetic and increment/decrement lower directly, but their semantic access still
+/// belongs to checking; diagnostic consumers must not reconstruct it from syntax or result types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SelectedBuiltinOperatorAccess {
+    pub(super) dispatch_receiver: Option<TypeName>,
+    pub(super) owner: Option<TypeName>,
+    pub(super) extension_receiver: Option<TypeName>,
+}
+
+impl SelectedBuiltinOperatorAccess {
+    pub(super) fn member(receiver: Ty) -> Option<Self> {
+        let receiver = receiver.non_null().kotlin_class_internal();
+        Some(Self {
+            dispatch_receiver: receiver,
+            owner: receiver,
+            extension_receiver: None,
+        })
+        .filter(|access| access.dispatch_receiver.is_some())
+    }
+
+    pub(super) fn selected(call: &ResolvedCall) -> Option<Self> {
+        let class_of = |ty: Ty| ty.non_null().kotlin_class_internal();
+        Some(match call {
+            ResolvedCall::Member(selected) => Self {
+                dispatch_receiver: class_of(selected.receiver),
+                owner: selected.member.owner,
+                extension_receiver: None,
+            },
+            ResolvedCall::Companion(member) => Self {
+                dispatch_receiver: None,
+                owner: member.owner,
+                extension_receiver: None,
+            },
+            ResolvedCall::Extension(call) => Self {
+                dispatch_receiver: None,
+                owner: None,
+                extension_receiver: call.callable.source_receiver.and_then(class_of),
+            },
+            ResolvedCall::MemberExtension {
+                owner,
+                extension_receiver,
+                ..
+            } => Self {
+                dispatch_receiver: None,
+                owner: Some(*owner),
+                extension_receiver: class_of(*extension_receiver),
+            },
+            ResolvedCall::TopLevel(_) | ResolvedCall::LocalFunction(_) => return None,
+        })
+    }
+}
+
 /// The synthetic-call key for a range syntax, paired with the declaration name `RangeKind` owns.
 /// Membership, range expressions, and loops share the key so a mixed operand such as
 /// `3f in 1.0..<3.0` is not rewritten through the wrong operator. Membership always selects this
@@ -430,6 +483,12 @@ impl<'a> Checker<'a> {
         kind: crate::ast::RangeKind,
     ) -> Ty {
         self.resolved_in_range_comparisons.remove(&e);
+        let convention = range_operator(kind);
+        for operator in [convention.key, SyntheticOperatorCall::Contains] {
+            self.resolved_operator_calls.remove(&(e, operator));
+            self.resolved_builtin_operator_accesses
+                .remove(&(e, operator));
+        }
         let t = {
             let vt = self.expr(scope, value);
             let st = self.expr(scope, start);
@@ -440,7 +499,6 @@ impl<'a> Checker<'a> {
                 kind,
                 value_ty: vt,
             };
-            let convention = range_operator(kind);
             let Some((range_ty, range_call)) = self.operator_call_ret(
                 scope,
                 e,
@@ -515,6 +573,10 @@ impl<'a> Checker<'a> {
                     None
                 };
             if let (Some(comparison), Some(provenance)) = (comparison, comparison_provenance) {
+                if let Some(access) = SelectedBuiltinOperatorAccess::selected(&range_call) {
+                    self.resolved_builtin_operator_accesses
+                        .insert((e, convention.key), access);
+                }
                 self.resolved_in_range_comparisons.insert(
                     e,
                     ResolvedInRangeComparison {

@@ -82,8 +82,13 @@ fn a_partly_omitted_call_passes_the_supplied_argument_and_a_placeholder() {
 
 #[test]
 fn secondary_constructor_defaults_run() {
-    let output = common::compile_and_run_box(SRC, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }
 
@@ -143,9 +148,13 @@ fn a_nullable_carrier_argument_calls_the_overload_unboxed_when_nothing_is_omitte
 
 #[test]
 fn nullable_carrier_secondary_constructor_defaults_run() {
-    let output =
-        common::compile_and_run_box(NULLABLE_CARRIER_SRC, "Main", &[common::stdlib_jar()], None)
-            .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        NULLABLE_CARRIER_SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }
 

@@ -335,7 +335,7 @@ fn function_invoke_reference_becomes_a_capturing_suspend_forwarder() {
 fn reflective_function_invoke_reference_marks_its_forwarder() {
     let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_STDLIB",
             )),
         ))
@@ -820,7 +820,7 @@ fn adapted_generic_extension_reference_consumes_published_substitution() {
 fn size_only_primitive_array_constructor_reference_lowers_mechanically() {
     let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_STDLIB",
             )),
         ))
@@ -847,7 +847,7 @@ fn size_only_primitive_array_constructor_reference_lowers_mechanically() {
 fn inline_array_initializer_is_spliced_before_common_ir_escapes() {
     let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_STDLIB",
             )),
         ))
@@ -1083,7 +1083,7 @@ fn block_trailing_expression_keeps_its_checked_statement_line() {
 fn companion_extension_references_lower_as_receiverless_static_values() {
     let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_REFLECT",
             )),
         ))
@@ -1485,7 +1485,7 @@ fn unbound_inner_constructor_reference_maps_outer_and_vararg_parameters() {
 fn reflective_unbound_inner_constructor_reference_keeps_structural_identity() {
     let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_REFLECT",
             )),
         ))

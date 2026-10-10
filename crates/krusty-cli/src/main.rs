@@ -8,7 +8,7 @@ use std::path::Path;
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty_cli::cli;
+use krusty_cli::{cli, kotlinc_arguments};
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -23,6 +23,14 @@ fn main() {
     }
     let opts = cli::parse(argv);
 
+    // kotlinc rejects a malformed command line before anything else, in these words.
+    if !opts.argument_errors.is_empty() {
+        for error in &opts.argument_errors {
+            eprintln!("error: {}", kotlinc_arguments::render(error));
+        }
+        eprintln!("info: use -help for more information");
+        std::process::exit(1);
+    }
     if opts.print_version {
         println!("{}", cli::version_line());
         return;
@@ -37,13 +45,18 @@ fn main() {
         }
         std::process::exit(2);
     }
+    for warning in &opts.argument_warnings {
+        eprintln!("warning: {}", kotlinc_arguments::render(warning));
+    }
+    for problem in &opts.language_feature_problems {
+        let severity = if problem.is_error { "error" } else { "warning" };
+        eprintln!(
+            "{severity}: {}",
+            kotlinc_arguments::render(&problem.message)
+        );
+    }
     for ig in &opts.ignored {
         eprintln!("krusty: ignoring unsupported option '{ig}'");
-    }
-    // kotlinc's own wording, byte for byte (measured on kotlinc 2.4.10 JVM): the flag is accepted,
-    // this warning is printed, and compilation is unchanged.
-    for flag in &opts.unsupported_flag_warnings {
-        eprintln!("warning: flag is not supported by this version of the compiler: {flag}");
     }
     if opts.sources.is_empty() {
         eprintln!("krusty: no source files. Use -help for usage.");
@@ -108,6 +121,7 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
                 .join(":"),
         );
     }
+    // kotlinc splits `-Xfriend-paths` on `,`, not on the path separator.
     if !unit.friend_paths.is_empty() {
         argv.push(format!(
             "-Xfriend-paths={}",
@@ -115,7 +129,7 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
                 .iter()
                 .map(|entry| entry.display().to_string())
                 .collect::<Vec<_>>()
-                .join(":")
+                .join(",")
         ));
     }
     argv.extend(unit.kotlinc_args.iter().cloned());
@@ -133,8 +147,14 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
         })?;
     } else {
         let opts = cli::parse(argv);
-        if !opts.errors.is_empty() {
-            return Err(format!("krusty: {}\n", opts.errors.join("; ")));
+        let errors: Vec<&str> = opts
+            .argument_errors
+            .iter()
+            .chain(&opts.errors)
+            .map(String::as_str)
+            .collect();
+        if !errors.is_empty() {
+            return Err(format!("krusty: {}\n", errors.join("; ")));
         }
         compile(&opts)?;
     }
@@ -161,29 +181,43 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
-    let mut configured_errors = String::new();
+    // kotlinc reports the configuration errors, then the configuration warnings, some of which
+    // `-Xwarning-level` may promote. Any error, or an error among the `-XXLanguage` problems already
+    // printed, fails the invocation once everything is reported.
+    let mut report = String::new();
+    let mut failed = opts
+        .language_feature_problems
+        .iter()
+        .any(|problem| problem.is_error);
     let mut unconfigured_warning_under_werror = false;
+    for error in &opts.configuration_errors {
+        report.push_str(&format!("error: {error}\n"));
+        failed = true;
+    }
     for warning in &opts.warnings {
         match opts.warning_policy.command_line_disposition(warning.name) {
-            cli::WarningDisposition::Warning => eprintln!("warning: {}", warning.message),
+            cli::WarningDisposition::Warning => {
+                report.push_str(&format!("warning: {}\n", warning.message));
+            }
             cli::WarningDisposition::Error => {
-                configured_errors.push_str("error: ");
-                configured_errors.push_str(&warning.message);
-                configured_errors.push('\n');
+                report.push_str(&format!("error: {}\n", warning.message));
+                failed = true;
             }
             cli::WarningDisposition::Disabled => {}
             cli::WarningDisposition::WarningAndFail => {
-                eprintln!("warning: {}", warning.message);
+                report.push_str(&format!("warning: {}\n", warning.message));
                 unconfigured_warning_under_werror = true;
             }
         }
     }
-    if !configured_errors.is_empty() {
-        return Err(configured_errors);
+    if failed {
+        return Err(report);
     }
     if unconfigured_warning_under_werror {
-        return Err("error: warnings found and -Werror specified\n".to_string());
+        report.push_str("error: warnings found and -Werror specified\n");
+        return Err(report);
     }
+    eprint!("{report}");
     let version = match opts.kotlin_reference_version {
         Some(version) => version,
         None => krusty::kotlin_version::configured_target()
@@ -205,6 +239,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     for problem in cli::classpath_entry_problems(&opts.classpath) {
         eprintln!("{problem}");
     }
+    opts.check_jdk_release()
+        .map_err(|error| format!("krusty: error: {error}\n"))?;
     let effective_classpath = opts
         .effective_classpath()
         .map_err(|error| format!("krusty: {error}\n"))?;
@@ -254,21 +290,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     );
 
     // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
-    // Absent, the backend keeps krusty's v52 default. The selected source-language level stamps
-    // `@kotlin.Metadata` and `.kotlin_module`, as kotlinc does; the internal metadata override is
-    // kept separate for controlled emission comparisons.
-    let metadata_version = opts
-        .metadata_version
-        .unwrap_or_else(|| opts.language_settings.language_version.metadata_version());
-    let backend = krusty::jvm::JvmBackend::new(cp)
-        .with_class_major(opts.jvm_target_major)
-        .with_jvm_default(opts.jvm_default)
-        .with_java_parameters(opts.java_parameters)
-        .with_lambda_modes(opts.lambda_modes)
-        .with_param_assertions(!opts.no_param_assertions)
-        .with_call_assertions(!opts.no_call_assertions)
-        .with_annotations_in_metadata(opts.language_settings.features.has("AnnotationsInMetadata"))
-        .with_metadata_version(Some(metadata_version));
+    // Absent, the backend keeps krusty's v52 default.
+    let backend = opts.jvm_backend(cp);
     let outputs =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);
 

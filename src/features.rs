@@ -1,17 +1,38 @@
 //! Language-feature flags — krusty's model of kotlinc's `-XXLanguage:`/`-X` toggles and the test
-//! infrastructure's `// LANGUAGE:` directive. Stable features for krusty's Kotlin language level are
-//! enabled by default; directives and command-line flags apply ordered overrides.
+//! infrastructure's `// LANGUAGE:` directive. The defaults for a language/API version pair come from
+//! the reference release's own `LanguageFeature` table ([`FeatureTable`]); directives and
+//! command-line flags apply ordered overrides on top of them.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
+
+mod language_versions;
+mod table;
+
+pub use language_versions::{vendored_language_versions, LanguageVersionPolicy, VersionStatus};
+pub use table::{vendored_table, BehaviorAfterSinceVersion, FeatureTable, LanguageFeature};
+
+/// One explicit language-feature state, as kotlinc's `specificFeatures` map holds it: the effect of
+/// an `@Enables`/`@Disables` argument, a `-XXLanguage:` argument, or a `// LANGUAGE:` directive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeatureSetting {
+    pub feature: String,
+    pub enabled: bool,
+}
 
 /// The set of enabled language features (by their kotlinc `LanguageFeature` name, e.g.
 /// `NameBasedDestructuring`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LangFeatures {
+    /// The reference release whose feature table supplies the defaults.
+    release: KotlinVersion,
     language_version: LanguageVersion,
     enabled: HashSet<String>,
+    /// The explicitly set features and their states, in kotlinc's `specificFeatures` sense. These
+    /// decide whether the output is pre-release ([`Self::is_pre_release`]).
+    specific: BTreeMap<String, bool>,
     /// Opt-in requirement markers accepted for the whole module (`-opt-in=<fq name>`), spelled as
     /// kotlinc's `AnalysisFlags.optIn` holds them: dotted fully qualified names.
     opted_in: BTreeSet<String>,
@@ -24,66 +45,120 @@ impl Default for LangFeatures {
 }
 
 impl LangFeatures {
-    /// The stable feature baseline for one public Kotlin source-language level.
+    /// The default feature set for one public Kotlin source-language level.
     pub fn for_language_version(language_version: LanguageVersion) -> Self {
         Self::for_versions(language_version, language_version)
     }
 
-    /// The stable feature baseline for one language/API pair. The current observed features are
-    /// language-gated; keeping the API input here prevents future API-gated feature defaults from
-    /// bypassing the shared settings boundary.
-    pub fn for_versions(language_version: LanguageVersion, _api_version: LanguageVersion) -> Self {
-        let mut enabled = HashSet::new();
-        for &(name, since) in OBSERVED_FEATURES {
-            if let Some(since) = since {
-                if language_level_enables(language_version, since) {
-                    enabled.insert(name.to_string());
-                }
-            }
-        }
+    /// The default feature set for one language/API pair: every feature of the reference
+    /// release's table whose `sinceVersion` and `sinceApiVersion` are both reached (kotlinc's
+    /// `isEnabledByDefault`).
+    pub fn for_versions(language_version: LanguageVersion, api_version: LanguageVersion) -> Self {
+        Self::for_release(
+            crate::kotlin_version::target(),
+            language_version,
+            api_version,
+        )
+    }
+
+    /// [`Self::for_versions`] under an explicitly chosen reference release, for a driver that
+    /// configures a compilation before fixing the process-wide reference version.
+    pub fn for_release(
+        release: KotlinVersion,
+        language_version: LanguageVersion,
+        api_version: LanguageVersion,
+    ) -> Self {
+        let enabled = FeatureTable::for_version(release)
+            .unwrap_or_else(|| panic!("kotlinc {release} has no language feature table"))
+            .features()
+            .iter()
+            .filter(|feature| feature.is_enabled_by_default(language_version, api_version))
+            .map(|feature| feature.name.clone())
+            .collect();
         Self {
+            release,
             language_version,
             enabled,
+            specific: BTreeMap::new(),
             opted_in: BTreeSet::new(),
         }
     }
+
+    /// Whether kotlinc marks code compiled with these settings as pre-release
+    /// (`LanguageVersionSettings.isPreRelease`): the language version is experimental, or an
+    /// explicitly enabled feature has not been released by a stable language version.
+    pub fn is_pre_release(&self) -> bool {
+        let versions = self.versions();
+        if !versions.is_stable(self.language_version) {
+            return true;
+        }
+        let table = self.table();
+        self.specific.iter().any(|(name, &enabled)| {
+            enabled
+                && table.get(name).is_some_and(|feature| {
+                    feature.forces_pre_release_binaries_if_enabled(versions, self.language_version)
+                })
+        })
+    }
 }
 
-/// Features the frontend observes, paired with kotlinc's `sinceVersion`. `None` means kotlinc
-/// has not assigned one, so the feature stays off until a flag or directive enables it.
-const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
-    (
-        "AllowAccessToProtectedFieldFromSuperCompanion",
-        Some((2, 1)),
-    ),
-    ("AnnotationsInMetadata", Some((2, 4))),
-    ("BareArrayClassLiteral", Some((1, 4))),
-    ("ContextParameters", Some((2, 4))),
-    ("ContextReceivers", None),
-    ("ContextSensitiveResolutionUsingExpectedType", None),
-    ("DataClassCopyRespectsConstructorVisibility", None),
-    ("EagerLambdaAnalysis", None),
-    ("EnableNameBasedDestructuringShortForm", None),
-    ("EnumEntries", Some((1, 9))),
-    ("ExplicitBackingFields", Some((2, 4))),
-    ("ExplicitContextArguments", Some((2, 5))),
-    ("ImplicitSignedToUnsignedIntegerConversion", None),
-    ("JvmSupportRecursiveTypeOf", None),
-    ("MultiDollarInterpolation", Some((2, 2))),
-    ("MultiPlatformProjects", None),
-    ("NameBasedDestructuring", Some((2, 5))),
-    ("NestedTypeAliases", Some((2, 4))),
-    ("PrioritizedEnumEntries", Some((2, 1))),
-    ("UnitConversionsOnArbitraryExpressions", None),
-    ("WhenGuards", Some((2, 2))),
+/// The kotlinc `LanguageFeature`s krusty's frontend or backend consumes, sorted by name, one per
+/// line. A feature is listed once some phase checks it (`LangFeatures::has`), so a command line may
+/// turn it on and get that behaviour.
+const MODELED_FEATURES: &[&str] = &[
+    "AllowAccessToProtectedFieldFromSuperCompanion",
+    "AllowEagerSupertypeAccessibilityChecks",
+    "AnnotationsInMetadata",
+    "BareArrayClassLiteral",
+    "ContextParameters",
+    "ContextReceivers",
+    "ContextSensitiveResolutionUsingExpectedType",
+    "DataClassCopyRespectsConstructorVisibility",
+    "EagerLambdaAnalysis",
+    "EnableNameBasedDestructuringShortForm",
+    "EnumEntries",
+    "ExplicitBackingFields",
+    "ExplicitContextArguments",
+    "FullValueClasses",
+    "ImplicitSignedToUnsignedIntegerConversion",
+    "JvmSupportRecursiveTypeOf",
+    "MultiDollarInterpolation",
+    "MultiPlatformProjects",
+    "NameBasedDestructuring",
+    "NestedTypeAliases",
+    "PrioritizedEnumEntries",
+    "UnitConversionsOnArbitraryExpressions",
+    "WhenGuards",
 ];
 
-fn language_level_enables(language_version: LanguageVersion, since: (u16, u16)) -> bool {
-    since.0 < language_version.major
-        || (since.0 == language_version.major && since.1 <= language_version.minor)
-}
-
 impl LangFeatures {
+    /// The feature table of the reference release these defaults come from.
+    pub fn table(&self) -> &'static FeatureTable {
+        FeatureTable::for_version(self.release)
+            .unwrap_or_else(|| panic!("kotlinc {} has no language feature table", self.release))
+    }
+
+    /// The language version policy of the reference release these defaults come from.
+    pub fn versions(&self) -> &'static LanguageVersionPolicy {
+        LanguageVersionPolicy::for_release(self.release)
+            .unwrap_or_else(|| panic!("kotlinc {} has no language version policy", self.release))
+    }
+
+    /// Whether krusty's frontend/backend has an explicit semantic consumer for this kotlinc
+    /// `LanguageFeature`. Command-line boundaries use this to refuse toggles that would otherwise
+    /// be recorded by name without changing compilation semantics.
+    pub fn models(name: &str) -> bool {
+        MODELED_FEATURES.binary_search(&name).is_ok()
+    }
+
+    /// Whether `name` is on at this language/API level before any explicit setting
+    /// (kotlinc's `isEnabledByDefault`).
+    pub fn is_enabled_by_default(&self, name: &str, api_version: LanguageVersion) -> bool {
+        self.table().get(name).is_some_and(|feature| {
+            feature.is_enabled_by_default(self.language_version, api_version)
+        })
+    }
+
     /// The public source-language level from which this feature baseline was derived.
     ///
     /// Ordered feature overrides do not replace the language level: consumers that implement a
@@ -103,16 +178,59 @@ impl LangFeatures {
     }
 
     pub fn enable(&mut self, name: &str) {
-        self.enabled.insert(name.to_string());
+        self.set(name, true);
     }
 
     pub fn disable(&mut self, name: &str) {
-        self.enabled.remove(name);
+        self.set(name, false);
+    }
+
+    /// Record an explicit feature state, overriding the language-version default.
+    pub fn set(&mut self, name: &str, enabled: bool) {
+        if enabled {
+            self.enabled.insert(name.to_string());
+        } else {
+            self.enabled.remove(name);
+        }
+        self.specific.insert(name.to_string(), enabled);
+    }
+
+    /// The reference release whose feature table supplies the defaults.
+    pub fn release(&self) -> KotlinVersion {
+        self.release
+    }
+
+    /// The explicitly set features and their states, by name.
+    pub fn explicit_settings(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.specific
+            .iter()
+            .map(|(name, &enabled)| (name.as_str(), enabled))
+    }
+
+    /// Whether `name` was set explicitly.
+    pub fn is_explicit(&self, name: &str) -> bool {
+        self.specific.contains_key(name)
+    }
+
+    /// Whether both enable exactly the same features, whatever was set explicitly.
+    pub fn enables_same_features(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
     }
 
     /// Enable every feature enabled in `other`.
     pub fn extend(&mut self, other: &Self) {
-        self.enabled.extend(other.enabled.iter().cloned());
+        // A feature `other` enables that this set has off, by default or explicitly, is now
+        // explicitly on: these defaults no longer account for it.
+        for name in &other.enabled {
+            if self.enabled.insert(name.clone()) || self.specific.get(name) == Some(&false) {
+                self.specific.insert(name.clone(), true);
+            }
+        }
+        for (name, &enabled) in &other.specific {
+            if enabled {
+                self.specific.insert(name.clone(), true);
+            }
+        }
         self.opted_in.extend(other.opted_in.iter().cloned());
     }
 
@@ -131,8 +249,9 @@ impl LangFeatures {
         self.enabled.iter().map(String::as_str)
     }
 
-    /// Apply the payload of a `// LANGUAGE:` directive / `-XXLanguage:` flag: whitespace- or
-    /// comma-separated `+Feature` / `-Feature` tokens (`+` enables, `-` disables).
+    /// Apply the payload of a `// LANGUAGE:` test directive: whitespace- or comma-separated
+    /// `+Feature` / `-Feature` tokens (`+` enables, `-` disables). Command-line arguments are read
+    /// by kotlinc's rules in the command line's `language_settings`, never here.
     pub fn apply_directive(&mut self, payload: &str) {
         for tok in payload.split([' ', ',', '\t']).filter(|s| !s.is_empty()) {
             if let Some(name) = tok.strip_prefix('+') {
@@ -154,11 +273,7 @@ impl LangFeatures {
             // `// ASSERTIONS_MODE: always-enable|always-disable` — kotlinc's `-Xassertions` mode for the
             // `assert(...)` intrinsic (modeled as pseudo-features so it flows like any other directive).
             if let Some(rest) = l.strip_prefix("// ASSERTIONS_MODE:") {
-                match rest.trim() {
-                    "always-enable" => self.enable("AssertionsAlwaysEnable"),
-                    "always-disable" => self.enable("AssertionsAlwaysDisable"),
-                    _ => {}
-                }
+                self.apply_assertions_mode(rest.trim());
             }
             // `// EXPLICIT_API_MODE: STRICT|WARNING` — kotlinc's `-Xexplicit-api` analysis mode,
             // carried the same way.
@@ -188,65 +303,27 @@ impl LangFeatures {
         true
     }
 
+    /// Select one of kotlinc's two unconditional `-Xassertions` modes for the `assert(...)`
+    /// intrinsic, carried as pseudo-features. Returns `false`, changing nothing, for any other
+    /// spelling, including the runtime-checked `jvm` and `legacy` modes.
+    pub fn apply_assertions_mode(&mut self, mode: &str) -> bool {
+        let feature = match mode {
+            "always-enable" => "AssertionsAlwaysEnable",
+            "always-disable" => "AssertionsAlwaysDisable",
+            _ => return false,
+        };
+        self.disable("AssertionsAlwaysEnable");
+        self.disable("AssertionsAlwaysDisable");
+        self.enable(feature);
+        true
+    }
+
     /// Collect every `// LANGUAGE:` directive in a source file.
     pub fn from_source(src: &str) -> Self {
         let mut f = Self::default();
         f.apply_source_directives(src);
         f
     }
-
-    /// Apply a single CLI argument, mirroring the reference compiler's flags. Returns `true` if the
-    /// argument was a recognized language flag (the caller should then not treat it as a source file).
-    /// Handles `-XXLanguage:+Foo,-Bar`, the `-Xname-based-destructuring[=mode]` alias, and each
-    /// one-feature flag in `FEATURE_ALIASES`.
-    pub fn apply_cli_arg(&mut self, arg: &str) -> bool {
-        if let Some(rest) = arg.strip_prefix("-XXLanguage:") {
-            self.apply_directive(rest);
-            return true;
-        }
-        if let Some(rest) = arg.strip_prefix("-Xname-based-destructuring") {
-            // `-Xname-based-destructuring[=only-syntax|name-mismatch|complete|disable]`.
-            match rest {
-                "=disable" => {
-                    self.disable("NameBasedDestructuring");
-                    self.disable("EnableNameBasedDestructuringShortForm");
-                }
-                "=complete" => {
-                    self.enable("NameBasedDestructuring");
-                    self.enable("EnableNameBasedDestructuringShortForm");
-                }
-                _ => {
-                    self.enable("NameBasedDestructuring");
-                    self.disable("EnableNameBasedDestructuringShortForm");
-                }
-            }
-            return true;
-        }
-        if let Some(feature) = feature_alias(arg) {
-            self.enable(feature);
-            return true;
-        }
-        false
-    }
-}
-
-/// Flags that enable exactly one language feature. A mode (`-Xname-based-destructuring=…`) or a
-/// list (`-XXLanguage:`) is not an entry: those change more than one feature.
-const FEATURE_ALIASES: &[(&str, &str)] = &[
-    ("-Xcontext-parameters", "ContextParameters"),
-    (
-        "-Xconsistent-data-class-copy-visibility",
-        "DataClassCopyRespectsConstructorVisibility",
-    ),
-    ("-Xexplicit-backing-fields", "ExplicitBackingFields"),
-    ("-Xmulti-dollar-interpolation", "MultiDollarInterpolation"),
-    ("-Xnested-type-aliases", "NestedTypeAliases"),
-];
-
-fn feature_alias(arg: &str) -> Option<&'static str> {
-    FEATURE_ALIASES
-        .iter()
-        .find_map(|&(flag, feature)| (flag == arg).then_some(feature))
 }
 
 #[cfg(test)]
@@ -282,18 +359,28 @@ mod tests {
     }
 
     #[test]
-    fn cli_xxlanguage_and_alias() {
-        let mut f = LangFeatures::new();
-        assert!(f.apply_cli_arg("-XXLanguage:+NameBasedDestructuring"));
-        assert!(f.has("NameBasedDestructuring"));
-        let mut g = LangFeatures::new();
-        assert!(g.apply_cli_arg("-Xname-based-destructuring=complete"));
-        assert!(g.has("NameBasedDestructuring"));
-        assert!(g.has("EnableNameBasedDestructuringShortForm"));
-        assert!(g.apply_cli_arg("-Xname-based-destructuring=disable"));
-        assert!(!g.has("NameBasedDestructuring"));
-        assert!(!g.has("EnableNameBasedDestructuringShortForm"));
-        assert!(!g.apply_cli_arg("foo.kt"));
+    fn modeled_features_are_sorted_kotlinc_features() {
+        assert!(MODELED_FEATURES.windows(2).all(|pair| pair[0] < pair[1]));
+        let table =
+            FeatureTable::for_version(crate::kotlin_version::KotlinVersion::newest()).unwrap();
+        for name in MODELED_FEATURES {
+            assert!(
+                table.get(name).is_some(),
+                "{name} is not a kotlinc language feature"
+            );
+        }
+    }
+
+    #[test]
+    fn modeled_features_are_the_frontend_and_backend_capability_boundary() {
+        assert!(LangFeatures::models("ContextParameters"));
+        assert!(LangFeatures::models("FullValueClasses"));
+        assert!(LangFeatures::models(
+            "AllowEagerSupertypeAccessibilityChecks"
+        ));
+        assert!(!LangFeatures::models(
+            "ErrorAboutDataClassCopyVisibilityChange"
+        ));
     }
 
     #[test]
@@ -353,17 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn each_cli_feature_alias_enables_its_feature() {
-        assert!(LangFeatures::new().has("ExplicitBackingFields"));
-        assert!(!LangFeatures::new().has("DataClassCopyRespectsConstructorVisibility"));
-        for &(flag, feature) in super::FEATURE_ALIASES {
-            let mut features = LangFeatures::new();
-            assert!(features.apply_cli_arg(flag), "{flag}");
-            assert!(features.has(feature), "{flag} enables {feature}");
-        }
-    }
-
-    #[test]
     fn stable_features_can_be_disabled_and_reenabled() {
         let mut features = LangFeatures::new();
         assert!(features.has("MultiDollarInterpolation"));
@@ -371,5 +447,32 @@ mod tests {
         assert!(!features.has("MultiDollarInterpolation"));
         features.apply_directive("+MultiDollarInterpolation");
         assert!(features.has("MultiDollarInterpolation"));
+    }
+
+    #[test]
+    fn an_older_api_version_keeps_api_gated_features_off() {
+        // `EnumEntries` is a language 1.9 feature that also needs API 1.8; every supported API
+        // reaches it. `AnnotationsInMetadata` needs language 2.4 and API 1.0.
+        let features = LangFeatures::for_versions(LanguageVersion::V2_4, LanguageVersion::V2_0);
+        assert!(features.has("EnumEntries"));
+        assert!(features.has("AnnotationsInMetadata"));
+        let older = LangFeatures::for_versions(LanguageVersion::V2_2, LanguageVersion::V2_2);
+        assert!(!older.has("AnnotationsInMetadata"));
+    }
+
+    #[test]
+    fn pre_release_follows_the_language_version_and_explicit_unreleased_features() {
+        assert!(!LangFeatures::for_language_version(LanguageVersion::V2_4).is_pre_release());
+        assert!(LangFeatures::for_language_version(LanguageVersion::V2_5).is_pre_release());
+        let mut features = LangFeatures::new();
+        features.apply_directive("+NameBasedDestructuring");
+        assert!(!features.is_pre_release(), "no pre-release marker");
+        features.apply_directive("+CompanionBlocksAndExtensions");
+        assert!(features.is_pre_release());
+        features.apply_directive("-CompanionBlocksAndExtensions");
+        assert!(
+            !features.is_pre_release(),
+            "a disabled feature forces nothing"
+        );
     }
 }

@@ -54,6 +54,8 @@ trace = []
 dhat-heap = ["dep:dhat"]
 
 [dev-dependencies]
+# The kotlinc command-line conformance test compares the CLI's argument parser with kotlinc's own.
+krusty-cli = { path = "crates/krusty-cli" }
 rayon = "1"
 libc = "0.2"
 syn = { version = "3", features = ["full", "visit"] }

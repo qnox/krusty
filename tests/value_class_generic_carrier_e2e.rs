@@ -61,7 +61,12 @@ fn a_generic_carrier_read_into_a_generic_parameter_keeps_the_box() {
 
 #[test]
 fn values_stored_in_a_generic_carrier_keep_their_boxes() {
-    let output = common::compile_and_run_box(SRC, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }

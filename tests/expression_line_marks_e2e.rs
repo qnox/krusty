@@ -32,8 +32,13 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> (String, String) {
     ])
     .unwrap_or_else(|| panic!("{name}: reference kotlinc unavailable under the test harness"));
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-    let classes = common::compile_in_process(src, name, &[common::stdlib_jar()], None)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let classes = common::compile_in_process(
+        src,
+        name,
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
@@ -85,7 +90,8 @@ fn disassemble_both_files(name: &str, sources: &[(&str, &str)], class: &str) -> 
     let (code, stderr) = common::kotlinc_compile(&arguments)
         .unwrap_or_else(|| panic!("{name}: reference kotlinc unavailable under the test harness"));
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-    let classes = common::compile_in_process_files(sources, &[common::stdlib_jar()], None)
+    let jdk = common::jdk_modules();
+    let classes = common::compile_in_process_files(sources, &[common::stdlib_jar()], Some(&jdk))
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));

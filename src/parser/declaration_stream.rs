@@ -70,6 +70,7 @@ pub(crate) fn visit_declaration_units_with_features(
 ) {
     let mut parser = Parser::new(source, tokens, diags, features, false);
     let mut prelude = DeclarationPrelude::default();
+    let mut unit_tokens = 0;
     crate::wide_stack::on_wide_stack(|| {
         parser.parse_file_with_declaration_sink(&mut |parser| {
             prelude.learn_file_prefix(&parser.file);
@@ -84,6 +85,11 @@ pub(crate) fn visit_declaration_units_with_features(
             // Keeping parser `TypeRef` trees beside that index would retain Pass-1 syntax across
             // the pass boundary, so a bounded unit deliberately carries only aliases declared
             // inside that unit. The Pass-2 checker resolves module aliases from the index.
+            unit.binary_reference_tokens = crate::ast::BinaryReferenceTokens::new(
+                &parser.t[unit_tokens..parser.i],
+                std::mem::take(&mut parser.function_spans),
+            );
+            unit_tokens = parser.i;
             finish_unit(&mut unit, source, features, parser.diags);
             visit(unit, parser.diags);
         });
