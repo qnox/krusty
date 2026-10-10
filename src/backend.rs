@@ -4,6 +4,7 @@
 
 pub(crate) mod counted_loops;
 mod dependency_facts;
+mod entry;
 pub(crate) mod local_properties;
 mod module_facts;
 
@@ -13,6 +14,8 @@ pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyFactError,
 };
+
+pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
@@ -58,6 +61,10 @@ pub trait Backend {
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact>;
+
+    /// Report what makes the accumulated module unemittable as a whole (a program with no entry,
+    /// say) before anything is finalized. An error here suppresses [`Backend::finalize`].
+    fn check_module(&self, _state: &Self::State, _diags: &mut DiagSink) {}
 
     /// Emit any whole-module artifacts from the accumulated `state` (e.g. `META-INF/<m>.kotlin_module`).
     fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact>;

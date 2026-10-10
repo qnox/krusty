@@ -230,42 +230,20 @@ pub fn lower_file(
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init = lowering.define_file_init(source, statics_init)?;
-    let program_entry = match entry {
-        // The frontend selected the file's `main` and its form; the backend only realizes it.
-        Entry::Main => ir.entry_point.map(|point| {
-            (
-                point.function as usize,
-                point.parameters == MainEntryParameters::Arguments,
-            )
-        }),
-        // A `box` case answers through a parameterless `box(): String`, the test corpus's own
-        // convention rather than a Kotlin entry point.
-        Entry::Box => ir
-            .functions
-            .iter()
-            .position(|function| {
-                function.params.is_empty()
-                    && function.is_static
-                    && function.dispatch_receiver.is_none()
-                    && function.name == "box"
-                    && lowering.carrier(function.ret) == Carrier::Ref
-            })
-            .map(|index| (index, false)),
-    };
-    let mut defines_entry = false;
+    let selected = entry.selected(ir);
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        if let Some((_, takes_arguments)) = program_entry.filter(|(chosen, _)| *chosen == index) {
+        if let Some((_, parameters)) = selected.filter(|(function, _)| *function == index as u32) {
             lowering.define_program_entry(
                 index,
                 entry,
                 file_init,
                 statics_init.is_some(),
-                takes_arguments,
+                parameters == MainEntryParameters::Arguments,
             )?;
-            defines_entry = true;
         }
     }
+    let defines_entry = selected.is_some();
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
 

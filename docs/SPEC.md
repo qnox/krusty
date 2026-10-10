@@ -11829,8 +11829,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array form is chosen first); two functions of one form are conflicting overloads the same pass
   reports, and no entry is recorded. Common lowering only maps the recorded callable to its function
   (`IrFile::entry_point`); an unmapped one is an internal error. The entry is a Kotlin rule; a
-  harness's `box(): String` is not, and a backend receives it as a driver-selected identity instead
-  of finding it by name. Tests: `src/fir/entry_point_tests.rs`, `src/fir_lower/entry_point_tests.rs`.
+  harness's `box(): String` is not, but it is selected by the same pass and recorded the same way
+  (`ResolvedModuleIndex::source_box_entry`, lowered to `IrFile::box_entry`): a top-level,
+  parameterless, non-generic `box` without receivers or context parameters whose result the
+  checker's subtyping places under `String?` (the corpus declares both `String` and `String?`;
+  `Nothing` and `Nothing?` do not count), and only when its unit declares one. A member, local or
+  differently
+  shaped `box` is an ordinary function. A backend never finds either entry by spelling; `backend::Entry::selected`
+  reads the recorded identity. Tests: `src/fir/entry_point_tests.rs`,
+  `src/fir_lower/entry_point_tests.rs`.
+- **A runnable program declares exactly one entry, checked before anything is written.** A backend
+  that links one program (Wasm) reports `krusty: the program declares no <entry> to start in` when
+  no unit recorded the driver's entry, and `krusty: the program declares <entry> in both <A> and
+  <B>` when two did, where `<entry>` is `` `fun main()` `` or `` `fun box(): String` ``. Both are
+  errors raised in `Backend::check_module`, which the driver calls after the last file and before
+  `finalize`, so a rejected program emits no artifact at all. Tests: `wasm::codegen::tests`.
+- **A backend reads each value's checked type; it chooses only the carrier.** Common lowering
+  records the checker's type of every lowered FIR expression in `IrFile::logical_types`, and the
+  producer of each value node it synthesizes records that node's type too (the `when` under a
+  subject block, a short-circuit `&&`/`||`, a `Unit` value after an effect, an increment's sum, an
+  assertion under a coercion). A node that names its type in itself needs no record: a constant, a
+  type operation's target, an intrinsic call's declared result, and a comparison or equality.
+  `IrFile::checked_type` is that one contract; it never derives a parent's type from its children.
+  The Wasm backend declines a value without a checked type by name rather than inferring one.
+  Tests: the `wasm-js`/`wasm-wasi` box lanes.
 - **Native targets: every prebuilt runtime object is its target's, and the runtime is closed.**
   `build.rs` compiles each runtime source once per supported target and, after each compile, reads
   the object's ELF identity: it must be 64-bit (`EI_CLASS` 2), little-endian (`EI_DATA` 1), a
@@ -16211,3 +16233,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the call's line after the locals end; the load and its `pop` are removed together. A computed
   value still ends the locals first and returns to the inline body's line with a `nop` after the
   value (`jvm/ir_emit/block_scope.rs`). Test: `tests/also_apply_result_line_e2e.rs`.
+
+- **The Wasm backend keeps Kotlin's text and arithmetic in the module.** `src/wasm/` compiles one
+  program to one WasmGC module for either kotlinc Wasm target; `wasm-js` and `wasm-wasi` differ only
+  in the host function that writes bytes (`src/wasm/host.rs`). A `String` is a struct over a mutable
+  `i16` array, so length and indexing are UTF-16 units as on the JVM; it is written out as UTF-8,
+  with a lone surrogate written as the three bytes its unit encodes to, as the Native runtime does.
+  `Int`/`Long` division and remainder follow Kotlin, not wasm's trap: `MIN_VALUE / -1` is
+  `MIN_VALUE` and `MIN_VALUE % -1` is `0`; division by zero still traps, which ends the program
+  without a `box()` answer until exceptions land. A value narrowed to `Byte`, `Short` or `Char`
+  wraps as on the JVM. Every file's top-level property initializer runs before the entry, in file
+  order, as on Native. Anything else the generator has not been taught declines the whole
+  compilation with `krusty: the wasm backend does not support <construct> yet` and writes nothing.
+  Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
+  (`tests/kotlin_box_wasm_conformance.rs`).

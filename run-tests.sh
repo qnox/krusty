@@ -378,8 +378,19 @@ if [ -n "$gate" ]; then
       "$logdir" \
       "$gate::--exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1" \
       "native-box"
+  # The two Wasm lanes run every accepted case under Node.js. Locally they skip with a notice when
+  # no Node.js 22+ is installed; CI requires them through scripts/box-lane-run.sh.
+  for lane in wasm_js wasm_wasi; do
+    echo "run-tests.sh: conformance ${lane//_/-}-box" >&2
+    KRUSTY_TEST_THREADS="$conf_threads" \
+      KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS" \
+      run_one \
+        "$logdir" \
+        "$gate::--exact kotlin_box_wasm_conformance::kotlin_codegen_box_${lane}_conformance --test-threads=1" \
+        "${lane//_/-}-box"
+  done
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads=$conf_threads"
+    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --skip kotlin_codegen_box_wasm --test-threads=$conf_threads"
 fi
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
 # Per-binary test threads for the SMALL binaries run in the cross-binary xargs pool: keep 1 so `-P jobs`

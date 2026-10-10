@@ -559,8 +559,8 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
     let lane = workflow_job(&workflow, "conformance");
     assert!(
         lane.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            && lane.contains("target: [jvm, native]"),
-        "every version exposes independent JVM and Native report rows: {lane}"
+            && lane.contains("target: [jvm, native, wasm]"),
+        "every version exposes independent JVM, Native and Wasm rows: {lane}"
     );
     assert!(
         lane.contains(
