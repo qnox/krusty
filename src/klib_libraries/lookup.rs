@@ -4,14 +4,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use super::builtin_realizations;
 use super::classifier_records::{associated_callables, classifier_record};
 use super::declaration_signatures::{SignedFunction, SignedProperty};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
 use crate::libraries::{
-    declared_function, declared_property, CallablePlacement, Callables, ClassifierDeclaration,
-    ExternalCallableKind, FnKind, FunctionInfo, FunctionSet, PropertyAccessorNames, PropertyInfo,
-    PropertySet, ResolvedSymbols,
+    declared_function, declared_property, function_classifiers, CallablePlacement, Callables,
+    ClassifierDeclaration, ExternalCallableKind, FnKind, FunctionInfo, FunctionSet,
+    PropertyAccessorNames, PropertyInfo, PropertySet, ResolvedSymbols,
 };
 use crate::symbol_source::SymbolNamespace;
 
@@ -62,12 +63,39 @@ pub(super) fn declared_symbols(
 ) -> ResolvedSymbols {
     // A probe never interns its leaf: only an already-interned identity can name a published
     // classifier.
-    let classifier_name = namespace
-        .existing_classifier(name)
-        .filter(|identity| inventory.classifier(*identity).is_some());
-    let classifier = classifier_name
-        .and_then(|identity| classifier_record(inventory, identities, identity))
-        .map(std::sync::Arc::new);
+    let declared_identity = namespace.existing_classifier(name);
+    let alias = declared_identity.and_then(|identity| inventory.type_alias(identity));
+    let declared = declared_identity.filter(|identity| inventory.classifier(*identity).is_some());
+    let (classifier_name, classifier, classifier_declaration) = match (alias, declared) {
+        (Some(alias), _) => {
+            let classifier = classifier_record(inventory, identities, alias.target)
+                .map(std::sync::Arc::new)
+                .or_else(|| {
+                    function_classifiers::classifier(alias.target)
+                        .map(function_classifiers::synthetic)
+                });
+            (
+                Some(alias.target),
+                classifier,
+                Some(ClassifierDeclaration::TypeAlias(alias.clone())),
+            )
+        }
+        (None, Some(identity)) => (
+            Some(identity),
+            classifier_record(inventory, identities, identity).map(std::sync::Arc::new),
+            Some(ClassifierDeclaration::Ordinary(identity)),
+        ),
+        // `FunctionN`, `SuspendFunctionN` and `KFunctionN` are declared by the language, not by
+        // any library: no KLIB serializes them.
+        (None, None) => match language_function_classifier(namespace, name) {
+            Some(function) => (
+                Some(function.identity()),
+                Some(function_classifiers::synthetic(function)),
+                Some(ClassifierDeclaration::Ordinary(function.identity())),
+            ),
+            None => (None, None, None),
+        },
+    };
     let (overloads, properties) = match namespace {
         SymbolNamespace::Package(package) => (
             inventory
@@ -99,7 +127,7 @@ pub(super) fn declared_symbols(
     };
     ResolvedSymbols {
         classifier_name,
-        classifier_declaration: classifier_name.map(ClassifierDeclaration::Ordinary),
+        classifier_declaration,
         classifier,
         builtin_classifier: false,
         callables: Callables::from_parts(
@@ -138,10 +166,11 @@ pub(super) fn published_function(
         &signed.type_parameters,
         enclosing,
     );
-    // A KLIB declaration's implementation is its serialized IR body. Do not replace it with
-    // either a compiler intrinsic or an implementation role inferred from a stdlib signature. A
-    // genuinely bodyless ABI declaration needs an explicit availability contract from the body
-    // provider instead.
+    // A KLIB declaration's implementation is its serialized IR body, unless it is one of the
+    // language's builtins, whose compiler operation the shared rules name by exact declaration.
+    if let CallablePlacement::Package(package) = placement {
+        builtin_realizations::realize_package_function(package, &mut function);
+    }
     let kind = realization_kind(placement, function.kind == FnKind::Extension);
     identities.assign_function(signed, kind, &mut function);
     function
@@ -168,8 +197,23 @@ pub(super) fn published_property(
         accessors,
         enclosing,
     );
-    // As for functions, the implementation is the serialized IR body of each accessor.
+    // As for functions, the implementation is the serialized IR body of each accessor, unless
+    // the property is a builtin.
+    if let CallablePlacement::Package(package) = placement {
+        builtin_realizations::realize_package_property(package, &mut property);
+    }
     let kind = realization_kind(placement, property.receiver.is_some());
     identities.assign_property(signed, kind, &mut property);
     property
+}
+
+fn language_function_classifier(
+    namespace: SymbolNamespace,
+    name: &str,
+) -> Option<function_classifiers::FunctionClassifier> {
+    let SymbolNamespace::Package(package) = namespace else {
+        return None;
+    };
+    function_classifiers::classifier_name_in(package, name)
+        .and_then(function_classifiers::classifier)
 }

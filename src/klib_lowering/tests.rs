@@ -25,7 +25,7 @@ use crate::metadata::klib_ir::{
     read_declaration_trees, KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees,
     KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
 };
-use crate::metadata::semantic::{parse_package_fragment_checked, KotlinFunction, KotlinPackage};
+use crate::metadata::semantic::{KotlinFunction, KotlinPackage};
 use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, Visibility};
@@ -278,6 +278,7 @@ fn coerce_declaration() -> KotlinFunction {
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_external: false,
         is_static: false,
         context_count: 0,
         context_kinds: Vec::new(),
@@ -919,30 +920,10 @@ pub(super) fn distribution_root() -> Option<PathBuf> {
 /// The common stdlib KLIB's declarations and their bodies.
 pub(super) fn stdlib(root: &std::path::Path) -> (KlibLibraries, KlibDeclarationBodies) {
     let path = root.join("klib/common/stdlib");
+    let libraries =
+        KlibLibraries::open(std::slice::from_ref(&path)).unwrap_or_else(|error| panic!("{error}"));
     let archive =
         KlibArchive::open(&path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
-    let packages = archive
-        .package_fragments()
-        .into_iter()
-        .map(|fragment| {
-            let bytes = archive
-                .read(&fragment.entry)
-                .unwrap_or_else(|error| panic!("read {}: {error}", fragment.entry));
-            let package = parse_package_fragment_checked(&bytes)
-                .unwrap_or_else(|error| panic!("decode {}: {error:?}", fragment.entry));
-            let segments = if fragment.package_fqname.is_empty() {
-                Vec::new()
-            } else {
-                fragment
-                    .package_fqname
-                    .split('.')
-                    .map(str::to_owned)
-                    .collect()
-            };
-            (segments, package)
-        })
-        .collect();
-    let libraries = KlibLibraries::from_packages(packages).expect("the stdlib is signable");
     let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");
     let bodies = KlibDeclarationBodies::from_libraries(vec![trees]).expect("one library");
     (libraries, bodies)

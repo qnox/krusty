@@ -6,6 +6,7 @@ use super::classifier_signatures::{sign_package_classes, SignedClassifier};
 use super::declaration_signatures::{
     sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
 };
+use crate::libraries::{declared_type_alias, AliasExpansion};
 use crate::metadata::semantic::KotlinPackage;
 use crate::types::{existing_type_name_child, type_name, type_name_child, TypeName, Visibility};
 
@@ -23,6 +24,7 @@ pub(super) struct PackageInventory {
     functions: HashMap<TypeName, Vec<SignedFunction>>,
     properties: HashMap<TypeName, Vec<SignedProperty>>,
     classifiers: HashMap<TypeName, SignedClassifier>,
+    type_aliases: HashMap<TypeName, AliasExpansion>,
     /// Companion extensions by the classifier they are named through.
     companion_functions: HashMap<TypeName, Vec<CompanionExtension<SignedFunction>>>,
     companion_properties: HashMap<TypeName, Vec<CompanionExtension<SignedProperty>>>,
@@ -39,6 +41,7 @@ impl PackageInventory {
             functions: HashMap::new(),
             properties: HashMap::new(),
             classifiers: HashMap::new(),
+            type_aliases: HashMap::new(),
             companion_functions: HashMap::new(),
             companion_properties: HashMap::new(),
             namespaces: HashSet::new(),
@@ -50,6 +53,20 @@ impl PackageInventory {
         let mut declared_signatures = HashSet::new();
         for (segments, package) in packages {
             let identity = inventory.declare_package(&segments);
+            for alias in package
+                .type_aliases
+                .into_iter()
+                .filter(|alias| alias.visibility != Visibility::Private)
+            {
+                let expansion = declared_type_alias(identity, &alias, &Default::default())
+                    .map_err(|error| {
+                        super::declaration_signatures::unsignable(&segments, &alias.name, error)
+                    })?;
+                inventory
+                    .type_aliases
+                    .entry(expansion.identity)
+                    .or_insert(expansion);
+            }
             let signed = package
                 .functions
                 .into_iter()
@@ -118,6 +135,12 @@ impl PackageInventory {
             for (classifier, signed) in
                 sign_package_classes(&segments, package.classes, &mut declared_signatures)?
             {
+                for alias in &signed.type_aliases {
+                    inventory
+                        .type_aliases
+                        .entry(alias.identity)
+                        .or_insert_with(|| alias.clone());
+                }
                 inventory.classifiers.insert(classifier, signed);
             }
         }
@@ -162,9 +185,40 @@ impl PackageInventory {
             .filter(move |property| property.declaration.name == name)
     }
 
+    /// Every published top-level function with its package, in no particular order.
+    #[cfg(test)]
+    pub(super) fn all_functions(&self) -> impl Iterator<Item = (TypeName, &SignedFunction)> {
+        self.functions
+            .iter()
+            .flat_map(|(package, functions)| functions.iter().map(move |f| (*package, f)))
+    }
+
+    /// Every published class with its identity, in no particular order.
+    #[cfg(test)]
+    pub(super) fn all_classifiers(&self) -> impl Iterator<Item = (TypeName, &SignedClassifier)> {
+        self.classifiers
+            .iter()
+            .map(|(identity, classifier)| (*identity, classifier))
+    }
+
+    /// Every companion extension function with the classifier it is named through.
+    #[cfg(test)]
+    pub(super) fn all_companion_functions(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, &CompanionExtension<SignedFunction>)> {
+        self.companion_functions
+            .iter()
+            .flat_map(|(classifier, extensions)| extensions.iter().map(move |e| (*classifier, e)))
+    }
+
     /// The published class with exactly this identity.
     pub(super) fn classifier(&self, identity: TypeName) -> Option<&SignedClassifier> {
         self.classifiers.get(&identity)
+    }
+
+    /// The type alias declared with exactly this qualified identity.
+    pub(super) fn type_alias(&self, identity: TypeName) -> Option<&AliasExpansion> {
+        self.type_aliases.get(&identity)
     }
 
     /// The companion extension functions named `name` that are named through `classifier`.

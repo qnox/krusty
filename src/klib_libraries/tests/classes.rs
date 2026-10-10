@@ -833,6 +833,7 @@ fn in_memory_class(constructor_params: usize) -> KotlinClass {
         members: Vec::new(),
         functions: vec![function("run", None, vec![class("kotlin/Int", false)])],
         properties: Vec::new(),
+        type_aliases: Vec::new(),
         constructors: vec![KotlinConstructor {
             is_primary: true,
             params: vec![class("kotlin/Int", false); constructor_params],

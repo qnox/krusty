@@ -1594,12 +1594,16 @@ mod primitive_explicit_equals_e2e;
 mod primitive_hash_code_e2e;
 #[path = "property_accessor_annotation_e2e.rs"]
 mod property_accessor_annotation_e2e;
+#[path = "public_inline_property_access_e2e.rs"]
+mod public_inline_property_access_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
+#[path = "serialization_explicit_companion_e2e.rs"]
+mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
 #[path = "source_map_annotation_parts_e2e.rs"]
@@ -2278,6 +2282,8 @@ mod reified_inline_return_infer_e2e;
 mod reified_inline_splice_ldc_wide_e2e;
 #[path = "reified_local_delegate_e2e.rs"]
 mod reified_local_delegate_e2e;
+#[path = "reified_member_metadata_e2e.rs"]
+mod reified_member_metadata_e2e;
 #[path = "reified_parameter_forwarding_e2e.rs"]
 mod reified_parameter_forwarding_e2e;
 #[path = "reified_primitive_safecast_e2e.rs"]
