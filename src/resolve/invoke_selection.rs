@@ -953,11 +953,14 @@ impl Checker<'_> {
                 continue;
             }
             if !self.lambda_overload_partially_applicable(
+                scope,
                 overload,
                 None,
                 (args, arg_tys),
-                &argument_map,
-                &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
+                (
+                    &argument_map,
+                    &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
+                ),
                 type_args,
             ) {
                 continue;
