@@ -571,7 +571,8 @@ fn a_fixture_context_property_keeps_its_named_context_parameter() {
     );
 }
 
-/// `companion val Registry.capacity` is named through `Registry`, not through its package.
+/// `companion val Registry.capacity` is read on `Registry` itself, so it is not published as an
+/// ordinary package extension property.
 #[test]
 fn a_fixture_companion_extension_property_is_not_a_package_property() {
     let (libraries, _) = fixture_libraries();
@@ -581,4 +582,17 @@ fn a_fixture_companion_extension_property_is_not_a_package_property() {
     );
     assert!(symbols.callables.properties().is_empty());
     assert!(symbols.callables.functions().is_empty());
+}
+
+/// `companion fun Registry.named(name: String)` is called on `Registry` itself; published as an
+/// ordinary extension it would accept a call on a `Registry` instance.
+#[test]
+fn a_fixture_companion_extension_function_is_not_a_package_extension() {
+    let (libraries, _) = fixture_libraries();
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("fixture/signatures")),
+        "named",
+    );
+    assert!(symbols.callables.functions().is_empty());
+    assert!(symbols.callables.properties().is_empty());
 }

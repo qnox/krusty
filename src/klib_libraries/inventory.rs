@@ -31,6 +31,11 @@ impl PackageInventory {
         // publish the same declaration more than once; they must not become duplicate overload
         // candidates carrying one ExternalCallableId.
         let mut declared_signatures = HashSet::new();
+        // A companion extension (`companion fun C.name()`, `companion val C.name`) is called on
+        // the classifier `C` itself, not on an instance of `C`, and its body takes no receiver.
+        // Publishing it as an ordinary extension would accept `instance.name()`. It is signed so
+        // an unsignable one still rejects the set, and is withheld until selection models a
+        // classifier receiver.
         for (segments, package) in packages {
             let identity = inventory.declare_package(&segments);
             let signed = package
@@ -44,6 +49,7 @@ impl PackageInventory {
             inventory.functions.entry(identity).or_default().extend(
                 signed
                     .into_iter()
+                    .filter(|function| !function.declaration.is_static)
                     .filter(|function| declared_signatures.insert(function.signature.clone())),
             );
             let signed = package
@@ -56,10 +62,6 @@ impl PackageInventory {
             inventory.properties.entry(identity).or_default().extend(
                 signed
                     .into_iter()
-                    // A companion extension property (`companion val C.name`) is named through its
-                    // classifier, not through the package, and its accessors take no receiver.
-                    // It is signed here so an unsignable one still rejects the set; it belongs to
-                    // its classifier's namespace, which this provider does not publish yet.
                     .filter(|property| !property.declaration.is_static)
                     .filter(|property| declared_signatures.insert(property.signature.clone())),
             );
