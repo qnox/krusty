@@ -296,8 +296,9 @@ pub(super) fn add_deserialization_constructor(
             if value_class_underlying(ir, field_ty).is_some() {
                 // Unlike ordinary source-constructor parameters, this ABI slot carries the
                 // value-class BOX. Publish that exact expression representation so JVM lowering
-                // inserts `unbox-impl` at the erased backing-field store.
-                ir.physical_types.insert(argument, *field_ty);
+                // inserts `unbox-impl` at the erased backing-field store. The slot holds the box
+                // reference itself, so a nullable property's `X?` is still physically `X`.
+                ir.physical_types.insert(argument, field_ty.non_null());
             }
             ir.add_expr(IrExpr::SetField {
                 receiver: this,
