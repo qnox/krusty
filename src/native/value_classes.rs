@@ -96,6 +96,13 @@ impl NativeValueClasses {
                 crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
             }
         }
+        for constructor in ir.module_constructions.records.values() {
+            pending.push(constructor.owner);
+            pending.extend(constructor.outer);
+            for ty in constructor.parameters.iter() {
+                crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
+            }
+        }
         pending.extend(ir.classes.iter().filter_map(|class| {
             (class.is_value && class.ctor_param_count == 1).then_some(class.fq_name)
         }));

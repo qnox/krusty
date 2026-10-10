@@ -2232,11 +2232,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     pub(super) fn construction(
         &mut self,
+        site: u32,
         internal: TypeName,
         args: &[u32],
         selected: Option<&[Ty]>,
         defaulted: Option<&[u32]>,
     ) -> Result<Option<Value>, Unsupported> {
+        // A class another file declares is constructed through the entry point of the selected
+        // module constructor; its layout and constructor are that file's.
+        if self.file.ir.class_id_by_name(internal).is_none() {
+            if let Some(constructor) = self.file.ir.module_constructions.selected.get(&site) {
+                return self.module_construction(*constructor, internal, args, defaulted.is_some());
+            }
+        }
         let name = internal.render();
         if let Some(omitted) = defaulted {
             return self.defaulted_construction(internal, args, selected, omitted);

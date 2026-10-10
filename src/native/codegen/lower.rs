@@ -269,6 +269,7 @@ pub fn lower_file(
         }
     }
     lowering.define_property_entry_points(file_init)?;
+    lowering.define_constructor_entry_points(file_init)?;
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
 
@@ -1551,6 +1552,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .map(|ordinal| ordinal + default_prefix_count)
                     .collect();
                 self.construction(
+                    id,
                     internal,
                     &args,
                     ctor_params.as_deref(),

@@ -314,3 +314,33 @@ pub enum IrCustomSerializerConstructorTarget {
     Module(IrConstructorTarget),
     External(super::IrExternalConstructorTarget),
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IrCheckedConstructorTarget {
+    Module(crate::fir::CallableId),
+    External {
+        declaration: crate::fir::ExternalCallableId,
+        classifier: TypeName,
+        parameters: Vec<Ty>,
+    },
+}
+
+/// Exact dependency constructor selected by checked FIR, with an optional backend realization.
+///
+/// `declaration` is provider-neutral and survives common lowering. A target backend fills
+/// `descriptor` from that identity before emission; common lowering never derives a physical ABI
+/// from the call site's specialized semantic parameter types.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrExternalConstructorTarget {
+    pub declaration: crate::fir::ExternalCallableId,
+    pub descriptor: Option<String>,
+}
+
+impl IrExternalConstructorTarget {
+    pub fn unresolved(declaration: crate::fir::ExternalCallableId) -> Self {
+        Self {
+            declaration,
+            descriptor: None,
+        }
+    }
+}

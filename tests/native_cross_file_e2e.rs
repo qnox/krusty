@@ -1,9 +1,10 @@
-//! A top-level function, a package property, or a class's member property defined in another file
-//! of the same module.
+//! A top-level function, a package property, a class's member property, or a class's constructor
+//! defined in another file of the same module.
 //!
-//! The call is a direct symbol both files derive from the checked callable identity, and a
-//! property is reached through the getter and setter entry points both files derive from the
-//! property identity. The file that does not contain `box` still has to be linked: its function is
+//! The call is a direct symbol both files derive from the checked callable identity, a property
+//! is reached through the getter and setter entry points both files derive from the property
+//! identity, and a construction through the entry point both files derive from the constructor's
+//! qualified owner and parameter list. The file that does not contain `box` still has to be linked: its function is
 //! not in the entry file.
 
 use crate::common::{expect_box_ok_files_with_stdlib, expect_native_sources};
@@ -623,6 +624,240 @@ fn an_open_member_and_a_source_written_getter_run_in_the_declaring_file() {
                     if (twice().doubled != 42) return "FAIL: ${twice().doubled}"
                     return base().label + "K"
                 }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_class_is_constructed_from_the_file_that_does_not_declare_it() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Named(val n: Int, val label: String)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val value = Named(2, "OK")
+                    return if (value.n == 2 && value.label == "OK") "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_constructed_member_var_is_updated_from_the_calling_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Counter(var n: Int)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val count = Counter(1)
+                    count.n += 2
+                    return if (count.n == 3) "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_empty_constructor_runs_the_property_initializer() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Empty {
+                    val n: Int = 1
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String = if (Empty().n == 1) "OK" else "FAIL"
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_secondary_constructor_in_another_file_delegates() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Pair(val a: Int, val b: Int) {
+                    constructor(n: Int) : this(n, n)
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val pair = Pair(2)
+                    return if (pair.a == 2 && pair.b == 2) "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+/// Two constructors of one class with the same arity are two entry points: each is named from its
+/// complete parameter list, not from its position among the class's constructors.
+#[test]
+fn overloaded_constructors_in_another_file_stay_distinct() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Pick {
+                    val label: String
+                    constructor(n: Int) { label = "int $n" }
+                    constructor(text: String) { label = "text $text" }
+                    constructor(n: Int?, text: String) { label = "both $n $text" }
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val labels = Pick(1).label + "|" + Pick("a").label + "|" + Pick(null, "b").label
+                    return if (labels == "int 1|text a|both null b") "OK" else "FAIL: $labels"
+                }
+            "#,
+        ),
+    ]);
+}
+
+/// The arguments are evaluated in source order in the constructing file before the constructor
+/// runs, and the constructor reads a package property of its own file at its initialized value.
+#[test]
+fn a_constructor_reads_its_own_file_after_the_arguments_are_evaluated() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                val prefix: String = "O"
+                class Mark(val first: Int, val second: Int) {
+                    val label: String = prefix + "K"
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                var order: String = ""
+                fun argument(name: String, value: Int): Int {
+                    order = order + name
+                    return value
+                }
+                fun box(): String {
+                    val mark = Mark(argument("a", 1), argument("b", 2))
+                    if (order != "ab" || mark.first != 1 || mark.second != 2) return "FAIL: $order"
+                    return mark.label
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_generic_class_is_constructed_at_each_instantiation_from_another_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Box<T>(val value: T)
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val count: Box<Int> = Box(41)
+                    val held: Box<String> = Box("OK")
+                    if (count.value + 1 != 42) return "FAIL: ${count.value}"
+                    return held.value
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_inner_class_is_constructed_with_its_outer_instance() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Outer {
+                    val label: String = "O"
+                    inner class Inner(val n: Int) {
+                        val label: String = this@Outer.label
+                    }
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val inner = Outer().Inner(3)
+                    return if (inner.n == 3 && inner.label == "O") "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_value_class_constructed_in_another_file_is_its_value() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                @JvmInline
+                value class Name(val text: String)
+                class Tag(val name: Name)
+                fun text(name: Name): String = name.text
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String = text(Tag(Name("O")).name) + text(Name("K"))
             "#,
         ),
     ]);
