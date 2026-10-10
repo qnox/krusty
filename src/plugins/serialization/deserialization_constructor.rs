@@ -134,11 +134,12 @@ fn multi_mask_check(
         let expected = ir.add_expr(IrExpr::Const(IrConst::Int(*required)));
         let mask = ir.add_expr(IrExpr::Const(IrConst::Int(*required)));
         let seen = ir.add_expr(IrExpr::GetValue(word as u32 + 1));
-        let masked = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitAnd,
-            lhs: mask,
-            rhs: seen,
-        });
+        let masked = ir.add_arithmetic(
+            crate::ir::IrBinOp::BitAnd,
+            mask,
+            seen,
+            crate::types::Ty::Int,
+        );
         missing_conditions.push(ir.add_expr(IrExpr::PrimitiveBinOp {
             op: crate::ir::IrBinOp::Ne,
             lhs: expected,
@@ -150,11 +151,13 @@ fn multi_mask_check(
         .next()
         .expect("multi-mask constructor has masks");
     for rhs in missing_conditions {
-        missing = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitOr,
-            lhs: missing,
+        // Kotlin's non-short-circuit `Boolean.or(Boolean): Boolean`.
+        missing = ir.add_arithmetic(
+            crate::ir::IrBinOp::BitOr,
+            missing,
             rhs,
-        });
+            crate::types::Ty::Boolean,
+        );
     }
 
     let array_ty = class_ty("kotlin/IntArray");
@@ -331,11 +334,12 @@ pub(super) fn complete_deserialization_constructor(
         let required = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
         let and_lhs = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
         let seen = ir.add_expr(IrExpr::GetValue(1));
-        let masked = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitAnd,
-            lhs: and_lhs,
-            rhs: seen,
-        });
+        let masked = ir.add_arithmetic(
+            crate::ir::IrBinOp::BitAnd,
+            and_lhs,
+            seen,
+            crate::types::Ty::Int,
+        );
         let missing = ir.add_expr(IrExpr::PrimitiveBinOp {
             op: crate::ir::IrBinOp::Ne,
             lhs: required,
@@ -455,11 +459,8 @@ pub(super) fn complete_deserialization_constructor(
         let bit = ir.add_expr(IrExpr::Const(IrConst::Int(
             1i32.wrapping_shl((element % 32) as u32),
         )));
-        let masked = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitAnd,
-            lhs: seen,
-            rhs: bit,
-        });
+        let masked =
+            ir.add_arithmetic(crate::ir::IrBinOp::BitAnd, seen, bit, crate::types::Ty::Int);
         let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let absent = ir.add_expr(IrExpr::PrimitiveBinOp {
             op: crate::ir::IrBinOp::Eq,

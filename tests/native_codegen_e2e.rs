@@ -12,9 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -49,8 +48,10 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && krusty::toolchain::stdlib_jar().is_some())
-        .then_some(target)
+    (krusty::native::can_link(target)
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some())
+    .then_some(target)
 }
 
 /// Compile `sources` with the Cranelift backend for `target`.
@@ -68,8 +69,8 @@ fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Ve
 }
 
 fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, DiagSink) {
-    let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    // The JVM front end resolves against the classpath kotlinc would: the stdlib and the JDK.
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -87,10 +88,13 @@ fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Art
         features.apply_source_directives(source);
     }
     let mut diags = DiagSink::new();
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
-    );
     let backend = CraneliftBackend::new(target).verified();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
+    );
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     (artifacts, diags)
 }
@@ -195,8 +199,8 @@ fn elf_machine(image: &[u8]) -> u16 {
 
 #[test]
 fn one_host_links_a_static_executable_for_every_supported_architecture() {
-    if krusty::toolchain::stdlib_jar().is_none() {
-        eprintln!("skipping: needs the Kotlin stdlib");
+    if krusty::toolchain::stdlib_jar().is_none() || krusty::toolchain::jdk_modules().is_none() {
+        eprintln!("skipping: needs the Kotlin stdlib and a JDK");
         return;
     }
     // The Go property, now with nothing but krusty in the loop: the code generator emits each

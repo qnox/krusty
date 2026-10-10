@@ -1,6 +1,7 @@
 //! The dependency facts frozen at the backend boundary answer every identity the file's IR holds,
 //! and each answer is what the provider normalized for that exact declaration.
 
+use crate::compilation_target::CompilationTarget;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -229,6 +230,10 @@ struct FactRecorder {
 impl Backend for FactRecorder {
     type State = ();
 
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Jvm
+    }
+
     fn lower_ir_file(
         &self,
         file: CheckedIrFile<'_>,
@@ -356,10 +361,10 @@ fn analyze(
     let stems = [stem.to_string()];
     crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         diagnostics,
@@ -381,10 +386,10 @@ fn analyze_many(
         .collect::<Vec<_>>();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         diagnostics,
@@ -726,16 +731,20 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         param_defaults: vec![false],
         vararg: None,
         visibility: crate::types::Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         is_inline: false,
         has_reified_type_params: false,
         is_suspend: false,
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_external: false,
         is_static: false,
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        return_value_status: Default::default(),
+        contract: None,
     };
     let provider = crate::klib_libraries::KlibLibraries::from_packages(vec![(
         vec!["kotlin".to_string(), "io".to_string()],

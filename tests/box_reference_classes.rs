@@ -21,11 +21,11 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use krusty::conformance::{
-    directive, inject_support_module, module_units, split_files, split_modules,
-    unsupported_codegen_mode_directive, BoxJdk, FragmentUnit, UnitCodegenModes,
+    directive, inject_support_module, module_units, reference_only_kotlinc_arguments, split_files,
+    split_modules, unit_compiler_configuration, BoxJdk, FragmentUnit,
 };
 
-use super::common::{self, byte_dump, language_directives};
+use super::common::{self, byte_dump};
 
 /// The stable module identity for every single-module topology (ordinary, `// FILE:` multi-file,
 /// and mixed Java). It matches the module name krusty emits those cases under.
@@ -38,10 +38,10 @@ pub const MAIN_MODULE: &str = "main";
 /// fragments instead of a flat `-Xcommon-sources` split (changing even a successful MPP case's
 /// bytes-exact invocation), so cases that `v3` cached must recompile. `v5` compiles each unit under
 /// its own `// LAMBDAS:`/`// SAM_CONVERSIONS:`/`// JVM_DEFAULT_MODE:` modes and keys on the producing
-/// JDK, so a `v4` entry compiled under kotlinc's default modes or another JDK is never replayed. The
-/// directive flags (`// ALLOW_KOTLIN_PACKAGE`, test-only features, `// OPT_IN:`) ride `language_args`
-/// and so already re-key themselves.
-const REF_CACHE_SALT: &str = "ref-classes-v5-unit-modes-and-producing-jdk";
+/// JDK, so an older entry compiled under kotlinc's default modes or another JDK is never replayed.
+/// Every directive-selected argument rides its unit's `unit_arguments` and the test-only feature
+/// property rides `jvm_properties`, so a change of either re-keys itself.
+const REF_CACHE_SALT: &str = "ref-classes-v6-typed-language-settings";
 
 /// A reference `.class` inventory grouped by module identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -112,15 +112,15 @@ pub fn reference_compile(
     jdk: BoxJdk<'_>,
     coroutine_helpers: &str,
 ) -> Result<ReferenceClasses, String> {
-    let language_args = reference_directive_args(src)?;
     let units = plan_units(src, stem, coroutine_helpers)?;
+    let jvm_properties = reference_jvm_properties(&units);
     let fingerprint = cache_key(
         src,
         stem,
         cp_jars,
         jdk,
         coroutine_helpers,
-        &language_args,
+        &jvm_properties,
         &units,
     )?;
     let cache = reference_cache_dir(fingerprint);
@@ -142,7 +142,7 @@ pub fn reference_compile(
     STATS.misses.bump();
     let compiling = Instant::now();
     let scratch = ScratchDir::new()?;
-    let result = compile_all(&units, cp_jars, jdk, &language_args, scratch.path());
+    let result = compile_all(&units, cp_jars, jdk, &jvm_properties, scratch.path());
     STATS.compile.add_since(compiling);
     let cleanup = Instant::now();
     drop(scratch);
@@ -163,15 +163,15 @@ pub fn reference_cache_key(
     jdk: BoxJdk<'_>,
     coroutine_helpers: &str,
 ) -> Result<u128, String> {
-    let language_args = reference_directive_args(src)?;
     let units = plan_units(src, stem, coroutine_helpers)?;
+    let jvm_properties = reference_jvm_properties(&units);
     cache_key(
         src,
         stem,
         cp_jars,
         jdk,
         coroutine_helpers,
-        &language_args,
+        &jvm_properties,
         &units,
     )
 }
@@ -182,13 +182,23 @@ fn cache_key(
     cp_jars: &[PathBuf],
     jdk: BoxJdk<'_>,
     coroutine_helpers: &str,
-    language_args: &[String],
+    jvm_properties: &[String],
     units: &[PlannedUnit],
 ) -> Result<u128, String> {
     let base_args = jdk.kotlinc_args(cp_jars)?;
-    let unit_codegen_args: Vec<(&str, &[String])> = units
+    let unit_arguments: Vec<(&str, &[String])> = units
         .iter()
-        .map(|unit| (unit.module.as_str(), unit.codegen_args.as_slice()))
+        .map(|unit| (unit.module.as_str(), unit.arguments.as_slice()))
+        .collect();
+    let unit_language_settings: Vec<_> = units
+        .iter()
+        .map(|unit| {
+            (
+                unit.module.as_str(),
+                unit.language_version,
+                unit.api_version,
+            )
+        })
         .collect();
     let (compiler_id, compiler_len) = compiler_identity();
     let producing_jdk = producing_jdk_identity()?;
@@ -197,8 +207,9 @@ fn cache_key(
         stem,
         coroutine_helpers,
         base_args: &base_args,
-        language_args,
-        unit_codegen_args: &unit_codegen_args,
+        jvm_properties,
+        unit_arguments: &unit_arguments,
+        unit_language_settings: &unit_language_settings,
         compiler_id: compiler_id.as_deref(),
         compiler_len,
         producing_jdk,
@@ -354,10 +365,16 @@ pub struct ReferenceCacheInputs<'a> {
     pub coroutine_helpers: &'a str,
     /// The case's classpath and JDK arguments.
     pub base_args: &'a [String],
-    /// The case-wide directive flags.
-    pub language_args: &'a [String],
-    /// Each compilation unit's module and its code-generation mode arguments, in build order.
-    pub unit_codegen_args: &'a [(&'a str, &'a [String])],
+    /// The JVM properties the reference compiler server runs under ([`reference_jvm_properties`]).
+    pub jvm_properties: &'a [String],
+    /// Each compilation unit's module and its directive-selected arguments, in build order.
+    pub unit_arguments: &'a [(&'a str, &'a [String])],
+    /// Exact language/API levels installed through kotlinc's typed configuration channel.
+    pub unit_language_settings: &'a [(
+        &'a str,
+        Option<krusty::language_version::LanguageVersion>,
+        Option<krusty::language_version::LanguageVersion>,
+    )],
     pub compiler_id: Option<&'a str>,
     pub compiler_len: u64,
     /// The JDK the reference kotlinc and javac run on, from
@@ -377,18 +394,40 @@ impl ReferenceCacheInputs<'_> {
         let base_count = (self.base_args.len() as u64).to_le_bytes();
         parts.push(&base_count);
         parts.extend(self.base_args.iter().map(|arg| arg.as_bytes()));
-        let language_count = (self.language_args.len() as u64).to_le_bytes();
-        parts.push(&language_count);
-        parts.extend(self.language_args.iter().map(|arg| arg.as_bytes()));
+        let property_count = (self.jvm_properties.len() as u64).to_le_bytes();
+        parts.push(&property_count);
+        parts.extend(self.jvm_properties.iter().map(|arg| arg.as_bytes()));
         let unit_counts: Vec<[u8; 8]> = self
-            .unit_codegen_args
+            .unit_arguments
             .iter()
             .map(|(_, args)| (args.len() as u64).to_le_bytes())
             .collect();
-        for ((module, args), count) in self.unit_codegen_args.iter().zip(&unit_counts) {
+        for ((module, args), count) in self.unit_arguments.iter().zip(&unit_counts) {
             parts.push(module.as_bytes());
             parts.push(count);
             parts.extend(args.iter().map(|arg| arg.as_bytes()));
+        }
+        let setting_bytes: Vec<[u8; 8]> = self
+            .unit_language_settings
+            .iter()
+            .map(|(_, language, api)| {
+                let [language_major, language_minor] = language
+                    .map(|version| [version.major, version.minor])
+                    .unwrap_or([u16::MAX, u16::MAX]);
+                let [api_major, api_minor] = api
+                    .map(|version| [version.major, version.minor])
+                    .unwrap_or([u16::MAX, u16::MAX]);
+                let mut bytes = [0; 8];
+                bytes[0..2].copy_from_slice(&language_major.to_le_bytes());
+                bytes[2..4].copy_from_slice(&language_minor.to_le_bytes());
+                bytes[4..6].copy_from_slice(&api_major.to_le_bytes());
+                bytes[6..8].copy_from_slice(&api_minor.to_le_bytes());
+                bytes
+            })
+            .collect();
+        for ((module, _, _), settings) in self.unit_language_settings.iter().zip(&setting_bytes) {
+            parts.push(module.as_bytes());
+            parts.push(settings);
         }
         // The exact compiler identity isolates one release/RC's bytes from another's; the jar length
         // guards a same-identity rebuild. An unpublished compiler never reaches the cache, but still
@@ -407,84 +446,25 @@ impl ReferenceCacheInputs<'_> {
 /// `// LANGUAGE:` must reference-compile with that property, not be dropped from the population.
 const TEST_ONLY_LANGUAGE_FEATURES: &[&str] = &["ImplicitSignedToUnsignedIntegerConversion"];
 
-/// The case-wide reference compiler arguments a case's test directives imply, each of which the
-/// cache key already folds in (every entry rides `language_args`, which
-/// [`ReferenceCacheInputs::fingerprint`] hashes). Code-generation modes are per unit, so they are
-/// selected by [`plan_units`] instead; a mode directive with an unknown value fails closed here.
-/// - its `// LANGUAGE:` flags, verbatim;
-/// - `-Dkotlinc.test.allow.testonly.language.features=true` when it opts in a test-only feature,
-///   which the persistent server applies as a JVM property on its own property-keyed pool rather
-///   than passing to the compiler;
-/// - `-Xallow-kotlin-package` for an `// ALLOW_KOTLIN_PACKAGE` case, which declares types under the
-///   otherwise-reserved `kotlin` package;
-/// - `-opt-in=<marker>` for each fully-qualified marker named by an `// OPT_IN:` directive, so a
-///   case using an experimental API (e.g. an `@OptionalExpectation` requires
-///   `kotlin.ExperimentalMultiplatform`) compiles instead of failing the opt-in requirement;
-/// - `-Xreturn-value-checker=<mode>` for a `// RETURN_VALUE_CHECKER_MODE:` case, so the reference
-///   accepts its `@MustUseReturnValues`/`@IgnorableReturnValue` annotations (krusty does not model
-///   the checker, so it never passes this flag to its own compile, but the case's runtime `box()`
-///   is unaffected, leaving it applicable and still requiring a reference compile).
-fn reference_directive_args(src: &str) -> Result<Vec<String>, String> {
-    if let Some(directive) = unsupported_codegen_mode_directive(src) {
-        return Err(format!(
-            "reference oracle does not support the code-generation mode `{directive}`"
-        ));
+/// The JVM properties the reference compiler server runs under for these units: the
+/// `kotlinc.test.allow.testonly.language.features` property when a unit's arguments enable a
+/// test-only feature, which the persistent server applies on its own property-keyed pool rather
+/// than passing to the compiler. Every other directive is an argument of the unit
+/// ([`unit_compiler_configuration`]), shared with krusty's own compile of the case.
+fn reference_jvm_properties(units: &[PlannedUnit]) -> Vec<String> {
+    let enables_test_only_feature = units
+        .iter()
+        .flat_map(|unit| &unit.arguments)
+        .any(|argument| {
+            argument
+                .strip_prefix("-XXLanguage:+")
+                .is_some_and(|feature| TEST_ONLY_LANGUAGE_FEATURES.contains(&feature))
+        });
+    if enables_test_only_feature {
+        vec!["-Dkotlinc.test.allow.testonly.language.features=true".to_string()]
+    } else {
+        Vec::new()
     }
-    let mut args = language_directives::kotlinc_args(src);
-    let opts_in_test_only = TEST_ONLY_LANGUAGE_FEATURES.iter().any(|feature| {
-        let enabling = format!("-XXLanguage:+{feature}");
-        args.iter().any(|arg| arg == &enabling)
-    });
-    if opts_in_test_only {
-        args.push("-Dkotlinc.test.allow.testonly.language.features=true".to_string());
-    }
-    // Real kotlinc rejects any source that declares a type under the reserved `kotlin` package
-    // unless `-Xallow-kotlin-package` is set. A case opts in either explicitly with
-    // `// ALLOW_KOTLIN_PACKAGE` or implicitly by declaring such a package in one of its files
-    // (several corpus cases do the latter without the directive). krusty does not enforce the
-    // reservation, so it compiles without the flag; the reference must get it or the applicable
-    // case cannot be scored.
-    if directive(src, "ALLOW_KOTLIN_PACKAGE") || declares_reserved_kotlin_package(src) {
-        args.push("-Xallow-kotlin-package".to_string());
-    }
-    for marker in src
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("// OPT_IN:"))
-        .flat_map(|payload| payload.split([' ', ',', '\t']))
-        .filter(|token| !token.is_empty())
-    {
-        args.push(format!("-opt-in={marker}"));
-    }
-    if let Some(mode) = src.lines().find_map(|line| {
-        line.trim_start()
-            .strip_prefix("// RETURN_VALUE_CHECKER_MODE:")
-    }) {
-        // Map the test directive's enum value to the compiler flag spelling. An unrecognized value
-        // fails closed (REF-FAIL) rather than silently scoring against the wrong invocation.
-        let flag = match mode.trim() {
-            "FULL" => "full",
-            "CHECKER" => "check",
-            "DISABLED" => "disable",
-            unknown => {
-                return Err(format!(
-                    "reference oracle does not support RETURN_VALUE_CHECKER_MODE {unknown}"
-                ));
-            }
-        };
-        args.push(format!("-Xreturn-value-checker={flag}"));
-    }
-    Ok(args)
-}
-
-/// Whether any source file declares a top-level package of `kotlin` or a `kotlin.*` subpackage,
-/// which real kotlinc accepts only under `-Xallow-kotlin-package`.
-fn declares_reserved_kotlin_package(src: &str) -> bool {
-    src.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix("package ")
-            .map(str::trim)
-            .is_some_and(|pkg| pkg == "kotlin" || pkg.starts_with("kotlin."))
-    })
 }
 
 fn compiler_identity() -> (Option<String>, u64) {
@@ -496,7 +476,7 @@ fn compiler_identity() -> (Option<String>, u64) {
 }
 
 /// One reference compilation unit of a case, in build order: its module identity, sources, the
-/// earlier units it reads, and the code-generation mode arguments its own Kotlin sources select.
+/// earlier units it reads, and the kotlinc arguments its directives select.
 /// `fragments` is the folded `dependsOn` chain in dependency-first order (empty for a single-module
 /// case); a multi-fragment unit compiles as HMPP, each fragment owning a contiguous run of the
 /// Kotlin blocks in that same order.
@@ -507,16 +487,29 @@ struct PlannedUnit {
     fragments: Vec<FragmentUnit>,
     deps: Vec<String>,
     friends: Vec<String>,
-    codegen_args: Vec<String>,
+    arguments: Vec<String>,
+    language_version: Option<krusty::language_version::LanguageVersion>,
+    api_version: Option<krusty::language_version::LanguageVersion>,
 }
 
 /// Split a case into the units krusty compiles it as: a `// MODULE:` build's folded units, else
 /// one `main` unit of its `// FILE:` blocks or of the whole source. `// WITH_COROUTINES` adds the
-/// generated helpers exactly where krusty does. Each unit selects its modes from its own Kotlin
-/// sources through [`UnitCodegenModes::of_unit`], the selection the gate's compile uses.
+/// generated helpers exactly where krusty does. Each unit's arguments come from
+/// [`unit_compiler_configuration`], the selection the gate's own compile of that unit parses,
+/// followed by
+/// the case's [`reference_only_kotlinc_arguments`].
 fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<PlannedUnit>, String> {
-    let codegen_args = |kotlin: &[(String, String)]| {
-        UnitCodegenModes::of_unit(kotlin.iter().map(|(_, source)| source.as_str())).kotlinc_args()
+    let reference_only = reference_only_kotlinc_arguments(src)
+        .map_err(|error| format!("reference oracle: {error}"))?;
+    let configuration = |kotlin: &[(String, String)]| {
+        unit_compiler_configuration(src, kotlin.iter().map(|(_, source)| source.as_str()))
+            .map(|mut configuration| {
+                configuration
+                    .arguments
+                    .extend(reference_only.iter().cloned());
+                configuration
+            })
+            .map_err(|error| format!("reference oracle: {error}"))
     };
     if src.contains("// MODULE:") {
         let Some(mut modules) = split_modules(src) else {
@@ -525,18 +518,23 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
         if directive(src, "WITH_COROUTINES") {
             inject_support_module(&mut modules, coroutine_helpers);
         }
-        return Ok(module_units(&modules)
+        return module_units(&modules)
             .into_iter()
-            .map(|unit| PlannedUnit {
-                codegen_args: codegen_args(&unit.files),
-                module: unit.name,
-                kotlin: unit.files,
-                java: unit.java_files,
-                fragments: unit.fragments,
-                deps: unit.deps,
-                friends: unit.friends,
+            .map(|unit| {
+                let configuration = configuration(&unit.files)?;
+                Ok(PlannedUnit {
+                    arguments: configuration.arguments,
+                    language_version: configuration.language_version,
+                    api_version: configuration.api_version,
+                    module: unit.name,
+                    kotlin: unit.files,
+                    java: unit.java_files,
+                    fragments: unit.fragments,
+                    deps: unit.deps,
+                    friends: unit.friends,
+                })
             })
-            .collect());
+            .collect();
     }
     let (mut kotlin, java) = if src.contains("// FILE:") {
         split_files(src)
@@ -546,8 +544,11 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
     if directive(src, "WITH_COROUTINES") {
         kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
     }
+    let configuration = configuration(&kotlin)?;
     Ok(vec![PlannedUnit {
-        codegen_args: codegen_args(&kotlin),
+        arguments: configuration.arguments,
+        language_version: configuration.language_version,
+        api_version: configuration.api_version,
         module: MAIN_MODULE.to_string(),
         kotlin,
         java,
@@ -561,7 +562,7 @@ fn compile_all(
     units: &[PlannedUnit],
     cp_jars: &[PathBuf],
     jdk: BoxJdk<'_>,
-    language_args: &[String],
+    jvm_properties: &[String],
     work: &Path,
 ) -> Result<ReferenceClasses, String> {
     let mut classes = ReferenceClasses::default();
@@ -588,12 +589,14 @@ fn compile_all(
                 kotlin: &unit.kotlin,
                 java: &unit.java,
                 fragments: &unit.fragments,
-                codegen_args: &unit.codegen_args,
+                arguments: &unit.arguments,
+                language_version: unit.language_version,
+                api_version: unit.api_version,
                 classpath: &classpath,
                 friend_paths: &friends,
             },
             jdk,
-            language_args,
+            jvm_properties,
             &work.join(&unit.module),
             &output,
         )?;
@@ -615,7 +618,9 @@ struct Unit<'a> {
     kotlin: &'a [(String, String)],
     java: &'a [(String, String)],
     fragments: &'a [FragmentUnit],
-    codegen_args: &'a [String],
+    arguments: &'a [String],
+    language_version: Option<krusty::language_version::LanguageVersion>,
+    api_version: Option<krusty::language_version::LanguageVersion>,
     classpath: &'a [PathBuf],
     friend_paths: &'a [PathBuf],
 }
@@ -627,7 +632,7 @@ struct Unit<'a> {
 fn compile_unit(
     unit: &Unit<'_>,
     jdk: BoxJdk<'_>,
-    language_args: &[String],
+    jvm_properties: &[String],
     unit_root: &Path,
     output: &Path,
 ) -> Result<BTreeMap<String, Vec<u8>>, String> {
@@ -649,8 +654,8 @@ fn compile_unit(
         let classpath_args = jdk.kotlinc_args(unit.classpath)?;
         let mut args: Vec<String> = vec!["-d".to_string(), output.to_string_lossy().into_owned()];
         args.extend(classpath_args);
-        args.extend_from_slice(language_args);
-        args.extend_from_slice(unit.codegen_args);
+        args.extend_from_slice(jvm_properties);
+        args.extend_from_slice(unit.arguments);
         args.push("-module-name".to_string());
         args.push(unit.module.to_string());
         // A folded `dependsOn` chain compiles as hierarchical multiplatform: one fragment per
@@ -687,7 +692,16 @@ fn compile_unit(
         }
         // This inventory's own cache is keyed by every input and the exact compiler, so a miss
         // compiles live rather than also replaying or recording through the recorded-byte archive.
-        let (code, diagnostics) = common::kotlinc_server::kotlinc_compile_unrecorded(&args)
+        let (code, diagnostics) =
+            common::kotlinc_server::kotlinc_compile_unrecorded_with_language_settings(
+                &args,
+                unit.language_version
+                    .map(|version| version.to_string())
+                    .as_deref(),
+                unit.api_version
+                    .map(|version| version.to_string())
+                    .as_deref(),
+            )
             .ok_or_else(|| "kotlinc unavailable".to_string())?;
         if code != 0 {
             return Err(reference_compile_error(unit.module, &diagnostics));
@@ -922,15 +936,16 @@ mod tests {
     /// A plain case's key inputs, which each test varies one field of.
     fn key_inputs<'a>(
         base_args: &'a [String],
-        unit_codegen_args: &'a [(&'a str, &'a [String])],
+        unit_arguments: &'a [(&'a str, &'a [String])],
     ) -> ReferenceCacheInputs<'a> {
         ReferenceCacheInputs {
             src: "fun box() = \"OK\"",
             stem: "Box",
             coroutine_helpers: NO_HELPERS,
             base_args,
-            language_args: &[],
-            unit_codegen_args,
+            jvm_properties: &[],
+            unit_arguments,
+            unit_language_settings: &[(MAIN_MODULE, None, None)],
             compiler_id: Some("2.4.20"),
             compiler_len: 100,
             producing_jdk: b"JAVA_VERSION=\"21.0.12\"",
@@ -992,13 +1007,13 @@ mod tests {
         let class_lambdas = ["-Xlambdas=class".to_string()];
         let no_compatibility = ["-jvm-default".to_string(), "no-compatibility".to_string()];
         // A unit compiled under a non-default mode is a different reference compile.
-        for unit_codegen_args in [
+        for unit_arguments in [
             &[(MAIN_MODULE, class_lambdas.as_slice())][..],
             &[(MAIN_MODULE, no_compatibility.as_slice())][..],
         ] {
             assert_ne!(
                 base.fingerprint(),
-                key_inputs(&a_jar, unit_codegen_args).fingerprint()
+                key_inputs(&a_jar, unit_arguments).fingerprint()
             );
         }
         // The same mode on a different unit of the same build is a different reference compile.
@@ -1020,12 +1035,85 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_isolates_typed_language_and_api_levels() {
+        let jar = classpath("/a.jar");
+        let base = key_inputs(&jar, PLAIN_UNIT);
+        let historical = [(
+            MAIN_MODULE,
+            None,
+            Some(krusty::language_version::LanguageVersion::new(1, 8)),
+        )];
+        assert_ne!(
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                unit_language_settings: &historical,
+                ..base
+            }
+            .fingerprint()
+        );
+    }
+
+    #[test]
+    fn typed_historical_levels_control_the_reference_compile() {
+        if !kotlinc_available() {
+            return;
+        }
+        let root = common::scratch_dir().expect("allocate a compile directory");
+        let api_source = root.join("HistoricalApi.kt");
+        std::fs::write(
+            &api_source,
+            "enum class Entry { VALUE }\nfun selected() = Entry.entries\n",
+        )
+        .expect("write the API source");
+        let language_source = root.join("HistoricalLanguage.kt");
+        std::fs::write(&language_source, "class Selected\n").expect("write the language source");
+        let compile = |source: &Path, output: &str, language, api| {
+            common::kotlinc_server::kotlinc_compile_unrecorded_with_language_settings(
+                &[
+                    "-d".to_string(),
+                    root.join(output).to_string_lossy().into_owned(),
+                    source.to_string_lossy().into_owned(),
+                ],
+                language,
+                api,
+            )
+            .expect("reference compiler is provisioned")
+        };
+        let (old_api_code, _) = compile(&api_source, "api-1.8", None, Some("1.8"));
+        let (new_api_code, new_api_diagnostics) =
+            compile(&api_source, "api-1.9", None, Some("1.9"));
+        let (old_language_code, old_language_diagnostics) =
+            compile(&language_source, "language-1.4", Some("1.4"), Some("1.4"));
+        let (new_language_code, new_language_diagnostics) =
+            compile(&language_source, "language-1.5", Some("1.5"), Some("1.5"));
+        let old_language_class =
+            std::fs::read(root.join("language-1.4/Selected.class")).expect("read 1.4 class");
+        let new_language_class =
+            std::fs::read(root.join("language-1.5/Selected.class")).expect("read 1.5 class");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_ne!(old_api_code, 0, "API 1.8 must hide Enum.entries");
+        assert_eq!((new_api_code, new_api_diagnostics.as_str()), (0, ""));
+        assert_eq!(
+            (old_language_code, old_language_diagnostics.as_str()),
+            (0, "")
+        );
+        assert_eq!(
+            (new_language_code, new_language_diagnostics.as_str()),
+            (0, "")
+        );
+        assert_ne!(
+            old_language_class, new_language_class,
+            "the exact language level must reach kotlinc's metadata stamp"
+        );
+    }
+
+    #[test]
     fn each_planned_unit_selects_its_own_codegen_modes() {
         let args = |src: &str, stem: &str| {
             plan_units(src, stem, NO_HELPERS)
                 .expect("a supported shape")
                 .into_iter()
-                .map(|unit| (unit.module, unit.codegen_args))
+                .map(|unit| (unit.module, unit.arguments))
                 .collect::<Vec<_>>()
         };
         let strings = |args: &[&str]| args.iter().map(ToString::to_string).collect::<Vec<_>>();
@@ -1180,135 +1268,87 @@ mod tests {
     }
 
     #[test]
-    fn directive_flags_mirror_the_corpus_reference_options() {
-        // A plain case adds nothing.
+    fn every_unit_compiles_under_the_shared_directive_arguments() {
+        let arguments = |src: &str| {
+            plan_units(src, "box", NO_HELPERS).map(|units| {
+                units
+                    .into_iter()
+                    .map(|unit| unit.arguments)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let strings = |args: &[&str]| args.iter().map(ToString::to_string).collect::<Vec<_>>();
+        // Case-wide arguments reach every unit; a unit's code-generation modes only that unit.
         assert_eq!(
-            reference_directive_args("fun box() = \"OK\"\n"),
-            Ok(Vec::<String>::new())
-        );
-        // `// ALLOW_KOTLIN_PACKAGE` opts in the reserved-`kotlin`-package flag.
-        assert_eq!(
-            reference_directive_args("// ALLOW_KOTLIN_PACKAGE\npackage kotlin.jvm\n"),
-            Ok(vec!["-Xallow-kotlin-package".to_string()])
-        );
-        // A source that declares a `kotlin.*` package opts in the same flag WITHOUT the directive,
-        // as several corpus cases do (e.g. a `// FILE:` block under `package kotlin.internal`).
-        assert_eq!(
-            reference_directive_args(
-                "// FILE: a.kt\npackage kotlin.internal\nannotation class A\n// FILE: b.kt\nfun box() = \"OK\"\n"
-            ),
-            Ok(vec!["-Xallow-kotlin-package".to_string()])
-        );
-        // A package that merely starts with the letters `kotlin` but is not the reserved package is
-        // not matched, so an ordinary case is unaffected.
-        assert_eq!(
-            reference_directive_args("package kotlinx.demo\nfun box() = \"OK\"\n"),
-            Ok(Vec::<String>::new())
-        );
-        // A test-only feature additionally opts in the JVM property.
-        assert_eq!(
-            reference_directive_args(
-                "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\nfun box() = \"OK\"\n"
+            arguments(
+                "// ALLOW_KOTLIN_PACKAGE\n// ASSERTIONS_MODE: always-enable\n\
+                 // MODULE: lib\n// FILE: lib.kt\n// LAMBDAS: CLASS\npackage kotlin.jvm\nfun a() {}\n\
+                 // MODULE: main(lib)\n// FILE: main.kt\nfun box() = \"OK\"\n"
             ),
             Ok(vec![
-                "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
-                "-Dkotlinc.test.allow.testonly.language.features=true".to_string(),
+                strings(&[
+                    "-Xallow-kotlin-package",
+                    "-Xassertions=always-enable",
+                    "-Xlambdas=class"
+                ]),
+                strings(&["-Xallow-kotlin-package", "-Xassertions=always-enable"]),
             ])
         );
-        // A non-test-only feature must NOT drag in the property: that would needlessly spin a
-        // property-keyed compiler server and change the key for an ordinary case.
+        // A directive with no kotlinc spelling fails the reference closed rather than compiling the
+        // case under a default it did not ask for.
         assert_eq!(
-            reference_directive_args("// LANGUAGE: +ContextParameters\nfun box() = \"OK\"\n"),
-            Ok(vec!["-XXLanguage:+ContextParameters".to_string()])
-        );
-        // `// OPT_IN:` markers each become an `-opt-in` flag; multiple markers on one line split.
-        assert_eq!(
-            reference_directive_args(
-                "// OPT_IN: kotlin.ExperimentalMultiplatform, kotlin.contracts.ExperimentalContracts\nfun box() = \"OK\"\n"
-            ),
-            Ok(vec![
-                "-opt-in=kotlin.ExperimentalMultiplatform".to_string(),
-                "-opt-in=kotlin.contracts.ExperimentalContracts".to_string(),
-            ])
-        );
-        // `// RETURN_VALUE_CHECKER_MODE: <MODE>` enables kotlinc's return-value checker so the
-        // reference compile accepts a case's `@MustUseReturnValues`/`@IgnorableReturnValue`; the
-        // directive's enum value maps to the compiler flag's `{check|full|disable}` spelling.
-        assert_eq!(
-            reference_directive_args(
-                "// RETURN_VALUE_CHECKER_MODE: FULL\n// WITH_STDLIB\nfun box() = \"OK\"\n"
-            ),
-            Ok(vec!["-Xreturn-value-checker=full".to_string()])
-        );
-        assert_eq!(
-            reference_directive_args("// RETURN_VALUE_CHECKER_MODE: CHECKER\nfun box() = \"OK\"\n"),
-            Ok(vec!["-Xreturn-value-checker=check".to_string()])
-        );
-        assert_eq!(
-            reference_directive_args(
-                "// RETURN_VALUE_CHECKER_MODE: DISABLED\nfun box() = \"OK\"\n"
-            ),
-            Ok(vec!["-Xreturn-value-checker=disable".to_string()])
-        );
-        // An unrecognized mode has no verified compiler spelling, so the reference fails closed
-        // instead of scoring against an invocation that lacks the case's checker mode.
-        assert_eq!(
-            reference_directive_args("// RETURN_VALUE_CHECKER_MODE: UNKNOWN\nfun box() = \"OK\"\n"),
-            Err("reference oracle does not support RETURN_VALUE_CHECKER_MODE UNKNOWN".to_string())
-        );
-        // A recognized code-generation mode is a per-unit argument, not a case-wide one; an
-        // unrecognized one cannot be mirrored and fails closed rather than compiling the default.
-        assert_eq!(
-            reference_directive_args("// JVM_DEFAULT_MODE: no-compatibility\nfun box() = \"OK\"\n"),
-            Ok(Vec::<String>::new())
-        );
-        assert_eq!(
-            reference_directive_args("// FILE: a.kt\n// LAMBDAS: SIDEWAYS\nfun box() = \"OK\"\n"),
+            arguments("// FILE: a.kt\n// LAMBDAS: SIDEWAYS\nfun box() = \"OK\"\n"),
             Err(
-                "reference oracle does not support the code-generation mode `// LAMBDAS: SIDEWAYS`"
+                "reference oracle: box directive `// LAMBDAS: SIDEWAYS` names no code-generation mode"
                     .to_string()
             )
         );
-        assert_eq!(
-            reference_directive_args("// JVM_DEFAULT_MODE: all\nfun box() = \"OK\"\n"),
-            Err(
-                "reference oracle does not support the code-generation mode `// JVM_DEFAULT_MODE: all`"
-                    .to_string()
+    }
+
+    #[test]
+    fn only_a_test_only_feature_runs_the_reference_under_the_property() {
+        let properties = |src: &str| {
+            reference_jvm_properties(
+                &plan_units(src, "box", NO_HELPERS).expect("a supported shape"),
             )
-        );
-        // The real `expectActualTypealiasCoercion` corpus case opts in all three.
+        };
         assert_eq!(
-            reference_directive_args(
+            properties(
                 "// LANGUAGE: +MultiPlatformProjects +ImplicitSignedToUnsignedIntegerConversion\n\
                  // ALLOW_KOTLIN_PACKAGE\nfun box() = \"OK\"\n"
             ),
-            Ok(vec![
-                "-XXLanguage:+MultiPlatformProjects".to_string(),
-                "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
-                "-Dkotlinc.test.allow.testonly.language.features=true".to_string(),
-                "-Xallow-kotlin-package".to_string(),
-            ])
+            vec!["-Dkotlinc.test.allow.testonly.language.features=true".to_string()]
+        );
+        // An ordinary feature must NOT drag in the property: that would needlessly spin a
+        // property-keyed compiler server and change the key for an ordinary case.
+        assert_eq!(
+            properties("// LANGUAGE: +ContextParameters\nfun box() = \"OK\"\n"),
+            Vec::<String>::new()
         );
     }
 
     #[test]
     fn directive_reference_options_change_the_cache_key() {
-        // Both corpus directive options ride `language_args`, so they must move the reference cache
-        // key: a cached plain compile can never be replayed as the directive-enabled one.
+        // Directive arguments and the test-only property both move the reference cache key: a
+        // cached plain compile can never be replayed as the directive-enabled one.
         let a_jar = classpath("/a.jar");
-        let key = |language_args: &[String]| {
+        let allow = ["-Xallow-kotlin-package".to_string()];
+        let key = |jvm_properties: &[String], unit: &[String]| {
             ReferenceCacheInputs {
                 src: "package kotlin.jvm\nfun box() = \"OK\"\n",
-                language_args,
-                ..key_inputs(&a_jar, PLAIN_UNIT)
+                jvm_properties,
+                ..key_inputs(&a_jar, &[(MAIN_MODULE, unit)])
             }
             .fingerprint()
         };
-        let plain = key(&[]);
-        assert_ne!(plain, key(&["-Xallow-kotlin-package".to_string()]));
+        let plain = key(&[], &[]);
+        assert_ne!(plain, key(&[], &allow));
         assert_ne!(
             plain,
-            key(&["-Dkotlinc.test.allow.testonly.language.features=true".to_string()])
+            key(
+                &["-Dkotlinc.test.allow.testonly.language.features=true".to_string()],
+                &[]
+            )
         );
     }
 

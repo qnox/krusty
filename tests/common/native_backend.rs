@@ -261,10 +261,13 @@ fn analyze_natively(
     for (_, src) in sources {
         features.apply_source_directives(src);
     }
+    // Every Native test analyzes for the Native target, so Native rules are not a choice this
+    // helper can get wrong.
+    let target = krusty::compilation_target::CompilationTarget::Native;
     let platform = if plugins {
-        super::with_native_plugins(platform)
+        super::with_native_plugins(target, platform)
     } else {
-        platform.into()
+        krusty::frontend::PlatformProvider::new(target, platform)
     };
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, diags,

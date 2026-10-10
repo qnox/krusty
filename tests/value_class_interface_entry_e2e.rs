@@ -152,7 +152,7 @@ fn delegated_value_class_interface_members_run() {
         SOURCE,
         "ValueClassInterfaceEntryBox",
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");

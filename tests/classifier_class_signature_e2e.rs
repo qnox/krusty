@@ -100,13 +100,22 @@ fn every_classifier_form_publishes_kotlincs_class_signature() {
     .expect("run the reference compiler");
     assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
 
-    let classes = common::compile_in_process(SOURCE, "Classifiers", &[common::stdlib_jar()], None)
-        .unwrap_or_else(|| {
-            panic!(
-                "{:?}",
-                common::front_end_diagnostics(SOURCE, &[common::stdlib_jar()], None)
+    let classes = common::compile_in_process(
+        SOURCE,
+        "Classifiers",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "{:?}",
+            common::front_end_diagnostics(
+                SOURCE,
+                &[common::stdlib_jar()],
+                Some(&common::jdk_modules())
             )
-        });
+        )
+    });
     write_classes(&classes, &ours);
 
     let named = [

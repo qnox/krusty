@@ -48,6 +48,10 @@ pub(super) enum HeapType {
     /// `none`, the bottom of the internal (struct/array/i31) hierarchy: what `null` of any struct
     /// or array type is.
     None,
+    /// `eq`: every struct, array and `i31` — the values `ref.eq` compares.
+    Eq,
+    /// `func`: every function reference.
+    Func,
 }
 
 impl HeapType {
@@ -55,6 +59,8 @@ impl HeapType {
         match self {
             Self::Concrete(index) => sleb(out, i64::from(index)),
             Self::None => out.push(0x71),
+            Self::Eq => out.push(0x6d),
+            Self::Func => out.push(0x70),
         }
     }
 }
@@ -153,6 +159,46 @@ impl CompositeType {
     }
 }
 
+/// A type definition: its structure, the type it is declared a subtype of, and whether further
+/// types may be declared subtypes of it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct SubType {
+    pub(super) composite: CompositeType,
+    pub(super) supertype: Option<u32>,
+    pub(super) open: bool,
+}
+
+impl SubType {
+    /// A type nothing extends and that extends nothing: what the short form of a type names.
+    fn plain(composite: CompositeType) -> Self {
+        Self {
+            composite,
+            supertype: None,
+            open: false,
+        }
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(if self.open { 0x50 } else { 0x4f });
+        match self.supertype {
+            Some(supertype) => {
+                uleb(out, 1);
+                uleb(out, u64::from(supertype));
+            }
+            None => uleb(out, 0),
+        }
+        self.composite.encode(out);
+    }
+}
+
+/// A global: its type, whether the program may assign it, and the constant expression it starts
+/// as — the type's default value when there is none.
+struct Global {
+    ty: ValType,
+    mutable: bool,
+    init: Option<Code>,
+}
+
 /// An import of a function; the only kind of import the hosts krusty targets need.
 pub(super) struct FunctionImport {
     pub(super) module: &'static str,
@@ -171,14 +217,15 @@ pub(super) struct Function {
 /// defined functions, in the order they were added.
 #[derive(Default)]
 pub(super) struct Module {
-    types: Vec<CompositeType>,
+    types: Vec<SubType>,
     imports: Vec<FunctionImport>,
     functions: Vec<Option<Function>>,
     /// One page-granular linear memory, exported as `memory`, when the host ABI needs one.
     memory_pages: Option<u32>,
     exports: Vec<(String, u32)>,
-    /// Mutable globals, each starting at its type's default value.
-    globals: Vec<ValType>,
+    globals: Vec<Global>,
+    /// Functions the code names by `ref.func`, which the format requires a module to declare.
+    referenced: Vec<u32>,
     /// One passive data segment: the bytes `array.new_data` copies constants out of.
     data: Vec<u8>,
 }
@@ -187,8 +234,23 @@ impl Module {
     /// The index of `ty`, declaring it if it is new. Function types are deduplicated so that two
     /// functions of one signature share an index, which `call_ref` would need them to.
     pub(super) fn ty(&mut self, ty: CompositeType) -> u32 {
+        let ty = SubType::plain(ty);
         if let Some(index) = self.types.iter().position(|known| *known == ty) {
             return index as u32;
+        }
+        self.types.push(ty);
+        (self.types.len() - 1) as u32
+    }
+
+    /// Declare a NEW type, never shared with an existing one of the same structure: a class's
+    /// type is its identity, which `ref.test` distinguishes. Its supertype, if any, is declared
+    /// before it.
+    pub(super) fn subtype(&mut self, ty: SubType) -> u32 {
+        if let Some(supertype) = ty.supertype {
+            assert!(
+                (supertype as usize) < self.types.len() && self.types[supertype as usize].open,
+                "a supertype is an open type declared earlier"
+            );
         }
         self.types.push(ty);
         (self.types.len() - 1) as u32
@@ -227,8 +289,29 @@ impl Module {
 
     /// Declare a mutable global holding `ty`'s default value: zero, or null.
     pub(super) fn global(&mut self, ty: ValType) -> u32 {
-        self.globals.push(ty);
+        self.globals.push(Global {
+            ty,
+            mutable: true,
+            init: None,
+        });
         (self.globals.len() - 1) as u32
+    }
+
+    /// Declare an immutable global holding the value the constant expression `init` computes.
+    pub(super) fn constant_global(&mut self, ty: ValType, init: Code) -> u32 {
+        self.globals.push(Global {
+            ty,
+            mutable: false,
+            init: Some(init),
+        });
+        (self.globals.len() - 1) as u32
+    }
+
+    /// Record that the code takes a reference to `function`, which `ref.func` requires.
+    pub(super) fn reference_function(&mut self, function: u32) {
+        if !self.referenced.contains(&function) {
+            self.referenced.push(function);
+        }
     }
 
     pub(super) fn export_function(&mut self, name: &str, index: u32) {
@@ -250,10 +333,6 @@ impl Module {
             body.push(0x4e);
             uleb(body, self.types.len() as u64);
             for ty in &self.types {
-                // `sub final` with no supertypes: the same type the short form would name, spelled
-                // out so a class hierarchy can later declare supertypes without changing form.
-                body.push(0x4f);
-                uleb(body, 0);
                 ty.encode(body);
             }
         });
@@ -285,18 +364,23 @@ impl Module {
         if !self.globals.is_empty() {
             section(&mut out, 6, |body| {
                 uleb(body, self.globals.len() as u64);
-                for ty in &self.globals {
-                    ty.encode(body);
-                    body.push(0x01);
-                    let mut init = Code::default();
-                    match ty {
-                        ValType::I32 => init.i32_const(0),
-                        ValType::I64 => init.i64_const(0),
-                        ValType::F32 => init.f32_const(0.0),
-                        ValType::F64 => init.f64_const(0.0),
-                        ValType::Ref { heap, .. } => init.ref_null(*heap),
-                    };
-                    body.extend_from_slice(&init.bytes);
+                for global in &self.globals {
+                    global.ty.encode(body);
+                    body.push(u8::from(global.mutable));
+                    match &global.init {
+                        Some(init) => body.extend_from_slice(&init.bytes),
+                        None => {
+                            let mut init = Code::default();
+                            match global.ty {
+                                ValType::I32 => init.i32_const(0),
+                                ValType::I64 => init.i64_const(0),
+                                ValType::F32 => init.f32_const(0.0),
+                                ValType::F64 => init.f64_const(0.0),
+                                ValType::Ref { heap, .. } => init.ref_null(heap),
+                            };
+                            body.extend_from_slice(&init.bytes);
+                        }
+                    }
                     body.push(0x0b);
                 }
             });
@@ -315,6 +399,19 @@ impl Module {
                 uleb(body, 0);
             }
         });
+        if !self.referenced.is_empty() {
+            // One declarative segment: it places nothing in a table and only declares the
+            // functions `ref.func` names.
+            section(&mut out, 9, |body| {
+                uleb(body, 1);
+                uleb(body, 3);
+                body.push(0x00);
+                uleb(body, self.referenced.len() as u64);
+                for function in &self.referenced {
+                    uleb(body, u64::from(*function));
+                }
+            });
+        }
         // `array.new_data` names a data segment from the code section, which the format only
         // permits once the data count section has announced how many there are.
         section(&mut out, 12, |body| uleb(body, 1));
@@ -511,6 +608,34 @@ impl Code {
 
     pub(super) fn ref_as_non_null(&mut self) -> &mut Self {
         self.op(0xd4)
+    }
+
+    pub(super) fn ref_func(&mut self, function: u32) -> &mut Self {
+        self.op(0xd2).index(function)
+    }
+
+    pub(super) fn call_ref(&mut self, ty: u32) -> &mut Self {
+        self.op(0x14).index(ty)
+    }
+
+    /// `ref.test`: whether the reference on the stack is of `heap`, a null passing only when
+    /// `nullable`.
+    pub(super) fn ref_test(&mut self, nullable: bool, heap: HeapType) -> &mut Self {
+        self.gc(if nullable { 0x15 } else { 0x14 });
+        heap.encode(&mut self.bytes);
+        self
+    }
+
+    /// `ref.cast`: the reference on the stack as `heap`, trapping when it is not one (or is null
+    /// and `nullable` is false).
+    pub(super) fn ref_cast(&mut self, nullable: bool, heap: HeapType) -> &mut Self {
+        self.gc(if nullable { 0x17 } else { 0x16 });
+        heap.encode(&mut self.bytes);
+        self
+    }
+
+    pub(super) fn struct_set(&mut self, ty: u32, field: u32) -> &mut Self {
+        self.gc(0x05).index(ty).index(field)
     }
 
     pub(super) fn struct_new(&mut self, ty: u32) -> &mut Self {

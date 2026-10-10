@@ -1226,6 +1226,7 @@ pub(crate) struct ReplayedClasses {
 
 struct Invocation {
     out: PathBuf,
+    sources: Vec<String>,
     fingerprint: u128,
     legacy_fingerprint: u128,
     label: String,
@@ -1275,7 +1276,7 @@ fn replay_class_dump_with_policy(
             }
             continue;
         };
-        let replayed = split_replay(files);
+        let mut replayed = split_replay(files);
         if diagnostics_required() && !replayed.status {
             saw_incomplete = true;
             if fingerprint == invocation.legacy_fingerprint {
@@ -1283,6 +1284,7 @@ fn replay_class_dump_with_policy(
             }
             continue;
         }
+        replayed.stderr = materialize_diagnostic_sources(&replayed.stderr, &invocation.sources);
         return Some(replayed);
     }
     if saw_incomplete && !compile_missing {
@@ -1381,6 +1383,69 @@ fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
     }
 }
 
+/// Replace a recorded located-diagnostic path with the current invocation's source spelling.
+///
+/// Invocation fingerprints deliberately identify scratch sources by basename and bytes, so a dump
+/// recorded in one process may replay in another directory. Diagnostics are part of that dump and
+/// must follow the same location-independent identity instead of leaking the recorder's path.
+fn materialize_diagnostic_sources(stderr: &str, sources: &[String]) -> String {
+    let mut by_basename = BTreeMap::<String, Option<&str>>::new();
+    for source in sources {
+        let entry = by_basename.entry(basename(source));
+        match entry {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(source));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_some_and(|existing| existing != source) {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+
+    let mut materialized = String::with_capacity(stderr.len());
+    for line in stderr.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        let replacement = located_diagnostic_source(body).and_then(|recorded| {
+            by_basename
+                .get(&basename(recorded))
+                .and_then(|source| *source)
+                .map(|source| (recorded.len(), source))
+        });
+        if let Some((prefix_len, source)) = replacement {
+            materialized.push_str(source);
+            materialized.push_str(&body[prefix_len..]);
+        } else {
+            materialized.push_str(body);
+        }
+        materialized.push_str(newline);
+    }
+    materialized
+}
+
+fn located_diagnostic_source(line: &str) -> Option<&str> {
+    for (prefix_len, _) in line.match_indices(':') {
+        let after_path = &line[prefix_len + 1..];
+        let Some((line_number, after_line)) = after_path.split_once(':') else {
+            continue;
+        };
+        let Some((column, _message)) = after_line.split_once(':') else {
+            continue;
+        };
+        if !line_number.is_empty()
+            && line_number.bytes().all(|byte| byte.is_ascii_digit())
+            && !column.is_empty()
+            && column.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Some(&line[..prefix_len]);
+        }
+    }
+    None
+}
+
 fn exit_code(bytes: &[u8]) -> i32 {
     let Ok(bytes) = <[u8; 4]>::try_from(bytes) else {
         refuse_missing_dump("a kotlinc exit code that is not four bytes");
@@ -1390,6 +1455,7 @@ fn exit_code(bytes: &[u8]) -> i32 {
 
 fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
     let mut out = None;
+    let mut source_args = Vec::new();
     let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
     let mut classpath = Vec::new();
     let mut flags = Vec::new();
@@ -1420,6 +1486,7 @@ fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
             let bytes = std::fs::read(arg)
                 .map_err(|err| format!("unreadable source {}: {err}", Path::new(arg).display()))?;
             let name = basename(arg);
+            source_args.push(arg.clone());
             sources.push((name, bytes));
             index += 1;
             continue;
@@ -1452,6 +1519,7 @@ fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
     };
     Ok(Some(Invocation {
         out,
+        sources: source_args,
         fingerprint: fingerprint_of(&classpath),
         legacy_fingerprint: fingerprint_of(&legacy_classpath),
         label,

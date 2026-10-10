@@ -65,6 +65,7 @@ fn run_predicate(
     conformance: &str,
     gradle_plugin: &str,
     gradle: &str,
+    build_tools: &str,
 ) -> std::process::Output {
     let mut child = Command::new("bash")
         .arg("-s")
@@ -75,6 +76,7 @@ fn run_predicate(
         .env("CONFORMANCE_RESULT", conformance)
         .env("GRADLE_PLUGIN_RESULT", gradle_plugin)
         .env("GRADLE_RESULT", gradle)
+        .env("BUILD_TOOLS_RESULT", build_tools)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -99,7 +101,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         aggregate.contains(
-            "\n    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle]\n"
+            "\n    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools]\n"
         ),
         "the aggregate waits on every merge gate: {aggregate}"
     );
@@ -117,7 +119,8 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             && aggregate.contains("CONFORMANCE_RESULT: ${{ needs.conformance.result }}\n")
             && aggregate
                 .contains("GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}\n")
-            && aggregate.contains("GRADLE_RESULT: ${{ needs.gradle.result }}\n"),
+            && aggregate.contains("GRADLE_RESULT: ${{ needs.gradle.result }}\n")
+            && aggregate.contains("BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}\n"),
         "the step reads each dependency's own result: {aggregate}"
     );
     assert_eq!(
@@ -145,7 +148,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         job(&workflow, "release").contains(
-            "    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]\n"
+            "    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]\n"
         ),
         "master release keeps its broader prerequisites"
     );
@@ -155,12 +158,12 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
 fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let run = |results: [&str; 5]| {
+    let run = |results: [&str; 6]| {
         run_predicate(
-            &script, results[0], results[1], results[2], results[3], results[4],
+            &script, results[0], results[1], results[2], results[3], results[4], results[5],
         )
     };
-    let success = ["success"; 5];
+    let success = ["success"; 6];
     let output = run(success);
     assert!(
         output.status.success(),
@@ -169,7 +172,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nklib-semantics: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\n",
+        "ci: success\nklib-semantics: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\nbuild-tools: success\n",
         "the log names every dependency result"
     );
 
@@ -179,6 +182,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
         "conformance",
         "build-gradle-plugin",
         "gradle",
+        "build-tools",
     ];
     for (gate, index) in gates.into_iter().zip(0..) {
         for result in ["failure", "cancelled", "skipped", ""] {
@@ -191,7 +195,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
             );
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr),
-                "core CI, KLIB semantics, conformance, and every Gradle gate must succeed\n",
+                "core CI, KLIB semantics, conformance, every Gradle gate, and every build-tools lane must succeed\n",
                 "{gate}={result:?}"
             );
         }

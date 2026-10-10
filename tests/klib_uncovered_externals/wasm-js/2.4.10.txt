@@ -1,0 +1,16 @@
+package kotlin.js: fun js(kotlin.String): kotlin.Nothing
+package kotlin.wasm.internal: fun getCachedJsObject(kotlin.js.JsAny, kotlin.js.JsAny): kotlin.js.JsAny?
+package kotlin.wasm.internal: fun itoa32(kotlin.Int): kotlin.String
+package kotlin.wasm.internal: fun itoa64(kotlin.Long): kotlin.String
+package kotlin.wasm.internal: fun jsCharCodeAt(kotlin.js.JsString, kotlin.Int): kotlin.Int
+package kotlin.wasm.internal: fun jsCompare(kotlin.js.JsString, kotlin.js.JsString): kotlin.Int
+package kotlin.wasm.internal: fun jsConcat(kotlin.js.JsString, kotlin.js.JsString): kotlin.wasm.internal.JsStringRef
+package kotlin.wasm.internal: fun jsEquals(kotlin.js.JsString, kotlin.js.JsString): kotlin.Int
+package kotlin.wasm.internal: fun jsFromCharCodeArray(kotlin.wasm.internal.WasmCharArray, kotlin.Int, kotlin.Int): kotlin.wasm.internal.JsStringRef
+package kotlin.wasm.internal: fun jsIntoCharCodeArray(kotlin.js.JsString, kotlin.wasm.internal.WasmCharArray, kotlin.Int): kotlin.Int
+package kotlin.wasm.internal: fun jsLength(kotlin.js.JsString): kotlin.Int
+package kotlin.wasm.internal: fun jsSubstring(kotlin.js.JsString, kotlin.Int, kotlin.Int): kotlin.wasm.internal.JsStringRef
+package kotlin.wasm.internal: fun jsThrow(kotlin.js.JsAny?): kotlin.Unit
+package kotlin.wasm.internal: fun utoa32(kotlin.UInt): kotlin.String
+package kotlin.wasm.internal: fun utoa64(kotlin.ULong): kotlin.String
+package kotlin.wasm.internal: fun wasm_externref_is_null(kotlin.js.JsAny?): kotlin.Boolean

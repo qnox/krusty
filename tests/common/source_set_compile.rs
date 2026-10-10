@@ -1,5 +1,6 @@
 //! Module-wide in-process compilation helpers.
 
+use krusty::compilation_target::CompilationTarget;
 use std::path::PathBuf;
 
 use krusty::diag::DiagSink;
@@ -87,7 +88,7 @@ pub(crate) fn compile_source_set(
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        super::with_native_plugins(platform),
+        super::with_native_plugins(CompilationTarget::Jvm, platform),
         &language_settings.features,
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
@@ -95,6 +96,7 @@ pub(crate) fn compile_source_set(
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(class_major)
         .with_annotations_in_metadata(language_settings.features.has("AnnotationsInMetadata"))
+        .with_pre_release_metadata(language_settings.features.is_pre_release())
         .with_metadata_version(metadata_version);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs

@@ -325,16 +325,19 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             if let Slot::AccessorBridge {
-                declared, setter, ..
+                declared,
+                receiver,
+                setter,
+                ..
             } = &slot
             {
                 // The INTERFACE's accessor signature, which is the point of the entry: a caller
                 // reading this number through the interface reads what the interface declares.
-                let (params, ret) = if *setter {
-                    (vec![any(), *declared], Ty::Unit)
-                } else {
-                    (vec![any()], *declared)
-                };
+                let (params, ret) = super::object_entries::accessor_signature(
+                    *declared,
+                    receiver.map(|(declared, _)| declared),
+                    *setter,
+                );
                 // Named by position rather than by what it bridges: neither end need be a source
                 // accessor, so there is no declaration id to name it after, and two classes may
                 // need one for the same slot number.
@@ -885,7 +888,9 @@ impl<'a> FileLowering<'a> {
             .cloned()
             .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
         let fid = match entry {
-            Slot::Function(fid) => fid,
+            // A value class's own member wears its own signature behind the bridge that unboxes
+            // the receiver.
+            Slot::Function(fid) | Slot::ValueBridge { function: fid, .. } => fid,
             Slot::Bridge { declared, .. } => declared,
             other => return Err(declined!("a walk through the vtable entry {other:?}")),
         };
@@ -909,7 +914,9 @@ impl<'a> FileLowering<'a> {
             .cloned()
             .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
         match entry {
-            Slot::Function(fid) => Ok(self.ir.functions[fid as usize].ret),
+            Slot::Function(fid) | Slot::ValueBridge { function: fid, .. } => {
+                Ok(self.ir.functions[fid as usize].ret)
+            }
             // A stand-in for a base whose signature has another representation wears that base's,
             // which is what a caller reading the slot gets.
             Slot::Bridge { declared, .. } => Ok(self.ir.functions[declared as usize].ret),
@@ -1424,11 +1431,19 @@ impl<'a> FileLowering<'a> {
         if let Slot::AccessorBridge {
             declared,
             implemented,
+            receiver,
             setter,
             target_slot,
         } = slot
         {
-            return self.define_accessor_bridge(*declared, *implemented, *setter, *target_slot, id);
+            return self.define_accessor_bridge(
+                *declared,
+                *implemented,
+                *receiver,
+                *setter,
+                *target_slot,
+                id,
+            );
         }
         if let Slot::AnnotationMember { class, member } = slot {
             return self.define_annotation_member(*class, *member, id);
@@ -2247,12 +2262,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     pub(super) fn construction(
         &mut self,
+        site: u32,
         internal: TypeName,
         args: &[u32],
         selected: Option<&[Ty]>,
         defaulted: Option<&[u32]>,
         placement: super::frame_objects::Placement,
     ) -> Result<Option<Value>, Unsupported> {
+        // A class another file declares is constructed through the entry point of the selected
+        // module constructor; its layout and constructor are that file's.
+        if self.file.ir.class_id_by_name(internal).is_none() {
+            if let Some(constructor) = self.file.ir.module_constructions.selected.get(&site) {
+                return self.module_construction(*constructor, internal, args, defaulted.is_some());
+            }
+        }
         let name = internal.render();
         if let Some(omitted) = defaulted {
             return self.defaulted_construction(internal, args, selected, omitted);
@@ -2371,6 +2394,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     pub(super) fn method_call(
         &mut self,
+        site: u32,
         class: ClassId,
         index: u32,
         receiver: u32,
@@ -2389,7 +2413,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 .map(|(ordinal, _)| ordinal as u32)
                 .collect();
             let supplied: Vec<u32> = args.iter().flatten().copied().collect();
-            return self.defaulted_call(fid, &omitted, Some(receiver), &supplied);
+            return self.defaulted_call(fid, &omitted, Some(receiver), &supplied, site);
         };
         if function.dispatch_receiver.is_none() {
             return Err(declined!("a class-static call (`{}`)", function.name));
@@ -2426,6 +2450,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         receiver: u32,
         inner: TypeName,
     ) -> Result<Option<Value>, Unsupported> {
+        let (class, field) = self.enclosing_field(inner)?;
+        // At the field's own type: the outer instance of a value class's `inner` class is that
+        // class's value, not an object.
+        let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        self.null_check(object)?;
+        self.load_field(object, class, field, ty).map(Some)
+    }
+
+    /// The class an enclosing-instance edge leaves and the field holding its outer instance.
+    pub(super) fn enclosing_field(&self, inner: TypeName) -> Result<(ClassId, u32), Unsupported> {
         let class = self.file.class_of(inner, "the enclosing instance of")?;
         let declaration = &self.file.ir.classes[class as usize];
         let Some(&(_, field)) = declaration
@@ -2438,17 +2475,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 declaration.fq_name()
             ));
         };
-        let offset = self.file.model.layout(class).fields[field as usize].offset as i32;
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
-        self.null_check(object)?;
-        Ok(Some(self.builder.ins().load(
-            types::I64,
-            trusted(),
-            object,
-            offset,
-        )))
+        Ok((class, field))
     }
 
     pub(super) fn checked_property(
@@ -2515,12 +2542,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         index: usize,
         value: Value,
     ) -> Result<Option<Value>, Unsupported> {
+        Ok(self
+            .value_property_read_typed(class, index, value)?
+            .map(|(value, _)| value))
+    }
+
+    /// [`Self::value_property_read_of`], with the type the produced value is carried at.
+    pub(super) fn value_property_read_typed(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        value: Value,
+    ) -> Result<Option<(Value, Ty)>, Unsupported> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
         if let Some(getter) = property.getter {
             let id = self.file.functions[getter as usize].expect("a getter has a body");
+            let produced = self.file.ir.functions[getter as usize].ret;
             let func_ref = self.func_ref(id);
             let call = self.emit_call(func_ref, &[value])?;
-            return Ok(self.builder.inst_results(call).first().copied());
+            return Ok(self
+                .builder
+                .inst_results(call)
+                .first()
+                .map(|value| (*value, produced)));
         }
         let Some(field) = property.backing_field else {
             return Err(declined!(
@@ -2535,7 +2579,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             ));
         }
         let stored = model::field_storage_ty(self.file.values, self.file.ir, class, field)?;
-        self.convert(value, Some(stored), property.ty)
+        Ok(self
+            .convert(value, Some(stored), property.ty)?
+            .map(|value| (value, property.ty)))
     }
 
     /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.
@@ -2545,20 +2591,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         index: usize,
         object: Value,
     ) -> Result<Option<Value>, Unsupported> {
+        Ok(self
+            .property_read_typed(class, index, object)?
+            .map(|(value, _)| value))
+    }
+
+    /// [`Self::property_read_of`], with the type the produced value is carried at: the property's
+    /// own type through a dispatch slot, the getter's result, or the backing field's type.
+    pub(super) fn property_read_typed(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        object: Value,
+    ) -> Result<Option<(Value, Ty)>, Unsupported> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
-        if property
-            .storage_ty
-            .is_some_and(|storage| self.carrier(storage) != self.carrier(property.ty))
-        {
-            return Err(declined!(
-                "a property whose storage differs from its type (`{}`)",
-                property.name
-            ));
-        }
         let through_slot = model::local_property_target(self.file.ir, class, index)
             .and_then(|target| self.file.model.slot(class, &model::SlotKey::Getter(target)));
         if let Some(slot) = through_slot {
-            return self.dispatch(object, slot, &[], property.ty, &[]);
+            return Ok(self
+                .dispatch(object, slot, &[], property.ty, &[])?
+                .map(|value| (value, property.ty)));
         }
         if let Some(getter) = property.getter {
             // A value class's getter is its own member and takes the VALUE as `this`; what is in
@@ -2570,20 +2622,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 object
             };
             let id = self.file.functions[getter as usize].expect("a getter has a body");
+            let produced = self.file.ir.functions[getter as usize].ret;
             let func_ref = self.func_ref(id);
             let call = self.emit_call(func_ref, &[this])?;
-            return Ok(self.builder.inst_results(call).first().copied());
+            return Ok(self
+                .builder
+                .inst_results(call)
+                .first()
+                .map(|value| (*value, produced)));
         }
-        match property.backing_field {
-            Some(field) => {
-                let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
-                self.load_field(object, class, field, ty).map(Some)
-            }
-            None => Err(declined!(
+        let Some(field) = property.backing_field else {
+            return Err(declined!(
                 "a property with neither storage nor a getter (`{}`)",
                 property.name
-            )),
-        }
+            ));
+        };
+        // The checker lowers a read of an explicit backing field as a field access; a property
+        // read that remains is the default getter, which answers the property's public type.
+        let ty = match property.storage_ty {
+            Some(_) => property.ty,
+            None => self.file.ir.classes[class as usize].fields[field as usize].ty,
+        };
+        self.load_field(object, class, field, ty)
+            .map(|value| Some((value, ty)))
     }
 
     pub(super) fn property_write(
