@@ -807,7 +807,6 @@ delegatedProperty/genericSetValueViaSyntheticAccessor.kt
 delegatedProperty/insideInlinedObjectMultiModule.kt
 delegatedProperty/kt37204.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
-delegatedProperty/localDelegatedBoundValueWithSideEffect.kt
 delegatedProperty/map.kt
 delegatedProperty/optimizedDelegatedProperties/inSeparateModule.kt
 delegatedProperty/optimizedDelegatedProperties/inSeparateModuleWithNonNullParameter.kt
@@ -826,7 +825,6 @@ delegatedProperty/provideDelegate/inlineProvideDelegate.kt
 delegatedProperty/provideDelegate/local.kt
 delegatedProperty/provideDelegate/memberExtension.kt
 delegatedProperty/provideDelegate/propertyMetadata.kt
-delegatedProperty/resolveGetValueWithWholeDelegate.kt
 delegatedProperty/useKPropertyLater.kt
 delegatedProperty/valByMapDelegatedProperty.kt
 delegation/delegationDifferentModule.kt
@@ -1487,7 +1485,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/augmentedAssignmentsAndIncrements.kt
 properties/complexPropertyInitializer.kt
 properties/const/intermoduleInlineConst.kt
 properties/eagerInitializationGlobal1.kt
