@@ -161,6 +161,10 @@ impl PackageInventory {
             .flatten()
             .for_each(|extension| attach(&mut extension.signed));
         for classifier in self.classifiers.values_mut() {
+            classifier.constructors.iter_mut().for_each(|constructor| {
+                let signature = KlibIrSignature::Public(constructor.signature.clone());
+                constructor.defaults = defaults.of(&signature);
+            });
             classifier.functions.iter_mut().for_each(&mut attach);
             classifier
                 .associated_functions

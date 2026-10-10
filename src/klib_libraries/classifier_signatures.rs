@@ -24,6 +24,8 @@ pub(super) struct SignedConstructor {
     pub(super) declaration: KotlinConstructor,
     pub(super) signature: KlibPublicIdSignature,
     pub(super) parameters: Box<[ResolvedParameterIdentity]>,
+    /// The constant default of each value parameter, read from the library's IR.
+    pub(super) defaults: Vec<Option<crate::libraries::DefaultValue>>,
 }
 
 /// A class joined with its identity, its validated shape, and its signed members.
@@ -174,6 +176,7 @@ pub(super) fn sign_package_classes(
                 declaration,
                 signature,
                 parameters,
+                defaults: Vec::new(),
             });
         }
         let mut functions = Vec::new();

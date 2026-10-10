@@ -33,6 +33,7 @@ pub(super) fn classifier_record(
             &constructor.declaration,
             &constructor.parameters,
         );
+        member.default_values = constructor.defaults.clone();
         identities.assign_constructor(
             &constructor.signature,
             &constructor.parameters,

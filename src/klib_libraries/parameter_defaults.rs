@@ -16,6 +16,9 @@ use crate::metadata::klib_ir::{KlibIrConstant, KlibIrModuleTrees, KlibIrSignatur
 #[derive(Default)]
 pub(super) struct ParameterDefaults {
     defaults: HashMap<KlibIrSignature, Vec<Option<DefaultValue>>>,
+    /// The declarations already visited, including ones with no constant default. Library order
+    /// matches the inventory's first-definition-wins policy for a repeated public identity.
+    seen: std::collections::HashSet<KlibIrSignature>,
 }
 
 impl ParameterDefaults {
@@ -26,9 +29,16 @@ impl ParameterDefaults {
                 continue;
             };
             let defaults = value_parameter_defaults(arena, function);
-            if defaults.iter().any(Option::is_some) {
-                self.defaults.insert(signature.clone(), defaults);
-            }
+            self.record(signature.clone(), defaults);
+        }
+    }
+
+    fn record(&mut self, signature: KlibIrSignature, defaults: Vec<Option<DefaultValue>>) {
+        if !self.seen.insert(signature.clone()) {
+            return;
+        }
+        if defaults.iter().any(Option::is_some) {
+            self.defaults.insert(signature, defaults);
         }
     }
 
@@ -87,5 +97,113 @@ fn constant_value(constant: &KlibIrConstant) -> DefaultValue {
         KlibIrConstant::Float(value) => DefaultValue::Float(*value),
         KlibIrConstant::Double(value) => DefaultValue::Double(*value),
         KlibIrConstant::String(value) => DefaultValue::Str(value.as_str().into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::klib_libraries::classifier_records::classifier_record;
+    use crate::klib_libraries::external_identities::ExternalIdentities;
+    use crate::klib_libraries::inventory::PackageInventory;
+    use crate::libraries::TypeKind;
+    use crate::metadata::semantic::{
+        KotlinClass, KotlinConstructor, KotlinFunctionTypeShape, KotlinModality, KotlinPackage,
+        KotlinType,
+    };
+    use crate::types::{type_name, Visibility};
+
+    fn class(internal: &str) -> KotlinType {
+        KotlinType::Class {
+            internal: internal.to_owned(),
+            args: Vec::new(),
+            nullable: false,
+            shape: KotlinFunctionTypeShape::default(),
+        }
+    }
+
+    fn defaulted_box() -> KotlinPackage {
+        let classifier = KotlinClass {
+            supertypes: vec!["kotlin/Any".to_owned()],
+            supertype_tys: vec![class("kotlin/Any")],
+            members: Vec::new(),
+            functions: Vec::new(),
+            properties: Vec::new(),
+            type_aliases: Vec::new(),
+            constructors: vec![KotlinConstructor {
+                is_primary: true,
+                params: vec![class("kotlin/Int")],
+                param_names: vec!["value".to_owned()],
+                param_defaults: vec![true],
+                vararg: None,
+                visibility: Visibility::Public,
+            }],
+            companion_name: None,
+            type_params: Vec::new(),
+            kind: TypeKind::Class,
+            is_fun_interface: false,
+            visibility: Visibility::Public,
+            is_expect: false,
+            enum_entries: Vec::new(),
+            has_enum_entries: false,
+            sealed_subclasses: Vec::new(),
+            inline_class_property: None,
+            modality: KotlinModality::Final,
+            is_nested: false,
+            is_inner: false,
+            metadata_flags: 0,
+            annotations: Vec::new(),
+            nullable_member_returns: Vec::new(),
+        };
+        KotlinPackage {
+            classes: [("fixture/Box".to_owned(), classifier)].into(),
+            ..KotlinPackage::default()
+        }
+    }
+
+    #[test]
+    fn constructor_defaults_are_published_on_the_ordinary_callable() {
+        let mut inventory =
+            PackageInventory::from_packages(vec![(vec!["fixture".to_owned()], defaulted_box())])
+                .expect("the fixture is signable");
+        let identity = type_name("fixture/Box");
+        let signature = inventory
+            .classifier(identity)
+            .expect("the class is published")
+            .constructors[0]
+            .signature
+            .clone();
+        let mut defaults = ParameterDefaults::default();
+        defaults.defaults.insert(
+            KlibIrSignature::Public(signature),
+            vec![Some(DefaultValue::Int(7))],
+        );
+        inventory.attach_defaults(&defaults);
+
+        let published = classifier_record(&inventory, &ExternalIdentities::default(), identity)
+            .expect("the class record is published");
+        assert_eq!(
+            published.constructors[0].default_values,
+            [Some(DefaultValue::Int(7))]
+        );
+    }
+
+    #[test]
+    fn repeated_identity_keeps_the_first_librarys_defaults() {
+        let inventory =
+            PackageInventory::from_packages(vec![(vec!["fixture".to_owned()], defaulted_box())])
+                .expect("the fixture is signable");
+        let signature = KlibIrSignature::Public(
+            inventory
+                .classifier(type_name("fixture/Box"))
+                .expect("the class is published")
+                .constructors[0]
+                .signature
+                .clone(),
+        );
+        let mut defaults = ParameterDefaults::default();
+        defaults.record(signature.clone(), vec![Some(DefaultValue::Int(7))]);
+        defaults.record(signature.clone(), vec![Some(DefaultValue::Int(9))]);
+        assert_eq!(defaults.of(&signature), [Some(DefaultValue::Int(7))]);
     }
 }

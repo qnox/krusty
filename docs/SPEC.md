@@ -3638,6 +3638,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A generic function whose provided parameters are mismatched primitives (`assertEquals(0, longVal)`)
   is skipped (kotlinc unifies the type variable and coerces the literal; krusty would box `Integer` vs
   `Long`). This is what compiles the large `kotlin.test`-based slice of the box corpus.
+- **KLIB constant defaults are declaration-owned call facts.** Metadata records which function or
+  constructor parameters have defaults; the default expressions themselves come from serialized
+  IR and are joined to metadata by the declaration's exact public identity. A closed literal is
+  published on that ordinary callable candidate and inserted at the call site with the parameter's
+  semantic type. A call omitting a non-constant default remains rejected as unavailable instead of
+  guessing or re-resolving it during lowering. If a library graph repeats a public identity, its
+  defaults come from the same first declaration the KLIB inventory retains. Test:
+  `klib_libraries::parameter_defaults::tests`.
 - **A nullable-primitive *field* smart-cast** (`if (value != null) value` where `value: Int?`) unboxes the
   wrapper on read, like the local-variable path — else the `Integer` reaches an `int` context (verify error).
 - **A statement-position `when` may mix `Unit` arms with value arms** — kotlinc coerces every arm of
