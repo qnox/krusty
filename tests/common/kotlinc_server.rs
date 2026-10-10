@@ -41,6 +41,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.lang.reflect.Method;
+import java.lang.reflect.Field;
 
 public class KotlincServer {
     public static void main(String[] a) throws Exception {
@@ -53,11 +54,24 @@ public class KotlincServer {
             if (n.endsWith(".jar") && !n.endsWith("-sources.jar") && !n.contains("-js") && !n.contains("-wasm"))
                 urls.add(f.toURI().toURL());
         }
+        urls.add(new File(a[1]).toURI().toURL());
         // ONE loader for the whole session: the compiler classes load once (this is the warmth). Parent is
         // the platform loader only, so the compiler's classes stay private to it.
         URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), ClassLoader.getPlatformClassLoader());
         Class<?> k = cl.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
         Method exec = k.getMethod("exec", PrintStream.class, String[].class);
+        Class<?> typedSettings = cl.loadClass("TypedLanguageSettingsUpdater");
+        Object typedSettingsUpdater = typedSettings.getDeclaredConstructor().newInstance();
+        Method selectLanguageSettings = typedSettings.getMethod("select", String.class, String.class);
+        Object configurationPhase = cl
+            .loadClass("org.jetbrains.kotlin.cli.pipeline.jvm.JvmConfigurationPipelinePhase")
+            .getField("INSTANCE").get(null);
+        Field updatersField = cl.loadClass("org.jetbrains.kotlin.cli.pipeline.AbstractConfigurationPhase")
+            .getDeclaredField("configurationUpdaters");
+        updatersField.setAccessible(true);
+        ArrayList<Object> updaters = new ArrayList<>((List<?>) updatersField.get(configurationPhase));
+        updaters.add(typedSettingsUpdater);
+        updatersField.set(configurationPhase, Collections.unmodifiableList(updaters));
         // The reset the compile daemon uses: dispose the accumulated global application environment after
         // each compile so the next one starts clean — without this the reused compiler leaks and stalls.
         Method disposeAppEnv = cl.loadClass("org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment")
@@ -72,6 +86,8 @@ public class KotlincServer {
         while (true) {
             int n;
             try { n = din.readInt(); } catch (EOFException e) { break; }
+            String languageVersion = readOptionalString(din);
+            String apiVersion = readOptionalString(din);
             String[] args = new String[n];
             for (int i = 0; i < n; i++) {
                 int l = din.readUnsignedShort();
@@ -81,6 +97,7 @@ public class KotlincServer {
             PrintStream err = new PrintStream(errBuf, true, "UTF-8");
             int codeNum;
             try {
+                selectLanguageSettings.invoke(null, languageVersion, apiVersion);
                 Object comp = k.getDeclaredConstructor().newInstance();
                 Object code = exec.invoke(comp, err, (Object) args);
                 codeNum = (int) code.getClass().getMethod("getCode").invoke(code);
@@ -88,6 +105,7 @@ public class KotlincServer {
                 t.printStackTrace(err);
                 codeNum = 2;
             } finally {
+                try { selectLanguageSettings.invoke(null, null, null); } catch (Throwable ignore) {}
                 // Clear the leaky global compiler state — the key to reusing one JVM without degrading.
                 try { disposeAppEnv.invoke(null); } catch (Throwable ignore) {}
             }
@@ -97,6 +115,90 @@ public class KotlincServer {
             dout.write(eb);
             dout.flush();
         }
+    }
+
+    private static String readOptionalString(DataInputStream in) throws IOException {
+        int length = in.readUnsignedShort();
+        return length == 0 ? null : new String(in.readNBytes(length), "UTF-8");
+    }
+}
+"#;
+
+const TYPED_LANGUAGE_SETTINGS_UPDATER_SRC: &str = r#"
+import java.util.Collections;
+import java.util.Map;
+import org.jetbrains.kotlin.cli.common.arguments.K2JVMCompilerArguments;
+import org.jetbrains.kotlin.cli.pipeline.ArgumentsPipelineArtifact;
+import org.jetbrains.kotlin.cli.pipeline.ConfigurationUpdater;
+import org.jetbrains.kotlin.config.AnalysisFlag;
+import org.jetbrains.kotlin.config.ApiVersion;
+import org.jetbrains.kotlin.config.CommonConfigurationKeys;
+import org.jetbrains.kotlin.config.CompilerConfiguration;
+import org.jetbrains.kotlin.config.LanguageFeature;
+import org.jetbrains.kotlin.config.LanguageVersion;
+import org.jetbrains.kotlin.config.LanguageVersionSettings;
+import org.jetbrains.kotlin.config.LanguageVersionSettingsImpl;
+
+public final class TypedLanguageSettingsUpdater extends ConfigurationUpdater<K2JVMCompilerArguments> {
+    private static String selectedLanguageVersion;
+    private static String selectedApiVersion;
+
+    public static void select(String languageVersion, String apiVersion) {
+        selectedLanguageVersion = languageVersion;
+        selectedApiVersion = apiVersion;
+    }
+
+    @Override
+    public void fillConfiguration(
+        ArgumentsPipelineArtifact<? extends K2JVMCompilerArguments> input,
+        CompilerConfiguration configuration
+    ) {
+        if (selectedLanguageVersion == null && selectedApiVersion == null) return;
+        LanguageVersionSettings original = configuration.get(CommonConfigurationKeys.LANGUAGE_VERSION_SETTINGS);
+        if (original == null) throw new IllegalStateException("kotlinc did not configure language settings");
+        LanguageVersion language = selectedLanguageVersion == null
+            ? original.getLanguageVersion()
+            : LanguageVersion.fromVersionString(selectedLanguageVersion);
+        if (language == null) throw new IllegalArgumentException("unknown language version " + selectedLanguageVersion);
+        ApiVersion api = selectedApiVersion == null
+            ? (selectedLanguageVersion == null
+                ? original.getApiVersion()
+                : ApiVersion.createByLanguageVersion(language))
+            : ApiVersion.Companion.parse(selectedApiVersion);
+        if (api == null) throw new IllegalArgumentException("unknown API version " + selectedApiVersion);
+        if (api.compareTo(ApiVersion.createByLanguageVersion(language)) > 0) {
+            throw new IllegalArgumentException("API version " + api + " exceeds language version " + language);
+        }
+        LanguageVersionSettings adjusted = new LanguageVersionSettingsImpl(
+            language,
+            api,
+            Collections.emptyMap(),
+            original.getCustomizedLanguageFeatures()
+        );
+        configuration.put(
+            CommonConfigurationKeys.LANGUAGE_VERSION_SETTINGS,
+            new PreservingSettings(adjusted, original)
+        );
+    }
+
+    private static final class PreservingSettings implements LanguageVersionSettings {
+        private final LanguageVersionSettings adjusted;
+        private final LanguageVersionSettings original;
+
+        PreservingSettings(LanguageVersionSettings adjusted, LanguageVersionSettings original) {
+            this.adjusted = adjusted;
+            this.original = original;
+        }
+        public LanguageFeature.State getFeatureSupport(LanguageFeature feature) {
+            return adjusted.getFeatureSupport(feature);
+        }
+        public Map<LanguageFeature, LanguageFeature.State> getCustomizedLanguageFeatures() {
+            return adjusted.getCustomizedLanguageFeatures();
+        }
+        public boolean isPreRelease() { return adjusted.isPreRelease(); }
+        public <T> T getFlag(AnalysisFlag<? extends T> flag) { return original.getFlag(flag); }
+        public ApiVersion getApiVersion() { return adjusted.getApiVersion(); }
+        public LanguageVersion getLanguageVersion() { return adjusted.getLanguageVersion(); }
     }
 }
 "#;
@@ -117,6 +219,7 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in KOTLINC_SERVER_SRC
         .bytes()
+        .chain(TYPED_LANGUAGE_SETTINGS_UPDATER_SRC.bytes())
         .chain(super::producing_jdk::driver_cache_key(java_home))
     {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
@@ -144,15 +247,20 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
         return Some(dir);
     }
     let src_path = dir.join("KotlincServer.java");
+    let updater_src_path = dir.join("TypedLanguageSettingsUpdater.java");
     std::fs::write(&src_path, KOTLINC_SERVER_SRC).ok()?;
+    std::fs::write(&updater_src_path, TYPED_LANGUAGE_SETTINGS_UPDATER_SRC).ok()?;
     let javac = format!("{java_home}/bin/javac");
     if !Path::new(&javac).exists() {
         return None;
     }
     let out = Command::new(&javac)
+        .arg("-cp")
+        .arg(format!("{}/*", _compiler_jar.parent()?.to_string_lossy()))
         .arg("-d")
         .arg(&dir)
         .arg(&src_path)
+        .arg(&updater_src_path)
         .output()
         .ok()?;
     if !class.is_file() {
@@ -200,7 +308,7 @@ impl KotlincServer {
             "-Xmn256m",
         ]);
         cmd.args(jvm_properties);
-        cmd.args(["-cp", cp, "KotlincServer", lib_dir])
+        cmd.args(["-cp", cp, "KotlincServer", lib_dir, cp])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -215,8 +323,18 @@ impl KotlincServer {
         })
     }
 
-    fn try_compile(&mut self, args: &[String]) -> std::io::Result<(i32, String)> {
+    fn try_compile(
+        &mut self,
+        args: &[String],
+        language_version: Option<&str>,
+        api_version: Option<&str>,
+    ) -> std::io::Result<(i32, String)> {
         self.stdin.write_all(&(args.len() as u32).to_be_bytes())?;
+        for version in [language_version, api_version] {
+            let bytes = version.unwrap_or_default().as_bytes();
+            self.stdin.write_all(&(bytes.len() as u16).to_be_bytes())?;
+            self.stdin.write_all(bytes)?;
+        }
         for arg in args {
             self.stdin.write_all(&(arg.len() as u16).to_be_bytes())?;
             self.stdin.write_all(arg.as_bytes())?;
@@ -259,7 +377,7 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
         }
         return Some((replayed.code, replayed.stderr));
     }
-    let result = kotlinc_compile_live(args)?;
+    let result = kotlinc_compile_live(args, None, None)?;
     // A replay returns above and prints nothing. This line names the test that reached the JVM.
     byte_dump::report_live_kotlinc(args);
     byte_dump::remember_class_dump(args, result.0, &result.1);
@@ -274,7 +392,20 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
 ///
 /// Every call reaches the JVM, so every completed compile is reported like a recorded-path miss.
 pub fn kotlinc_compile_unrecorded(args: &[String]) -> Option<(i32, String)> {
-    let result = kotlinc_compile_live(args)?;
+    let result = kotlinc_compile_live(args, None, None)?;
+    byte_dump::report_unrecorded_kotlinc(args);
+    Some(result)
+}
+
+/// Compile with exact language/API levels installed in kotlinc's typed compiler configuration.
+/// This mirrors Kotlin's own test runner for historical levels which current kotlinc releases no
+/// longer accept as public command-line options.
+pub fn kotlinc_compile_unrecorded_with_language_settings(
+    args: &[String],
+    language_version: Option<&str>,
+    api_version: Option<&str>,
+) -> Option<(i32, String)> {
+    let result = kotlinc_compile_live(args, language_version, api_version)?;
     byte_dump::report_unrecorded_kotlinc(args);
     Some(result)
 }
@@ -325,7 +456,11 @@ fn add_elapsed(total: &AtomicU64, since: Instant) -> Duration {
     elapsed
 }
 
-fn kotlinc_compile_live(args: &[String]) -> Option<(i32, String)> {
+fn kotlinc_compile_live(
+    args: &[String],
+    language_version: Option<&str>,
+    api_version: Option<&str>,
+) -> Option<(i32, String)> {
     static POOLS: OnceLock<KotlincPools> = OnceLock::new();
     let _pg = ProfGuard::new("kotlinc");
     REQUESTS.fetch_add(1, Ordering::Relaxed);
@@ -373,7 +508,7 @@ fn kotlinc_compile_live(args: &[String]) -> Option<(i32, String)> {
                 Ordering::Relaxed,
             );
             let compiling = Instant::now();
-            let result = match server.try_compile(&compiler_args) {
+            let result = match server.try_compile(&compiler_args, language_version, api_version) {
                 Ok(result) => Some(result),
                 Err(_) => {
                     // Server JVM died — restart once and retry.
@@ -381,7 +516,9 @@ fn kotlinc_compile_live(args: &[String]) -> Option<(i32, String)> {
                     match KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties) {
                         Some(restarted) => {
                             *server = restarted;
-                            server.try_compile(&compiler_args).ok()
+                            server
+                                .try_compile(&compiler_args, language_version, api_version)
+                                .ok()
                         }
                         None => None,
                     }

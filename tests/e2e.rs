@@ -129,8 +129,6 @@ mod bound_relation_type_variable_e2e;
 mod bounded_type_param_e2e;
 #[path = "box_harness_skip_semantics_e2e.rs"]
 mod box_harness_skip_semantics_e2e;
-#[path = "box_lists_guard_e2e.rs"]
-mod box_lists_guard_e2e;
 #[path = "box_runtime_reflect_e2e.rs"]
 mod box_runtime_reflect_e2e;
 #[path = "boxed_array_construction_e2e.rs"]
@@ -1066,6 +1064,8 @@ mod indy_infra_e2e;
 mod indy_lambda_fallback_parity_e2e;
 #[path = "indy_lambda_parity_e2e.rs"]
 mod indy_lambda_parity_e2e;
+#[path = "inert_kotlinc_arguments_e2e.rs"]
+mod inert_kotlinc_arguments_e2e;
 #[path = "inferred_alias_abbreviation_e2e.rs"]
 mod inferred_alias_abbreviation_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
@@ -1292,6 +1292,8 @@ mod java_static_callable_reference_e2e;
 mod java_static_field_e2e;
 #[path = "java_supertype_type_arguments_e2e.rs"]
 mod java_supertype_type_arguments_e2e;
+#[path = "jdk_release_e2e.rs"]
+mod jdk_release_e2e;
 #[path = "jimage_compressed_e2e.rs"]
 mod jimage_compressed_e2e;
 #[path = "js_backend_coverage_e2e.rs"]
@@ -1318,6 +1320,8 @@ mod klib_semantic_e2e;
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "kotlin_native_provisioning_e2e.rs"]
 mod kotlin_native_provisioning_e2e;
+#[path = "kotlinc_argument_conformance_e2e.rs"]
+mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -1356,6 +1360,8 @@ mod lambda_result_inference_e2e;
 mod lambda_result_type_variable_e2e;
 #[path = "lambda_vs_block_fun_type_e2e.rs"]
 mod lambda_vs_block_fun_type_e2e;
+#[path = "language_feature_arguments_e2e.rs"]
+mod language_feature_arguments_e2e;
 #[path = "language_level_features_e2e.rs"]
 mod language_level_features_e2e;
 #[path = "large_metadata_parts_e2e.rs"]
@@ -1546,6 +1552,8 @@ mod method_access_flags_e2e;
 mod method_generic_signature_e2e;
 #[path = "method_pool_order_e2e.rs"]
 mod method_pool_order_e2e;
+#[path = "missing_dependency_supertypes_e2e.rs"]
+mod missing_dependency_supertypes_e2e;
 #[path = "missing_return_check_e2e.rs"]
 mod missing_return_check_e2e;
 #[path = "mixed_numeric_comparison_e2e.rs"]
@@ -1576,6 +1584,8 @@ mod nullable_uint_property_e2e;
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
 mod optional_expectation_annotation_e2e;
+#[path = "outcome_lists_guard_e2e.rs"]
+mod outcome_lists_guard_e2e;
 #[path = "override_default_stub_e2e.rs"]
 mod override_default_stub_e2e;
 #[path = "primitive_explicit_equals_e2e.rs"]
@@ -1584,6 +1594,8 @@ mod primitive_explicit_equals_e2e;
 mod primitive_hash_code_e2e;
 #[path = "property_accessor_annotation_e2e.rs"]
 mod property_accessor_annotation_e2e;
+#[path = "public_inline_property_access_e2e.rs"]
+mod public_inline_property_access_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
@@ -1622,6 +1634,8 @@ mod suspend_value_class_results_e2e;
 mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
+#[path = "unsupported_kotlinc_arguments_e2e.rs"]
+mod unsupported_kotlinc_arguments_e2e;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]
 mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
@@ -2266,6 +2280,8 @@ mod reified_inline_return_infer_e2e;
 mod reified_inline_splice_ldc_wide_e2e;
 #[path = "reified_local_delegate_e2e.rs"]
 mod reified_local_delegate_e2e;
+#[path = "reified_member_metadata_e2e.rs"]
+mod reified_member_metadata_e2e;
 #[path = "reified_parameter_forwarding_e2e.rs"]
 mod reified_parameter_forwarding_e2e;
 #[path = "reified_primitive_safecast_e2e.rs"]

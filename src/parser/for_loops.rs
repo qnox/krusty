@@ -93,6 +93,7 @@ impl Parser<'_> {
         // operator. Physical newlines are allowed here; an explicit semicolon still terminates the
         // iterable expression and is deliberately left visible.
         self.skip_plain_newlines();
+        let operator_span = self.tok().span;
         let kind = if self.eat(TokenKind::DotDot) {
             RangeKind::Through
         } else if self.eat(TokenKind::DotDotLt) {
@@ -175,6 +176,9 @@ impl Parser<'_> {
                         },
                         base_span,
                     );
+                    self.file
+                        .exact_member_name_spans
+                        .insert(callee.0, operator_span);
                     self.file.add_expr(
                         Expr::Call {
                             callee,
@@ -183,14 +187,20 @@ impl Parser<'_> {
                         base_span,
                     )
                 }
-                k => self.file.add_expr(
-                    Expr::RangeTo {
-                        lo: rstart,
-                        hi: rend,
-                        kind: k,
-                    },
-                    base_span,
-                ),
+                k => {
+                    let range = self.file.add_expr(
+                        Expr::RangeTo {
+                            lo: rstart,
+                            hi: rend,
+                            kind: k,
+                        },
+                        base_span,
+                    );
+                    self.file
+                        .operator_token_spans
+                        .insert(range.0, operator_span);
+                    range
+                }
             };
             let iterable = self.parse_for_trailing_infix(base);
             self.expect(TokenKind::RParen, "')'");
@@ -217,6 +227,7 @@ impl Parser<'_> {
                     start: rstart,
                     end: rend,
                     kind,
+                    operator_span,
                 },
                 body,
                 label,

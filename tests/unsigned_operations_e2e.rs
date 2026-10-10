@@ -41,9 +41,13 @@ fn unsigned_operations_still_compute_unsigned_results() {
                \x20   val arithmetic = \"${big / 3u} ${big % 7u} ${long / 10uL} ${long % 10uL}\"\n\
                \x20   return \"$order $arithmetic ${big.toString()} ${long.toString()} x${255.toUByte()}\"\n\
                }\n";
-    let actual =
-        common::compile_and_run_box(src, "unsigned_operations", &[common::stdlib_jar()], None)
-            .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        src,
+        "unsigned_operations",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(
         actual,
         "false 1 1431655764 2 1844674407370955161 5 4294967294 18446744073709551615 x255"

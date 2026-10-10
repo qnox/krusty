@@ -71,9 +71,11 @@ use field_nullability::{
 };
 mod discarding;
 mod diverging_value_type;
+mod emit_options;
 pub(super) mod enclosure;
 mod enum_entry_subclass;
 mod enum_reflection_call;
+pub use emit_options::{EmitOptions, DEFAULT_METADATA_VERSION};
 mod explicit_backing_fields;
 mod field_read;
 mod field_visibility;
@@ -511,9 +513,11 @@ pub(super) struct EmitEnv<'a> {
     inner_classes: crate::jvm::inner_classes::InnerClasses,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     java_parameters: bool,
-    /// The `@kotlin.Metadata` `mv` stamp this emission writes (`-language-version`, or
-    /// [`DEFAULT_METADATA_VERSION`]).
-    metadata_version: [i32; 3],
+    /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
+    inline_string_concat: bool,
+    /// The `@kotlin.Metadata` `mv` (`-language-version`, or [`DEFAULT_METADATA_VERSION`]) and
+    /// pre-release flag this emission writes.
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
 }
 
 /// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
@@ -648,129 +652,6 @@ pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
                 value: Some(*operand),
             };
         }
-    }
-}
-
-/// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
-/// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
-/// it too. The `Default` is v52 with no `SourceFile`; every path that claims to emit the bytes krusty
-/// SHIPS — the CLI, `survey`, the conformance corpus and the in-process test helpers — builds its
-/// options through [`crate::jvm::backend::shipping_emit_options`] instead, which supplies the source
-/// `.kt` name and the inner-class resolver (and, from the CLI, `-jvm-target`).
-#[derive(Clone)]
-pub struct EmitOptions {
-    /// Class-file major version to emit (default v52; `-jvm-target 25` ⇒ v69).
-    pub class_major: Option<u16>,
-    /// Source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`); `None` ⇒ no attribute.
-    pub source_file: Option<String>,
-    /// `-module-name` value, recorded in each class's `@Metadata` (`classModuleName`). kotlinc omits it
-    /// for the default module `main`; `None` here matches that.
-    pub module_name: Option<String>,
-    /// Emit a computed `@kotlin.Metadata` for supported class shapes ([`build_class_metadata`]).
-    /// Byte-verified vs kotlinc for a plain `val`/`var`-property class and a `data class` (its IS_DATA
-    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); a shape that is not
-    /// verified declines individually and emits no metadata, so this never writes an unverified
-    /// payload (one did break kotlin-reflect on a box-corpus case). ON in this `Default`, and ON in
-    /// [`crate::jvm::backend::shipping_emit_options`] — without it a krusty-compiled CLASS carries
-    /// nothing a second krusty compilation can read (the facade metadata describes top-level
-    /// declarations only). There is no `EmitOptions` value that means "the pre-class-metadata bytes"
-    /// by default; a caller that wants those either sets `KRUSTY_NO_CLASS_METADATA` (which only the
-    /// shipping constructor consults, for bisecting) or constructs `EmitOptions` explicitly with this
-    /// field `false`.
-    pub emit_class_metadata: bool,
-    /// `-jvm-default`: the JVM shape of interface members with bodies. Not part of
-    /// [`crate::jvm::backend::shipping_emit_options`]'s parameters because it is a per-INVOCATION
-    /// compiler option rather than per-file configuration; the backend applies it with
-    /// [`EmitOptions::with_jvm_default`].
-    pub jvm_default: JvmDefaultMode,
-    /// Emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions` clears this).
-    ///
-    /// Most guards are recorded by lowering and removed from the IR before emission
-    /// ([`crate::jvm::parameter_assertions::strip`]), which keeps them consistent with the debug-table offsets
-    /// measured past them. A PROPERTY SETTER's `<set-?>` guard has no IR record — it is derived here
-    /// from the property's type — so those sites read this flag instead.
-    pub param_assertions: bool,
-    /// Independent `-Xlambdas` / `-Xsam-conversions` strategies for this invocation.
-    pub lambda_modes: LambdaModes,
-    pub inner_class_resolver: Option<InnerClassResolver>,
-    /// The file's value classes, for the redundant-boxing pass; the emitter fills it per file.
-    pub(crate) value_classes:
-        std::rc::Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
-    /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
-    pub java_parameters: bool,
-    /// `-language-version X.Y`: the `mv` stamp of every `@kotlin.Metadata` and the version ints of
-    /// the `META-INF/<module>.kotlin_module` header. `None` keeps kotlinc's no-flag stamp, the
-    /// compiler's default language version [`DEFAULT_METADATA_VERSION`].
-    pub metadata_version: Option<[i32; 3]>,
-    /// Whether the finalized source-language feature set enables declaration annotation records in
-    /// Kotlin metadata. Kept separate from `metadata_version`: the latter is only an output stamp.
-    pub annotations_in_metadata: bool,
-}
-
-/// The `mv` krusty writes without `-language-version`: kotlinc's default-language-version stamp.
-pub const DEFAULT_METADATA_VERSION: [i32; 3] = [2, 4, 0];
-
-impl EmitOptions {
-    /// The `mv` this emission stamps on every `@kotlin.Metadata` (and the `.kotlin_module` header).
-    pub fn metadata_version(&self) -> [i32; 3] {
-        self.metadata_version.unwrap_or(DEFAULT_METADATA_VERSION)
-    }
-
-    /// Select the `-language-version` metadata stamp, keeping every other field as configured.
-    pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> Self {
-        self.metadata_version = version;
-        self
-    }
-
-    /// Select declaration-annotation record emission from source-language settings.
-    pub fn with_annotations_in_metadata(mut self, enabled: bool) -> Self {
-        self.annotations_in_metadata = enabled;
-        self
-    }
-
-    /// Select the `-jvm-default` mode, keeping every other field as configured.
-    pub fn with_jvm_default(mut self, mode: JvmDefaultMode) -> Self {
-        self.jvm_default = mode;
-        self
-    }
-
-    /// Enable `-java-parameters`, keeping every other field as configured.
-    pub fn with_java_parameters(mut self, enabled: bool) -> Self {
-        self.java_parameters = enabled;
-        self
-    }
-
-    /// Select the independently configured lambda strategies, keeping every other field unchanged.
-    pub fn with_lambda_modes(mut self, modes: LambdaModes) -> Self {
-        self.lambda_modes = modes;
-        self
-    }
-}
-
-impl Default for EmitOptions {
-    fn default() -> Self {
-        Self {
-            class_major: None,
-            source_file: None,
-            module_name: None,
-            emit_class_metadata: true,
-            jvm_default: JvmDefaultMode::Enable,
-            param_assertions: true,
-            java_parameters: false,
-            lambda_modes: LambdaModes::default(),
-            inner_class_resolver: None,
-            value_classes: std::rc::Rc::default(),
-            metadata_version: None,
-            annotations_in_metadata: true,
-        }
-    }
-}
-
-impl EmitOptions {
-    /// `-Xno-param-assertions` passes `false`.
-    pub fn with_param_assertions(mut self, enabled: bool) -> Self {
-        self.param_assertions = enabled;
-        self
     }
 }
 
@@ -1384,7 +1265,8 @@ pub(crate) fn emit_all_with_checked_classifiers(
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
-        metadata_version: opts.metadata_version(),
+        inline_string_concat: opts.inline_string_concat,
+        metadata_stamp: opts.metadata_stamp(),
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
         sam_wrapper_realizations: facts.sam_wrapper_realizations,
@@ -1732,7 +1614,7 @@ fn emit_pass(
     let facade_needed = facade_has_method || facade_has_static || metadata.is_some();
     if facade_needed {
         if let Some(m) = metadata {
-            cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+            cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
         }
         out.push((facade.to_string(), env.run.finish_class(cw)));
         out.extend(drain_lambda_classes(env, opts));
@@ -3306,7 +3188,7 @@ fn emit_class(
         );
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     // Intern the `EnclosingMethod` refs, then every retained `InnerClasses` row's outer-class ref
     // and simple name, at kotlinc's post-metadata pool position, in the table's sorted order. An
@@ -3669,7 +3551,7 @@ fn emit_interface_class(
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
         let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
-        di.set_kotlin_metadata(3, &opts.metadata_version(), xi, &[], &[]);
+        di.set_kotlin_metadata(3, opts.metadata_stamp(), xi, &[], &[]);
         extra.push((holder, env.run.finish_class(di)));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
@@ -3694,7 +3576,7 @@ fn emit_interface_class(
         attach_synth_nullability(ir, c, env.run, &mut cw);
     }
     if let Some(m) = class_meta.or(computed.as_ref()) {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     if emitted_default_impls {
         let holder = format!("{fq_name}$DefaultImpls");
@@ -4488,7 +4370,7 @@ fn emit_enum_class(
     // metadata must not discard the class's declared annotations.
     cw.set_class_annotations(&c.applied_annotations);
     if let Some(m) = class_metadata {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     // The `EnclosingMethod` refs, then each retained row's outer-class ref and simple name, intern
     // at kotlinc's post-metadata window — the same step every other classifier path takes.
@@ -5465,8 +5347,8 @@ struct Emitter<'a> {
     run: &'a EmitRun,
     /// `-jvm-default`, so a call site can tell where an interface's `$default` synthetic lives.
     jvm_default: JvmDefaultMode,
-    /// The `@Metadata` `mv` an anonymous object regenerated by an inline call of this class carries.
-    metadata_version: [i32; 3],
+    /// The `@Metadata` stamp an anonymous object regenerated by an inline call of this class carries.
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
@@ -5613,6 +5495,8 @@ struct Emitter<'a> {
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
     lambda_modes: LambdaModes,
+    /// `-Xstring-concat=inline`: never build a concatenation with `invokedynamic`.
+    inline_string_concat: bool,
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
@@ -5647,7 +5531,7 @@ impl<'a> Emitter<'a> {
             bodies: env.bodies,
             run: env.run,
             jvm_default: env.jvm_default,
-            metadata_version: env.metadata_version,
+            metadata_stamp: env.metadata_stamp,
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
             sam_wrapper_realizations: env.sam_wrapper_realizations,
@@ -5705,6 +5589,7 @@ impl<'a> Emitter<'a> {
             unsigned_assignment_line: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
+            inline_string_concat: env.inline_string_concat,
             return_finalizers: Vec::new(),
             protected_regions: Vec::new(),
             terminal_statement_target: None,
@@ -6618,46 +6503,6 @@ impl<'a> Emitter<'a> {
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
         })
-    }
-
-    /// Whether a property of `owner` may be reached as its raw backing FIELD from the class currently
-    /// being emitted. Only inside the declaring class (the field is private everywhere else) — and only
-    /// for a FINAL property. An `open`/`override` property is redeclared by subclasses, which replace its
-    /// ACCESSOR, not the base's own private storage: a `getfield` from a base method would read the
-    /// base's field and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` inside
-    /// the class for exactly that reason, so the accessor is the only correct realization here.
-    ///
-    /// Two exemptions, both because the accessor an `open` property would be reached through does not
-    /// exist:
-    ///
-    /// * a PRIVATE property has no synthesized accessor at all (kotlinc reads it directly in-class).
-    ///   `private open` is not valid Kotlin — kotlinc reports "'open' is incompatible with 'private'"
-    ///   — so this only decides what an input krusty accepts but kotlinc rejects compiles to, and the
-    ///   raw field is the realization that at least links.
-    /// * a `val` has no SETTER, so a `writable` access to one can only be the deferred initialization
-    ///   Kotlin permits in a constructor/`init` block, which kotlinc also emits as a `putfield`.
-    ///
-    /// A `@JvmField` property is reachable this way from ANY class: it has no accessor to call, and
-    /// its field carries the declaration's own visibility rather than Kotlin's default `private`.
-    fn direct_field_access(
-        &self,
-        class: &crate::ir::IrClass,
-        declared: Option<&crate::ir::IrProperty>,
-        writable: bool,
-    ) -> bool {
-        if declared.is_some_and(|p| is_jvm_field(class, &p.name)) {
-            return true;
-        }
-        // An explicit backing field is a different type from the property. The checker already
-        // chose a field read, and lowered it as one, when the receiver's static type is exactly
-        // this class. A property read that remains is the getter: a subclass value, a nested
-        // class, and every other receiver. Loading the private field here would skip that choice
-        // and hand back the carrier (`Integer.valueOf`) instead of the getter's public value.
-        if !writable && declared.is_some_and(|property| property.storage_ty.is_some()) {
-            return false;
-        }
-        class.fq_name_matches(&self.owner)
-            && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
     /// Whether emitting `e` introduces non-linear JVM control flow anywhere in its subtree. Operand

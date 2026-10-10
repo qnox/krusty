@@ -195,7 +195,7 @@ fn local_classifier_property_reference_streams_with_captured_type_arguments() {
         fun box(): String = genericFun("OK")"#;
     let inputs = [SourceInput::kotlin(source).with_file_stem("LocalPropertyReference")];
     let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::classpath_jars_for(source),
+        crate::toolchain::jvm_classpath_jars_for(source),
     ));
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
