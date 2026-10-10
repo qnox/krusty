@@ -1,0 +1,14 @@
+A template applied by a template is less specific than the template applying it.
+--- module.yaml
+product: jvm/lib
+apply: [ outer.module-template.yaml ]
+--- outer.module-template.yaml
+apply: [ inner.module-template.yaml ]
+settings:
+  jvm:
+    release: 22
+--- inner.module-template.yaml
+settings:
+  jvm:
+    release: 21
+    storeParameterNames: true

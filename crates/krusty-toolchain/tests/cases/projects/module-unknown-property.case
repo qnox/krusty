@@ -1,0 +1,6 @@
+A property module files do not have.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product: jvm/lib
+foo: 1

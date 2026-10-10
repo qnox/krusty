@@ -1,0 +1,11 @@
+A local plugin the project lists.
+--- project.yaml
+modules:
+  - libs/a
+  - plugins/p
+plugins:
+  - ./plugins/p
+--- libs/a/module.yaml
+product: jvm/lib
+--- plugins/p/module.yaml
+product: jvm/amper-plugin

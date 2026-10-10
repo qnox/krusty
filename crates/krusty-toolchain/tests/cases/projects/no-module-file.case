@@ -1,0 +1,5 @@
+A listed directory without a module file.
+--- project.yaml
+modules: [d]
+--- d/readme.txt
+x

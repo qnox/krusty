@@ -1,0 +1,5 @@
+An invalid glob.
+--- project.yaml
+modules: ["libs/[a"]
+--- libs/a/module.yaml
+product: jvm/lib

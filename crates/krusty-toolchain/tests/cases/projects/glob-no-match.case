@@ -1,0 +1,5 @@
+A glob that matches nothing.
+--- project.yaml
+modules: ["libs/*"]
+--- libs/readme.txt
+x

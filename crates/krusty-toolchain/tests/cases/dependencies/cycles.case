@@ -1,0 +1,70 @@
+An artifact that depends, through others, on its own group and module is not followed again.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:a:1.0
+  - org.example:self:1.0
+--- m2/org/example/a/1.0/a-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>a</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>b</artifactId><version>1.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/b/1.0/b-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>b</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>a</artifactId><version>2.0</version></dependency>
+      <dependency><groupId>org.example</groupId><artifactId>c</artifactId><version>1.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/a/2.0/a-2.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>a</artifactId>
+  <version>2.0</version>
+</project>
+--- m2/org/example/c/1.0/c-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>c</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/self/1.0/self-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>self</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>self</artifactId><version>0.9</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/self/0.9/self-0.9.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>self</artifactId>
+  <version>0.9</version>
+</project>
+--- m2/org/example/a/1.0/a-1.0.jar
+--- m2/org/example/b/1.0/b-1.0.jar
+--- m2/org/example/c/1.0/c-1.0.jar
+--- m2/org/example/self/1.0/self-1.0.jar

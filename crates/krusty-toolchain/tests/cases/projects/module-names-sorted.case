@@ -1,0 +1,15 @@
+The table is sorted by module name.
+--- project.yaml
+modules: [libs/B, libs/a, z, "y/*"]
+--- libs/B/module.yaml
+product: jvm/lib
+--- libs/a/module.yaml
+product: jvm/lib
+--- z/module.yaml
+product: jvm/lib
+--- y/_x/module.yaml
+product: jvm/lib
+--- y/Ab/module.yaml
+product: jvm/lib
+--- module.yaml
+product: jvm/app

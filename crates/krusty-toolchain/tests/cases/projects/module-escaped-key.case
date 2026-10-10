@@ -1,0 +1,7 @@
+A quoted key is matched as written: its escapes are not processed, so an escaped spelling of a
+property name names an unknown property.
+--- project.yaml
+"modules": [a]
+--- a/module.yaml
+"product": jvm/lib
+'description': x

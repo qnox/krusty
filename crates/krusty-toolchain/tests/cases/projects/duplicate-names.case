@@ -1,0 +1,7 @@
+Two modules with the same directory name.
+--- project.yaml
+modules: [a/x, b/x]
+--- a/x/module.yaml
+product: jvm/lib
+--- b/x/module.yaml
+product: jvm/lib

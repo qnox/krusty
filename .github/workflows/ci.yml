@@ -92,6 +92,22 @@ jobs:
           key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
             recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-
+      # krusty-toolchain's references (JetBrains' `kotlin` and the JDK glob matcher) are cached the
+      # same way: restored from the base, run only for a missing entry, saved by master.
+      # `tests/support/oracle.rs` keys each entry by the reference's identity and its inputs.
+      - name: restore Kotlin Toolchain oracle output
+        id: toolchain-oracle
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/kotlin-toolchain-oracle
+          key: kotlin-toolchain-oracle-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            kotlin-toolchain-oracle-
+      - name: cache Kotlin Toolchain distribution
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/JetBrains/Kotlin/cli
+          key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
       - name: select recorded-byte cache mode
         id: recorded-mode
         env:
@@ -127,6 +143,7 @@ jobs:
           KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
+          KRUSTY_TOOLCHAIN_RUN_MISSING: 1
         run: just ci
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'
@@ -134,6 +151,12 @@ jobs:
         with:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.sha }}
+      - name: save Kotlin Toolchain oracle output
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/kotlin-toolchain-oracle
+          key: kotlin-toolchain-oracle-${{ github.sha }}
 
   # Real Kotlin/Native metadata, provisioned rather than silently skipped. This lane validates the
   # common KLIB semantic boundary only; serialized IR bodies have their own follow-up.

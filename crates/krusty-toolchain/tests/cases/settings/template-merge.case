@@ -1,0 +1,24 @@
+A module's values beat its template's; lists concatenate and maps merge, template first.
+--- module.yaml
+product: jvm/lib
+apply: [ common.module-template.yaml ]
+settings:
+  kotlin:
+    version: 2.4.20
+    freeCompilerArgs: [ -Xmodule ]
+  java:
+    annotationProcessing:
+      processorOptions:
+        b: module
+--- common.module-template.yaml
+settings:
+  jvm:
+    release: 21
+  kotlin:
+    version: 2.3.0
+    freeCompilerArgs: [ -Xtemplate ]
+  java:
+    annotationProcessing:
+      processorOptions:
+        a: template
+        b: template

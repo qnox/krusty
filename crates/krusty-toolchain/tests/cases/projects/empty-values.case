@@ -1,0 +1,6 @@
+Properties without values.
+--- project.yaml
+modules:
+plugins:
+--- module.yaml
+product: jvm/lib

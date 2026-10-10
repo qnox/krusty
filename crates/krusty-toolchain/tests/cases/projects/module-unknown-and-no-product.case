@@ -1,0 +1,11 @@
+Unknown properties, the missing product, and an unknown property of the product, in the toolchain's order.
+--- project.yaml
+modules: [a, b]
+--- a/module.yaml
+foo: 1
+description: !x [b]
+--- b/module.yaml
+product:
+  bar: 1
+  type: !t jvm/lib
+baz: 2

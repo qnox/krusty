@@ -1,0 +1,5 @@
+A path leaving the root that does not exist.
+--- project.yaml
+modules: [../nowhere-at-all]
+--- libs/a/module.yaml
+product: jvm/lib

@@ -1,0 +1,6 @@
+An unknown property of the project file is reported after the problems of its modules list.
+--- project.yaml
+foo: 1
+modules: [missing, !tag libs/a]
+--- libs/a/module.yaml
+product: jvm/lib

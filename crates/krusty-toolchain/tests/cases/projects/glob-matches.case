@@ -1,0 +1,11 @@
+A glob matches only module directories at its own depth.
+--- project.yaml
+modules: ["libs/*"]
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/b/module.yaml
+product: jvm/lib
+--- libs/c/x/module.yaml
+product: jvm/lib
+--- libs/d/readme.txt
+x
