@@ -326,6 +326,9 @@ change, not a quiet reset inside yours.
 ## Validation
 
 - Work test-first and compare diagnostics/behavior with kotlinc through the repository harness.
+- A portable Native regression must establish its expected result through the JVM/kotlinc oracle
+  before asserting the Native result. Use `expect_box_ok_with_stdlib` (or the result-returning
+  equivalent when the exact value matters) before `expect_native_box`.
 - Use `./run-tests.sh`; do not use release builds for ordinary validation.
 - `gate` is a Cargo profile: `--profile gate`. Never `--target-dir target/gate` or
   `CARGO_TARGET_DIR=target/gate`; that builds the dev profile into `target/gate/debug`, which

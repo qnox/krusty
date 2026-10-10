@@ -211,3 +211,31 @@ fn a_for_loop_over_text_reads_each_character_at_its_index() {
     assert_eq!(expect_box_run_with_stdlib(source, "ForOverText"), "OK");
     expect_native_box(source, "ForOverText", "OK");
 }
+
+#[test]
+fn an_ascii_string_is_indexed_directly_and_still_bounds_checked() {
+    // A `String` counts its UTF-16 length once and, when every byte is ASCII, reads `s[i]` as byte
+    // `i`. The count must not outlive the text it describes: a view of non-ASCII storage is counted
+    // on its own, a builder (whose text changes) is counted again after each append, and the direct
+    // path checks the index exactly as the walk does.
+    let source = "fun box(): String {\n\
+         \x20   val ascii = \"hello\"\n\
+         \x20   if (ascii.length != 5) return \"fail length: \" + ascii.length\n\
+         \x20   if (ascii[0] != 'h' || ascii[4] != 'o') return \"fail ends\"\n\
+         \x20   try {\n\
+         \x20       ascii[5]\n\
+         \x20       return \"fail past the end\"\n\
+         \x20   } catch (e: IndexOutOfBoundsException) {}\n\
+         \x20   val mixed = \"\\u00E9abc\"\n\
+         \x20   val tail = mixed.substring(1)\n\
+         \x20   if (tail.length != 3 || tail[0] != 'a' || tail[2] != 'c') return \"fail tail\"\n\
+         \x20   if (mixed.length != 4 || mixed[0] != '\\u00E9' || mixed[3] != 'c') return \"fail mixed\"\n\
+         \x20   val builder = StringBuilder(\"ab\")\n\
+         \x20   if (builder.length != 2) return \"fail builder\"\n\
+         \x20   builder.append('\\u00E9')\n\
+         \x20   if (builder.length != 3 || builder[2] != '\\u00E9') return \"fail grown builder\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    assert_eq!(expect_box_run_with_stdlib(source, "AsciiIndexing"), "OK");
+    expect_native_box(source, "AsciiIndexing", "OK");
+}

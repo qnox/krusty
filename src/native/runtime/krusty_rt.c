@@ -304,6 +304,7 @@ KRef kt_string_of(KRef storage, const char *bytes, kt_int byte_length) {
     object->as.string.storage = storage;
     object->as.string.bytes = bytes;
     object->as.string.byte_length = byte_length;
+    object->as.string.units_plus_one = 0;
     return object;
 }
 
@@ -323,14 +324,18 @@ static const char *kt_text_of(KRef self, kt_int *byte_length);
    points; of those, only the ones a four-byte sequence starts (`11110xxx`, i.e. above U+FFFF) are
    written as a SURROGATE PAIR in UTF-16 and contribute two units. Everything else contributes one.
 
-   This walks the bytes on every call, which is what a string that stores UTF-8 costs; it is also
-   what makes the answer right for text a JVM-shaped length would have to be stored alongside. */
+   This walks the bytes, which is what a string that stores UTF-8 costs; a `String` keeps the count
+   once made, because its text never changes. A builder's text does, so it is walked each time. */
 kt_int kt_string_length(KRef self) {
     /* Text the PROGRAM wrote: a class implementing `kotlin.CharSequence`, whose own `length` its
        descriptor records. Asked first, because `kt_text_of` reads a string's own storage and an
        object of the program's holds none. */
     if (self != NULL && self->header.type->walk_length != NULL) {
         return self->header.type->walk_length(self);
+    }
+    bool string = self != NULL && self->header.type == &kt_type_string;
+    if (string && self->as.string.units_plus_one != 0) {
+        return self->as.string.units_plus_one - 1;
     }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
@@ -341,6 +346,11 @@ kt_int kt_string_length(KRef self) {
             continue;
         }
         units += (byte >= 0xF0u) ? 2 : 1;
+    }
+    /* `units_plus_one` is signed. An all-ASCII string may legitimately have INT32_MAX units, so
+       leave that one uncached rather than overflowing while encoding the zero sentinel. */
+    if (string && units < INT32_MAX) {
+        self->as.string.units_plus_one = units + 1;
     }
     return units;
 }
@@ -362,6 +372,18 @@ kt_char kt_string_get(KRef self, kt_int index) {
     if (index < 0) {
         kt_text_index_out_of_bounds(self, index, kt_string_length(self));
         return 0;
+    }
+    /* All-ASCII text is indexed directly: counting it once (see `kt_string_length`) is what
+       tells the two apart, and costs no more than the first walk would have. */
+    if (self != NULL && self->header.type == &kt_type_string) {
+        kt_int units = kt_string_length(self);
+        if (units == self->as.string.byte_length) {
+            if (index >= units) {
+                kt_text_index_out_of_bounds(self, index, units);
+                return 0;
+            }
+            return (kt_char)(unsigned char)self->as.string.bytes[index];
+        }
     }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);

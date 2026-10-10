@@ -37,6 +37,11 @@ struct KObject {
             KRef storage;
             const char *bytes;
             kt_int byte_length;
+            /* The text's length in UTF-16 units plus one, once `kt_string_length` has counted it;
+               zero until then. A string's text never changes, so it is normally counted at most
+               once. INT32_MAX units cannot be encoded with this sentinel and remain uncached. A
+               count equal to `byte_length` says every byte is ASCII: `s[i]` is then byte `i`. */
+            kt_int units_plus_one;
         } string;
         kt_byte byte_value;
         kt_short short_value;
