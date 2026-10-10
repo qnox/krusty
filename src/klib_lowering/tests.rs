@@ -278,6 +278,7 @@ fn coerce_declaration() -> KotlinFunction {
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_external: false,
         is_static: false,
         context_count: 0,
         context_kinds: Vec::new(),

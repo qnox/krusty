@@ -3,8 +3,10 @@
 use super::super::KlibLibraries;
 use crate::diag::DiagSink;
 
-fn native_stdlib() -> Option<KlibLibraries> {
-    let Some(stdlib) = crate::toolchain::kotlin_native_stdlib_klib() else {
+pub(super) fn native_stdlib() -> Option<KlibLibraries> {
+    let Some(stdlib) =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::Native)
+    else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
             "KRUSTY_REQUIRE_KLIB is set but no Kotlin/Native stdlib KLIB is provisioned"

@@ -188,6 +188,8 @@ pub struct KotlinFunction {
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_expect: bool,
+    /// An `external` function: the target supplies its implementation, so it has no IR body.
+    pub is_external: bool,
     /// Whether metadata declares this function static: a companion extension
     /// (`companion fun C.name`), which KLIB signature mangling marks static.
     pub is_static: bool,

@@ -10,6 +10,7 @@
 //! other half of that join: the decoded IR body serialized under a published signature.
 
 mod archives;
+mod builtin_realizations;
 mod classifier_records;
 mod classifier_signatures;
 mod declaration_bodies;

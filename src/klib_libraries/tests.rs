@@ -39,6 +39,7 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         is_operator: false,
         is_infix: false,
         is_expect: false,
+        is_external: false,
         is_static: false,
         context_count: 0,
         context_kinds: Vec::new(),
@@ -418,15 +419,30 @@ fn realized_parameters(
 
 #[test]
 fn a_klib_function_is_published_without_a_compiler_intrinsic() {
-    let libraries = kotlin_io();
-    let println = single_function(&libraries, "kotlin/io", "println");
-    assert_eq!(println.callable.compiler_intrinsic, None);
-    assert_eq!(println.callable.semantic_role, None);
+    let mut greet = function("greet", None, vec![class("kotlin/Any", true)]);
+    greet.param_names = vec!["message".to_owned()];
+    let libraries =
+        KlibLibraries::from_packages(vec![(segments(&["kotlin", "io"]), package_of(vec![greet]))])
+            .expect("an in-memory kotlin.io package is signable");
+    let greet = single_function(&libraries, "kotlin/io", "greet");
+    assert_eq!(greet.callable.compiler_intrinsic, None);
+    assert_eq!(greet.callable.semantic_role, None);
     let realization = libraries
-        .external_callable(println.callable.external_identity.expect("identity"))
+        .external_callable(greet.callable.external_identity.expect("identity"))
         .expect("realization");
     assert_eq!(realization.callable.compiler_intrinsic, None);
     assert_eq!(realization.callable.semantic_role, None);
+}
+
+#[test]
+fn a_builtin_klib_function_carries_its_shared_compiler_operation() {
+    let libraries = kotlin_io();
+    let println = single_function(&libraries, "kotlin/io", "println");
+    assert_eq!(
+        println.callable.compiler_intrinsic,
+        Some(crate::libraries::CompilerIntrinsic::Println)
+    );
+    assert_eq!(println.callable.semantic_role, None);
 }
 
 #[test]
@@ -679,5 +695,7 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
 }
 
 mod analysis;
+mod builtin_operations;
 mod classes;
+mod external_coverage;
 mod properties;
