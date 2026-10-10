@@ -50124,10 +50124,12 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
+            // `sealed` is abstract: its own subclasses discharge members the sealed class leaves
+            // open, including members inherited from a superclass emitted in another unit.
             let leaves_abstract_members = !cl.is_enum()
                 && separate_emission
                 && inheritance.is_some_and(|shape| shape.is_abstract)
-                && cl.modality != crate::ast::Modality::Abstract
+                && !cl.modality.is_abstract()
                 && !self.has_no_unimplemented_abstract_members(owner);
             if leaves_abstract_members {
                 // This is a Kotlin declaration error, not an emitter capability gate. Diagnose it
