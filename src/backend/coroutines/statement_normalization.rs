@@ -1,7 +1,7 @@
 //! Statement/value-region normalization required before coroutine state splitting.
 //!
 //! These rewrites preserve checked Kotlin meaning while making the consumer position explicit in
-//! common IR. They neither discover suspension points nor choose JVM representations.
+//! common IR. They neither discover suspension points nor choose a target representation.
 
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
@@ -10,7 +10,7 @@ use crate::types::Ty;
 /// Suspension normalization needs the consumer fact explicitly: only statement-position tries may
 /// discard branch values and become `Unit`; a try used by a return, assignment, call argument, or
 /// another value consumer keeps its checked result unchanged.
-pub(super) fn normalize_statement_try_results(
+pub(crate) fn normalize_statement_try_results(
     ir: &mut IrFile,
     expression: ExprId,
     statement: bool,
@@ -85,7 +85,7 @@ pub(super) fn demote_block_value_to_statement(ir: &mut IrFile, block: ExprId) {
 /// `prelude` statements followed by `Variable { init: inner }`. Elvis and primitive safe-call elvis
 /// lower to such a block-valued initializer; lifting it exposes the inner conditional to the
 /// state-machine flattener. Traversal stops at lambdas, which own another value namespace.
-pub(super) fn normalize_block_inits(ir: &mut IrFile, expression: ExprId) {
+pub(crate) fn normalize_block_inits(ir: &mut IrFile, expression: ExprId) {
     if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
         return;
     }
@@ -145,7 +145,7 @@ pub(super) fn normalize_block_inits(ir: &mut IrFile, expression: ExprId) {
 /// A statement-shaped conditional used as a `Unit` value leaves nothing on the operand stack.
 /// Split it into the conditional statement followed by the semantic `Unit` singleton before the
 /// state-machine emitter assigns or returns the value.
-pub(super) fn split_unit_conditional_returns(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
+pub(crate) fn split_unit_conditional_returns(ir: &mut IrFile, body: ExprId, unit_ret: bool) {
     let unwrap_when = |ir: &IrFile, mut expression: ExprId| {
         while let IrExpr::TypeOp { arg, .. } = ir.exprs[expression as usize] {
             expression = arg;
