@@ -596,16 +596,12 @@ impl Preprocessor {
     fn peek_is_open_paren(&mut self) -> Result<bool, PreprocessError> {
         // Directives between a macro name and its `(` are not supported; the next raw token
         // decides, as it does for every compiler on real headers.
-        loop {
-            match self.queue.front() {
-                None => return Ok(false),
-                Some(token) if token.kind == Kind::FileEnd => return Ok(false),
-                Some(token) if token.at_line_start && token.is("#") && token.hide.is_empty() => {
-                    return Ok(false)
-                }
-                Some(token) => return Ok(token.is("(")),
-            }
-        }
+        Ok(match self.queue.front() {
+            None => false,
+            Some(token) if token.kind == Kind::FileEnd => false,
+            Some(token) if token.at_line_start && token.is("#") && token.hide.is_empty() => false,
+            Some(token) => token.is("("),
+        })
     }
 
     /// Read the arguments of an invocation whose `(` was consumed, up to the matching `)`.
