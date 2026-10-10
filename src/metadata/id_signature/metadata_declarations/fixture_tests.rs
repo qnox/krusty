@@ -227,8 +227,8 @@ fn metadata_signs_every_declaration_exactly_as_the_serialized_ir() {
         "computed from metadata but not declared by IR"
     );
     assert_eq!(serialized, computed);
-    assert_eq!(serialized.public.len(), 39);
-    assert_eq!(serialized.accessors.len(), 12);
+    assert_eq!(serialized.public.len(), 40);
+    assert_eq!(serialized.accessors.len(), 14);
 
     // Renaming every type parameter leaves the member ids alone; only the paths differ.
     let member_id = |path: &str| {

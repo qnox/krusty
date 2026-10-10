@@ -35,6 +35,9 @@ val <T> List<T>.second: T get() = this[1]
 
 var counter: Int = 0
 
+var guarded: Int = 0
+    private set
+
 enum class Color { RED, GREEN }
 
 expect fun platform(): Int

@@ -538,8 +538,26 @@ fn fixture_properties_realize_the_accessors_their_ir_declares() {
             .collect::<Vec<_>>(),
         ["<get-second>"]
     );
+    // `var guarded: Int private set`: a private setter of a public property is still serialized
+    // under its public accessor signature.
+    let guarded = realized("guarded");
+    assert_eq!(
+        guarded
+            .iter()
+            .map(KlibAccessorIdSignature::name)
+            .collect::<Vec<_>>(),
+        ["<get-guarded>", "<set-guarded>"]
+    );
+    let guarded_property = single_property(&libraries, "fixture/signatures", "guarded");
+    assert_eq!(guarded_property.visibility, Visibility::Public);
+    assert_eq!(guarded_property.setter_visibility, Visibility::Private);
     let contextual = realized("contextual");
-    for signature in counter.iter().chain(&second).chain(&contextual) {
+    for signature in counter
+        .iter()
+        .chain(&second)
+        .chain(&guarded)
+        .chain(&contextual)
+    {
         assert!(
             serialized.contains(signature),
             "{signature:?} is not declared by the fixture's IR"
