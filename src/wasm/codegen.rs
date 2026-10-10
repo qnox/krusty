@@ -5,6 +5,7 @@
 //! generator has not been taught declines the compilation with a diagnostic naming the construct,
 //! and a declined compilation emits nothing.
 
+mod classes;
 mod lower;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile, Entry, BOX_RESULT_FRAME};
@@ -109,14 +110,19 @@ impl Backend for WasmBackend {
             return Vec::new();
         }
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        if crate::backend::local_properties::realize(&mut file.ir).is_err() {
+        let Ok(properties) = crate::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();
-        }
+        };
         let started = state
             .started
             .get_or_insert_with(|| Started::new(self.target));
-        let lowered = match lower::lower_file(&file.ir, &mut started.module, &mut started.runtime) {
+        let lowered = match lower::lower_file(
+            &file.ir,
+            &properties,
+            &mut started.module,
+            &mut started.runtime,
+        ) {
             Ok(lowered) => lowered,
             Err(construct) => {
                 decline(state, construct);
@@ -279,13 +285,27 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "class Box(val value: String)\nfun box(): String = Box(\"OK\").value",
+            "enum class Color { RED }\nfun box(): String = \"OK\"",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support a class yet"]
+            ["krusty: the wasm backend does not support an enum class (`Color`) yet"]
         );
+    }
+
+    #[test]
+    fn a_class_compiles_to_one_module_on_both_targets() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "open class Box(val value: String) { open fun get() = value }\n\
+                 class Wrapped(value: String) : Box(value) { override fun get() = value }\n\
+                 fun box(): String = (Wrapped(\"OK\") as Box).get()",
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
     }
 
     #[test]

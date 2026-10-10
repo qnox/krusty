@@ -16829,3 +16829,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compilation with `krusty: the wasm backend does not support <construct> yet` and writes nothing.
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
+
+- **Wasm classes are WasmGC struct subtypes dispatched through shared class tables.** A class's
+  instance is a struct whose first field is its dispatch table, followed by its superclasses'
+  fields root first and then its own; it is declared a subtype of its superclass's struct, so
+  `is`, `!is`, `as` and `as?` against a class are `ref.test`/`ref.cast`, and against an interface
+  test every class of the file implementing it. Slot numbers come from the target-neutral tables
+  Native also uses (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role,
+  one reserved slot, the class's own members, then a program-wide interface region in which an
+  interface member has the same number in every implementing class. Class, interface and `Any`
+  values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
+  override carried differently from the member it overrides (a bridge) declines. `==` on a class
+  value calls its `equals` slot null-safely, whose default is identity. `kotlin.Any`'s own
+  `hashCode` and `toString` have no body in the module yet: their slots trap, and a call or
+  template that could reach one on a class that does not override it declines the compilation by
+  name rather than print something kotlinc would not. An `object` is built on first use and
+  stored before its constructor runs, as on the JVM. Tests: `wasm::codegen::tests`, the
+  `wasm_*` regressions in `tests/kotlin_box_wasm_conformance.rs`, and
+  `backend::class_tables::tests`.

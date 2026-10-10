@@ -5418,10 +5418,24 @@ non-inline callers, still reads the field directly. Test:
   the selected operator's declared result (`IrFile::add_arithmetic`, proven complete by
   `IrFile::validate_complete_facts`). Native deleted its promotion table (`arithmetic_result`);
   Native and Wasm only choose operand widening and narrowing to that result.
+- Classes: final, open and abstract classes, interfaces declared in the same file and `object`
+  declarations, with primary and secondary constructors, fields, properties, virtual and `super`
+  calls, interface dispatch, `is`/`!is`/`as`/`as?`, and `equals`/`hashCode`/`toString` a class
+  declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
+  program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
+  keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
+  struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Declined by name:
+  enum, value, annotation, inner and local capturing classes, companions, bridged overrides,
+  supertypes from another file or the library, and a call that could reach `kotlin.Any`'s own
+  `toString`/`hashCode`, which have no body in the module until the library's bodies are.
+  Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
+  181/181/182; Native's counts are unchanged by the shared tables.
+- Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
+  checked type, which Wasm declines rather than infer one.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
-- Next: classes as struct subtypes with vtables, exceptions on wasm EH, library calls keyed by the
-  selected declaration, multi-file and `// MODULE:` programs, then a klib-backed library provider
-  shared with Native.
+- Next: exceptions on wasm EH, library calls keyed by the selected declaration, enums and
+  companions on the class tables, multi-file and `// MODULE:` programs, then a klib-backed library
+  provider shared with Native.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 
