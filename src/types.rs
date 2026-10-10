@@ -4,12 +4,14 @@
 mod classifier_declarations;
 mod intersection;
 pub(crate) use intersection::declaration_approximation;
+mod overridden_declaration;
 mod semantic_call_role;
 mod semantic_callable_owner;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
 };
+pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::SemanticCallRole;
 pub use semantic_callable_owner::SemanticCallableOwner;
 mod annotation_targets;

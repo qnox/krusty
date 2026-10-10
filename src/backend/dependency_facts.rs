@@ -47,6 +47,9 @@ pub struct BackendCallableFact {
     pub owner_is_interface: bool,
     pub compiler_intrinsic: Option<BackendCompilerIntrinsic>,
     pub semantic_role: Option<BackendSemanticCallRole>,
+    /// Exact declarations this declaration overrides, as checked FIR froze them from the member
+    /// hierarchy. A target keys a specially implemented language declaration on them.
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
@@ -180,6 +183,11 @@ impl CheckedBackendCallables {
             );
         }
         facts.freeze_callables(referenced.callables, callable)?;
+        for (identity, overridden) in &ir.external_overridden_declarations {
+            if let Some(fact) = facts.callables.get_mut(identity) {
+                fact.overridden_declarations = overridden.clone();
+            }
+        }
         Ok(facts)
     }
 
@@ -237,6 +245,7 @@ impl CheckedBackendCallables {
                     owner_is_interface: callable.owner_is_interface,
                     compiler_intrinsic: callable.compiler_intrinsic,
                     semantic_role: callable.semantic_role,
+                    overridden_declarations: Box::new([]),
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,

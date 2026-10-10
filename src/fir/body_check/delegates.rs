@@ -864,6 +864,7 @@ fn selected_delegate_call(
                     declared_result: None,
                     overridden_results: Box::new([]),
                     semantic_role: None,
+                    overridden_declarations: Box::new([]),
                     suspend: false,
                     can_inline: false,
                     inline_plan: None,
@@ -968,6 +969,7 @@ fn selected_delegate_call(
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice(),
                     semantic_role: callable.semantic_role,
+                    overridden_declarations: callable.overridden_declarations.clone(),
                     suspend: callable.suspend,
                     can_inline: callable.inline.can_inline(),
                     inline_plan: super::inline_body_plan::publish(
@@ -1069,6 +1071,7 @@ fn selected_delegate_call(
                         declared_result: declared_ret.map(resolved).transpose()?,
                         overridden_results: Box::new([]),
                         semantic_role: None,
+                        overridden_declarations: Box::new([]),
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(

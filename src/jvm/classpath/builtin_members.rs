@@ -138,6 +138,7 @@ impl Classpath {
                         external_default_provider: None,
                         external_property_identity: None,
                         semantic_role,
+                        overridden_declarations: Box::new([]),
                         singleton_dispatch: None,
                         name: m.name.clone(),
                         owner: Some(owner),

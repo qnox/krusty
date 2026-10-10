@@ -578,6 +578,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             reflection_name: Some(name.to_owned()),
             compiler_intrinsic: None,
             semantic_role: None,
+            overridden_declarations: Box::new([]),
             collection_barrier: None,
             inline_body_plan: None,
             plugin_expression: None,

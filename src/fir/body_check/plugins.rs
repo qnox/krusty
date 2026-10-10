@@ -220,6 +220,7 @@ impl BodyFirChecker<'_> {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
                 semantic_role: selected.member.semantic_role,
+                overridden_declarations: selected.member.overridden_declarations.clone(),
                 suspend: selected.suspend,
                 can_inline: selected.member.inline.can_inline(),
                 inline_plan: super::inline_body_plan::publish(

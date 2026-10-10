@@ -180,3 +180,32 @@ fn both_text_types_answer_to_char_sequence() {
         "OK",
     );
 }
+
+#[test]
+fn a_builder_used_inside_an_inline_function_body_is_the_same_builder() {
+    // Inlining copies the callee's checked body into the caller. A builder member call in that
+    // body must reach the backend as the Kotlin member it was resolved to, exactly as the same call
+    // written in the caller does.
+    expect_native_box(
+        "inline fun build(): String { val sb = StringBuilder(); sb.append(\"O\"); sb.append('K'); return sb.toString() }\n\
+         fun box(): String = build()\n",
+        "BuilderInInlineBody",
+        "OK",
+    );
+}
+
+#[test]
+fn a_builder_used_inside_a_lambda_inlined_into_a_call_is_the_same_builder() {
+    expect_native_box(
+        "inline fun run2(block: () -> Unit) = block()\n\
+         inline fun <T> run1(block: () -> T): T = block()\n\
+         fun box(): String {\n\
+         \x20   var r = \"\"\n\
+         \x20   run2 { val sb = StringBuilder(); sb.append(\"O\"); r = sb.toString() }\n\
+         \x20   val sb = StringBuilder(r)\n\
+         \x20   return run1 { sb.append(\"K\"); sb.toString() }\n\
+         }\n",
+        "BuilderInInlinedLambda",
+        "OK",
+    );
+}

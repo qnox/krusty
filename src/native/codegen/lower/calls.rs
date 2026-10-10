@@ -55,7 +55,6 @@ impl BodyLowering<'_, '_, '_> {
 
     pub(super) fn call(
         &mut self,
-        site: u32,
         callee: &Callee,
         dispatch_receiver: Option<u32>,
         args: &[u32],
@@ -218,14 +217,8 @@ impl BodyLowering<'_, '_, '_> {
                     declared_params.as_ref(),
                     declared_ret,
                 )
-                .with_receiver(declared_receiver);
-                let semantic_role = self
-                    .file
-                    .ir
-                    .semantic_call_roles
-                    .get(&site)
-                    .copied()
-                    .or(realization.semantic_role);
+                .with_receiver(declared_receiver)
+                .with_overridden(&realization.overridden_declarations);
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
@@ -243,7 +236,6 @@ impl BodyLowering<'_, '_, '_> {
                             if self.file.implements_dependency(internal)
                                 && !super::super::super::intrinsics::is_any_runtime_member(
                                     signature,
-                                    semantic_role,
                                 )
                             {
                                 if let Some(realized) = self.implemented_member(
@@ -614,10 +606,9 @@ impl BodyLowering<'_, '_, '_> {
                             };
                             return self.convert(produced, Some(any()), *ret);
                         }
-                        let Some(symbol) = super::super::super::intrinsics::runtime_member(
-                            signature,
-                            semantic_role,
-                        ) else {
+                        let Some(symbol) =
+                            super::super::super::intrinsics::runtime_member(signature)
+                        else {
                             return Err(format!(
                                 "the member `{}.{name}`",
                                 realization.physical_owner.render().replace('/', ".")
