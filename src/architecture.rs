@@ -523,7 +523,10 @@ mod tests {
         ] {
             assert_allowed_crate_modules(path, &[]);
         }
-        assert_allowed_crate_modules("src/wasm/codegen.rs", &["backend", "diag", "types"]);
+        assert_allowed_crate_modules(
+            "src/wasm/codegen.rs",
+            &["backend", "compilation_target", "diag", "types"],
+        );
         assert_allowed_crate_modules("src/wasm/codegen/lower.rs", &["ir", "types"]);
     }
 
