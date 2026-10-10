@@ -55433,40 +55433,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn postponed_call_mentions(&self, ty: Ty) -> bool {
-        self.postponed_call_constraints
-            .iter()
-            .any(|constraints| constraints.mentions_formal(ty))
-    }
-
-    /// Defer an unresolved member on a still-symbolic postponed lambda input. This is not
-    /// diagnostic suppression: the call solution rechecks the expression with its concrete input,
-    /// and an unsolved or still-invalid expression is reported at the commit point below.
-    fn defer_postponed_member_error(
-        &mut self,
-        receiver: Ty,
-        expression: Option<ExprId>,
-        span: Span,
-        name: &str,
-    ) -> bool {
-        let Some(expression) = expression else {
-            return false;
-        };
-        let Some(frame) = self
-            .postponed_call_constraints
-            .iter_mut()
-            .rev()
-            .find(|constraints| constraints.mentions_formal(receiver))
-        else {
-            return false;
-        };
-        let diagnostic = (expression, span, name.to_string());
-        if !frame.deferred_member_errors.contains(&diagnostic) {
-            frame.deferred_member_errors.push(diagnostic);
-        }
-        true
-    }
-
     /// Prove a nominal value against one function-type bound from its declared `invoke` overloads.
     /// A classifier can implement several different function shapes, while its compact
     /// `callable_signature` intentionally exposes at most one unambiguous shape. Generic-bound
@@ -55527,29 +55493,6 @@ impl<'a> Checker<'a> {
                         .copied()
                         .any(|constituent| self.receiver_is_assignable(constituent, bound))
                 })
-    }
-
-    fn apply_postponed_call_bindings(&self, ty: Ty) -> Ty {
-        self.postponed_call_constraints
-            .iter()
-            .rev()
-            .fold(ty, |ty, constraints| {
-                crate::symbol_resolver::ty_subst_keep_unbound(ty, &constraints.lower)
-            })
-    }
-
-    /// Whether every symbolic slot in `ty` belongs to the surrounding declaration rather than to
-    /// an inference problem currently being solved. A recursive generic call can legitimately
-    /// resolve its callee-owned `T` to the caller's lexical `T`; those identities are equal because
-    /// both name the same declaration, but the latter is universally quantified and therefore
-    /// fixed at this call site.
-    fn type_is_lexically_fixed(scope: &CheckerScope<'_>, ty: Ty) -> bool {
-        let lexical_bindings = scope
-            .lexical_tparam_identities()
-            .into_iter()
-            .map(|formal| (formal, Ty::obj("kotlin/Any")))
-            .collect::<crate::symbol_resolver::GSigBinds>();
-        !crate::symbol_resolver::ty_subst_keep_unbound(ty, &lexical_bindings).mentions_ty_param()
     }
 
     fn check_lambda_with_sam_signature_labeled(

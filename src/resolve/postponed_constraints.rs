@@ -230,6 +230,61 @@ impl PostponedCallConstraints {
     }
 }
 
+impl Checker<'_> {
+    pub(super) fn postponed_call_mentions(&self, ty: Ty) -> bool {
+        self.postponed_call_constraints
+            .iter()
+            .any(|constraints| constraints.mentions_formal(ty))
+    }
+
+    /// Defer an unresolved member on a still-symbolic postponed lambda input. The call solution
+    /// rechecks the expression with its concrete input and reports an unresolved error at commit.
+    pub(super) fn defer_postponed_member_error(
+        &mut self,
+        receiver: Ty,
+        expression: Option<ExprId>,
+        span: Span,
+        name: &str,
+    ) -> bool {
+        let Some(expression) = expression else {
+            return false;
+        };
+        let Some(frame) = self
+            .postponed_call_constraints
+            .iter_mut()
+            .rev()
+            .find(|constraints| constraints.mentions_formal(receiver))
+        else {
+            return false;
+        };
+        let diagnostic = (expression, span, name.to_string());
+        if !frame.deferred_member_errors.contains(&diagnostic) {
+            frame.deferred_member_errors.push(diagnostic);
+        }
+        true
+    }
+
+    pub(super) fn apply_postponed_call_bindings(&self, ty: Ty) -> Ty {
+        self.postponed_call_constraints
+            .iter()
+            .rev()
+            .fold(ty, |ty, constraints| {
+                crate::symbol_resolver::ty_subst_keep_unbound(ty, &constraints.lower)
+            })
+    }
+
+    /// Whether every symbolic slot belongs to the surrounding declaration rather than to the
+    /// inference problem currently being solved.
+    pub(super) fn type_is_lexically_fixed(scope: &CheckerScope<'_>, ty: Ty) -> bool {
+        let lexical_bindings = scope
+            .lexical_tparam_identities()
+            .into_iter()
+            .map(|formal| (formal, Ty::obj("kotlin/Any")))
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        !crate::symbol_resolver::ty_subst_keep_unbound(ty, &lexical_bindings).mentions_ty_param()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
