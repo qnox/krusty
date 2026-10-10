@@ -26,13 +26,13 @@ impl BodyLowering<'_, '_, '_> {
         let (capacity, block) = match args {
             [block] => (None, *block),
             [capacity, block] => (Some(*capacity), *block),
-            _ => return Err("a `build` function with an unexpected argument shape".to_string()),
+            _ => return Err("a `build` function with an unexpected argument shape".into()),
         };
         // The capacity is written BEFORE the block, and is evaluated in that order.
         let capacity = match capacity {
             Some(expression) => match self.coerce(expression, Ty::Int)? {
                 Some(value) => Some(value),
-                None => return Err("a `build` function with a `Unit` capacity".to_string()),
+                None => return Err("a `build` function with a `Unit` capacity".into()),
             },
             None => None,
         };

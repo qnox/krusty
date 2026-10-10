@@ -84,7 +84,7 @@ impl BodyLowering<'_, '_, '_> {
     /// somewhere else has no layout here, and boxing one declines.
     fn value_class(&self, classifier: TypeName) -> Result<ClassId, Unsupported> {
         self.file.ir.class_id_by_name(classifier).ok_or_else(|| {
-            format!(
+            declined!(
                 "a boxed `{}`, a value class this file does not declare",
                 classifier.render().replace('/', ".")
             )
@@ -203,7 +203,7 @@ impl BodyLowering<'_, '_, '_> {
                 match target.clif() {
                     Some(clif) if clif == actual => Ok(Some(value)),
                     None => Ok(None),
-                    Some(clif) => Err(format!(
+                    Some(clif) => Err(declined!(
                         "a value of undetermined type (carried as `{actual}`) where a `{clif}` is \
                          required"
                     )),
@@ -214,7 +214,7 @@ impl BodyLowering<'_, '_, '_> {
             (Some(Carrier::Scalar(_, _)), Carrier::Ref) => {
                 let ty = source.expect("known scalar");
                 let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!(
+                    return Err(declined!(
                         "a `{ty:?}` in a position that requires a reference"
                     ));
                 };
@@ -230,7 +230,7 @@ impl BodyLowering<'_, '_, '_> {
                 // a `UByte` from a `Boolean`, and each unboxes through its own descriptor.
                 let ty = target_ty.non_null();
                 let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!("an unboxing to `{ty:?}`"));
+                    return Err(declined!("an unboxing to `{ty:?}`"));
                 };
                 self.runtime_call(
                     &format!("kt_unbox_{suffix}"),
@@ -243,7 +243,7 @@ impl BodyLowering<'_, '_, '_> {
                 Ok(Some(self.resize(value, from, signed, to)))
             }
             (Some(_), Carrier::Void) => Ok(None),
-            (Some(Carrier::Void), _) => Err("a coercion from `Unit`".to_string()),
+            (Some(Carrier::Void), _) => Err("a coercion from `Unit`".into()),
         }
     }
 }

@@ -171,7 +171,7 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         }
         let Some(thrown) = thrown else {
-            return Err("a `throw` of a `Unit` value".to_string());
+            return Err("a `throw` of a `Unit` value".into());
         };
         let id = self.file.import("kt_throw", &[any()], Ty::Unit)?;
         let func_ref = self.func_ref(id);
@@ -222,9 +222,7 @@ impl BodyLowering<'_, '_, '_> {
             (Some(_), Some(value)) => {
                 self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
             }
-            (Some(_), None) => {
-                return Err("a `try` arm of no value where one is needed".to_string())
-            }
+            (Some(_), None) => return Err("a `try` arm of no value where one is needed".into()),
             (None, _) => {
                 self.builder.ins().jump(merge, &[]);
             }
@@ -374,10 +372,10 @@ impl BodyLowering<'_, '_, '_> {
         expected: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let Some((&block, leading)) = args.split_last() else {
-            return Err("`assertFailsWith` with no block".to_string());
+            return Err("`assertFailsWith` with no block".into());
         };
         let Some(descriptor) = self.file.type_descriptor(expected.non_null())? else {
-            return Err(format!(
+            return Err(declined!(
                 "`assertFailsWith` of `{}`, which wears no runtime descriptor",
                 super::type_checks::type_name_of(expected)
             ));
@@ -387,7 +385,7 @@ impl BodyLowering<'_, '_, '_> {
         let message = match leading {
             [] => None,
             [only] if params.len() == args.len() => Some(*only),
-            _ => return Err("`assertFailsWith` with an unexpected argument shape".to_string()),
+            _ => return Err("`assertFailsWith` with an unexpected argument shape".into()),
         };
         let message = match message {
             Some(arg) => self.reference(arg)?,
@@ -546,7 +544,7 @@ impl BodyLowering<'_, '_, '_> {
                 concrete => concrete,
             };
             let Some(descriptor) = self.file.type_descriptor(runtime_type)? else {
-                return Err(format!(
+                return Err(declined!(
                     "a `catch` of `{:?}`, which wears no runtime descriptor",
                     catch.ty
                 ));
@@ -662,14 +660,14 @@ impl BodyLowering<'_, '_, '_> {
             }
             (_, [checked]) => (*checked, None),
             (_, [checked, message]) => (*checked, Some(*message)),
-            _ => return Err("a precondition with an unexpected argument shape".to_string()),
+            _ => return Err("a precondition with an unexpected argument shape".into()),
         };
         // The value is evaluated ONCE — `requireNotNull(f())` calls `f` once and answers what it
         // returned — so what the check branches on is derived from the value already in hand.
         let (condition, held) = match precondition.shape {
             PreconditionShape::Holds => {
                 let Some(value) = self.coerce(checked, Ty::Boolean)? else {
-                    return Err("a precondition over a `Unit` value".to_string());
+                    return Err("a precondition over a `Unit` value".into());
                 };
                 (Condition::Holds(value), None)
             }

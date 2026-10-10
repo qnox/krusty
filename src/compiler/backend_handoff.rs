@@ -16,6 +16,15 @@ use crate::resolve::PassTwoSymbols;
 #[cfg(test)]
 mod tests;
 
+/// The module-wide facts every file of one emission hands its backend alongside its own IR.
+pub(super) struct ModuleEmission<'a> {
+    pub module_name: &'a str,
+    /// Each source file's output stem, by source identity.
+    pub stems: &'a [String],
+    /// Where each checked node came from, for a backend to place what it reports.
+    pub origins: &'a crate::fir::OriginStore,
+}
+
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
 /// has no provider answer.
 pub(super) fn checked_ir_file<'a>(
@@ -23,8 +32,7 @@ pub(super) fn checked_ir_file<'a>(
     source: SourceFileId,
     module_facts: &'a BackendModuleFacts,
     symbols: &'a PassTwoSymbols,
-    module_name: &'a str,
-    stems: &'a [String],
+    module: ModuleEmission<'a>,
     diags: &mut DiagSink,
 ) -> Option<CheckedIrFile<'a>> {
     let callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
@@ -43,7 +51,8 @@ pub(super) fn checked_ir_file<'a>(
         classifiers: CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform()),
         callables,
         native_plugins: symbols.native_plugins(),
-        module_name,
-        stems,
+        module_name: module.module_name,
+        stems: module.stems,
+        origins: module.origins,
     })
 }

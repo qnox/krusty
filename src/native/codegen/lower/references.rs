@@ -783,12 +783,12 @@ impl<'a> FileLowering<'a> {
                     // a setter — and if one somehow did, writing a constant is not a thing to do
                     // quietly.
                     Access::Static { .. } => {
-                        return Err(format!("a write to the constant `{name}`"));
+                        return Err(declined!("a write to the constant `{name}`"));
                     }
                     Access::TopLevel { property } => {
                         let ty = body.top_level_written_ty(&property)?;
                         let Some(value) = body.convert(params[2], Some(any()), ty)? else {
-                            return Err(format!("a `Unit` value assigned to `{name}`"));
+                            return Err(declined!("a `Unit` value assigned to `{name}`"));
                         };
                         body.top_level_write_value(&property, value)?;
                     }
@@ -797,7 +797,7 @@ impl<'a> FileLowering<'a> {
                         let object = receiver(body, params, receiver_offset);
                         body.null_check(object)?;
                         let Some(value) = body.convert(params[2], Some(any()), ty)? else {
-                            return Err(format!("a `Unit` value assigned to `{name}`"));
+                            return Err(declined!("a `Unit` value assigned to `{name}`"));
                         };
                         body.property_write_of(class, index, object, value)?;
                     }
@@ -862,7 +862,7 @@ impl BodyLowering<'_, '_, '_> {
         id: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let Some(site) = self.file.references.get(&id) else {
-            return Err("`LocalPropertyReference`".to_string());
+            return Err("`LocalPropertyReference`".into());
         };
         let instance = site
             .items
@@ -874,7 +874,7 @@ impl BodyLowering<'_, '_, '_> {
     /// `::foo`, `C::p`, `x::p` — the reference object itself.
     pub(super) fn property_reference(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
         let Some(site) = self.file.references.get(&id) else {
-            return Err(self.file.property_reference_decline(id));
+            return Err(self.file.property_reference_decline(id).into());
         };
         let (descriptor, size, receiver_offset, singleton, bound) = (
             site.items.descriptor,
@@ -947,12 +947,12 @@ impl BodyLowering<'_, '_, '_> {
         let mut arguments = Vec::with_capacity(params.len());
         for (operand, ty) in object.into_iter().chain(value).zip(&params) {
             let Some(argument) = self.convert(operand, Some(any()), *ty)? else {
-                return Err("a `Unit` operand of a property accessor".to_string());
+                return Err("a `Unit` operand of a property accessor".into());
             };
             arguments.push(argument);
         }
         if arguments.len() != params.len() {
-            return Err(format!(
+            return Err(declined!(
                 "a property accessor taking {} operands for {} parameters",
                 arguments.len(),
                 params.len()

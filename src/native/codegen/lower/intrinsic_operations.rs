@@ -18,7 +18,7 @@ impl BodyLowering<'_, '_, '_> {
             // rather than acted on.
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (Some(receiver), [argument]) = (receiver, args) else {
-                    return Err("a malformed `compareTo`".to_string());
+                    return Err("a malformed `compareTo`".into());
                 };
                 // The operand type named here is the erased one, which for an unsigned value is
                 // the signed number sharing its bits — and ordering is exactly the question that
@@ -31,7 +31,7 @@ impl BodyLowering<'_, '_, '_> {
                     return self.unsigned_compare(element, receiver, *argument, ret);
                 }
                 let Some(suffix) = scalar_suffix(operand) else {
-                    return Err("`compareTo` on a non-scalar operand".to_string());
+                    return Err("`compareTo` on a non-scalar operand".into());
                 };
                 let left = self.coerce(receiver, operand)?;
                 let right = self.coerce(*argument, operand)?;
@@ -39,7 +39,7 @@ impl BodyLowering<'_, '_, '_> {
                     return Ok(None);
                 }
                 let (Some(left), Some(right)) = (left, right) else {
-                    return Err("`compareTo` on `Unit`".to_string());
+                    return Err("`compareTo` on `Unit`".into());
                 };
                 self.runtime_call(
                     &format!("kt_compare_{suffix}"),
@@ -56,17 +56,17 @@ impl BodyLowering<'_, '_, '_> {
             // s)` — gets the conversion, which is why the answer is not handed straight back.
             IrIntrinsic::StringGet => {
                 let (Some(receiver), [index]) = (receiver, args) else {
-                    return Err("a malformed string read".to_string());
+                    return Err("a malformed string read".into());
                 };
                 self.string_get(receiver, *index, ret)
             }
             IrIntrinsic::Ieee754Equals { operand } => {
                 let [left, right] = args else {
-                    return Err("a malformed IEEE floating-point equality".to_string());
+                    return Err("a malformed IEEE floating-point equality".into());
                 };
                 let operand = operand.canonical_semantic();
                 if !matches!(operand, Ty::Float | Ty::Double) {
-                    return Err(format!(
+                    return Err(declined!(
                         "an IEEE equality whose operand is not floating-point (`{operand:?}`)"
                     ));
                 }
@@ -82,26 +82,26 @@ impl BodyLowering<'_, '_, '_> {
                 {
                     return Err(
                         "an IEEE equality whose checked operands do not match its floating type"
-                            .to_string(),
+                            .into(),
                     );
                 }
                 self.ieee_equality(IrBinOp::Eq, *left, left_ty, *right, right_ty)
             }
             IrIntrinsic::ArrayGet => {
                 let (Some(receiver), [index]) = (receiver, args) else {
-                    return Err("a malformed array read".to_string());
+                    return Err("a malformed array read".into());
                 };
                 self.array_get(receiver, *index, ret)
             }
             IrIntrinsic::ArraySet => {
                 let (Some(receiver), [index, value]) = (receiver, args) else {
-                    return Err("a malformed array store".to_string());
+                    return Err("a malformed array store".into());
                 };
                 self.array_set(receiver, *index, *value)
             }
             IrIntrinsic::ArraySize => {
                 let Some(receiver) = receiver else {
-                    return Err("a malformed array size".to_string());
+                    return Err("a malformed array size".into());
                 };
                 self.array_size(receiver)
             }
@@ -110,17 +110,17 @@ impl BodyLowering<'_, '_, '_> {
             // the bits.
             IrIntrinsic::UnsignedToString { source } => {
                 let Some(receiver) = receiver else {
-                    return Err("a malformed unsigned `toString`".to_string());
+                    return Err("a malformed unsigned `toString`".into());
                 };
                 let Some(realized) = self.unsigned_intrinsic_to_string(source.non_null(), receiver)
                 else {
-                    return Err(format!("an unsigned `toString` of `{source:?}`"));
+                    return Err(declined!("an unsigned `toString` of `{source:?}`"));
                 };
                 realized
             }
             IrIntrinsic::StringLength => {
                 let Some(receiver) = receiver else {
-                    return Err("a malformed `String.length`".to_string());
+                    return Err("a malformed `String.length`".into());
                 };
                 let value = self.reference(receiver)?;
                 if self.terminated {
@@ -134,16 +134,16 @@ impl BodyLowering<'_, '_, '_> {
             // external `Enum`-typed property access.
             IrIntrinsic::EnumName => {
                 let Some(receiver) = receiver else {
-                    return Err("a malformed `Enum.name` read".to_string());
+                    return Err("a malformed `Enum.name` read".into());
                 };
                 if !args.is_empty() {
-                    return Err("a malformed `Enum.name` read".to_string());
+                    return Err("a malformed `Enum.name` read".into());
                 }
                 self.enum_member("name", receiver)
             }
             IrIntrinsic::NullableAnyToString => {
                 let Some(receiver) = receiver else {
-                    return Err("a malformed `toString`".to_string());
+                    return Err("a malformed `toString`".into());
                 };
                 let value = self.reference(receiver)?;
                 if self.terminated {
@@ -153,13 +153,13 @@ impl BodyLowering<'_, '_, '_> {
             }
             IrIntrinsic::GeneratedPropertyHash { ty } => {
                 let [value] = args else {
-                    return Err("a malformed data-class field hash".to_string());
+                    return Err("a malformed data-class field hash".into());
                 };
                 self.field_hash(*value, ty)
             }
             IrIntrinsic::GeneratedPropertyEquals { ty } => {
                 let [left, right] = args else {
-                    return Err("a malformed data-class field comparison".to_string());
+                    return Err("a malformed data-class field comparison".into());
                 };
                 self.field_equals(*left, *right, ty)
             }
@@ -169,7 +169,7 @@ impl BodyLowering<'_, '_, '_> {
             // runtime already answers it for every array it lays out.
             IrIntrinsic::DataClassArrayToString { .. } => {
                 let [value] = args else {
-                    return Err("a malformed data-class array rendering".to_string());
+                    return Err("a malformed data-class array rendering".into());
                 };
                 let array = self.reference(*value)?;
                 if self.terminated {
@@ -182,11 +182,11 @@ impl BodyLowering<'_, '_, '_> {
             // enum; one still standing here names no enum this generator can build.
             IrIntrinsic::EnumEntries { classifier } => match classifier.non_null().obj_internal() {
                 Some(classifier) => self.enum_entries(classifier),
-                None => Err(format!(
+                None => Err(declined!(
                     "`enumEntries` of `{classifier:?}`, which is not an enum"
                 )),
             },
-            other => Err(format!("the `{other:?}` intrinsic")),
+            other => Err(declined!("the `{other:?}` intrinsic")),
         }
     }
 
@@ -213,14 +213,14 @@ impl BodyLowering<'_, '_, '_> {
             crate::types::AssertionMode::Runtime => Err(
                 "an `assert` whose enabling is decided at run time, which this target does not \
                  answer yet"
-                    .to_string(),
+                    .into(),
             ),
             crate::types::AssertionMode::AlwaysEnabled => {
                 let [condition, message @ ..] = args else {
-                    return Err("a malformed `assert`".to_string());
+                    return Err("a malformed `assert`".into());
                 };
                 if message.len() > 1 {
-                    return Err("an `assert` with more than a condition and a message".to_string());
+                    return Err("an `assert` with more than a condition and a message".into());
                 }
                 let Some(value) = self.coerce(*condition, Ty::Boolean)? else {
                     return Ok(None);

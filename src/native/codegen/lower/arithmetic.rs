@@ -86,10 +86,10 @@ impl BodyLowering<'_, '_, '_> {
         let lhs_scalar = self.scalar_operand_type(lhs, lhs_physical);
         let rhs_scalar = self.scalar_operand_type(rhs, rhs_physical);
         let Some(left) = self.expression(lhs)? else {
-            return Err("a `Unit` primitive-equality operand".to_string());
+            return Err("a `Unit` primitive-equality operand".into());
         };
         let Some(right) = self.expression(rhs)? else {
-            return Err("a `Unit` primitive-equality operand".to_string());
+            return Err("a `Unit` primitive-equality operand".into());
         };
         if self.terminated {
             return Ok(None);
@@ -188,7 +188,7 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(value);
         }
         let Some(scalar) = scalar else {
-            return Err("an operator on a reference operand".to_string());
+            return Err("an operator on a reference operand".into());
         };
         Ok(self
             .convert(value, Some(any()), scalar)?
@@ -229,7 +229,7 @@ impl BodyLowering<'_, '_, '_> {
         let left = self.builder.func.dfg.value_type(lhs);
         let right = self.builder.func.dfg.value_type(rhs);
         if left.is_float() != right.is_float() {
-            return Err("an operator mixing integer and floating-point operands".to_string());
+            return Err("an operator mixing integer and floating-point operands".into());
         }
         // `Char` and the four unsigned integers widen by zero-extension; everything else by sign.
         let signed_of = |ty: Option<Ty>| {
@@ -287,18 +287,16 @@ impl BodyLowering<'_, '_, '_> {
                 .and_then(scalar_bound)
                 .or_else(|| right_physical.and_then(scalar_bound)),
         ) else {
-            return Err(
-                "an IEEE comparison whose operand names no floating-point type".to_string(),
-            );
+            return Err("an IEEE comparison whose operand names no floating-point type".into());
         };
         if left_ty != right_ty {
-            return Err("an IEEE comparison between two floating-point widths".to_string());
+            return Err("an IEEE comparison between two floating-point widths".into());
         }
         let Some(left) = self.expression(lhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         let Some(right) = self.expression(rhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         if self.terminated {
             return Ok(None);
@@ -468,7 +466,7 @@ impl BodyLowering<'_, '_, '_> {
             }
             if lhs_ty.is_none() && rhs_ty.is_none() {
                 // Neither a known scalar nor a known reference: either equality would be a guess.
-                return Err("an equality on an undetermined operand type".to_string());
+                return Err("an equality on an undetermined operand type".into());
             }
         }
         if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) {
@@ -481,10 +479,10 @@ impl BodyLowering<'_, '_, '_> {
                     && matches!(rhs_ty.map(|ty| self.carrier(ty)), Some(Carrier::Scalar(..)));
             if both_scalars {
                 let Some(left) = self.expression(lhs)? else {
-                    return Err("a `Unit` operand".to_string());
+                    return Err("a `Unit` operand".into());
                 };
                 let Some(right) = self.expression(rhs)? else {
-                    return Err("a `Unit` operand".to_string());
+                    return Err("a `Unit` operand".into());
                 };
                 if self.terminated {
                     return Ok(None);
@@ -513,10 +511,10 @@ impl BodyLowering<'_, '_, '_> {
         }
 
         let Some(left) = self.expression(lhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         let Some(right) = self.expression(rhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         if self.terminated {
             return Ok(None);
@@ -526,7 +524,7 @@ impl BodyLowering<'_, '_, '_> {
         // to the operand width, which is exactly Kotlin's rule (`1 shl 32 == 1`).
         if matches!(op, IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr) {
             if self.builder.func.dfg.value_type(left).is_float() {
-                return Err("a shift of a floating-point operand".to_string());
+                return Err("a shift of a floating-point operand".into());
             }
             let left = self.widen_narrow_integer(left, lhs_ty);
             return Ok(Some(match op {
@@ -559,7 +557,7 @@ impl BodyLowering<'_, '_, '_> {
                         &[left, right],
                     )?
                     else {
-                        return Err("a `%` on floating point that yields no value".to_string());
+                        return Err("a `%` on floating point that yields no value".into());
                     };
                     value
                 }
@@ -572,7 +570,7 @@ impl BodyLowering<'_, '_, '_> {
                     let condition = float_comparison(op).expect("comparison");
                     self.builder.ins().fcmp(condition, left, right)
                 }
-                other => return Err(format!("`{other:?}` on floating-point operands")),
+                other => return Err(declined!("`{other:?}` on floating-point operands")),
             }));
         }
 
@@ -657,7 +655,7 @@ impl BodyLowering<'_, '_, '_> {
     /// Unary minus. `-Int.MIN_VALUE` is `Int.MIN_VALUE` in Kotlin, and `ineg` wraps the same way.
     pub(super) fn negate(&mut self, operand: u32, ty: Ty) -> Result<Option<Value>, Unsupported> {
         let Some(value) = self.coerce(operand, ty)? else {
-            return Err("a negation of `Unit`".to_string());
+            return Err("a negation of `Unit`".into());
         };
         if self.terminated {
             return Ok(None);
@@ -685,10 +683,10 @@ impl BodyLowering<'_, '_, '_> {
         let ty = match self.type_of(receiver).map(Ty::non_null) {
             Some(Ty::Double) => Ty::Double,
             Some(Ty::Float) => Ty::Float,
-            _ => return Err("a floating-point question about a value of another type".to_string()),
+            _ => return Err("a floating-point question about a value of another type".into()),
         };
         let Some(value) = self.coerce(receiver, ty)? else {
-            return Err("a floating-point question about `Unit`".to_string());
+            return Err("a floating-point question about `Unit`".into());
         };
         if self.terminated {
             return Ok(None);
@@ -810,20 +808,20 @@ impl BodyLowering<'_, '_, '_> {
         use super::super::super::intrinsics::BitwiseOp;
         let operand = ret.non_null();
         if !matches!(operand, Ty::Byte | Ty::Short) {
-            return Err(format!(
+            return Err(declined!(
                 "a `kotlin.experimental` bit operation answering `{operand:?}`"
             ));
         }
         let Some(left) = self.coerce(receiver, operand)? else {
-            return Err("a `Unit` receiver for a bit operation".to_string());
+            return Err("a `Unit` receiver for a bit operation".into());
         };
         let right = match args {
             [] => None,
             [argument] => match self.coerce(*argument, operand)? {
                 Some(value) => Some(value),
-                None => return Err("a `Unit` operand for a bit operation".to_string()),
+                None => return Err("a `Unit` operand for a bit operation".into()),
             },
-            _ => return Err("a bit operation with more than one operand".to_string()),
+            _ => return Err("a bit operation with more than one operand".into()),
         };
         if self.terminated {
             return Ok(None);
@@ -833,7 +831,7 @@ impl BodyLowering<'_, '_, '_> {
             (BitwiseOp::Or, Some(right)) => self.builder.ins().bor(left, right),
             (BitwiseOp::Xor, Some(right)) => self.builder.ins().bxor(left, right),
             (BitwiseOp::Inv, None) => self.builder.ins().bnot(left),
-            _ => return Err("a bit operation of the wrong arity".to_string()),
+            _ => return Err("a bit operation of the wrong arity".into()),
         };
         self.convert(produced, Some(operand), ret)
     }
@@ -857,7 +855,7 @@ impl BodyLowering<'_, '_, '_> {
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let Some(value) = self.coerce(receiver, Ty::Boolean)? else {
-            return Err("a `Unit` operand of `Boolean.not`".to_string());
+            return Err("a `Unit` operand of `Boolean.not`".into());
         };
         if self.terminated {
             return Ok(None);

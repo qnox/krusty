@@ -252,7 +252,7 @@ impl<'a> FileLowering<'a> {
                                     };
                                     let Some(&wrapper) = body.file.default_constructors.get(&key)
                                     else {
-                                        return Err(format!(
+                                        return Err(declined!(
                                             "an enum constant omitting a constructor argument (`{}`)",
                                             entry.name
                                         ));
@@ -263,13 +263,13 @@ impl<'a> FileLowering<'a> {
                             };
                             if entry.args.len() != carried.len() {
                                 return Err(
-                                    "an enum constant with a mismatched argument list".to_string()
+                                    "an enum constant with a mismatched argument list".into()
                                 );
                             }
                             let mut operands = vec![instance];
                             for (&argument, ty) in entry.args.iter().zip(&carried) {
                                 let Some(value) = body.coerce(argument, *ty)? else {
-                                    return Err("a `Unit` enum constant argument".to_string());
+                                    return Err("a `Unit` enum constant argument".into());
                                 };
                                 operands.push(value);
                             }

@@ -69,9 +69,7 @@ impl FileLowering<'_> {
                             return Ok(());
                         }
                         let Some(value) = value else {
-                            return Err(
-                                "a local delegate accessor returned a `Unit` value".to_string()
-                            );
+                            return Err("a local delegate accessor returned a `Unit` value".into());
                         };
                         body.builder.ins().return_(&[value]);
                         body.terminate();
@@ -116,7 +114,7 @@ impl BodyLowering<'_, '_, '_> {
         operands.push(access.delegate);
         operands.extend(access.value);
         if operands.len() != accessor.parameters.len() {
-            return Err("a local delegated-property access with malformed operands".to_string());
+            return Err("a local delegated-property access with malformed operands".into());
         }
         let arguments = self.arguments(&operands, &accessor.parameters)?;
         if self.terminated {

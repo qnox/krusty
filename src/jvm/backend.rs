@@ -836,6 +836,7 @@ impl JvmBackend {
             native_plugins,
             module_name,
             stems,
+            origins: _,
         } = file;
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();

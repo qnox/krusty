@@ -26,7 +26,7 @@ pub(super) fn array_type(array: Ty) -> Result<(&'static str, u32), Unsupported> 
         return Ok(("kt_type_array", 8));
     }
     let Some(element) = array.non_null().array_elem() else {
-        return Err(format!("an array of `{array:?}`"));
+        return Err(declined!("an array of `{array:?}`"));
     };
     Ok(match element {
         Ty::Byte => ("kt_type_byte_array", 1),
@@ -45,7 +45,7 @@ pub(super) fn array_type(array: Ty) -> Result<(&'static str, u32), Unsupported> 
         Ty::UShort => ("kt_type_ushort_array", 2),
         Ty::UInt => ("kt_type_uint_array", 4),
         Ty::ULong => ("kt_type_ulong_array", 8),
-        other => return Err(format!("an array of `{other:?}`")),
+        other => return Err(declined!("an array of `{other:?}`")),
     })
 }
 
@@ -140,7 +140,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         let Some(length) = length else {
-            return Err("an array size of no value".to_string());
+            return Err("an array size of no value".into());
         };
         let descriptor = self.data_address(descriptor);
         self.runtime_call(
@@ -169,7 +169,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         for (value, spread) in elements.iter().zip(spreads) {
             let stored = if *spread { any() } else { shape.stored };
             let Some(value) = self.coerce(*value, stored)? else {
-                return Err("a `Unit` array element".to_string());
+                return Err("a `Unit` array element".into());
             };
             if self.terminated {
                 return Ok(None);
@@ -260,7 +260,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         let Some(index) = index else {
-            return Err("an array index of no value".to_string());
+            return Err("an array index of no value".into());
         };
         let address = self.element_address(array, index, shape.stride)?;
         let clif = self
@@ -284,7 +284,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         let (Some(index), Some(value)) = (index, value) else {
-            return Err("an array store of no value".to_string());
+            return Err("an array store of no value".into());
         };
         let address = self.element_address(array, index, shape.stride)?;
         self.builder.ins().store(trusted(), value, address, 0);

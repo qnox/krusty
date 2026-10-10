@@ -481,7 +481,7 @@ impl BodyLowering<'_, '_, '_> {
         let mut operands = vec![self.reference(receiver)?];
         for (argument, ty) in args.iter().zip(&carried[1..]) {
             let Some(value) = self.coerce(*argument, *ty)? else {
-                return Err(format!("a `Unit` operand of `{symbol}`"));
+                return Err(declined!("a `Unit` operand of `{symbol}`"));
             };
             operands.push(value);
         }
