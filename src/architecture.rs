@@ -444,7 +444,9 @@ mod tests {
         ];
         assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);
         for path in rust_files_under("src/klib_lowering") {
-            if path.file_name() != Some(std::ffi::OsStr::new("tests.rs")) {
+            let test_module = path.file_name() == Some(std::ffi::OsStr::new("tests.rs"))
+                || path.starts_with(source_path("src/klib_lowering/tests"));
+            if !test_module {
                 assert_allowed_crate_modules_in_file(&path, &allowed);
             }
         }
