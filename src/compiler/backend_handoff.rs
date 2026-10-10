@@ -19,7 +19,7 @@ mod tests;
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
 /// has no provider answer.
 pub(super) fn checked_ir_file<'a>(
-    ir: IrFile,
+    mut ir: IrFile,
     source: SourceFileId,
     module_facts: &'a BackendModuleFacts,
     symbols: &'a PassTwoSymbols,
@@ -37,6 +37,8 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
+    // Each class's declarations are recorded here, before any target lowers them.
+    crate::metadata::class_declarations::record_all(&mut ir);
     Some(CheckedIrFile {
         ir,
         source,

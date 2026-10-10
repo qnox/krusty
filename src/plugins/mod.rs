@@ -674,15 +674,16 @@ pub trait IrPlugin {
 /// Run this compilation's native backend plugins over frontend-checked common IR. Annotation names
 /// and values have already been resolved and folded, so neither reparsed source nor spelling
 /// participates. `plugins` is the same selection the frontend ran; with none selected this is a no-op.
+/// Returns whether any plugin ran, and so may have generated or completed declarations.
 pub fn run_enabled(
     ir: &mut IrFile,
     plugins: &registry::NativePlugins,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
     classifiers: &dyn crate::types::ClassifierFactSource,
-) {
+) -> bool {
     if plugins.is_empty() {
-        return;
+        return false;
     }
     let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
     let uses_serialization = ir.exprs.iter().any(|expression| {
@@ -699,7 +700,7 @@ pub fn run_enabled(
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
             .is_empty()
     {
-        return;
+        return false;
     }
     record_external_value_classes(ir, classifiers);
     let external = external_serializers(ir, classifiers);
@@ -709,6 +710,7 @@ pub fn run_enabled(
         .with_runtime_serializers(runtime_serializers(classifiers))
         .with_external_serializer_objects(declared_serializer_objects(ir, classifiers));
     plugins.host(module_name).run(ir, &ctx);
+    true
 }
 
 /// The provider-confirmed kind of every serializer class a property's `@Serializable(with = …)`

@@ -90,6 +90,7 @@ pub(crate) struct BackendPassFacts {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
+///    When they ran, each class's declaration record is rebuilt to include their declarations.
 ///    Once their output is final, freeze any exact dependency identity selected by a generated
 ///    `super` call, then realize all checked super calls from those frozen facts.
 ///
@@ -152,13 +153,18 @@ pub(crate) fn run_backend_passes(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(
+    let plugins_ran = crate::plugins::run_enabled(
         ir,
         plugins.native_plugins,
         plugins.module_name,
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    // Plugins run after the handoff recorded each class's declarations, and generate or complete
+    // declarations of their own. Record them again before any JVM lowering rewrites one.
+    if plugins_ran {
+        crate::metadata::class_declarations::record_all(ir);
+    }
     // Plugins run after the frontend/backend handoff and may append checked calls selected by an
     // exact dependency identity. Freeze those provider-normalized records now, once plugin output
     // is final and before any realization consumes them. Existing facts remain the original copy.

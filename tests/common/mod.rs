@@ -26,7 +26,7 @@ pub mod source_set_compile;
 #[allow(unused_imports)]
 pub use native_backend::{
     expect_native_box, expect_native_decline, expect_native_exit, expect_native_sources,
-    native_sys_header, write_native_runtime_headers,
+    native_analysis, native_sys_header, write_native_runtime_headers,
 };
 pub use source_set_compile::compile_in_process_files;
 

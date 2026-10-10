@@ -2085,6 +2085,13 @@ pub struct IrFile {
     pub extension_receiver_fns: std::collections::HashSet<u32>,
     /// Members this file's `companion { … }` blocks declared, placed on their classes.
     pub companion_blocks: IrCompanionBlocks,
+    /// Each class's Kotlin declaration record, built from the checked IR at the backend handoff,
+    /// before any target lowering rewrites a declaration. `None` for a class the record cannot
+    /// describe.
+    pub(crate) class_declarations: std::collections::HashMap<
+        TypeName,
+        Option<crate::metadata::class_declarations::ClassDeclarationRecord>,
+    >,
     /// Function id → how many of its LEADING physical parameters are context parameters. Class
     /// `@Metadata` is built from the IR alone, so this is the only carrier telling it to record them
     /// as `Function.context_parameter` (field 13) rather than as ordinary value parameters — without

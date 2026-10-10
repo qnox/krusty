@@ -201,19 +201,16 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     native_sources_outcome(&[(stem, src)], target)
 }
 
-/// Compile `sources` with the native code generator and link them into an executable image, or say
-/// why there is none.
-pub fn native_image(
+/// The analysis a Native compilation of `sources` (`(stem, text)`) starts from: the semantic
+/// platform and language settings every Native test compiles with, and the file stems in order.
+/// `None` when this build has no stdlib to analyze against.
+pub fn native_analysis(
     sources: &[(&str, &str)],
-    target: krusty::native::NativeTarget,
-) -> Result<Vec<u8>, NativeBox> {
-    use krusty::diag::DiagSink;
-    use krusty::native::{CraneliftBackend, Entry};
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
     use krusty::source::SourceInput;
 
-    let Some(jar) = krusty::toolchain::stdlib_jar() else {
-        return Err(NativeBox::Unavailable);
-    };
+    let jar = krusty::toolchain::stdlib_jar()?;
     // Stdlib AND JDK, the same pair the JVM helpers compile against. The bridge `native/intrinsics`
     // describes runs through here: signatures are read out of JVM artifacts until the provider is
     // klib-based, and `kotlin.RuntimeException` is a typealias for `java.lang.RuntimeException`, so
@@ -244,10 +241,25 @@ pub fn native_image(
     for (_, src) in sources {
         features.apply_source_directives(src);
     }
-    let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs, platform, &features, diags,
     );
+    Some((analysis, stems))
+}
+
+/// Compile `sources` with the native code generator and link them into an executable image, or say
+/// why there is none.
+pub fn native_image(
+    sources: &[(&str, &str)],
+    target: krusty::native::NativeTarget,
+) -> Result<Vec<u8>, NativeBox> {
+    use krusty::diag::DiagSink;
+    use krusty::native::{CraneliftBackend, Entry};
+
+    let mut diags = DiagSink::new();
+    let Some((analysis, stems)) = native_analysis(sources, &mut diags) else {
+        return Err(NativeBox::Unavailable);
+    };
     if let Some(refusal) = diags.diags.first() {
         return Err(NativeBox::Declined(format!(
             "the frontend refused it: {}",
