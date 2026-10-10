@@ -1531,6 +1531,9 @@ pub struct ClassSig {
     /// Arena declaration that owns this source classifier. Synthetic companion classifiers have no
     /// independent class declaration and therefore leave this unset.
     pub source_decl: Option<DeclId>,
+    /// Whether the declaration is structurally owned by another classifier. This is captured from
+    /// the declaration graph while source ownership is live; an internal-name `$` is not ownership.
+    pub is_nested: bool,
     pub visibility: Visibility,
     /// Resolved classifier declaration annotations, projected to the stable module index before
     /// Pass 2 so plugins and semantic checks never revisit source occurrences.
@@ -1692,6 +1695,7 @@ struct DeclaredCallableClassHeader {
     stable_declaration: Option<crate::fir::DeclarationId>,
     source_file: u32,
     source_decl: DeclId,
+    is_nested: bool,
     visibility: Visibility,
     flags: ClassFlags,
     methods: MethodMap,
@@ -1717,6 +1721,7 @@ impl ClassSig {
             stable_declaration,
             source_file,
             source_decl,
+            is_nested,
             visibility,
             flags,
             methods,
@@ -1734,6 +1739,7 @@ impl ClassSig {
             stable_declaration,
             source_file,
             source_decl: Some(source_decl),
+            is_nested,
             visibility,
             annotations: Vec::new(),
             applied_annotations: Vec::new(),
