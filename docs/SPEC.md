@@ -2333,6 +2333,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   direct accessor realization, the valid property is typed but rejected before emission with a stable
   boundary until an alternative cached-mapping realization is implemented. Test:
   `tests/enum_entries_e2e.rs`.
+- **An enum entry named `entries` (`ForbidEnumEntryNamedEntries`, `DECLARATION_OF_ENUM_ENTRY_ENTRIES`).**
+  The entry is reported at its name: `conflicting declarations: the enum entry 'entries' and the
+  property 'Enum.entries' (KT-48872).`, an error with the feature (the default since 2.2) and
+  otherwise a warning followed by `This will become an error in language version 2.2. See
+  https://youtrack.jetbrains.com/issue/KT-72829.` (the version and issue from the vendored feature
+  table). What `entries` names on such an enum follows kotlinc's
+  `DiscriminateSyntheticAndForbiddenProperties`, decided by the use site's settings: with the feature
+  the entry resolves with low priority, so `Enum.entries` wins; without it, under
+  `PrioritizedEnumEntries`, the entry and the property are equal candidates for both an unqualified
+  `entries` in the enum and `E.entries`, reported at the name as `overload resolution ambiguity
+  between candidates:` followed by `enum entry entries: E` and `companion val entries:
+  EnumEntries<E>`; without either feature `E.entries` reads the entry. A callable reference
+  `E::entries` names the property in every case. Not modeled: suppressing the warning. Tests:
+  `tests/enum_entry_named_entries_e2e.rs` (complete errors and warnings in each state and the
+  run-time meaning without either feature, vs kotlinc) and `tests/feature_coverage_a_e2e.rs`
+  (`enum_entries_callable_reference_is_distinct_from_same_named_enum_entry`).
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form

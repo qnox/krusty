@@ -27,6 +27,9 @@ pub struct LanguageGates {
     /// `FunctionalTypeWithExtensionAsSupertype`, for supertypes that expand to an extension or
     /// contextual function type.
     pub functional_type_with_extension_as_supertype: FeatureGate,
+    /// `ForbidEnumEntryNamedEntries`: the severity of an enum entry named `entries`, which is an
+    /// error exactly when the feature is enabled; enabled, such an entry also loses to `Enum.entries`.
+    pub enum_entry_named_entries: DeprecationGate,
     /// `ProhibitIntersectionReifiedTypeParameter`, the severity of an intersection type argument
     /// for a reified type parameter.
     pub intersection_reified_type_parameter: DeprecationGate,

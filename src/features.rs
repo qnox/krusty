@@ -132,6 +132,7 @@ const MODELED_FEATURES: &[&str] = &[
     "EnumEntries",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
+    "ForbidEnumEntryNamedEntries",
     "FullValueClasses",
     "FunctionalTypeWithExtensionAsSupertype",
     "ImplicitSignedToUnsignedIntegerConversion",
