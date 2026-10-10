@@ -100,7 +100,9 @@ struct Toolchain {
     dist_jars: Vec<(&'static str, PathBuf)>,
     /// What the compiler's home directory renders as (`$PROJECT_DIR$`), when it has one.
     home: Option<PathBuf>,
-    /// The running JVM's `java.runtime.version`, for the reference compiler's `-version` line.
+    /// The JDK a JVM compiler runs on, and its `java.runtime.version` for the reference
+    /// compiler's `-version` line.
+    java_home: Option<PathBuf>,
     jvm_version: Option<String>,
 }
 
@@ -115,7 +117,7 @@ const DIST_JARS: &[(&str, &str)] = &[
 ];
 
 impl Toolchain {
-    fn new(compiler: PathBuf, home: Option<PathBuf>, jvm_version: Option<String>) -> Self {
+    fn new(compiler: PathBuf, home: Option<PathBuf>) -> Self {
         let dist_jars = DIST_JARS
             .iter()
             .filter_map(|(placeholder, name)| {
@@ -131,7 +133,8 @@ impl Toolchain {
             jdks: available_jdks(),
             dist_jars,
             home,
-            jvm_version,
+            java_home: None,
+            jvm_version: None,
         }
     }
 }
@@ -454,10 +457,15 @@ fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
     let mut exit = Some(0);
     for arguments in &invocations.groups {
         // JetBrains runs the corpus under UTF-8; a JVM in the POSIX locale prints `?` for `–`.
-        let result = Command::new(&toolchain.compiler)
+        let mut command = Command::new(&toolchain.compiler);
+        command
             .args(arguments)
             .current_dir(&toolchain.root)
-            .env("LC_ALL", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8");
+        if let Some(java_home) = &toolchain.java_home {
+            command.env("JAVA_HOME", java_home).env_remove("JAVACMD");
+        }
+        let result = command
             .output()
             .unwrap_or_else(|error| panic!("run {}: {error}", toolchain.compiler.display()));
         output.push_str(&String::from_utf8_lossy(&result.stderr));
@@ -612,7 +620,7 @@ fn render_failures(version: KotlinVersion, failures: &BTreeSet<String>) -> Strin
 
 #[test]
 fn krusty_reproduces_kotlincs_cli_test_corpus() {
-    let toolchain = Toolchain::new(common::krusty_binary(), None, None);
+    let toolchain = Toolchain::new(common::krusty_binary(), None);
     let version = toolchain.reference;
     let outcomes = run_corpus(&toolchain);
     let not_applicable =
@@ -717,11 +725,19 @@ fn the_reference_compiler_reproduces_every_applicable_cli_case() {
         .and_then(Path::parent)
         .expect("kotlinc lives in <home>/bin")
         .to_path_buf();
-    let toolchain = Toolchain::new(
-        home.join("bin/kotlinc-jvm"),
-        Some(home),
-        jvm_runtime_version(),
-    );
+    let mut toolchain = Toolchain::new(home.join("bin/kotlinc-jvm"), Some(home));
+    let java_home = toolchain
+        .jdks
+        .get(&REFERENCE_JDK)
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "the reference compiler runs on JDK {REFERENCE_JDK} \
+                 (set KRUSTY_JDK_{REFERENCE_JDK}_HOME)"
+            )
+        });
+    toolchain.jvm_version = jvm_runtime_version(&java_home);
+    toolchain.java_home = Some(java_home);
     let not_applicable = load_expectation(&expectation_path(
         "cli_expected_not_applicable",
         toolchain.reference,
@@ -757,12 +773,15 @@ fn the_reference_compiler_reproduces_every_applicable_cli_case() {
     );
 }
 
-/// `java.runtime.version` of the `java` on `JAVA_HOME`, which the reference `-version` line prints.
-fn jvm_runtime_version() -> Option<String> {
-    let java = std::env::var_os("JAVA_HOME")
-        .map(|home| PathBuf::from(home).join("bin/java"))
-        .unwrap_or_else(|| PathBuf::from("java"));
-    let output = Command::new(java)
+/// The JDK the reference kotlinc runs on: the newest release the corpus names. On JDK 25, kotlinc
+/// runs out of memory on `argFileCommonChecks/argfileWithEmptyArgument` instead of reporting that
+/// there are no sources, apparently reading the empty argument as the working directory and
+/// compiling the whole checkout.
+const REFERENCE_JDK: u32 = 21;
+
+/// `java.runtime.version` of a JDK, which the reference `-version` line prints.
+fn jvm_runtime_version(java_home: &Path) -> Option<String> {
+    let output = Command::new(java_home.join("bin/java"))
         .args(["-XshowSettings:properties", "-version"])
         .output()
         .ok()?;
