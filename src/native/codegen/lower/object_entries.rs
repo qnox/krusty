@@ -162,28 +162,40 @@ impl FileLowering<'_> {
         &mut self,
         declared: Ty,
         implemented: Ty,
+        receiver: Option<(Ty, Ty)>,
         setter: bool,
         target_slot: u32,
         id: FuncId,
     ) -> Result<(), Unsupported> {
-        let (params, result) = if setter {
-            (vec![any(), declared], Ty::Unit)
-        } else {
-            (vec![any()], declared)
-        };
+        let (params, result) =
+            accessor_signature(declared, receiver.map(|(declared, _)| declared), setter);
+        let (forwarded, forwarded_result) = accessor_signature(
+            implemented,
+            receiver.map(|(_, implemented)| implemented),
+            setter,
+        );
         let signature = self.signature_of(&params, result)?;
         let name = format!("accessor bridge to slot {target_slot}");
         self.emit_function(id, signature, result, &name, &mut |body, values| {
-            if setter {
-                let Some(value) = body.convert(values[1], Some(declared), implemented)? else {
-                    return Err("a `Unit` value crossing an accessor bridge".to_string());
+            let mut operands = Vec::with_capacity(forwarded.len() - 1);
+            for ((&value, &have), &want) in values.iter().zip(&params).zip(&forwarded).skip(1) {
+                let Some(value) = body.convert(value, Some(have), want)? else {
+                    return Err("a `Unit` operand crossing an accessor bridge".to_string());
                 };
-                body.dispatch(values[0], target_slot, &[implemented], Ty::Unit, &[value])?;
+                operands.push(value);
+            }
+            let answer = body.dispatch(
+                values[0],
+                target_slot,
+                &forwarded[1..],
+                forwarded_result,
+                &operands,
+            )?;
+            if setter {
                 body.builder.ins().return_(&[]);
                 body.terminate();
                 return Ok(());
             }
-            let answer = body.dispatch(values[0], target_slot, &[], implemented, &[])?;
             let Some(answer) = answer else {
                 return Err("a `Unit` answer crossing an accessor bridge".to_string());
             };
@@ -359,5 +371,22 @@ impl FileLowering<'_> {
             body.terminate();
             Ok(())
         })
+    }
+}
+
+/// An accessor's physical operands and answer: the object, a member extension's receiver, and a
+/// setter's value; a getter answers the property's type and a setter nothing.
+pub(super) fn accessor_signature(
+    property: Ty,
+    receiver: Option<Ty>,
+    setter: bool,
+) -> (Vec<Ty>, Ty) {
+    let mut params = vec![any()];
+    params.extend(receiver);
+    if setter {
+        params.push(property);
+        (params, Ty::Unit)
+    } else {
+        (params, property)
     }
 }

@@ -2185,9 +2185,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     self.file.ir.classes[*class as usize].fields[*index as usize].ty,
                 )
             }
+            IrExpr::EnclosingInstance { inner, .. } => {
+                let (class, field) = self.enclosing_field(*inner).ok()?;
+                self.file.ir.classes[class as usize].fields[field as usize].ty
+            }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
+            // What the checked accessor the access calls answers.
+            IrExpr::LocalDelegateAccess(access) => {
+                let plan = self
+                    .file
+                    .ir
+                    .local_delegate_plans
+                    .get(access.plan as usize)?;
+                match access.value {
+                    Some(_) => plan.setter.as_ref()?.result,
+                    None => plan.getter.result,
+                }
+            }
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),

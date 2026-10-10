@@ -195,21 +195,6 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
     prepared
 }
 
-/// Language features Kotlin's codegen-test runner supplies for one target, followed by the test's
-/// own ordered `// LANGUAGE:` overrides.
-///
-/// Native corpus migration still enables full value classes as a harness compatibility setting.
-/// The compiler target remains an explicit frontend input; removing this corpus setting belongs to
-/// the later migration that fixes the remaining backend cases instead of growing the ratchet.
-pub fn test_features(src: &str, target: TestTarget) -> crate::features::LangFeatures {
-    let mut features = crate::features::LangFeatures::new();
-    if target == TestTarget::Native {
-        features.enable("FullValueClasses");
-    }
-    features.apply_source_directives(src);
-    features
-}
-
 /// Whether a box test applies to the backend tokens `names`, per kotlinc's test-runner directives, for
 /// krusty's configuration: **Kotlin 2.4.0 (K2) frontend + JVM_IR backend**.
 /// - `// TARGET_BACKEND:` restricts the test to the listed backends (absent = all).
@@ -1942,21 +1927,6 @@ fun box(): String = f()
                     refines: vec!["mid".to_string(), "common".to_string()],
                 },
             ]
-        );
-    }
-
-    #[test]
-    fn native_test_features_keep_the_existing_corpus_compatibility_setting() {
-        assert!(
-            test_features("value class V(val x: Int)", TestTarget::Native).has("FullValueClasses")
-        );
-        assert!(!test_features(
-            "// LANGUAGE: -FullValueClasses\nvalue class V(val x: Int)",
-            TestTarget::Native,
-        )
-        .has("FullValueClasses"));
-        assert!(
-            !test_features("value class V(val x: Int)", TestTarget::Jvm).has("FullValueClasses")
         );
     }
 }

@@ -267,10 +267,7 @@ fn compile(
         .with_entry(Entry::Box)
         .verified();
     let platform = krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform);
-    let features = krusty::conformance::test_features(
-        directive_source,
-        krusty::conformance::TestTarget::Native,
-    );
+    let features = krusty::features::LangFeatures::from_source(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,

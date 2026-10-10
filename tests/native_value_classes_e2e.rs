@@ -306,3 +306,157 @@ fn a_value_class_fills_its_defaulted_arguments() {
          }\n";
     every_backend_agrees_with_kotlinc("ValueClassDefaults", source);
 }
+
+/// An explicit backing field of a value-class type: the default getter answers the property's
+/// public type, so the value is boxed on the way out, while the class reads the field as the value.
+#[test]
+fn an_explicit_backing_field_of_a_value_class_answers_the_public_type() {
+    let source = "// LANGUAGE: +ExplicitBackingFields\n\
+         interface I { fun call(): Int }\n\
+         @JvmInline value class V(val x: Int) : I { override fun call(): Int = x }\n\
+         class A {\n\
+         \x20   val a: Any\n\
+         \x20       field = V(1)\n\
+         \x20   fun bar(): Int = a.call() + a.x\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val a = A()\n\
+         \x20   if (a.bar() != 2) return \"fail 1\"\n\
+         \x20   val b: Any = a.a\n\
+         \x20   if (b !is V || b.x != 1) return \"fail 2: $b\"\n\
+         \x20   if ((b as I).call() != 1) return \"fail 3\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassBackingField", source);
+}
+
+/// A dependency interface member whose implementor in this file is a value class taking its own
+/// type: the implementor's arm is compiled for every call through the interface, and an operand
+/// the site types otherwise reaches it as the reference the interface carries.
+#[test]
+fn a_value_class_comparable_does_not_capture_another_comparable_call() {
+    let source = "@JvmInline value class II(val i: Int) : Comparable<II> {\n\
+         \x20   override fun compareTo(other: II): Int = i.compareTo(other.i)\n\
+         }\n\
+         @JvmInline value class ICmp(val intc: Comparable<Int>)\n\
+         fun test(x: ICmp): Int = x.intc.compareTo(42)\n\
+         fun box(): String {\n\
+         \x20   if (test(ICmp(42)) != 0) return \"fail 1\"\n\
+         \x20   val c: Comparable<II> = II(1)\n\
+         \x20   if (c.compareTo(II(2)) >= 0) return \"fail 2\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassComparableArm", source);
+}
+
+/// A call through `Comparable<Rank>` whose receiver IS a `Rank`: the implementor's arm is the one
+/// that runs, and its operand changes representation twice. The site passes the `Rank` value, the
+/// dependency declaration's `T` carries it boxed, and `Rank.compareTo` takes the value again. The
+/// exact differences catch a box read as the `Long`, and a value read as a box.
+#[test]
+fn a_comparable_call_selecting_a_value_class_arm_crosses_the_declared_parameter() {
+    let source = "@JvmInline value class Rank(val r: Long) : Comparable<Rank> {\n\
+         \x20   override fun compareTo(other: Rank): Int = (r - other.r).toInt()\n\
+         }\n\
+         fun <T : Comparable<T>> order(a: T, b: T): Int = a.compareTo(b)\n\
+         fun box(): String {\n\
+         \x20   val c: Comparable<Rank> = Rank(10)\n\
+         \x20   val direct = c.compareTo(Rank(3))\n\
+         \x20   if (direct != 7) return \"fail 1: $direct\"\n\
+         \x20   val generic = order(Rank(2), Rank(9))\n\
+         \x20   if (generic != -7) return \"fail 2: $generic\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassComparableDeclaredBoundary", source);
+}
+
+/// An interface redeclaring an inherited member at a value-class result stands in nothing of its
+/// own: the implementor fills both interfaces' numbers, each at its own representation.
+#[test]
+fn an_abstract_covariant_redeclaration_is_filled_by_the_implementor() {
+    let source = "@JvmInline value class X(val x: Any)\n\
+         interface IBar { fun bar(): Any }\n\
+         interface IFoo : IBar { override fun bar(): X }\n\
+         class TestX : IFoo { override fun bar(): X = X(\"K\") }\n\
+         fun box(): String {\n\
+         \x20   val foo: IFoo = TestX()\n\
+         \x20   val bar: IBar = TestX()\n\
+         \x20   val viaBar = bar.bar()\n\
+         \x20   if (viaBar !is X) return \"fail 1: $viaBar\"\n\
+         \x20   if (foo.bar().x != \"K\") return \"fail 2\"\n\
+         \x20   if (viaBar.x != \"K\") return \"fail 3\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassCovariantRedeclaration", source);
+}
+
+/// A member extension property whose receiver is the interface's type parameter, implemented at
+/// a value class: the receiver crosses the interface's number boxed and reaches the
+/// implementation as the value.
+#[test]
+fn a_member_extension_receiver_crosses_a_generic_interface_as_the_value() {
+    let source = "@JvmInline value class S(val x: String)\n\
+         interface GFoo<T> { val T.extVal: String }\n\
+         object GFooImpl : GFoo<S> { override val S.extVal: String get() = x }\n\
+         class TestGFoo : GFoo<S> by GFooImpl\n\
+         fun <T> read(foo: GFoo<T>, receiver: T): String = with(foo) { receiver.extVal }\n\
+         fun box(): String {\n\
+         \x20   val direct = with(TestGFoo()) { S(\"O\").extVal }\n\
+         \x20   return direct + read(GFooImpl, S(\"K\"))\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassMemberExtension", source);
+}
+
+/// A local delegated property of a value-class type reads as the value the generic convention
+/// hands back boxed.
+#[test]
+fn a_local_delegate_of_a_value_class_reads_as_the_value() {
+    let source = "import kotlin.reflect.KProperty\n\
+         @JvmInline value class ICInt(val i: Int)\n\
+         class Delegate<T>(val f: () -> T) {\n\
+         \x20   operator fun getValue(thisRef: Any?, property: KProperty<*>): T = f()\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val local by Delegate { ICInt(44) }\n\
+         \x20   if (local.i != 44) return \"fail: $local\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassLocalDelegate", source);
+}
+
+/// An `inner` class of a value class holds the outer value, and `this@Outer` reads it back.
+#[test]
+fn an_inner_class_of_a_value_class_holds_the_outer_value() {
+    let source = "@JvmInline value class Z(val x: Int) {\n\
+         \x20   @Suppress(\"INNER_CLASS_INSIDE_VALUE_CLASS\")\n\
+         \x20   inner class Inner(val y: Int) {\n\
+         \x20       val xx = x\n\
+         \x20       fun outer(): Z = this@Z\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val inner = Z(42).Inner(100)\n\
+         \x20   if (inner.xx != 42) return \"fail 1\"\n\
+         \x20   if (inner.y != 100) return \"fail 2\"\n\
+         \x20   if (inner.outer() != Z(42)) return \"fail 3: ${inner.outer()}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassInnerClass", source);
+}
+
+/// A collection a value class implements is walked through the value class's own members, which
+/// its box reaches through the bridge that unboxes it.
+#[test]
+fn a_value_class_collection_is_walked_through_its_own_members() {
+    let source = "@JvmInline value class Wrapped(val items: List<Int>) : Iterable<Int> {\n\
+         \x20   override fun iterator(): Iterator<Int> = items.iterator()\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   var sum = 0\n\
+         \x20   for (item in Wrapped(listOf(1, 2, 3))) sum += item\n\
+         \x20   if (sum != 6) return \"fail 1: $sum\"\n\
+         \x20   if (Wrapped(listOf(4, 5)).toList() != listOf(4, 5)) return \"fail 2\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassIterable", source);
+}
