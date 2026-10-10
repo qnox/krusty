@@ -2,13 +2,14 @@
 //!
 //! A construction bound to a local `val` that is only ever read for its fields cannot be seen once
 //! the function returns: nothing stores it, passes it, returns it or captures it. Such an object
-//! is given a stack slot instead of a heap allocation. The collector needs nothing new for it: it
-//! scans every frame word by word, so the references the object's fields hold are found the same
-//! way a local's are, and the object's own address resolves to no heap chunk.
+//! is never materialized: each of its fields becomes a variable of the function, the construction
+//! assigns them, and a read of a field reads its variable. The collector needs nothing new: a
+//! reference a field holds is a value of the function like any local's, found the same way.
 //!
 //! The analysis is one walk over the body and decides only from the IR the lowering already has:
 //! which local each construction initializes, and the node that reads each use of that local.
 
+use super::objects::CheckedProperty;
 use super::*;
 use crate::ir::{ClassId, ExprId, IrCheckedOperation};
 use std::collections::{HashMap, HashSet};
@@ -17,12 +18,16 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Placement {
     Heap,
-    Frame,
+    /// In the variables of this frame, as the object `local` holds.
+    Frame {
+        local: u32,
+    },
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// The constructions in `body` whose object may live in this frame.
-    pub(super) fn frame_constructions(&self, body: ExprId) -> HashSet<ExprId> {
+    /// The constructions in `body` whose object may live in this frame, each with the local it
+    /// initializes.
+    pub(super) fn frame_constructions(&self, body: ExprId) -> HashMap<ExprId, u32> {
         let ir = self.file.ir;
         // Each local's declarations, its uses with the node that reads them, and whether anything
         // assigns it.
@@ -51,7 +56,7 @@ impl BodyLowering<'_, '_, '_> {
                 pending.push(child);
             });
         }
-        let mut constructions = HashSet::new();
+        let mut constructions = HashMap::new();
         for (slot, inits) in declarations {
             let [Some(construction)] = inits[..] else {
                 continue;
@@ -67,7 +72,7 @@ impl BodyLowering<'_, '_, '_> {
                     .all(|&(read, reader)| self.reads_a_field(reader, read, class))
             });
             if only_fields_read {
-                constructions.insert(construction);
+                constructions.insert(construction, slot);
             }
         }
         constructions
@@ -135,9 +140,11 @@ impl BodyLowering<'_, '_, '_> {
             }) => {
                 *receiver == read
                     && context_arguments.is_empty()
-                    && self.checked_property(target).is_ok_and(|(owner, index)| {
-                        owner == class && self.property_field(owner, index).is_some()
-                    })
+                    && matches!(
+                        self.checked_property(target),
+                        Ok(CheckedProperty::Member(owner, index))
+                            if owner == class && self.property_field(owner, index).is_some()
+                    )
             }
             _ => false,
         }
@@ -162,23 +169,79 @@ impl BodyLowering<'_, '_, '_> {
         property.backing_field
     }
 
-    /// A zeroed object of `size` bytes stamped with `descriptor`, in a slot of this frame.
-    pub(super) fn frame_object(&mut self, descriptor: DataId, size: u32) -> Value {
-        let size = size.next_multiple_of(16);
-        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            size,
-            4,
-        ));
-        let object = self.builder.ins().stack_addr(types::I64, slot, 0);
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        for offset in (0..size).step_by(8) {
-            self.builder
-                .ins()
-                .store(trusted(), zero, object, offset as i32);
+    /// Build a frame object of `class` held by `local`: one variable per field, zero to begin
+    /// with, then assigned the constructor's `arguments` (in the physical types `params`) exactly
+    /// as its constructor stores them. The local itself holds no object, only null: every use of
+    /// it is a field read, and those read the variables.
+    pub(super) fn frame_object(
+        &mut self,
+        class: ClassId,
+        local: u32,
+        arguments: &[Value],
+        params: &[Ty],
+    ) -> Result<Option<Value>, Unsupported> {
+        // What constructing the class would run first: its companion's creation.
+        if let Some(getter) = self.file.ir.classes[class as usize]
+            .companion_class
+            .and_then(|companion| self.file.ir.class_id_by_name(companion))
+            .and_then(|companion| self.file.classes[companion as usize].singleton)
+            .map(|(_, getter)| getter)
+        {
+            let func_ref = self.func_ref(getter);
+            self.emit_call(func_ref, &[])?;
         }
-        let descriptor = self.data_address(descriptor);
-        self.builder.ins().store(trusted(), descriptor, object, 0);
-        object
+        let declaration = &self.file.ir.classes[class as usize];
+        let field_count = declaration.fields.len() as u32;
+        let stored: Vec<(Option<u32>, bool)> = declaration
+            .ctor_args
+            .iter()
+            .map(|argument| (argument.field_index, argument.is_field))
+            .collect();
+        let mut fields = Vec::new();
+        for field in 0..field_count {
+            let ty = model::field_storage_ty(self.file.values, self.file.ir, class, field)?;
+            let Some(clif) = self.carrier(ty).clif() else {
+                return Err("a `Unit` field".into());
+            };
+            let variable = self.builder.declare_var(clif);
+            let zero = self.zero_of(ty);
+            self.builder.def_var(variable, zero);
+            fields.push(variable);
+        }
+        let mut next_field = 0;
+        for (index, (field_index, is_field)) in stored.into_iter().enumerate() {
+            if !is_field {
+                continue;
+            }
+            let field = field_index.unwrap_or(next_field);
+            next_field = field + 1;
+            let field_type = model::field_storage_ty(self.file.values, self.file.ir, class, field)?;
+            let Some(value) = self.convert(arguments[index], Some(params[index]), field_type)?
+            else {
+                return Err("a `Unit` field".into());
+            };
+            self.builder.def_var(fields[field as usize], value);
+        }
+        self.frame_fields.insert(local, fields);
+        Ok(Some(self.builder.ins().iconst(types::I64, 0)))
+    }
+
+    /// Field `index` of `class` read out of `receiver` at `ty`, when `receiver` is a local
+    /// holding a frame object.
+    pub(super) fn frame_field_read(
+        &mut self,
+        receiver: ExprId,
+        class: ClassId,
+        index: u32,
+        ty: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let IrExpr::GetValue(local) = self.file.ir.expr(receiver) else {
+            return Ok(None);
+        };
+        let Some(fields) = self.frame_fields.get(local) else {
+            return Ok(None);
+        };
+        let value = self.builder.use_var(fields[index as usize]);
+        self.field_value(value, class, index, ty).map(Some)
     }
 }

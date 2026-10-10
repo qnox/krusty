@@ -153,17 +153,13 @@ pub(crate) enum IrSecondaryConstructorRole {
     NoArg,
 }
 
-/// Semantic declaration metadata retained when the JVM value-class pass replaces a secondary
-/// constructor with a static `constructor-impl` realization. The backend owns the physical handle;
-/// Kotlin metadata must still describe the original source parameters/defaults and link them to that
-/// exact handle for downstream frontend resolution.
+/// The static `constructor-impl` the JVM value-class pass realizes a published secondary
+/// constructor as. The class's declaration record describes the source constructor; this links it,
+/// by its ordinal among the class's secondary constructors, to that exact physical handle for
+/// downstream frontend resolution.
 #[derive(Clone, Debug)]
 pub struct IrJvmValueClassSecondaryCtor {
-    pub params: Vec<(String, Ty)>,
-    pub param_defaults: Vec<bool>,
-    pub vararg_index: Option<usize>,
-    pub annotations: DeclarationAnnotations,
-    pub metadata_visibility: crate::types::Visibility,
+    pub ordinal: usize,
     pub descriptor: String,
 }
 

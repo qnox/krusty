@@ -273,7 +273,7 @@ impl DeserializeBody<'_> {
                 stmts: vec![ret],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
             return;
         }
 
@@ -300,7 +300,7 @@ impl DeserializeBody<'_> {
                 stmts: vec![ret],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
             return;
         }
         let decodable = fields.iter().all(|(pname, t)| {
@@ -341,7 +341,7 @@ impl DeserializeBody<'_> {
                 stmts: vec![throw],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
             return;
         }
         // Semantic locals, declared in kotlinc's order. Their identities are independent of JVM
@@ -643,6 +643,6 @@ impl DeserializeBody<'_> {
             stmts.push(ir.add_expr(IrExpr::Return(Some(new))));
             ir.add_expr(IrExpr::Block { stmts, value: None })
         };
-        ir.functions[fid as usize].body = Some(body);
+        super::complete_generated_body(ir, fid, body);
     }
 }

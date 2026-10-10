@@ -1307,6 +1307,8 @@ mod jvm_name_toplevel_e2e;
 mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
+#[path = "klib_class_surface_e2e.rs"]
+mod klib_class_surface_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_semantic_e2e.rs"]
@@ -2395,6 +2397,8 @@ mod serialization_external_kinds_e2e;
 mod serialization_generated_debug_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
+#[path = "serialization_nullable_value_class_e2e.rs"]
+mod serialization_nullable_value_class_e2e;
 #[path = "serialization_object_serializer_e2e.rs"]
 mod serialization_object_serializer_e2e;
 #[path = "serialization_plain_enum_element_e2e.rs"]

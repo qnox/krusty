@@ -31,6 +31,7 @@ mod lookups;
 mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
+mod scope_resolver;
 mod selected_call_facts;
 mod semantics;
 mod source_contracts;
@@ -1001,56 +1002,6 @@ impl ProductionSignatureSemantics<'_> {
         } else {
             self.record_inapplicable_member_call(scope.owner, origin, spelling, &candidates)
         }
-    }
-
-    fn with_resolver<T>(
-        &self,
-        scope: crate::fir::SignatureScope,
-        select: impl FnOnce(&crate::symbol_resolver::SymbolResolver<'_>) -> Option<T>,
-    ) -> Result<T, crate::fir::DiagnosticId> {
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let imports = self.function_import_scope(scope.source)?;
-        let file = self
-            .headers
-            .scopes
-            .file(scope.source)
-            .ok_or_else(Self::failure)?;
-        let package = self
-            .headers
-            .scopes
-            .path(file.package)
-            .iter()
-            .map(|segment| self.headers.lookup_names.get(*segment))
-            .collect::<Option<Vec<_>>>()
-            .map(|segments| {
-                if segments.is_empty() {
-                    crate::types::TypeName::ROOT
-                } else {
-                    crate::types::type_name(&segments.join("/"))
-                }
-            })
-            .ok_or_else(Self::failure)?;
-        let mut lexical_classes = Vec::new();
-        let mut owner = Some(scope.owner);
-        while let Some(declaration) = owner {
-            if let Some(classifier) = self.lexical_access_classifier(declaration) {
-                lexical_classes.push(classifier);
-            }
-            owner = self
-                .headers
-                .declarations
-                .anchor(declaration)
-                .and_then(|anchor| anchor.owner);
-        }
-        let type_variables = self.active_postponed_type_variables(scope);
-        let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
-            self.table.libraries.as_ref(),
-            &module,
-            &imports,
-        )
-        .with_access_context(package, scope.source.raw(), lexical_classes)
-        .with_type_variables(&type_variables);
-        select(&resolver).ok_or_else(Self::failure)
     }
 
     fn classifier_is_singleton(&self, classifier: crate::types::TypeName) -> bool {
@@ -4641,14 +4592,8 @@ pub(crate) fn finalized_streamed_signature_index(
     finalization_failures.extend(auxiliary_failures);
     finalization_failures.sort_by_key(|(declaration, _)| declaration.raw());
     finalization_failures.dedup_by_key(|(declaration, _)| *declaration);
-    for diagnostic in semantics
-        .diagnostics
-        .borrow()
-        .iter()
-        .filter(|diagnostic| diagnostic.unconditional)
-    {
-        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
-    }
+    diagnostics::emit_unconditional(diags, &semantics.diagnostics.borrow());
+    let solver_diagnostics = semantics.diagnostics.borrow().len();
     if !failed.is_empty() || !finalization_failures.is_empty() {
         crate::trace_compiler!(
             "fir",
@@ -4680,8 +4625,19 @@ pub(crate) fn finalized_streamed_signature_index(
         failed.sort_by_key(|declaration| declaration.raw());
         failed.dedup();
     }
+    // Classifier publication resolves supertype headers after the solver's report; what it records
+    // joins the same module report on every exit from publication.
+    macro_rules! emit_publication_diagnostics {
+        () => {
+            diagnostics::emit_unconditional(
+                diags,
+                &semantics.diagnostics.borrow()[solver_diagnostics..],
+            )
+        };
+    }
     macro_rules! stop_with_failure {
         ($declaration:expr) => {{
+            emit_publication_diagnostics!();
             failed.push($declaration);
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
@@ -6149,6 +6105,7 @@ pub(crate) fn finalized_streamed_signature_index(
         };
         index.publish_interface_delegations(declaration, delegations);
     }
+    emit_publication_diagnostics!();
     let resolved_contracts = match resolved_contracts {
         Ok(contracts) => contracts,
         Err(mut declarations) => {

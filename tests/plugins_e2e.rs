@@ -1,8 +1,8 @@
 //! End-to-end proof that the plugin SURFACE composes with krusty's real front end: a Kotlin source
-//! is run through the actual checked-FIR pipeline to a real `IrFile`, then
-//! the serialization extension runs over it via `PluginHost`. This closes the gap between the
-//! self-contained unit tests (hand-built IR) and the production pipeline — the plugin operates on IR
-//! krusty itself produced, not a fixture.
+//! is run through the actual checked-FIR pipeline to the backend handoff, where the serialization
+//! extension has declared what it generates, then the extension completes those declarations via
+//! `PluginHost`. This closes the gap between the self-contained unit tests (hand-built IR) and the
+//! production pipeline — the plugin operates on IR krusty itself produced, not a fixture.
 //!
 //! Skips (does not fail) when no kotlin-stdlib jar is locatable, like other classpath-dependent tests.
 
@@ -39,16 +39,37 @@ fn lower_with_classpath(
     captured.pop()
 }
 
+/// Lower `src`, which uses `@Serializable` from kotlinx.serialization, to the IR the backend
+/// receives, or `None` when the runtime jar is unavailable or the source cannot compile.
+fn lower_serializable(src: &str) -> Option<krusty::ir::IrFile> {
+    let Some(serialization) = common::find_jar("kotlinx-serialization-core-jvm-", &["sources"])
+    else {
+        eprintln!("skipping: no kotlinx-serialization core jar");
+        return None;
+    };
+    lower_with_classpath(
+        &format!("import kotlinx.serialization.Serializable\n{src}"),
+        &[serialization],
+    )
+}
+
+/// Run the plugin's target phase over the IR the handoff produced.
+fn complete(ir: &mut krusty::ir::IrFile) {
+    let ctx = PluginContext::from_ir(ir);
+    let mut host = PluginHost::new();
+    host.register(Box::new(SerializationPlugin::default()));
+    host.complete(ir, &ctx);
+}
+
 #[test]
 fn serialization_plugin_runs_on_real_lowered_ir() {
     // A plain class krusty's IR subset lowers (primary-constructor val properties).
-    let Some(mut ir) = lower("class Foo(val a: Int, val b: String)") else {
-        eprintln!("skipping: no stdlib jar / class outside IR subset");
+    let Some(mut ir) = lower_serializable("@Serializable class Foo(val a: Int, val b: String)")
+    else {
+        eprintln!("skipping: class outside IR subset");
         return;
     };
 
-    // Find the real lowered class and mark it @Serializable (the side-table the production path will
-    // populate from captured AST annotations — see docs/PLUGIN_API.md).
     let foo_id = ir
         .classes
         .iter()
@@ -56,14 +77,15 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
         .expect("lowered Foo class present") as u32;
     let foo_fq = ir.classes[foo_id as usize].fq_name();
     let fields_before = ir.classes[foo_id as usize].fields.len();
+    // The handoff already declared the serializer; the target phase only completes it.
+    assert!(
+        ir.classes
+            .iter()
+            .any(|c| c.fq_name_matches(&format!("{foo_fq}$$serializer"))),
+        "$serializer declared at the handoff"
+    );
 
-    let mut ctx = PluginContext::default();
-    ctx.class_annotations
-        .insert(foo_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
-
-    let mut host = PluginHost::new();
-    host.register(Box::new(SerializationPlugin::default()));
-    host.run(&mut ir, &ctx);
+    complete(&mut ir);
 
     // The $serializer object was synthesized onto krusty's own lowered IR.
     let ser_fq = format!("{foo_fq}$$serializer");
@@ -100,8 +122,8 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
         "one element serializer per real field"
     );
 
-    // serializer() accessor was relocated to Foo's synthesized Companion (kotlinc's placement); Foo
-    // itself carries a `companion_class` pointing at it.
+    // The serializer() accessor is on Foo's generated Companion (kotlinc's placement); Foo itself
+    // carries a `companion_class` pointing at it.
     let comp_fq = ir.classes[foo_id as usize]
         .companion_class
         .expect("Foo has a companion_class for the serializer()");
@@ -146,9 +168,7 @@ fn serialization_activates_from_source_annotation() {
         "resolved @Serializable retained in checked IR"
     );
 
-    let mut host = PluginHost::new();
-    host.register(Box::new(SerializationPlugin::default()));
-    host.run(&mut ir, &ctx);
+    complete(&mut ir);
 
     assert!(
         ir.classes
@@ -180,9 +200,7 @@ fn an_unrelated_serializable_simple_name_does_not_activate_the_plugin() {
         "same simple spelling must not impersonate kotlinx.serialization.Serializable"
     );
 
-    let mut host = PluginHost::new();
-    host.register(Box::new(SerializationPlugin::default()));
-    host.run(&mut ir, &ctx);
+    complete(&mut ir);
     assert!(
         ir.classes
             .iter()
@@ -196,8 +214,8 @@ fn serializable_enum_relocates_serializer_to_companion() {
     // A `@Serializable enum` (kotlinx ≥ 1.5) gets `serializer()` on a nested `Companion` backed by a
     // cached `Lazy` delegate — NOT a static `serializer()` on the enum itself. Matches kotlinc's member
     // set (Companion class + `access$get$cachedSerializer$delegate$cp` accessor).
-    let Some(mut ir) = lower("enum class E { A, B }") else {
-        eprintln!("skipping: no stdlib jar / class outside IR subset");
+    let Some(mut ir) = lower_serializable("@Serializable enum class E { A, B }") else {
+        eprintln!("skipping: class outside IR subset");
         return;
     };
 
@@ -207,13 +225,7 @@ fn serializable_enum_relocates_serializer_to_companion() {
         .position(|c| c.fq_name().ends_with("E"))
         .expect("lowered E enum present") as u32;
 
-    let mut ctx = PluginContext::default();
-    ctx.class_annotations
-        .insert(e_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
-
-    let mut host = PluginHost::new();
-    host.register(Box::new(SerializationPlugin::default()));
-    host.run(&mut ir, &ctx);
+    complete(&mut ir);
 
     // serializer() lives on E$Companion, not statically on E.
     let comp_fq = ir.classes[e_id as usize]
@@ -223,7 +235,7 @@ fn serializable_enum_relocates_serializer_to_companion() {
         .classes
         .iter()
         .find(|c| c.fq_name == comp_fq)
-        .expect("E$Companion synthesized");
+        .expect("E$Companion declared");
     assert!(
         comp.methods
             .iter()
@@ -250,10 +262,11 @@ fn deser_ctor_retains_the_value_class_parameter_and_serialization_marker() {
     // A `@Serializable` data class with a value-class-typed field keeps the semantic value-class
     // parameter on its private deserialization ctor. The JVM value-class pass emits the separate
     // public `DefaultConstructorMarker` accessor; that marker is not part of this constructor.
-    let Some(mut ir) =
-        lower("@JvmInline value class V(val s: String)\nclass D(val v: V, val n: Int)")
-    else {
-        eprintln!("skipping: no stdlib jar / class outside IR subset");
+    let Some(mut ir) = lower_serializable(
+        "@Serializable @JvmInline value class V(val s: String)\n\
+         @Serializable class D(val v: V, val n: Int)",
+    ) else {
+        eprintln!("skipping: class outside IR subset");
         return;
     };
     let d_id = ir
@@ -262,12 +275,7 @@ fn deser_ctor_retains_the_value_class_parameter_and_serialization_marker() {
         .position(|c| c.fq_name().ends_with("D"))
         .expect("lowered D class present") as u32;
 
-    let mut ctx = PluginContext::default();
-    ctx.class_annotations
-        .insert(d_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
-    let mut host = PluginHost::new();
-    host.register(Box::new(SerializationPlugin::default()));
-    host.run(&mut ir, &ctx);
+    complete(&mut ir);
 
     let deser = ir.classes[d_id as usize]
         .secondary_ctors
@@ -295,8 +303,9 @@ fn value_class_serializer_omits_write_self() {
     // A `@JvmInline value class` serializes its sole underlying value inline — kotlinc emits NO
     // `write$Self` helper for it (unlike a plain data class). krusty must match: emitting one is a
     // spurious extra member the downstream ABI gate flags.
-    let Some(mut ir) = lower("@JvmInline value class V(val s: String)") else {
-        eprintln!("skipping: no stdlib jar / class outside IR subset");
+    let Some(mut ir) = lower_serializable("@Serializable @JvmInline value class V(val s: String)")
+    else {
+        eprintln!("skipping: class outside IR subset");
         return;
     };
 
@@ -307,13 +316,7 @@ fn value_class_serializer_omits_write_self() {
         .expect("lowered V class present") as u32;
     assert!(ir.classes[v_id as usize].is_value, "V is a value class");
 
-    let mut ctx = PluginContext::default();
-    ctx.class_annotations
-        .insert(v_id, vec![krusty::types::type_name(SERIALIZABLE_FQ)]);
-
-    let mut host = PluginHost::new();
-    host.register(Box::new(SerializationPlugin::default()));
-    host.run(&mut ir, &ctx);
+    complete(&mut ir);
 
     let has_write_self = ir.classes[v_id as usize]
         .methods

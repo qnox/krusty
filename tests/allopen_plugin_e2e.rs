@@ -8,7 +8,9 @@
 //! reference compiler's byte for byte, and `box()` must return `OK`.
 
 use super::common;
-use super::compiler_plugin_fixture::{assert_same_classes_and_box, plugin_switches, PluginFixture};
+use super::compiler_plugin_fixture::{
+    assert_same_classes_and_box, kotlinc_plugin_jar, plugin_switches, PluginFixture,
+};
 
 const ALLOPEN_ID: &str = "org.jetbrains.kotlin.allopen";
 
@@ -124,11 +126,11 @@ fn all_open_classes_and_members_match_kotlinc() {
 /// `-Xcompiler-plugin=<jar>=annotation=AllOpen`: its options reach the plugin its jar loads.
 #[test]
 fn modern_syntax_options_match_kotlinc() {
-    let fixture = Fixture::new("modern-syntax");
+    let fixture = PluginFixture::new("modern-syntax");
     let sources = [("Main.kt", SAME_MODULE)];
     let switches = vec![format!(
         "-Xcompiler-plugin={}=annotation=AllOpen",
-        allopen_jar().display()
+        kotlinc_plugin_jar("allopen-compiler-plugin.jar").display()
     )];
     let stdlib = vec![common::stdlib_jar()];
     let reference = fixture.kotlinc("main", &sources, &[], &switches);
