@@ -1,0 +1,56 @@
+Gradle module metadata with two equally matching JVM variants for a classpath fails resolution of
+its artifact.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:twice:1.0
+--- m2/org/example/twice/1.0/twice-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>twice</artifactId>
+  <version>1.0</version>
+  <!-- do_not_remove: published-with-gradle-metadata -->
+</project>
+--- m2/org/example/twice/1.0/twice-1.0.module
+{
+  "formatVersion": "1.1",
+  "component": { "group": "org.example", "module": "twice", "version": "1.0" },
+  "variants": [
+    {
+      "name": "firstApiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      }
+    },
+    {
+      "name": "secondApiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-api",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      }
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.usage": "java-runtime",
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      }
+    }
+  ]
+}
+--- krusty-refusal
+error	<directory>/home/.m2/repository/org/example/twice/1.0/twice-1.0.module: ERROR: More than one variant of org.example:twice:1.0 matches the JVM compile classpath: firstApiElements, secondApiElements

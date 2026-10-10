@@ -1,0 +1,9 @@
+A name clash and a module file error.
+--- project.yaml
+modules: [a/x, b/x, c]
+--- a/x/module.yaml
+product: jvm/lib
+--- b/x/module.yaml
+product: jvm/lib
+--- c/module.yaml
+product: jvm/foo
