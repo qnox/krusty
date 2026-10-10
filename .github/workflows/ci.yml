@@ -114,9 +114,11 @@ jobs:
       # The native runtime's thread drivers run on every supported architecture: built for each
       # with clang and lld, and run under QEMU's user-mode emulators (tests/native_runtime_e2e.rs).
       - name: install cross-architecture runners
+        # The POSIX drivers compile against each target's own glibc headers, so the layer's
+        # hand-copied numbers and layouts are checked against the target's, not the host's.
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user lld
+          sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
       - name: just ci
         env:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
