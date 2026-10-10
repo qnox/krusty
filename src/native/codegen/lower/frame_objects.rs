@@ -139,7 +139,10 @@ impl BodyLowering<'_, '_, '_> {
             }) => {
                 *receiver == read
                     && context_arguments.is_empty()
-                    && self.checked_property(target).is_ok_and(|(owner, index)| {
+                    && self.checked_property(target).is_ok_and(|property| {
+                        let super::objects::CheckedProperty::Member(owner, index) = property else {
+                            return false;
+                        };
                         owner == class && self.property_field(owner, index).is_some()
                     })
             }
@@ -198,7 +201,7 @@ impl BodyLowering<'_, '_, '_> {
         for field in 0..field_count {
             let ty = model::field_storage_ty(self.file.values, self.file.ir, class, field)?;
             let Some(clif) = self.carrier(ty).clif() else {
-                return Err("a `Unit` field".to_string());
+                return Err("a `Unit` field".into());
             };
             let variable = self.builder.declare_var(clif);
             let zero = self.zero_of(ty);
@@ -215,7 +218,7 @@ impl BodyLowering<'_, '_, '_> {
             let field_type = model::field_storage_ty(self.file.values, self.file.ir, class, field)?;
             let Some(value) = self.convert(arguments[index], Some(params[index]), field_type)?
             else {
-                return Err("a `Unit` field".to_string());
+                return Err("a `Unit` field".into());
             };
             self.builder.def_var(fields[field as usize], value);
         }
