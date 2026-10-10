@@ -19,13 +19,24 @@ pub(super) struct PostponedCallConstraints {
 }
 
 impl PostponedCallConstraints {
-    pub(super) fn for_call(scope: &CheckerScope<'_>, formals: &[String]) -> Self {
-        let lexical = scope.lexical_tparam_identities();
-        Self::for_formals(formals, |formal| {
-            lexical.iter().any(|visible| visible.as_str() == formal)
-        })
+    pub(super) fn for_call(compilation: u64, file: u32, call: ExprId, formals: &[String]) -> Self {
+        let variables = crate::symbol_resolver::CallSiteVariableMap::for_postponed_call(
+            formals,
+            compilation,
+            file,
+            call.0,
+        );
+        Self {
+            formals: formals
+                .iter()
+                .map(|formal| variables.instantiate_formal(formal))
+                .collect(),
+            variables,
+            ..Self::default()
+        }
     }
 
+    #[cfg(test)]
     fn for_formals(formals: &[String], lexically_visible: impl Fn(&str) -> bool) -> Self {
         let variables =
             crate::symbol_resolver::CallSiteVariableMap::new(formals, lexically_visible);
@@ -45,11 +56,13 @@ impl PostponedCallConstraints {
 
     pub(super) fn enter_for_type(
         frames: &mut Vec<Self>,
-        scope: &CheckerScope<'_>,
+        compilation: u64,
+        file: u32,
+        call: ExprId,
         formals: &[String],
         ty: Ty,
     ) -> (Ty, bool) {
-        let constraints = Self::for_call(scope, formals);
+        let constraints = Self::for_call(compilation, file, call, formals);
         let ty = constraints.instantiate_type(ty);
         let entered = matches!(ty.non_null(), Ty::Fun(_)) && constraints.mentions_formal(ty);
         if entered {
@@ -71,11 +84,13 @@ impl PostponedCallConstraints {
 
     pub(super) fn enter_for_function(
         frames: &mut Vec<Self>,
-        scope: &CheckerScope<'_>,
+        compilation: u64,
+        file: u32,
+        call: ExprId,
         formals: &[String],
         function: &'static crate::types::FnSig,
     ) -> (&'static crate::types::FnSig, bool) {
-        match Self::enter_for_type(frames, scope, formals, Ty::Fun(function)) {
+        match Self::enter_for_type(frames, compilation, file, call, formals, Ty::Fun(function)) {
             (Ty::Fun(function), entered) => (function, entered),
             _ => unreachable!("a function type remains a function type"),
         }
@@ -83,7 +98,9 @@ impl PostponedCallConstraints {
 
     pub(super) fn enter_lambda(
         frames: &mut Vec<Self>,
-        scope: &CheckerScope<'_>,
+        compilation: u64,
+        file: u32,
+        call: ExprId,
         formals: &[String],
         parameters: Vec<Ty>,
         expected: Option<Ty>,
@@ -91,7 +108,7 @@ impl PostponedCallConstraints {
         parameter: usize,
         receiver: Option<Ty>,
     ) -> PostponedLambdaTypes {
-        let constraints = Self::for_call(scope, formals);
+        let constraints = Self::for_call(compilation, file, call, formals);
         let parameters = constraints.instantiate_types(parameters);
         let expected = constraints.instantiate_optional(expected);
         let fixed = constraints.instantiate_optional(

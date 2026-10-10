@@ -2935,7 +2935,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recording a constraint. krusty's postponed-call frame instead recorded `T & Any` as a lower bound
   of `T`, which absorbed the `Int` evidence and left `Buildee<T>` in receiver position. A frame now
   drops a bound that is its own variable in an always-true position (`T` or `T & Any` below `T`,
-  `T` or `T?` above it). A recursive call instead
+  `T` or `T?` above it). Every postponed call expression owns distinct variables, including nested
+  calls to the same generic builder; otherwise the outer call can specialize the inner receiver
+  before its lambda contributes independent evidence. A recursive call instead
   receives a fresh call-owned variable, so the enclosing declaration's fixed `T` remains distinct
   evidence and the solution is translated back at the call boundary. Tests:
   `tests/builder_nested_lambda_result_e2e.rs`,

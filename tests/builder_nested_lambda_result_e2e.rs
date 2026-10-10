@@ -67,3 +67,35 @@ fn nested_lambda_result_keeps_builder_value_evidence() {
     common::assert_accepted_like_kotlinc(SOURCE);
     common::expect_box_same_as_kotlinc(SOURCE, "BuilderNestedLambdaResultRun");
 }
+
+const SAME_BUILDER_SOURCE: &str = r#"
+class Built<T>(val value: T?)
+
+class Scope<T> {
+    fun accept(value: T) {}
+    fun <X> take(value: Built<X>) {}
+}
+
+fun <T> build(block: Scope<T>.() -> Unit): Built<T> {
+    Scope<T>().block()
+    return Built(null)
+}
+
+val nested: Built<Int> = build {
+    accept(1)
+    take(build {
+        accept("inner")
+    })
+}
+
+fun box(): String = "OK"
+"#;
+
+/// Two simultaneously active invocations of the same generic builder own different postponed
+/// variables: the outer `T = Int` must not specialize the inner receiver before it records
+/// `T = String`.
+#[test]
+fn nested_calls_to_the_same_builder_keep_distinct_variables() {
+    common::assert_accepted_like_kotlinc(SAME_BUILDER_SOURCE);
+    common::expect_box_same_as_kotlinc(SAME_BUILDER_SOURCE, "NestedSameBuilderVariables");
+}

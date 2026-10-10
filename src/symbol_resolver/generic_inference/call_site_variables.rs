@@ -29,13 +29,15 @@ pub(crate) struct CallSiteVariableMap {
 }
 
 impl CallSiteVariableMap {
-    pub(crate) fn new(formals: &[String], lexically_visible: impl Fn(&str) -> bool) -> Self {
+    fn from_call_owned(
+        formals: &[String],
+        mut call_owned_identity: impl FnMut(&str) -> Option<&'static str>,
+    ) -> Self {
         let call_owned = formals
             .iter()
-            .filter(|formal| lexically_visible(formal))
-            .map(|formal| {
+            .filter_map(|formal| {
                 let declared = crate::types::intern(formal);
-                (declared, crate::types::call_site_type_variable(declared))
+                call_owned_identity(declared).map(|call_owned| (declared, call_owned))
             })
             .collect::<HashMap<_, _>>();
         let declared = call_owned
@@ -46,6 +48,31 @@ impl CallSiteVariableMap {
             call_owned,
             declared,
         }
+    }
+
+    pub(crate) fn new(formals: &[String], lexically_visible: impl Fn(&str) -> bool) -> Self {
+        Self::from_call_owned(formals, |declared| {
+            lexically_visible(declared).then(|| crate::types::call_site_type_variable(declared))
+        })
+    }
+
+    /// Give every still-open formal an identity owned by one postponed call expression. Repeated
+    /// construction for different lambda arguments of that call returns the same identities;
+    /// a nested call to the same declaration receives different ones.
+    pub(crate) fn for_postponed_call(
+        formals: &[String],
+        compilation: u64,
+        file: u32,
+        expression: u32,
+    ) -> Self {
+        Self::from_call_owned(formals, |declared| {
+            Some(crate::types::postponed_call_type_variable(
+                compilation,
+                file,
+                expression,
+                declared,
+            ))
+        })
     }
 
     pub(crate) fn is_identity(&self) -> bool {

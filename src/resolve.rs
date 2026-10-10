@@ -19850,7 +19850,9 @@ impl<'a> Checker<'a> {
                             let (shaped, collect_postponed) =
                                 PostponedCallConstraints::enter_for_type(
                                     &mut self.postponed_call_constraints,
-                                    scope,
+                                    self.compilation_id,
+                                    self.file_index,
+                                    call,
                                     &postponed_formals,
                                     shaped,
                                 );
@@ -20190,7 +20192,9 @@ impl<'a> Checker<'a> {
                                 collect_postponed,
                             ) = PostponedCallConstraints::enter_lambda(
                                 &mut self.postponed_call_constraints,
-                                scope,
+                                self.compilation_id,
+                                self.file_index,
+                                call,
                                 &postponed_formals,
                                 selected_params,
                                 expected_type,
@@ -20504,7 +20508,9 @@ impl<'a> Checker<'a> {
                             let (expected_function, collect_postponed) =
                                 PostponedCallConstraints::enter_for_function(
                                     &mut self.postponed_call_constraints,
-                                    scope,
+                                    self.compilation_id,
+                                    self.file_index,
+                                    call,
                                     &postponed_formals,
                                     expected_function,
                                 );

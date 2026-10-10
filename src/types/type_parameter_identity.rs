@@ -45,6 +45,28 @@ pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
     fresh
 }
 
+/// The inference variable owned by one postponed call expression. Unlike
+/// [`call_site_type_variable`], this identity includes the source call: nested invocations of the
+/// same generic builder are simultaneously active and must not share their variables.
+pub(crate) fn postponed_call_type_variable(
+    compilation: u64,
+    file: u32,
+    expression: u32,
+    declared: &str,
+) -> &'static str {
+    let declared = intern(declared);
+    let fresh = intern(&format!(
+        "\0postponed-call:{compilation}:{file}:{expression}:{declared}"
+    ));
+    let mut sources = TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    let source = sources.get(declared).copied().unwrap_or(declared);
+    sources.insert(fresh, source);
+    fresh
+}
+
 /// A constructor-declared type parameter that hides a class type parameter of the same spelling.
 /// The JVM signature uses one name for both; they are different inference variables. `declaration`
 /// is the caller's stable constructor identity (owner alone cannot separate overloads) and is not
@@ -83,7 +105,8 @@ pub(crate) fn type_parameter_source_name(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        constructor_type_parameter, declaration_type_parameter, type_parameter_source_name,
+        constructor_type_parameter, declaration_type_parameter, postponed_call_type_variable,
+        type_parameter_source_name,
     };
 
     #[test]
@@ -109,5 +132,19 @@ mod tests {
         assert_eq!(type_parameter_source_name(overload), "T");
         assert_eq!(type_parameter_source_name(other_owner), "T");
         assert_eq!(type_parameter_source_name(next_formal), "T");
+    }
+
+    #[test]
+    fn nested_postponed_calls_own_distinct_variables() {
+        let declared = declaration_type_parameter(23, 1, 17, 0, "T");
+        let outer = postponed_call_type_variable(23, 1, 40, declared);
+        let same_outer = postponed_call_type_variable(23, 1, 40, declared);
+        let inner = postponed_call_type_variable(23, 1, 55, declared);
+
+        assert_eq!(outer, same_outer);
+        assert_ne!(outer, inner);
+        assert_ne!(outer, declared);
+        assert_eq!(type_parameter_source_name(outer), "T");
+        assert_eq!(type_parameter_source_name(inner), "T");
     }
 }
