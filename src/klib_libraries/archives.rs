@@ -11,7 +11,10 @@ use crate::metadata::semantic::{
     parse_package_fragment_checked, KotlinPackage, PackageFragmentDecodeError,
 };
 
+use super::inventory::PackageInventory;
+use super::parameter_defaults::ParameterDefaults;
 use super::{KlibLibraries, KlibLibraryError};
+use crate::metadata::klib_ir::{read_declaration_trees, KlibIrDecodeError};
 
 /// Why the selected libraries could not be published.
 #[derive(Debug)]
@@ -23,6 +26,11 @@ pub enum KlibLibrariesOpenError {
         library: PathBuf,
         entry: String,
         error: PackageFragmentDecodeError,
+    },
+    /// The IR declarations of `library` do not decode.
+    Declarations {
+        library: PathBuf,
+        error: KlibIrDecodeError,
     },
     /// A decoded declaration cannot be signed.
     Declaration(KlibLibraryError),
@@ -41,6 +49,11 @@ impl std::fmt::Display for KlibLibrariesOpenError {
                 "cannot decode KLIB metadata fragment {entry} of {}: {error}",
                 library.display()
             ),
+            Self::Declarations { library, error } => write!(
+                formatter,
+                "cannot decode the KLIB IR declarations of {}: {error}",
+                library.display()
+            ),
             Self::Declaration(error) => error.fmt(formatter),
         }
     }
@@ -52,11 +65,22 @@ impl KlibLibraries {
     /// Publish every package fragment of the KLIBs at `libraries`, zipped or unpacked.
     pub fn open(libraries: &[PathBuf]) -> Result<Self, KlibLibrariesOpenError> {
         let mut packages = Vec::new();
+        let mut defaults = ParameterDefaults::default();
         for library in libraries {
             let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
             packages.extend(package_fragments(library, &archive)?);
+            let trees = read_declaration_trees(&archive).map_err(|error| {
+                KlibLibrariesOpenError::Declarations {
+                    library: library.to_path_buf(),
+                    error,
+                }
+            })?;
+            defaults.add_library(&trees);
         }
-        Self::from_packages(packages).map_err(KlibLibrariesOpenError::Declaration)
+        let mut inventory = PackageInventory::from_packages(packages)
+            .map_err(KlibLibrariesOpenError::Declaration)?;
+        inventory.attach_defaults(&defaults);
+        Ok(Self::over(std::rc::Rc::new(inventory)))
     }
 }
 

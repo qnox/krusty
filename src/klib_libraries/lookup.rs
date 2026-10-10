@@ -166,6 +166,7 @@ pub(super) fn published_function(
         &signed.type_parameters,
         enclosing,
     );
+    function.default_values = signed.defaults.clone();
     // A KLIB declaration's implementation is its serialized IR body, unless it is one of the
     // language's builtins, whose compiler operation the shared rules name by exact declaration.
     if let CallablePlacement::Package(package) = placement {
