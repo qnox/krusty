@@ -1033,7 +1033,8 @@ error: warnings found and -Werror specified\n";
                 .unwrap_or_else(|error| panic!("werror warning exception: {error}"));
             assert_eq!(
                 std::fs::read_to_string(&diagnostic_log).expect("recorded krusty diagnostics"),
-                "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.\n",
+                "krusty: ignoring unsupported option '-Xskip-prerelease-check'\n\
+warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.\n",
                 "werror warning exception diagnostics",
             );
             let invocation = single_module_invocation(&log, "kotlin-compiler-util");
