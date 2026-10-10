@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use super::builtin_realizations;
 use super::classifier_records::{associated_callables, classifier_record};
 use super::declaration_signatures::{SignedFunction, SignedProperty};
 use super::external_identities::ExternalIdentities;
@@ -165,10 +166,11 @@ pub(super) fn published_function(
         &signed.type_parameters,
         enclosing,
     );
-    // A KLIB declaration's implementation is its serialized IR body. Do not replace it with
-    // either a compiler intrinsic or an implementation role inferred from a stdlib signature. A
-    // genuinely bodyless ABI declaration needs an explicit availability contract from the body
-    // provider instead.
+    // A KLIB declaration's implementation is its serialized IR body, unless it is one of the
+    // language's builtins, whose compiler operation the shared rules name by exact declaration.
+    if let CallablePlacement::Package(package) = placement {
+        builtin_realizations::realize_package_function(package, &mut function);
+    }
     let kind = realization_kind(placement, function.kind == FnKind::Extension);
     identities.assign_function(signed, kind, &mut function);
     function
@@ -195,7 +197,11 @@ pub(super) fn published_property(
         accessors,
         enclosing,
     );
-    // As for functions, the implementation is the serialized IR body of each accessor.
+    // As for functions, the implementation is the serialized IR body of each accessor, unless
+    // the property is a builtin.
+    if let CallablePlacement::Package(package) = placement {
+        builtin_realizations::realize_package_property(package, &mut property);
+    }
     let kind = realization_kind(placement, property.receiver.is_some());
     identities.assign_property(signed, kind, &mut property);
     property
