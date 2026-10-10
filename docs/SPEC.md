@@ -14969,13 +14969,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `continue`, assignment, loop or declaration). Its type is that value's type, or `Nothing` when it
   ends in a jump, or `Unit`, regardless of the type a KLIB gives a braced branch by its use. A
   function body is such a block: one whose result is not `Unit` must not be able to reach its end
-  (it then declines as ending without a `return`); a `Unit` one needs no trailing `return`. A
-  statement after a jump, which checked FIR lowering never sees, declines. Blocks of a
+  (it then declines as ending without a `return`); a final constant-`true` loop only satisfies that
+  rule when no lowered `break` names it. A `Unit` body needs no trailing `return`. A statement after
+  a jump, which checked FIR lowering never sees, declines. Blocks of a
   compiler-introduced origin (inlined function bodies among them) and composite blocks decline by
   form. Tests: `control_forms::a_block_branch_lowers_as_the_source_block_does`,
   `a_returning_block_is_typed_by_its_jump`,
   `unit_bodies_without_a_return_lower_as_their_source_does`,
   `a_valued_body_that_can_end_declines`, `a_statement_after_a_jump_declines`,
+  `a_valued_body_ending_in_a_constant_loop_that_can_break_declines`,
   `stdlib_unit_bodies_lower_as_their_source_does`.
 
 - **A KLIB `throw` throws its lowered operand.** It lowers as the source `throw`, typed `Nothing`

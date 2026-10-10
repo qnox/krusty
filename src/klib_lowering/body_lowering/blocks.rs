@@ -43,7 +43,8 @@ impl BodyLowering<'_, '_, '_> {
         Ok(body)
     }
 
-    /// Whether `statement` is a loop whose condition is the constant `true`.
+    /// Whether `statement` is a loop whose condition is the constant `true` and whose lowered
+    /// body contains no `break` naming that loop.
     fn loops_forever(&self, statement: &KlibIrStatement) -> bool {
         let KlibIrStatement::Expression(expression) = statement else {
             return false;
@@ -56,7 +57,7 @@ impl BodyLowering<'_, '_, '_> {
         matches!(
             self.arena.expr(serialized.condition).kind,
             KlibIrExprKind::Const(KlibIrConstant::Boolean(true))
-        )
+        ) && !self.breakable_loops.contains(&serialized.id)
     }
 
     /// A source block of `statements`, typed as checked FIR lowering types it.
