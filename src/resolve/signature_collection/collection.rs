@@ -1044,6 +1044,24 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             |candidate| source_direct_supertypes.contains_key(&candidate),
                         ),
                     };
+                    let is_nested = match (compact_headers, compact_classifier) {
+                        (Some(headers), Some(classifier)) => headers
+                            .declarations
+                            .anchor(classifier.id)
+                            .and_then(|anchor| anchor.owner)
+                            .and_then(|owner| headers.stub(owner))
+                            .is_some_and(|owner| {
+                                matches!(
+                                    owner.kind,
+                                    crate::fir::DeclarationKind::Classifier
+                                        | crate::fir::DeclarationKind::EnumEntry
+                                )
+                            }),
+                        _ => {
+                            file.hoisted_classifier_owners.contains_key(&d)
+                                || file.enum_entry_nested_classifier_owners.contains_key(&d)
+                        }
+                    };
                     if compact_headers.is_none() {
                         if let Some(owner) = file.local_class_lexical_classifier_owners.get(&d) {
                             let owner = type_name(&class_internal(file, owner));
@@ -1733,6 +1751,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
                             source_decl: d,
+                            is_nested,
                             visibility: classifier_visibility,
                             flags: classifier_flags,
                             methods: declared_methods,
@@ -1882,6 +1901,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                                 .map(|stub| stub.id),
                                             source_file: i as u32,
                                             source_decl: companion_decl,
+                                            is_nested: true,
                                             visibility: compact_companion
                                                 .map(|stub| stub.visibility)
                                                 .unwrap_or(companion.visibility),
@@ -3400,6 +3420,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
                             source_decl: Some(d),
+                            is_nested,
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,
                             applied_annotations: Vec::new(),
@@ -3533,6 +3554,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     stable_declaration: None,
                                     source_file: i as u32,
                                     source_decl: None,
+                                    is_nested: true,
                                     visibility: Visibility::Public,
                                     annotations: Vec::new(),
                                     applied_annotations: Vec::new(),
