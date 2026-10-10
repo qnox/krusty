@@ -275,6 +275,8 @@ klib-semantics VERSION=`just max-version`:
       KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
       ./run-tests.sh --test e2e -- klib_ value_class_declaration_e2e \
         native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
+    KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 \
+      ./run-tests.sh --lib klib_
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. The same checkout carries the command-line corpus,

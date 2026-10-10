@@ -8,7 +8,8 @@ use super::declaration_signatures::{
 };
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::{
-    classifier_shape, constructor_parameter_identities, ClassTypeParameters, LibraryType, TypeKind,
+    classifier_shape, constructor_parameter_identities, declared_type_alias, AliasExpansion,
+    ClassTypeParameters, LibraryType, TypeKind,
 };
 use crate::metadata::id_signature::{
     constructor_signature, enum_class_member_signatures, metadata_class_signature,
@@ -35,6 +36,8 @@ pub(super) struct SignedClassifier {
     /// Instance members and member extensions.
     pub(super) functions: Vec<SignedFunction>,
     pub(super) properties: Vec<SignedProperty>,
+    /// Type aliases declared in this classifier's namespace.
+    pub(super) type_aliases: Vec<AliasExpansion>,
     /// `companion { … }` block members, which metadata marks static.
     pub(super) associated_functions: Vec<SignedFunction>,
     pub(super) associated_properties: Vec<SignedProperty>,
@@ -217,6 +220,14 @@ pub(super) fn sign_package_classes(
                 properties.push(signed);
             }
         }
+        let type_aliases = std::mem::take(&mut class.type_aliases)
+            .into_iter()
+            .filter(|alias| alias.visibility != Visibility::Private)
+            .map(|alias| {
+                declared_type_alias(identity, &alias, type_parameters.enclosing())
+                    .map_err(|error| unsignable(package, &format!("{local}.{}", alias.name), error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         published.push((
             identity,
             SignedClassifier {
@@ -226,6 +237,7 @@ pub(super) fn sign_package_classes(
                 constructors,
                 functions,
                 properties,
+                type_aliases,
                 associated_functions,
                 associated_properties,
                 enum_members,

@@ -168,6 +168,27 @@ pub fn kotlinc_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The common stdlib KLIB of the reference Kotlin/Native distribution. `KRUSTY_KOTLIN_NATIVE`
+/// names a distribution root; otherwise `just kotlin-native` provisions this host's distribution
+/// under `target/cache/kotlin-native/<version>/`.
+pub fn kotlin_native_stdlib_klib() -> Option<PathBuf> {
+    let host = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("macos", "x86_64") => "macos-x86_64",
+        ("macos", "aarch64") => "macos-aarch64",
+        _ => return None,
+    };
+    let version = reference_version();
+    let root = toolchain_path(
+        std::env::var_os("KRUSTY_KOTLIN_NATIVE"),
+        "kotlin-native",
+        &format!("kotlin-native-prebuilt-{host}-{version}"),
+    )?;
+    let stdlib = root.join("klib/common/stdlib");
+    stdlib.join("default/manifest").is_file().then_some(stdlib)
+}
+
 /// The `lib/` dir of the reference kotlinc dist we differential-test against — its jars are the
 /// exact ones the reference compiler ships. `KRUSTY_KOTLINC` overrides the provisioned dist.
 pub fn kotlinc_lib_dir() -> Option<PathBuf> {

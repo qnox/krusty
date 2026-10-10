@@ -62,6 +62,66 @@ fn package_of(functions: Vec<KotlinFunction>) -> KotlinPackage {
     }
 }
 
+#[test]
+fn a_package_type_alias_is_published_from_its_metadata_declaration() {
+    let upper = Ty::nullable(Ty::obj("kotlin/Any"));
+    let parameter = Ty::ty_param("T", upper);
+    let expansion = Ty::fun(vec![parameter], Ty::String);
+    let fragment = crate::metadata::klib_fragment::package_fragment(
+        &["fixture"],
+        &crate::metadata::klib_fragment::KlibFileMembers {
+            file_name: "aliases.kt".to_string(),
+            functions: Vec::new(),
+            properties: Vec::new(),
+            constants: Vec::new(),
+            aliases: vec![crate::metadata::builder::TypeAliasMeta {
+                name: "Transform".to_string(),
+                formals: vec!["T".to_string()],
+                expansion,
+                visibility: Visibility::Public,
+                expansion_spelling: Default::default(),
+                decl_order: 0,
+            }],
+        },
+        &[],
+        true,
+    );
+    let package = crate::metadata::semantic::parse_package_fragment_checked(&fragment)
+        .expect("the alias fragment decodes");
+    let libraries = KlibLibraries::from_packages(vec![(segments(&["fixture"]), package)])
+        .expect("the alias package is publishable");
+
+    let identity = type_name("fixture/Transform");
+    let target = type_name("kotlin/Function1");
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), "Transform");
+    assert_eq!(symbols.classifier_name, Some(target));
+    assert!(symbols.classifier.is_some());
+    assert_eq!(
+        symbols.classifier_declaration,
+        Some(crate::libraries::ClassifierDeclaration::TypeAlias(
+            crate::libraries::AliasExpansion {
+                identity,
+                target,
+                formals: vec!["T".to_string()],
+                expansion,
+                expansion_spelling: Default::default(),
+            }
+        ))
+    );
+    assert_eq!(
+        <KlibLibraries as crate::libraries::SemanticPlatform>::type_alias_expansion(
+            &libraries, identity,
+        ),
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            target,
+            formals: vec!["T".to_string()],
+            expansion,
+            expansion_spelling: Default::default(),
+        })
+    );
+}
+
 fn println() -> KotlinFunction {
     let mut println = function("println", None, vec![class("kotlin/Any", true)]);
     println.param_names = vec!["message".to_owned()];
@@ -618,5 +678,6 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
     );
 }
 
+mod analysis;
 mod classes;
 mod properties;
