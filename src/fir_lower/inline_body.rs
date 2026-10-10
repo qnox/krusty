@@ -272,6 +272,8 @@ impl BodyLowering<'_> {
                 plan_value,
             )?
         };
+        let result_adaptation_restores_caller =
+            returned_value.is_none() && self.ir.invocation_result_adaptation_line(value).is_some();
         let expansion = if let Some(returned_value) = returned_value {
             statements.push(value);
             // A plan returning its receiver reads the inlined callee's receiver parameter. The
@@ -301,6 +303,9 @@ impl BodyLowering<'_> {
             }
         }
         self.ir.external_inline_expansions.insert(expansion);
+        if result_adaptation_restores_caller {
+            self.ir.mark_inline_result_adaptation_boundary(expansion);
+        }
         Some(expansion)
     }
 

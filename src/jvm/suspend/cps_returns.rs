@@ -8,12 +8,15 @@ use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp};
 /// fall-through body verifies as "control flow falls through code end"). Idempotent: a body already
 /// ending in `return`/`throw` is left alone. A trailing VALUE becomes `return box(value)`; a statement
 /// body / a `Unit` fn runs the body for effect and returns `Unit.INSTANCE`, which it returns.
-pub(super) fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) -> Option<ExprId> {
+///
+/// Returns every synthesized `Unit.INSTANCE` so the caller can give each physical return the
+/// function's closing source line.
+pub(super) fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) -> Vec<ExprId> {
     let IrExpr::Block { stmts, value } = ir.exprs[body as usize].clone() else {
-        return None;
+        return Vec::new();
     };
     let mut stmts = stmts;
-    let mut added_unit = None;
+    let mut added_units = Vec::new();
     match value {
         Some(v) if !unit_ret => {
             let boxed = ir.add_expr(IrExpr::TypeOp {
@@ -24,25 +27,93 @@ pub(super) fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) 
             stmts.push(ir.add_expr(IrExpr::Return(Some(boxed))));
         }
         Some(v) => {
-            // `Unit` fn: run the trailing value for effect, then return the `Unit` singleton.
+            // A terminal safe call keeps its selected arm through the physical return. kotlinc
+            // writes one `Unit.INSTANCE; areturn` after the selector and another after the null
+            // arm instead of joining them ahead of a shared return.
+            if let Some(units) = return_unit_from_safe_call_arms(ir, v) {
+                stmts.push(v);
+                added_units.extend(units);
+                ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
+                return added_units;
+            }
+            // Every other `Unit` tail runs for effect, then returns the singleton once.
             stmts.push(v);
             let unit = ir.add_expr(IrExpr::UnitInstance);
             stmts.push(ir.add_expr(IrExpr::Return(Some(unit))));
-            added_unit = Some(unit);
+            added_units.push(unit);
         }
         None => {
+            // A block-bodied `Unit` function records its final safe call as the last statement,
+            // rather than as the block value handled above. It has the same terminal-arm layout.
+            if let Some(units) = stmts
+                .last()
+                .copied()
+                .and_then(|tail| return_unit_from_safe_call_arms(ir, tail))
+            {
+                added_units.extend(units);
+                ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
+                return added_units;
+            }
             // Statement body. If it doesn't already terminate, return `Unit.INSTANCE` (a leaf suspend fn
             // with a `Unit`/no-value body).
             let terminates = stmts.last().is_some_and(|&s| stmt_diverges(ir, s));
             if !terminates {
                 let unit = ir.add_expr(IrExpr::UnitInstance);
                 stmts.push(ir.add_expr(IrExpr::Return(Some(unit))));
-                added_unit = Some(unit);
+                added_units.push(unit);
             }
         }
     }
     ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
-    added_unit
+    added_units
+}
+
+/// Put a `Unit` return into each live arm of a terminal safe call.
+///
+/// The frontend's null-guard identity is the semantic distinction from an arbitrary conditional;
+/// wrapper blocks and checked coercions merely carry that identity to the function tail.
+fn return_unit_from_safe_call_arms(ir: &mut IrFile, mut expression: ExprId) -> Option<Vec<ExprId>> {
+    loop {
+        match ir.exprs[expression as usize] {
+            IrExpr::TypeOp { arg, .. } => expression = arg,
+            IrExpr::Block {
+                value: Some(value), ..
+            } => expression = value,
+            _ => break,
+        }
+    }
+    if !ir.null_guards.contains(&expression) {
+        return None;
+    }
+    let IrExpr::When { branches } = ir.exprs[expression as usize].clone() else {
+        return None;
+    };
+    let mut units = Vec::with_capacity(branches.len());
+    let branches = branches
+        .into_iter()
+        .map(|(condition, branch)| {
+            if stmt_diverges(ir, branch) {
+                return (condition, branch);
+            }
+            let unit = ir.add_expr(IrExpr::UnitInstance);
+            units.push(unit);
+            let returned = ir.add_expr(IrExpr::Return(Some(unit)));
+            let branch = match ir.exprs[branch as usize].clone() {
+                IrExpr::Block { mut stmts, value } => {
+                    stmts.extend(value);
+                    stmts.push(returned);
+                    ir.add_expr(IrExpr::Block { stmts, value: None })
+                }
+                _ => ir.add_expr(IrExpr::Block {
+                    stmts: vec![branch, returned],
+                    value: None,
+                }),
+            };
+            (condition, branch)
+        })
+        .collect();
+    ir.exprs[expression as usize] = IrExpr::When { branches };
+    Some(units)
 }
 
 /// Wrap the value of every `Return` reachable from `e` in an `ImplicitCoercion` to `Object`.

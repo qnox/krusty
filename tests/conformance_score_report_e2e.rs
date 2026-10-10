@@ -24,9 +24,8 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// One shard's fixture reports: the case report and the JVM byte report it writes verbatim (no
-/// file at all for `None`).
-type ShardReports<'a> = (Option<&'a str>, Option<&'a str>);
+/// The case report and JVM byte report written verbatim by a fixture process (no file for `None`).
+type RunReports<'a> = (Option<&'a str>, Option<&'a str>);
 
 /// The runner's output and, when it was asked for one, the JVM byte report file it left behind.
 struct ScoredRun {
@@ -34,25 +33,21 @@ struct ScoredRun {
     bytes: Option<String>,
 }
 
-/// Run `conformance-run.sh` over one shard per `reports` entry with a fake conformance binary that
-/// writes that entry's reports. With `byte_out`, the runner also gets a JVM byte report path.
+/// Run `conformance-run.sh` once with a fake conformance binary that writes `reports`. With
+/// `byte_out`, the runner also gets a JVM byte report path.
 #[cfg(unix)]
-fn run_scored_shards(name: &str, reports: &[ShardReports], byte_out: bool) -> ScoredRun {
-    let temp = scratch_dir(&format!("shards-{name}"));
-    for (shard, (cases, bytes)) in reports.iter().enumerate() {
-        if let Some(cases) = cases {
-            fs::write(temp.join(format!("cases-{shard}")), cases)
-                .expect("write fixture shard case report");
-        }
-        if let Some(bytes) = bytes {
-            fs::write(temp.join(format!("bytes-{shard}")), bytes)
-                .expect("write fixture shard JVM byte report");
-        }
+fn run_scored(name: &str, reports: RunReports<'_>, byte_out: bool) -> ScoredRun {
+    let temp = scratch_dir(&format!("run-{name}"));
+    if let Some(cases) = reports.0 {
+        fs::write(temp.join("cases"), cases).expect("write fixture case report");
+    }
+    if let Some(bytes) = reports.1 {
+        fs::write(temp.join("bytes"), bytes).expect("write fixture JVM byte report");
     }
     let binary = temp.join("conformance-bin");
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\ndir=\"$(dirname \"$0\")\"\n[ ! -e \"$dir/cases-$KRUSTY_CONFORMANCE_SHARD_INDEX\" ] || cp \"$dir/cases-$KRUSTY_CONFORMANCE_SHARD_INDEX\" \"$KRUSTY_CONFORMANCE_REPORT\"\n[ ! -e \"$dir/bytes-$KRUSTY_CONFORMANCE_SHARD_INDEX\" ] || cp \"$dir/bytes-$KRUSTY_CONFORMANCE_SHARD_INDEX\" \"$KRUSTY_JVM_BYTE_REPORT\"\n",
+        "#!/usr/bin/env bash\ndir=\"$(dirname \"$0\")\"\n[ ! -e \"$dir/cases\" ] || cp \"$dir/cases\" \"$KRUSTY_CONFORMANCE_REPORT\"\n[ ! -e \"$dir/bytes\" ] || cp \"$dir/bytes\" \"$KRUSTY_JVM_BYTE_REPORT\"\n",
     )
     .expect("write reporting conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
@@ -71,10 +66,6 @@ fn run_scored_shards(name: &str, reports: &[ShardReports], byte_out: bool) -> Sc
     let output = command
         .env("KRUSTY_KOTLINC", "/bin/reference-kotlinc")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
-        .env(
-            "KRUSTY_SCORED_CONFORMANCE_SHARDS",
-            reports.len().to_string(),
-        )
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "10")
         .output()
         .expect("run scored conformance fixture");
@@ -119,23 +110,19 @@ fn split_phase_timing(stderr: &[u8]) -> (Vec<String>, String) {
     (phases, diagnostics)
 }
 
-/// The phase-timing lines for a run whose first `ran` of `count` shards started.
+/// The phase-timing lines for one scored conformance process.
 #[cfg(unix)]
-fn expected_phase_timing(ran: usize, count: usize) -> Vec<String> {
-    let labels = (1..=ran)
-        .map(|shard| format!("box-shard-{shard}-of-{count}"))
-        .collect::<Vec<_>>();
-    let mut lines = Vec::new();
-    for label in &labels {
-        lines.push(format!("conformance-run: phase start {label}"));
-        lines.push(format!("conformance-run: phase {label} Ns"));
-    }
-    lines.push("conformance-run: phases".to_owned());
-    for label in &labels {
-        lines.push(format!("conformance-run: phase {label} Ns"));
-    }
-    lines.push("conformance-run: phase total Ns".to_owned());
-    lines
+fn expected_phase_timing() -> Vec<String> {
+    [
+        "conformance-run: phase start box-conformance",
+        "conformance-run: phase box-conformance Ns",
+        "conformance-run: phases",
+        "conformance-run: phase box-conformance Ns",
+        "conformance-run: phase total Ns",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn badge(mode: &str, kind: &str, report: &Path, version: &str) -> std::process::Output {
@@ -174,20 +161,11 @@ const BYTE_SHAPE: &str = "\"<pct> <matched> <total>\" with matched <= total";
 
 #[cfg(unix)]
 #[test]
-fn scored_shards_sum_each_reports_counts_before_deriving_its_percentage() {
-    // Bytes 1/2 (50%) and 2/8 (25%) weigh 3/10 = 30.0%, not the 37.5% shard average; the case
-    // counts 1/1 and 1/2 weigh 2/3 = 66.6% rounded down, not 75%, independently of the bytes.
-    let run = run_scored_shards(
-        "weighted",
-        &[
-            (Some("100.0 1 1\n"), Some("50.0 1 2\n")),
-            (Some("50.0 1 2\n"), Some("25.0 2 8\n")),
-        ],
-        true,
-    );
+fn scored_run_preserves_the_process_reports() {
+    let run = run_scored("weighted", (Some("66.6 2 3\n"), Some("30.0 3 10\n")), true);
     let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
     assert_eq!(diagnostics, byte_summary("30.0 3 10"));
-    assert_eq!(phases, expected_phase_timing(2, 2));
+    assert_eq!(phases, expected_phase_timing());
     assert_eq!(run.output.status.code(), Some(0));
     assert_eq!(String::from_utf8(run.output.stdout).unwrap(), "66.6 2 3\n");
     assert_eq!(run.bytes.as_deref(), Some("30.0 3 10\n"));
@@ -195,36 +173,26 @@ fn scored_shards_sum_each_reports_counts_before_deriving_its_percentage() {
 
 #[cfg(unix)]
 #[test]
-fn scored_shards_without_a_byte_report_path_still_validate_and_print_both() {
-    let run = run_scored_shards(
+fn scored_run_without_a_byte_report_path_still_validates_and_prints_both() {
+    let run = run_scored(
         "no-byte-path",
-        &[
-            (Some("100.0 1 1\n"), Some("50.0 1 2\n")),
-            (Some("50.0 1 2\n"), Some("25.0 2 8\n")),
-        ],
+        (Some("66.6 2 3\n"), Some("30.0 3 10\n")),
         false,
     );
     let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
     assert_eq!(diagnostics, byte_summary("30.0 3 10"));
-    assert_eq!(phases, expected_phase_timing(2, 2));
+    assert_eq!(phases, expected_phase_timing());
     assert_eq!(run.output.status.code(), Some(0));
     assert_eq!(String::from_utf8(run.output.stdout).unwrap(), "66.6 2 3\n");
 }
 
 #[cfg(unix)]
 #[test]
-fn scored_shards_with_no_cases_or_bytes_report_zero_percent() {
-    let run = run_scored_shards(
-        "zero",
-        &[
-            (Some("0.0 0 0\n"), Some("0.0 0 0\n")),
-            (Some("0.0 0 0\n"), Some("0.0 0 0\n")),
-        ],
-        true,
-    );
+fn scored_run_with_no_cases_or_bytes_reports_zero_percent() {
+    let run = run_scored("zero", (Some("0.0 0 0\n"), Some("0.0 0 0\n")), true);
     let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
     assert_eq!(diagnostics, byte_summary("0.0 0 0"));
-    assert_eq!(phases, expected_phase_timing(2, 2));
+    assert_eq!(phases, expected_phase_timing());
     assert_eq!(run.output.status.code(), Some(0));
     assert_eq!(String::from_utf8(run.output.stdout).unwrap(), "0.0 0 0\n");
     assert_eq!(run.bytes.as_deref(), Some("0.0 0 0\n"));
@@ -232,18 +200,15 @@ fn scored_shards_with_no_cases_or_bytes_report_zero_percent() {
 
 #[cfg(unix)]
 #[test]
-fn scored_shards_report_real_scale_totals_exactly() {
-    let run = run_scored_shards(
+fn scored_run_reports_real_scale_totals_exactly() {
+    let run = run_scored(
         "scale",
-        &[
-            (Some("88.4 3154 3567\n"), Some("52.4 12405762 23645354\n")),
-            (Some("88.3 3153 3568\n"), Some("52.4 12405762 23645355\n")),
-        ],
+        (Some("88.3 6307 7135\n"), Some("52.4 24811524 47290709\n")),
         true,
     );
     let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
     assert_eq!(diagnostics, byte_summary("52.4 24811524 47290709"));
-    assert_eq!(phases, expected_phase_timing(2, 2));
+    assert_eq!(phases, expected_phase_timing());
     assert_eq!(run.output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(run.output.stdout).unwrap(),
@@ -267,81 +232,59 @@ const MALFORMED_REPORTS: [&str; 10] = [
 
 #[cfg(unix)]
 #[test]
-fn scored_shards_fail_on_a_malformed_case_report() {
+fn scored_run_fails_on_a_malformed_case_report() {
     for report in MALFORMED_REPORTS {
-        let run = run_scored_shards(
-            "invalid-cases",
-            &[
-                (Some("50.0 1 2\n"), Some("50.0 1 2\n")),
-                (Some(report), Some("50.0 1 2\n")),
-            ],
-            true,
-        );
+        let run = run_scored("invalid-cases", (Some(report), Some("50.0 1 2\n")), true);
         assert_eq!(run.output.status.code(), Some(1), "report {report:?}");
         assert_eq!(run.output.stdout, b"", "report {report:?}");
         assert_eq!(run.bytes.as_deref(), Some(""), "report {report:?}");
         let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
         assert_eq!(
             diagnostics,
-            format!(
-                "conformance test wrote an invalid case report (want {CASE_SHAPE}): shard 2/2\n"
-            ),
+            format!("conformance test wrote an invalid case report (want {CASE_SHAPE})\n"),
             "report {report:?}"
         );
-        assert_eq!(phases, expected_phase_timing(2, 2), "report {report:?}");
+        assert_eq!(phases, expected_phase_timing(), "report {report:?}");
     }
 }
 
 #[cfg(unix)]
 #[test]
-fn scored_shards_fail_on_a_malformed_byte_report() {
+fn scored_run_fails_on_a_malformed_byte_report() {
     for report in MALFORMED_REPORTS {
-        let run = run_scored_shards(
-            "invalid-bytes",
-            &[
-                (Some("50.0 1 2\n"), Some("50.0 1 2\n")),
-                (Some("50.0 1 2\n"), Some(report)),
-            ],
-            true,
-        );
+        let run = run_scored("invalid-bytes", (Some("50.0 1 2\n"), Some(report)), true);
         assert_eq!(run.output.status.code(), Some(1), "report {report:?}");
         assert_eq!(run.output.stdout, b"", "report {report:?}");
         assert_eq!(run.bytes.as_deref(), Some(""), "report {report:?}");
         let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
         assert_eq!(
             diagnostics,
-            format!(
-                "conformance test wrote an invalid JVM byte report (want {BYTE_SHAPE}): shard 2/2\n"
-            ),
+            format!("conformance test wrote an invalid JVM byte report (want {BYTE_SHAPE})\n"),
             "report {report:?}"
         );
-        assert_eq!(phases, expected_phase_timing(2, 2), "report {report:?}");
+        assert_eq!(phases, expected_phase_timing(), "report {report:?}");
     }
 }
 
 #[cfg(unix)]
 #[test]
-fn scored_shards_fail_when_a_shard_writes_either_report_empty_or_not_at_all() {
+fn scored_run_fails_when_either_report_is_empty_or_absent() {
     for report in [None, Some("")] {
-        for (shard, kind) in [
+        for (reports, kind) in [
             ((report, Some("50.0 1 2\n")), "case report"),
             ((Some("50.0 1 2\n"), report), "JVM byte report"),
         ] {
-            let run = run_scored_shards(
-                "missing",
-                &[(Some("50.0 1 2\n"), Some("50.0 1 2\n")), shard],
-                true,
-            );
+            let run = run_scored("missing", reports, true);
             assert_eq!(run.output.status.code(), Some(1), "{kind} {report:?}");
             assert_eq!(run.output.stdout, b"", "{kind} {report:?}");
             assert_eq!(run.bytes.as_deref(), Some(""), "{kind} {report:?}");
             let (phases, diagnostics) = split_phase_timing(&run.output.stderr);
             assert_eq!(
                 diagnostics,
-                format!("conformance test did not write its {kind}: shard 2/2\n"),
+                format!("conformance test did not write its {kind}\n"),
                 "{kind} {report:?}"
             );
-            assert_eq!(phases, expected_phase_timing(2, 2), "{kind} {report:?}");
+            assert_eq!(phases, expected_phase_timing(), "{kind} {report:?}");
         }
     }
 }
@@ -559,8 +502,8 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
     let lane = workflow_job(&workflow, "conformance");
     assert!(
         lane.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            && lane.contains("target: [jvm, native]"),
-        "every version exposes independent JVM and Native report rows: {lane}"
+            && lane.contains("target: [jvm, native, wasm]"),
+        "every version exposes independent JVM, Native and Wasm rows: {lane}"
     );
     assert!(
         lane.contains(

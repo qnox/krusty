@@ -5,7 +5,7 @@
 //! that was prebuilt when krusty itself was built. A user's build touches no C toolchain. The one
 //! text artifact is the module's public C header: the names a C caller can link, not a program.
 //!
-//! **Why Cranelift, and what it owns.** `docs/BUILD_AND_NATIVE_PLAN.md`, *Decided: Cranelift, as a
+//! **Why Cranelift, and what it owns.** `docs/NATIVE.md`, *Decided: Cranelift, as a
 //! library*: Cranelift owns instruction selection and register allocation — and only those. The
 //! lowering below, the calling convention at every runtime boundary, object layout, collector
 //! integration and the linker are krusty's. The lowering sits behind this module's boundary so a
@@ -27,22 +27,7 @@ use super::target::NativeTarget;
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
 
-/// What a `box()` program prints before its answer. A harness requires exactly one occurrence and
-/// reads every byte after it, so an answer that spans lines is kept whole and an answer/program
-/// output containing the marker fails rather than spoofing a verdict. The NULs keep ordinary
-/// output from spelling it accidentally.
-pub const BOX_RESULT_FRAME: &str = "\u{0}krusty box result\u{0}";
-
-/// Which top-level function a program starts in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Entry {
-    /// Kotlin's `fun main()`.
-    Main,
-    /// A `codegen/box` conformance case: `fun box(): String`, whose result the entry prints after
-    /// [`BOX_RESULT_FRAME`] — so the case's verdict (`OK`, or what went wrong) is the program's
-    /// output, with no `main` written into the corpus.
-    Box,
-}
+pub use crate::backend::{Entry, BOX_RESULT_FRAME};
 
 pub struct CraneliftBackend {
     target: NativeTarget,

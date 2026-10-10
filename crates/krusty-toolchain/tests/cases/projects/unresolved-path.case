@@ -1,0 +1,3 @@
+A listed path that does not exist.
+--- project.yaml
+modules: [f]

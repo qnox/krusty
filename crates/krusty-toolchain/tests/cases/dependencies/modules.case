@@ -1,0 +1,85 @@
+A module's graph holds the modules it depends on, with what they export to its compile classpath
+and everything they need at runtime; its test graph adds its test dependencies.
+--- project.yaml
+modules:
+  - app
+  - lib
+  - util
+--- app/module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - ../lib
+  - org.example:app-only:1.0: compile-only
+test-dependencies:
+  - org.example:test-lib:1.0
+--- lib/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - ../util: exported
+  - org.example:api-dep:1.0: exported
+  - org.example:impl-dep:1.0
+  - org.example:rt-only:1.0: runtime-only
+--- util/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:util-dep:1.0
+--- m2/org/example/app-only/1.0/app-only-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>app-only</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/test-lib/1.0/test-lib-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>test-lib</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/api-dep/1.0/api-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>api-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/impl-dep/1.0/impl-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>impl-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/rt-only/1.0/rt-only-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>rt-only</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/util-dep/1.0/util-dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>util-dep</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/api-dep/1.0/api-dep-1.0.jar
+--- m2/org/example/app-only/1.0/app-only-1.0.jar
+--- m2/org/example/impl-dep/1.0/impl-dep-1.0.jar
+--- m2/org/example/rt-only/1.0/rt-only-1.0.jar
+--- m2/org/example/test-lib/1.0/test-lib-1.0.jar
+--- m2/org/example/util-dep/1.0/util-dep-1.0.jar

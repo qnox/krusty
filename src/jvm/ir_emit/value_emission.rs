@@ -1960,14 +1960,7 @@ impl super::Emitter<'_> {
                 ret,
             } => {
                 self.emit_function_invocation(e, *func, args, params, code);
-                // A transformed suspension materializes its declared result when the point
-                // closes. Narrowing here would checkcast the erased `Object` first.
-                if self.transformed_result(e).is_none() && !self.erased_invocations.remove(&e) {
-                    if let Some(line) = self.ir.invocation_result_adaptation_line(e) {
-                        self.mark_expression_line(e, line, code);
-                    }
-                    self.narrow_invocation_result(*ret, code);
-                }
+                self.finish_function_invocation_result(e, *ret, code);
             }
             _ => {}
         }

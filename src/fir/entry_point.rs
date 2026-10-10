@@ -5,6 +5,10 @@
 //! file-local when it classifies top-level overload conflicts, and it records the entry it selects
 //! for each source unit in the module index. Common lowering maps that recorded identity; it never
 //! applies the rule again. The rule genuinely names a declaration (`main`), so it is stated here.
+//!
+//! The `codegen/box` convention is selected the same way: a test program starts in its
+//! `fun box(): String`, which a runnable backend calls and whose answer it prints. Kotlin itself
+//! gives `box` no meaning, so it is not an entry point for conflicts; it is only recorded.
 
 use super::{CallableId, ResolvedModuleIndex, SourceFileId};
 use crate::program_entry::MainEntryParameters;
@@ -44,6 +48,20 @@ impl MainEntryShape<'_> {
             _ => None,
         }
     }
+
+    /// Whether this is a `codegen/box` test entry: a `box` with no extension receiver, type
+    /// parameters, context parameters or parameters whose result the checker's subtyping
+    /// (`is_string`, asked of a type outside the `Nothing` family) places under `String?`. The
+    /// corpus declares both `box(): String` and `box(): String?`.
+    pub fn is_box_entry(&self, is_string: impl FnOnce(Ty) -> bool) -> bool {
+        self.name == "box"
+            && !self.has_extension_receiver
+            && self.type_parameter_count == 0
+            && self.context_parameter_count == 0
+            && self.parameters.is_empty()
+            && self.result.non_null().canonical_semantic() != Ty::Nothing
+            && is_string(self.result)
+    }
 }
 
 /// The Kotlin `main` the frontend selected for one source unit. When the unit declares both
@@ -69,6 +87,18 @@ impl ResolvedModuleIndex {
         assert!(
             self.source_entry_points.insert(source, entry).is_none(),
             "a source unit selects one entry point"
+        );
+    }
+
+    /// The `fun box(): String` the frontend selected for `source`, if it declares exactly one.
+    pub fn source_box_entry(&self, source: SourceFileId) -> Option<CallableId> {
+        self.source_box_entries.get(&source).copied()
+    }
+
+    pub(crate) fn publish_source_box_entry(&mut self, source: SourceFileId, callable: CallableId) {
+        assert!(
+            self.source_box_entries.insert(source, callable).is_none(),
+            "a source unit selects one box entry"
         );
     }
 }

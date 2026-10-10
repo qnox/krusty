@@ -1603,6 +1603,8 @@ mod suspend_lambda_private_property_e2e;
 mod suspend_lambda_shared_capture_e2e;
 #[path = "suspend_result_nullability_e2e.rs"]
 mod suspend_result_nullability_e2e;
+#[path = "suspend_safe_call_receiver_e2e.rs"]
+mod suspend_safe_call_receiver_e2e;
 #[path = "suspend_under_try_e2e.rs"]
 mod suspend_under_try_e2e;
 #[path = "suspend_value_class_delegation_e2e.rs"]
@@ -1808,6 +1810,8 @@ mod native_float_predicates_e2e;
 mod native_floating_ranges_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
+#[path = "native_frame_objects_e2e.rs"]
+mod native_frame_objects_e2e;
 #[path = "native_function_slot_bridge_e2e.rs"]
 mod native_function_slot_bridge_e2e;
 #[path = "native_function_type_checks_e2e.rs"]

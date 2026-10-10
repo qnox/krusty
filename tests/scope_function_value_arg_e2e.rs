@@ -72,11 +72,14 @@ const EXPRESSION_VALUES_SRC: &str = "class Holder(val block: (String) -> String)
 fun identity(value: String): String = value\n\
 fun choose(flag: Boolean, first: (String) -> String, second: (String) -> String) =\n\
     if (flag) first else second\n\
+fun condition(block: (String) -> Boolean): String =\n\
+    if (\"x\".let(block)) \"\" else \"FAIL\"\n\
 fun box(): String {\n\
     val fromProperty = \"O\".let(Holder { it }.block)\n\
     val fromConditional = \"K\".let(choose(true, { it }, { \"FAIL\" }))\n\
     val fromReference = \"\".let(::identity)\n\
-    return fromProperty + fromConditional + fromReference\n\
+    val fromCondition = condition { it == \"x\" }\n\
+    return fromProperty + fromConditional + fromReference + fromCondition\n\
 }\n";
 
 #[test]

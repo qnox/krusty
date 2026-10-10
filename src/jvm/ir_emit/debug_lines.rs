@@ -420,6 +420,17 @@ impl Emitter<'_> {
         if !inlined {
             return;
         }
+        if self.ir.inline_result_adaptation_restores_caller(expression) {
+            // A condition still needs the caller line copied onto the branch that follows the
+            // adaptation. Only the ordinary, non-condition reset was consumed by the real
+            // checkcast/unbox instruction.
+            if self.inside_condition {
+                if let Some(line) = code.current_line() {
+                    code.inlined_line(line);
+                }
+            }
+            return;
+        }
         match code.current_line() {
             Some(line) if self.inside_condition => code.inlined_line(line),
             _ => code.forget_line(),

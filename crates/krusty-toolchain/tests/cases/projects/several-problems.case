@@ -1,0 +1,11 @@
+Two problems in one list, each reported.
+--- project.yaml
+modules:
+  - zz
+  - libs/a
+  - "libs/*/x"
+  - libs/f
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/f
+x
