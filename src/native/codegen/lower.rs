@@ -598,7 +598,8 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
-                    frame_objects: std::collections::HashSet::new(),
+                    frame_objects: std::collections::HashMap::new(),
+                    frame_fields: std::collections::HashMap::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -773,8 +774,11 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
-    /// The constructions of this body whose object lives in this frame; see `frame_objects`.
-    frame_objects: std::collections::HashSet<u32>,
+    /// The constructions of this body whose object lives in this frame, each with the local it
+    /// initializes; see `frame_objects`.
+    frame_objects: std::collections::HashMap<u32, u32>,
+    /// The field variables of each local that holds a frame object.
+    frame_fields: std::collections::HashMap<u32, Vec<Variable>>,
 }
 
 /// One `finally` the current position is inside.
@@ -1590,10 +1594,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .iter()
                     .map(|ordinal| ordinal + default_prefix_count)
                     .collect();
-                let placement = if self.frame_objects.contains(&id) {
-                    frame_objects::Placement::Frame
-                } else {
-                    frame_objects::Placement::Heap
+                let placement = match self.frame_objects.get(&id) {
+                    Some(&local) => frame_objects::Placement::Frame { local },
+                    None => frame_objects::Placement::Heap,
                 };
                 self.construction(
                     internal,
