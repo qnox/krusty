@@ -1,5 +1,6 @@
-//! Classifiers declared in executable code, and those nested in them. JVM emission gives them LOCAL
-//! metadata visibility, local class ids and no nullability annotations.
+//! Classifiers declared in executable code, and those nested in them. Their metadata records give
+//! them LOCAL visibility and local class ids; JVM emission also writes them no nullability
+//! annotations.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +12,7 @@ use crate::types::TypeName;
 /// anonymous object too, so what it nests is local, although the body itself keeps an ordinary
 /// member's nullability annotations. kotlinc's lambda and callable-reference classes are local
 /// too; their writers here annotate nothing to begin with.
-pub(super) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
+pub(crate) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
     is_local_in(ir, class, &|owner| ir.class_id_by_name(owner))
 }
 
@@ -35,27 +36,9 @@ fn is_local_in(
             })
 }
 
-/// How `class`'s `@Metadata` numbers the type parameters it captures. kotlinc serializes a class
-/// declared in executable code with no enclosing serializer, so its captured parameters are
-/// numbered on first use. A class nested in another is serialized under the outer one, whose
-/// interner already holds every enclosing class's parameters: `enclosing` (see
-/// [`enclosing_type_parameters`]) keep the ids before the nested class's own whether or not an
-/// `inner` class captures them.
-pub(super) fn captured_type_parameters<'a>(
-    class: &'a IrClass,
-    enclosing: &'a [String],
-) -> crate::metadata::class_builder::CapturedTypeParameters<'a> {
-    use crate::metadata::class_builder::CapturedTypeParameters;
-    if class.is_local_class || class.is_anonymous_object {
-        CapturedTypeParameters::NumberedOnUse(&class.captured_type_params)
-    } else {
-        CapturedTypeParameters::Reserved(enclosing)
-    }
-}
-
 /// The semantic identities of every type parameter `class`'s enclosing classes declare, outermost
 /// class first.
-pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<String> {
+pub(crate) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<String> {
     let mut owners = class.fq_name_id().existing_nested_owners();
     owners.reverse();
     owners
@@ -73,7 +56,7 @@ pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
 /// classes rather than a scan of them per lookup. Locality starts at a local class, an anonymous
 /// object or an enum entry body: a file declaring none of them has no local class id, and its
 /// classes' owners need no lookup at all.
-pub(super) fn names(ir: &IrFile) -> HashSet<TypeName> {
+pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
     if !ir
         .classes
         .iter()
@@ -98,7 +81,7 @@ pub(super) fn names(ir: &IrFile) -> HashSet<TypeName> {
 
 /// The enum entry bodies of the file. Their local class ids keep the entry's `Enum.ENTRY` name
 /// rather than the raw internal name a local class's id takes, and so do the ids nested in them.
-pub(super) fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
+pub(crate) fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
     ir.classes
         .iter()
         .filter(|class| class.is_enum_entry)

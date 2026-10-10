@@ -20,18 +20,23 @@ fn provisioned(artifact: &str) -> PathBuf {
     })
 }
 
-/// The stdlib plus the pinned kotlinx.serialization core and json runtimes every differential here
-/// compiles and runs against.
-pub(super) fn runtime_jars() -> Vec<PathBuf> {
+/// The pinned kotlinx.serialization core and json runtimes.
+pub(super) fn runtime_libraries() -> Vec<PathBuf> {
     static JARS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     JARS.get_or_init(|| {
         vec![
-            common::stdlib_jar(),
             provisioned("kotlinx-serialization-core-jvm"),
             provisioned("kotlinx-serialization-json-jvm"),
         ]
     })
     .clone()
+}
+
+/// The stdlib plus [`runtime_libraries`]: what every differential here compiles and runs against.
+pub(super) fn runtime_jars() -> Vec<PathBuf> {
+    std::iter::once(common::stdlib_jar())
+        .chain(runtime_libraries())
+        .collect()
 }
 
 fn reference_box(src: &str, stem: &str) -> String {

@@ -21,7 +21,10 @@ pub(super) fn compact_classifier_parents(
 ) -> Option<(Option<crate::fir::DeclaredSuperclass>, Vec<Ty>, Vec<Ty>)> {
     let header = headers.syntax.declaration(declaration)?;
     let crate::fir::HeaderDeclarationKind::Classifier {
-        supertypes, base, ..
+        supertypes,
+        base,
+        base_callee,
+        ..
     } = header.kind
     else {
         return None;
@@ -39,6 +42,12 @@ pub(super) fn compact_classifier_parents(
             "classifier parent resolution declaration={declaration:?} failed explicit base resolved_local={resolved_local:?}",
         );
         return None;
+    }
+    if let (Some(callee), Some(superclass)) = (
+        base_callee,
+        explicit_base.and_then(|base| base.non_null().kotlin_class_internal()),
+    ) {
+        semantics.check_superclass_call_access(scope, callee, superclass);
     }
     let source_syntax = headers.syntax.type_operands(supertypes);
     if resolved_local.is_some_and(|(_, parents)| parents.len() != source_syntax.len()) {

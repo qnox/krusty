@@ -15,6 +15,20 @@ pub(super) fn emit_production_signature_diagnostic(
     }
 }
 
+/// Report every unconditional finding of `recorded`, in recording order. A finding that only
+/// explains a declined declaration is reported with that declaration's failure instead.
+pub(super) fn emit_unconditional(
+    diagnostics: &mut crate::diag::DiagSink,
+    recorded: &[ProductionSignatureDiagnostic],
+) {
+    for diagnostic in recorded
+        .iter()
+        .filter(|diagnostic| diagnostic.unconditional)
+    {
+        emit_production_signature_diagnostic(diagnostics, diagnostic);
+    }
+}
+
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn record_unresolved_reference(
         &self,
