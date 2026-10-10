@@ -4653,17 +4653,14 @@ pub(crate) fn finalized_streamed_signature_index(
     let mut deferred_interface_delegations = Vec::new();
     let open_by_default =
         super::plugin_status::OpenByDefault::collect(headers, table, &classifier_types);
-    let no_arg_constructors =
-        super::plugin_noarg::NoArgConstructors::collect(headers, table, &classifier_types, diags);
+    super::plugin_noarg::NoArgConstructors::collect(headers, table, &classifier_types, diags)
+        .publish(&mut index);
     for stub in &headers.stubs {
         let anchor = headers
             .declarations
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
-        let mut flags = no_arg_constructors.flags(
-            stub.id,
-            open_by_default.status(headers, stub.id, stub.kind, stub.flags),
-        );
+        let mut flags = open_by_default.status(headers, stub.id, stub.kind, stub.flags);
         if stub.kind == DeclarationKind::Classifier
             && flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
         {

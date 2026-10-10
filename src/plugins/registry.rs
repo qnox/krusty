@@ -70,7 +70,9 @@ pub struct RegisteredExtension {
     /// checks them as kotlinc does; `None` where it leaves them to the extension.
     pub option_keys: Option<&'static [&'static str]>,
     /// `(key, value)` settings of a declared option whose behaviour krusty does not implement. Each
-    /// one fails the compile instead of silently producing other code than kotlinc.
+    /// one fails the compile instead of silently producing other code than kotlinc. Values match
+    /// exactly, as kotlinc's processors compare them (no-arg runs initializers only for
+    /// `invokeInitializers=true`, not `TRUE`).
     pub unimplemented_options: &'static [(&'static str, &'static str)],
 }
 

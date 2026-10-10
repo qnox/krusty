@@ -63,6 +63,11 @@ open class Opened(val o: Int)
 @NoArg
 class Closed private constructor(val c: Int)
 
+sealed class Sealed
+
+@NoArg
+class OfSealed(val s: Int) : Sealed()
+
 fun <T : Any> make(type: Class<T>): T = type.getDeclaredConstructor().newInstance()
 
 fun box(): String {
@@ -76,6 +81,7 @@ fun box(): String {
     if (make(Holder.Nested::class.java).n != 0) return "nested"
     if (make(Opened::class.java).o != 0) return "opened"
     if (make(Closed::class.java).c != 0) return "closed"
+    if (make(OfSealed::class.java).s != 0) return "sealed"
     val secondary: String? = make(SecondaryOnly::class.java).made
     return if (secondary == null) "OK" else "secondary"
 }
@@ -84,7 +90,8 @@ fun box(): String {
 /// Direct, meta-annotation and supertype matches; a class whose superclass gets the constructor; a
 /// class with only secondary constructors; classes that already declare a constructor callable
 /// without arguments and get none; a data class, whose generated members follow the constructor; a
-/// nested class; a private primary constructor.
+/// nested class; a private primary constructor; a sealed superclass, whose constructor is reached
+/// through its marker accessor.
 #[test]
 fn no_arg_constructors_match_kotlinc() {
     let fixture = PluginFixture::new("noarg-same-module");
@@ -146,6 +153,36 @@ fn the_jpa_preset_matches_through_a_dependency() {
         &switches,
     );
     assert_same_classes_and_box(&reference, &krusty, &[stdlib, krusty_lib]);
+}
+
+const INITIALIZERS: &str = r#"annotation class NoArg
+
+@NoArg
+class WithInitializer(val v: Int) {
+    val initialized = 5
+}
+
+fun box(): String {
+    val made = WithInitializer::class.java.getDeclaredConstructor().newInstance()
+    return if (made.initialized == 0) "OK" else "initialized=${made.initialized}"
+}
+"#;
+
+/// kotlinc 2.4.20 runs initializers only for the exact spelling `invokeInitializers=true` (which
+/// krusty refuses as unimplemented); a mixed-case `TRUE` or `True` leaves them out, so krusty
+/// compiles those as it compiles `false`.
+#[test]
+fn mixed_case_invoke_initializers_values_skip_initializers_like_kotlinc() {
+    for value in ["TRUE", "True"] {
+        let fixture = PluginFixture::new(&format!("noarg-invoke-initializers-{value}"));
+        let sources = [("Main.kt", INITIALIZERS)];
+        let switches =
+            noarg_switches(&["annotation=NoArg", &format!("invokeInitializers={value}")]);
+        let stdlib = vec![common::stdlib_jar()];
+        let reference = fixture.kotlinc("main", &sources, &[], &switches);
+        let krusty = fixture.krusty("main", &sources, &[], &switches);
+        assert_same_classes_and_box(&reference, &krusty, &stdlib);
+    }
 }
 
 const REJECTED: &str = r#"annotation class NoArg

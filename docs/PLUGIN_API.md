@@ -108,10 +108,12 @@ native port splits the same way. `IrPlugin::no_arg_constructor_annotations` name
 (from `annotation=<fqname>` and the `jpa` preset), matched by the same class predicate as all-open
 (`resolve::plugin_class_predicate`). Where headers are published, `resolve::plugin_noarg` reports
 kotlinc's checker errors on the class name (a matched inner class; a superclass with no constructor
-callable without arguments that is not matched itself) and marks each class that gets the
-constructor with `DeclarationFlags::NO_ARG_CONSTRUCTOR`: a matched, non-inner, non-local,
-non-value class that declares no constructor JVM callers can call without arguments. Common
-lowering builds the constructor from that flag: it delegates to the superclass's `<init>()`, runs no
+callable without arguments that is not matched itself). For each class that gets the constructor
+(a matched, non-inner, non-local, non-value class that declares no constructor JVM callers can
+call without arguments) it publishes the superclass constructor the new one calls as `<init>()`
+(`ResolvedModuleIndex::no_arg_constructor`): a declared source constructor by identity, so its
+access (a sealed superclass's marker accessor) comes with it, or an unrestricted one. Common
+lowering builds the constructor from that decision: it delegates to that constructor, runs no
 initializer, and carries `@Deprecated(level = HIDDEN)` and `@java.lang.Deprecated`, so Kotlin cannot
 select it while Java and frameworks can. `invokeInitializers=true` is not implemented and fails the
 compile (`UnimplementedOption`).

@@ -692,9 +692,10 @@ pub(super) fn finalize_constructors(
 /// The message of the `@Deprecated(level = HIDDEN)` kotlinc puts on the no-arg constructor.
 const NO_ARG_CONSTRUCTOR_HIDDEN_MESSAGE: &str = "No-arg constructor is hidden from direct usage";
 
-/// Build the zero-argument constructor of every class the frontend marked
-/// [`crate::fir::DeclarationFlags::NO_ARG_CONSTRUCTOR`] (kotlinc's no-arg plugin), after the class's
-/// declared constructors. It delegates to the superclass's `<init>()` and runs no initializer, as
+/// Build the zero-argument constructor of every class the frontend gave one
+/// ([`ResolvedModuleIndex::no_arg_constructor`], kotlinc's no-arg plugin), after the class's
+/// declared constructors. It delegates to the superclass constructor the frontend selected, called
+/// as `<init>()`, and runs no initializer, as
 /// kotlinc's `generateNoArgConstructorBody` without `invokeInitializers`. `@Deprecated(HIDDEN)`
 /// keeps Kotlin callers from selecting it; `@java.lang.Deprecated` keeps it a public, non-synthetic
 /// method Java and frameworks can call.
@@ -702,19 +703,25 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
     let mut classifiers = ir
         .checked_classifier_classes
         .iter()
-        .map(|(declaration, class)| (*declaration, *class))
-        .filter(|(declaration, _)| {
-            index
-                .declaration_header(*declaration)
-                .is_some_and(|header| {
-                    header
-                        .flags
-                        .has(crate::fir::DeclarationFlags::NO_ARG_CONSTRUCTOR)
-                })
+        .filter_map(|(declaration, class)| {
+            Some((
+                *declaration,
+                *class,
+                index.no_arg_constructor(*declaration)?,
+            ))
         })
         .collect::<Vec<_>>();
-    classifiers.sort_by_key(|(declaration, _)| declaration.raw());
-    for (classifier, class) in classifiers {
+    classifiers.sort_by_key(|(declaration, _, _)| declaration.raw());
+    for (classifier, class, superclass_constructor) in classifiers {
+        let target = match superclass_constructor {
+            crate::fir::NoArgSuperConstructor::Declared(constructor) => {
+                module_constructor_target(index, constructor)
+                    .expect("a selected source constructor has a published header")
+            }
+            crate::fir::NoArgSuperConstructor::Unrestricted => {
+                crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY
+            }
+        };
         // kotlinc generates it in FIR: after every member the class declares and before the
         // members lowering generates (a data class's `componentN`, `copy`, …). It takes the last
         // declared member's place, and the member schedule keeps it after that member.
@@ -803,7 +810,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
                 delegate: crate::ir::CtorDelegateTarget::Super {
                     owner: superclass,
                     target_params: Vec::new(),
-                    target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                    target,
                     default_masks: Vec::new(),
                 },
                 synthetic: false,

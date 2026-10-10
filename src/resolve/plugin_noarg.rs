@@ -11,13 +11,17 @@
 //! - its `FirNoArgConstructorGenerator`: which matched classes get the constructor. A class that
 //!   already declares a constructor JVM callers can call without arguments gets none.
 //!
-//! The decision travels as [`DeclarationFlags::NO_ARG_CONSTRUCTOR`] on the class's header, and
-//! lowering builds the constructor from it. A local class's annotations resolve only in its body
+//! The decision is published as the superclass constructor the generated one delegates to
+//! ([`crate::fir::ResolvedModuleIndex::no_arg_constructor`]), and lowering builds the constructor
+//! from it. A local class's annotations resolve only in its body
 //! pass, after headers are published, so a local class never matches here.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::fir::{DeclarationFlags, DeclarationId, DeclarationKind, StreamedHeaderModule};
+use crate::fir::{
+    DeclarationFlags, DeclarationId, DeclarationKind, NoArgSuperConstructor, ResolvedModuleIndex,
+    StreamedHeaderModule,
+};
 use crate::types::TypeName;
 
 use super::plugin_class_predicate::ClassPredicate;
@@ -28,10 +32,11 @@ const NOARG_ON_INNER_CLASS: &str =
 const NO_NOARG_CONSTRUCTOR_IN_SUPERCLASS: &str =
     "zero-argument constructor was not found in the superclass.";
 
-/// The source classes that get a generated zero-argument constructor.
+/// The source classes that get a generated zero-argument constructor, with the superclass
+/// constructor each one delegates to.
 #[derive(Default)]
 pub(super) struct NoArgConstructors {
-    classes: HashSet<DeclarationId>,
+    classes: HashMap<DeclarationId, NoArgSuperConstructor>,
 }
 
 impl NoArgConstructors {
@@ -76,11 +81,12 @@ impl NoArgConstructors {
                 diags.error(class.name_span, NOARG_ON_INNER_CLASS);
                 continue;
             }
-            let own = constructors(table, classifier);
+            let own = constructors(headers, table, classifier);
             // kotlinc's checker asks only for a constructor whose parameters all have defaults; its
             // generator also needs that constructor to compile to `<init>()`.
             let superclass = class.super_internal;
-            let super_constructors = superclass.map(|superclass| constructors(table, superclass));
+            let super_constructors =
+                superclass.map(|superclass| constructors(headers, table, superclass));
             let superclass_matches =
                 superclass.is_some_and(|superclass| predicate.class_matches(superclass));
             let super_has = |test: fn(&Constructor) -> bool| {
@@ -96,27 +102,38 @@ impl NoArgConstructors {
                 diags.error(class.name_span, NO_NOARG_CONSTRUCTOR_IN_SUPERCLASS);
                 continue;
             }
-            if !stub.flags.has(DeclarationFlags::LOCAL_CLASS)
-                && !own.iter().any(Constructor::zero_parameter)
-                && (super_has(Constructor::zero_parameter) || superclass_matches)
+            if stub.flags.has(DeclarationFlags::LOCAL_CLASS)
+                || own.iter().any(Constructor::zero_parameter)
             {
-                generated.classes.insert(stub.id);
+                continue;
+            }
+            // The super constructor the generated one calls as `<init>()`: one the superclass
+            // declares, else the one the plugin generates for a matched superclass.
+            let target = match &super_constructors {
+                None => Some(NoArgSuperConstructor::Unrestricted),
+                Some(constructors) => constructors
+                    .iter()
+                    .find(|constructor| constructor.zero_parameter())
+                    .map(|constructor| {
+                        constructor
+                            .declaration
+                            .map_or(NoArgSuperConstructor::Unrestricted, |declaration| {
+                                NoArgSuperConstructor::Declared(declaration)
+                            })
+                    })
+                    .or(superclass_matches.then_some(NoArgSuperConstructor::Unrestricted)),
+            };
+            if let Some(target) = target {
+                generated.classes.insert(stub.id, target);
             }
         }
         generated
     }
 
-    /// The header flags `declaration` publishes: its own flags, marked where it gets a generated
-    /// zero-argument constructor.
-    pub(super) fn flags(
-        &self,
-        declaration: DeclarationId,
-        flags: DeclarationFlags,
-    ) -> DeclarationFlags {
-        if self.classes.contains(&declaration) {
-            flags.with(DeclarationFlags::NO_ARG_CONSTRUCTOR, true)
-        } else {
-            flags
+    /// Publish each matched class's generated constructor into the module index.
+    pub(super) fn publish(self, index: &mut ResolvedModuleIndex) {
+        for (classifier, superclass_constructor) in self.classes {
+            index.publish_no_arg_constructor(classifier, superclass_constructor);
         }
     }
 }
@@ -132,6 +149,8 @@ fn is_class_kind(flags: DeclarationFlags) -> bool {
 
 /// The facts of one declared constructor that the plugin's rules read.
 struct Constructor {
+    /// The source declaration; `None` for a dependency's constructor.
+    declaration: Option<DeclarationId>,
     primary: bool,
     parameter_defaults: Vec<bool>,
     jvm_overloads: bool,
@@ -153,10 +172,34 @@ impl Constructor {
 
 /// The declared constructors of `classifier`: from its source declaration, or from its dependency
 /// provider. An unknown classifier declares none.
-fn constructors(table: &SymbolTable, classifier: TypeName) -> Vec<Constructor> {
+fn constructors(
+    headers: &StreamedHeaderModule,
+    table: &SymbolTable,
+    classifier: TypeName,
+) -> Vec<Constructor> {
     let jvm_overloads = crate::types::type_name("kotlin/jvm/JvmOverloads");
     if let Some(class) = table.classes.get(&classifier) {
+        // A source class's constructors are its owned constructor declarations by sibling
+        // ordinal: 0 for the primary, `n` for the `n`th secondary.
+        let declaration = |sibling: usize| {
+            let owner = class.stable_declaration?;
+            headers
+                .declarations
+                .owned(owner)
+                .iter()
+                .copied()
+                .find(|declaration| {
+                    headers
+                        .declarations
+                        .anchor(*declaration)
+                        .is_some_and(|anchor| {
+                            anchor.kind == DeclarationKind::Constructor
+                                && anchor.sibling as usize == sibling
+                        })
+                })
+        };
         let primary = class.has_primary_ctor.then(|| Constructor {
+            declaration: declaration(0),
             primary: true,
             parameter_defaults: class
                 .ctor_param_names
@@ -171,7 +214,9 @@ fn constructors(table: &SymbolTable, classifier: TypeName) -> Vec<Constructor> {
             .secondary_ctor_call_sigs
             .iter()
             .zip(&class.secondary_constructor_annotations)
-            .map(|(signature, annotations)| Constructor {
+            .enumerate()
+            .map(|(ordinal, (signature, annotations))| Constructor {
+                declaration: declaration(ordinal + 1),
                 primary: false,
                 parameter_defaults: signature.param_defaults.clone(),
                 jvm_overloads: annotations.contains(&jvm_overloads),
@@ -184,6 +229,7 @@ fn constructors(table: &SymbolTable, classifier: TypeName) -> Vec<Constructor> {
                 .constructors
                 .iter()
                 .map(|constructor| Constructor {
+                    declaration: None,
                     primary: constructor.is_primary_constructor(),
                     parameter_defaults: (0..constructor.params.len())
                         .map(|index| {

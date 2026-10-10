@@ -10119,9 +10119,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor generation is not possible for inner classes.` kotlinc 2.4.20 reports nothing for a
   matched value class and emits an unverifiable static `constructor-impl()` for it; krusty reports
   nothing and generates nothing. `invokeInitializers=true` is not implemented and fails the
-  compile. A local class is not matched yet, as for all-open. Tests: `tests/noarg_plugin_e2e.rs`
+  compile; kotlinc 2.4.20 runs initializers only for that exact spelling, so `TRUE` or `True`
+  compiles as `false` in both. A sealed superclass is reached through its `DefaultConstructorMarker`
+  constructor, the superclass constructor the frontend selected. A local class is not matched yet, as for all-open. Tests: `tests/noarg_plugin_e2e.rs`
   (direct, meta and supertype matches, secondary-only, data, nested and private-constructor classes,
-  declared no-arg constructors, byte-identical to kotlinc and instantiated reflectively; the `jpa`
+  a sealed superclass, declared no-arg constructors, mixed-case `invokeInitializers`, byte-identical to kotlinc and instantiated reflectively; the `jpa`
   preset through a dependency each compiler builds for itself; the plugin's errors against
   kotlinc's), `plugins::noarg` and `plugins::registry` unit tests
   (`noarg_resolves_to_native_and_reads_its_options`,
