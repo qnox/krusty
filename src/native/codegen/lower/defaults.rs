@@ -532,9 +532,9 @@ impl BodyLowering<'_, '_, '_> {
         };
         // The wrapper answers in the declaration's representation. An inherited provider declares
         // the result as its own type parameter, so `Input<V>.foo()` answers a box where the call
-        // reads a `V`.
+        // reads a `V`; the call site hands it over in the form its physical type names.
         let declared = self.file.ir.functions[function as usize].ret;
-        match self.type_of(site) {
+        match self.physical_type(site) {
             Some(read) => self.convert(result, Some(declared), read),
             None => Ok(Some(result)),
         }

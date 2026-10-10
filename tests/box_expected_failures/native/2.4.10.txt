@@ -28,7 +28,6 @@ arrays/forInUnsignedArray/forInUnsignedArrayWithIndexNoElementVar.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexNoIndexVar.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/kt42932.kt
-arrays/kt7009.kt
 arrays/primitiveArrays.kt
 assert/assertEnabledInlinedCrossModule.kt
 associatedObjects/associatedObjectNested.kt
@@ -282,9 +281,6 @@ contracts/isNullString.kt
 contracts/kt39374.kt
 contracts/referenceToGenericInDeserializedContract.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValue.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueDoWhileContinue.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
 controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/breakContinueInExpressions/kt45704_elvisInInlineFun.kt
 controlStructures/forInArray/forInArraySpecializedToUntil.kt
@@ -1143,7 +1139,6 @@ lambda/lambda_kt49360_trivial.kt
 lambda/lambda_kt49360_withFlow.kt
 lambda/lambda_kt49360_wrapBlock.kt
 lower/forLoopsLowering/arrays.kt
-lower/forLoopsLowering/nested.kt
 lower/forLoopsLowering/progressions.kt
 lower/forLoopsLowering/sequences.kt
 lower/forLoopsLowering/withIndex.kt
@@ -1514,7 +1509,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing2.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
-reified/sameIndexRecursive.kt
 reified/spreads.kt
 reified/vararg.kt
 reified/varargs.kt

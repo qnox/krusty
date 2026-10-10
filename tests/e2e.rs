@@ -1775,6 +1775,8 @@ mod native_builtin_supertypes_e2e;
 mod native_c_abi_e2e;
 #[path = "native_callable_name_e2e.rs"]
 mod native_callable_name_e2e;
+#[path = "native_checked_types_e2e.rs"]
+mod native_checked_types_e2e;
 #[path = "native_class_literals_e2e.rs"]
 mod native_class_literals_e2e;
 #[path = "native_classes_e2e.rs"]

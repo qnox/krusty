@@ -367,7 +367,7 @@ impl Realizer<'_> {
                 vec![(Some(lhs), true_value), (None, rhs)]
             }
         };
-        let when = self.add(IrExpr::When { branches });
+        let when = self.add_checked(IrExpr::When { branches }, Ty::Boolean);
         self.ir.short_circuits.insert(when, kind);
         when
     }

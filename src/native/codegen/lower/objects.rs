@@ -2092,16 +2092,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if !self.file.values.is_value_class(classifier) {
             return false;
         }
-        let physical = self.type_of(receiver);
-        if physical == Some(any()) {
+        if self.physical_type(receiver) == Some(any()) {
             return false;
         }
-        self.file
-            .ir
-            .logical_types
-            .get(&receiver)
-            .copied()
-            .or(physical)
+        self.checked_type(receiver)
             .and_then(|ty| self.file.values.unboxed(ty))
             == Some(classifier)
     }

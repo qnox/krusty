@@ -472,12 +472,15 @@ impl Realizer<'_> {
                 match step_argument_slot {
                     None => {
                         let negated = self.negated(Operand::stable(step_argument), step_ty);
-                        let chosen = self.add(IrExpr::When {
-                            branches: vec![
-                                (Some(not_positive), negated.value),
-                                (None, step_argument),
-                            ],
-                        });
+                        let chosen = self.add_checked(
+                            IrExpr::When {
+                                branches: vec![
+                                    (Some(not_positive), negated.value),
+                                    (None, step_argument),
+                                ],
+                            },
+                            step_ty,
+                        );
                         let chosen = Operand {
                             value: chosen,
                             can_change: true,
