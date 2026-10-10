@@ -2095,23 +2095,8 @@ fn decode_functions(
                         None,
                         function_type_table,
                     );
-                    let contract = if let Some(body) = pf.contract_body.as_deref() {
-                        let tparams = type_parameter_context(
-                            &[],
-                            &[],
-                            &pf.type_params,
-                            records,
-                            d2,
-                            function_type_table,
-                        )
-                        .map(|c| c.names)
-                        .unwrap_or_default();
-                        // Function-level table wins if present; the container's otherwise.
-                        contract::decode_contract(body, records, d2, &tparams, function_type_table)?
-                            .map(std::sync::Arc::new)
-                    } else {
-                        None
-                    };
+                    let contract =
+                        contract::decode_function_contract(&pf, records, d2, function_type_table)?;
                     if pf.contract_body.is_some() {
                         crate::trace_compiler!(
                             "metadata_contracts",
