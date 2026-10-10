@@ -270,8 +270,11 @@ pub fn emit_analyzed<B: Backend>(
             source_id,
             &backend_module_facts,
             &symbols,
-            module_name,
-            stems,
+            backend_handoff::ModuleEmission {
+                module_name,
+                stems,
+                origins: source_map.origins(),
+            },
             diags,
         ) else {
             continue;

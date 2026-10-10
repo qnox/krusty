@@ -9,8 +9,10 @@
 use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
+use crate::ir::{IrClass, IrFile};
+use crate::metadata::class_declarations::{ClassTailOptions, PropertyOrigin};
 use crate::metadata::declaration_records;
-use crate::metadata::klib_fragment::{package_fragment, KlibFileMembers};
+use crate::metadata::klib_fragment::{package_fragment, KlibClass, KlibFileMembers};
 
 use super::write::{KlibPlatform, KlibStamp, KlibWriter};
 
@@ -64,10 +66,14 @@ impl Backend for KlibBackend {
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let ir = &file.ir;
-        if !ir.classes.is_empty() {
+        let classes = library_classes(ir);
+        if let Some(construct) = classes
+            .iter()
+            .find_map(|&class| unsupported_class_construct(ir, class))
+        {
             diags.error(
                 crate::diag::Span::new(0, 0),
-                format!("{DECLINE_PREFIX}classes yet"),
+                format!("{DECLINE_PREFIX}{construct} yet"),
             );
             return Vec::new();
         }
@@ -108,7 +114,82 @@ impl Backend for KlibBackend {
             .split('.')
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
-        let fragment = package_fragment(&segments, &members, self.annotations_in_metadata);
+        // A library serializes each class's declaration record exactly as the handoff built it.
+        let Some(records) = classes
+            .iter()
+            .map(|class| {
+                ir.class_declarations
+                    .get(&class.fq_name_id())
+                    .and_then(Option::as_ref)
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("{DECLINE_PREFIX}this class shape yet"),
+            );
+            return Vec::new();
+        };
+        let constants = records
+            .iter()
+            .map(|record| {
+                record
+                    .prop_origins
+                    .iter()
+                    .map(|origin| match origin {
+                        PropertyOrigin::Constant(storage) => static_constant(ir, *storage),
+                        PropertyOrigin::Declared(_)
+                        | PropertyOrigin::MemberExtension(_)
+                        | PropertyOrigin::CompanionBlock(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let secondary_constructors = records
+            .iter()
+            .map(|record| record.secondary_constructors())
+            .collect::<Vec<_>>();
+        let nested = records
+            .iter()
+            .map(|record| record.nested())
+            .collect::<Vec<_>>();
+        let enum_entries = records
+            .iter()
+            .map(|record| record.enum_entries())
+            .collect::<Vec<_>>();
+        let tails = records
+            .iter()
+            .zip(secondary_constructors.iter().zip(&nested))
+            .map(|(record, (secondary, nested))| {
+                record.tail(
+                    ClassTailOptions {
+                        param_assertions: false,
+                        annotations_in_metadata: self.annotations_in_metadata,
+                        compiler_version_requirement: None,
+                        intersection: None,
+                        primary_ctor_annotations: None,
+                    },
+                    secondary,
+                    nested,
+                )
+            })
+            .collect::<Vec<_>>();
+        let declarations = records
+            .iter()
+            .zip(&tails)
+            .zip(enum_entries.iter().zip(&constants))
+            .map(|((record, tail), (entries, constants))| KlibClass {
+                declaration: record.declaration(tail, entries),
+                constants,
+                in_source_file: record.has_source_file(),
+            })
+            .collect::<Vec<_>>();
+        let fragment = package_fragment(
+            &segments,
+            &members,
+            &declarations,
+            self.annotations_in_metadata,
+        );
         state.fragments.push((package, fragment));
         Vec::new()
     }
@@ -135,6 +216,79 @@ fn declared_setter(
     }
 }
 
+/// The classes a library records for a file, in fragment order: each top-level source classifier
+/// in declaration order, each followed by the classifiers its `nestedClassName` list names (the
+/// declared ones, those a compiler plugin generated, the companion), in that list's order. A
+/// classifier declared in executable code is no declaration of the library.
+fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
+    let mut top_level = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| {
+            class.is_source_declared
+                && class.enclosure.is_none()
+                && !class.is_local_class
+                && !class.is_anonymous_object
+                && !class.is_enum_entry
+                && class.fq_name.nested_owner().is_none()
+        })
+        .map(|(index, class)| {
+            let order = ir
+                .class_source_order(index as crate::ir::ClassId)
+                .expect("a source classifier carries its stable declaration order");
+            (order, class)
+        })
+        .collect::<Vec<_>>();
+    top_level.sort_by_key(|(order, _)| *order);
+    let mut ordered = Vec::with_capacity(ir.classes.len());
+    let mut pending = top_level
+        .into_iter()
+        .rev()
+        .map(|(_, class)| class)
+        .collect::<Vec<_>>();
+    while let Some(class) = pending.pop() {
+        ordered.push(class);
+        pending.extend(
+            crate::metadata::class_declarations::nested_classifiers(ir, class)
+                .iter()
+                .rev()
+                .map(|segment| {
+                    let id = ir
+                        .class_id_by_name(class.fq_name.nested_child(segment))
+                        .expect("a listed nested classifier is declared in its owner's file");
+                    &ir.classes[id as usize]
+                }),
+        );
+    }
+    ordered
+}
+
+/// A construct of `class` this writer does not record yet.
+fn unsupported_class_construct(ir: &IrFile, class: &IrClass) -> Option<&'static str> {
+    if ir
+        .companion_blocks
+        .properties_of(class.fq_name_id())
+        .next()
+        .is_some()
+    {
+        return Some("companion blocks");
+    }
+    if class.is_value {
+        return Some("value classes");
+    }
+    None
+}
+
+/// The value a class `const val`'s static storage is initialized with.
+fn static_constant(ir: &IrFile, storage: u32) -> Option<crate::ir::IrConst> {
+    let init = ir.statics.get(storage as usize)?.init?;
+    match &ir.exprs[init as usize] {
+        crate::ir::IrExpr::Const(constant) => Some(constant.clone()),
+        _ => None,
+    }
+}
+
 /// A `const val`'s value: the constant its storage is initialized with.
 fn constant_value(
     ir: &crate::ir::IrFile,
@@ -148,9 +302,5 @@ fn constant_value(
     else {
         return None;
     };
-    let init = ir.statics.get(*storage as usize)?.init?;
-    match &ir.exprs[init as usize] {
-        crate::ir::IrExpr::Const(constant) => Some(constant.clone()),
-        _ => None,
-    }
+    static_constant(ir, *storage)
 }

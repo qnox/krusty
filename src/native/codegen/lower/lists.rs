@@ -402,7 +402,7 @@ impl BodyLowering<'_, '_, '_> {
                 let Some(text) = self.property_reference_name(*property) else {
                     return Some(Err(
                         "a delegated property read through a `KProperty` this file did not build"
-                            .to_string(),
+                            .into(),
                     ));
                 };
                 Some(self.delegate_read(receiver, *this_ref, *property, &text, ret))
@@ -1317,7 +1317,7 @@ impl BodyLowering<'_, '_, '_> {
         let mut operands = vec![self.reference(receiver)?];
         for (argument, ty) in args.iter().zip(&carried[1..]) {
             let Some(value) = self.coerce(*argument, *ty)? else {
-                return Err(format!("a `Unit` operand of `{symbol}`"));
+                return Err(declined!("a `Unit` operand of `{symbol}`"));
             };
             operands.push(value);
         }

@@ -253,7 +253,7 @@ klib-semantics VERSION=`just max-version`:
     root="$(just kotlin-native "{{VERSION}}")"
     KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KOTLIN_NATIVE=1 \
       KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 \
-      ./run-tests.sh --test e2e -- klib_semantic_e2e value_class_declaration_e2e \
+      ./run-tests.sh --test e2e -- klib_ value_class_declaration_e2e \
         native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and

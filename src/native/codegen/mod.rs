@@ -145,11 +145,8 @@ impl Backend for CraneliftBackend {
             self.verify,
         ) {
             Ok(lowered) => lowered,
-            Err(unsupported) => {
-                diags.error(
-                    crate::diag::Span::new(0, 0),
-                    format!("krusty: the native backend does not support {unsupported} yet"),
-                );
+            Err(declined) => {
+                report_decline(&declined, &file, diags);
                 return Vec::new();
             }
         };
@@ -174,6 +171,28 @@ impl Backend for CraneliftBackend {
         // linker supplies it. The header is the module's public C ABI, not a program to compile.
         let header = super::c_abi::header(module_name, &state.abi);
         vec![(format!("{module_name}.h"), header.into_bytes())]
+    }
+}
+
+/// Report a decline at the source span of the node it was declined at: in the file that node was
+/// written in, which an inlined body can make another file of the module. A decline no checked node
+/// claimed is a fact about the whole file and is reported at its start.
+fn report_decline(declined: &lower::Unsupported, file: &CheckedIrFile<'_>, diags: &mut DiagSink) {
+    let message = format!(
+        "krusty: the native backend does not support {} yet",
+        declined.construct()
+    );
+    match declined
+        .origin()
+        .and_then(|origin| file.origin_span(origin))
+    {
+        Some((source, span)) => {
+            let current = diags.current_file();
+            diags.set_file(source);
+            diags.error(span, message);
+            diags.set_file(current);
+        }
+        None => diags.error(crate::diag::Span::new(0, 0), message),
     }
 }
 

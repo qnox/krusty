@@ -295,7 +295,7 @@ impl BodyLowering<'_, '_, '_> {
         // the representation: re-selecting one from operand types would hide a broken frontend
         // contract and can erase unsigned or custom-range semantics.
         let Some((kind, element)) = range_type(result) else {
-            return Err(format!(
+            return Err(declined!(
                 "a range of `{start_type:?}`..`{end_type:?}` as a value"
             ));
         };
@@ -303,7 +303,7 @@ impl BodyLowering<'_, '_, '_> {
             FirRangeOperation::Through => "",
             FirRangeOperation::OpenEnd | FirRangeOperation::Until => "_until",
             // An ordinary provider-selected extension call; it must not arrive as a construction.
-            FirRangeOperation::DownTo => return Err("a `downTo` range as a value".to_string()),
+            FirRangeOperation::DownTo => return Err("a `downTo` range as a value".into()),
         };
         let Some(first) = self.coerce(start, element)? else {
             return Ok(None);
@@ -380,7 +380,7 @@ impl BodyLowering<'_, '_, '_> {
         {
             let [end] = args else {
                 return Some(Err(
-                    "an `until` call with an unexpected argument shape".to_string()
+                    "an `until` call with an unexpected argument shape".into()
                 ));
             };
             let (kind, element) = range_type(ret)?;
@@ -400,7 +400,7 @@ impl BodyLowering<'_, '_, '_> {
         {
             let [end] = args else {
                 return Some(Err(
-                    "a `downTo` call with an unexpected argument shape".to_string()
+                    "a `downTo` call with an unexpected argument shape".into()
                 ));
             };
             let (kind, element) = range_type(ret)?;
@@ -422,7 +422,7 @@ impl BodyLowering<'_, '_, '_> {
         {
             if args.len() != 1 {
                 return Some(Err(
-                    "a progression `step` call with an unexpected argument shape".to_string(),
+                    "a progression `step` call with an unexpected argument shape".into(),
                 ));
             }
             // The ANSWER is the progression, a reference; the ARGUMENT is the step, which crosses
@@ -436,7 +436,7 @@ impl BodyLowering<'_, '_, '_> {
         {
             if !args.is_empty() {
                 return Some(Err(
-                    "a progression `reversed` call with an unexpected argument shape".to_string(),
+                    "a progression `reversed` call with an unexpected argument shape".into(),
                 ));
             }
             return Some(self.range_call("kt_range_reversed", any(), any(), receiver, &[], ret));
@@ -558,7 +558,7 @@ impl BodyLowering<'_, '_, '_> {
     ///   to pass.
     fn range_compare_function(&mut self, element: Ty) -> Result<Value, Unsupported> {
         let Ty::Obj(name, _) = element.non_null() else {
-            return Err(format!(
+            return Err(declined!(
                 "a range of `{}`",
                 super::type_checks::type_name_of(element)
             ));
@@ -572,7 +572,7 @@ impl BodyLowering<'_, '_, '_> {
                 let func_ref = self.func_ref(id);
                 return Ok(self.builder.ins().func_addr(types::I64, func_ref));
             }
-            return Err(format!(
+            return Err(declined!(
                 "a range of `{}` in a file that declares its own `Comparable`",
                 name.render().replace('/', ".")
             ));
@@ -593,13 +593,13 @@ impl BodyLowering<'_, '_, '_> {
                 && matches!(function.params.as_slice(), [Ty::Obj(other, _)] if *other == name)
         });
         let (true, Some(function)) = (is_final, own) else {
-            return Err(format!(
+            return Err(declined!(
                 "a range of `{}`, which is not a final class declaring its own `compareTo`",
                 name.render().replace('/', ".")
             ));
         };
         let Some(id) = self.file.functions[function as usize] else {
-            return Err(format!(
+            return Err(declined!(
                 "a range of `{}`, whose `compareTo` has no body",
                 name.render().replace('/', ".")
             ));
@@ -739,16 +739,16 @@ impl BodyLowering<'_, '_, '_> {
         argument: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let Some(receiver_ty) = self.type_of(receiver).map(Ty::non_null) else {
-            return Err("`contains` on a receiver with no known type".to_string());
+            return Err("`contains` on a receiver with no known type".into());
         };
         let Some(internal) = receiver_ty.obj_internal() else {
-            return Err(format!("`contains` on a `{receiver_ty:?}`"));
+            return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         };
         if range_element(internal).is_none() {
-            return Err(format!("`contains` on a `{receiver_ty:?}`"));
+            return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         }
         let Some(argument_ty) = self.type_of(argument) else {
-            return Err("`contains` of a value with no known type".to_string());
+            return Err("`contains` of a value with no known type".into());
         };
         // Only a value that IS a scalar is answered. Kotlin's `contains` over a possibly-absent
         // element is a null test followed by the comparison — `null in 1..3` is false — and
@@ -761,7 +761,7 @@ impl BodyLowering<'_, '_, '_> {
         // neither — it is `Ty::Null`, the type of the literal itself, which walked straight
         // through the guard.
         if !argument_ty.is_jvm_scalar() {
-            return Err(format!("`contains` of a `{argument_ty:?}`"));
+            return Err(declined!("`contains` of a `{argument_ty:?}`"));
         }
         let object = self.reference(receiver)?;
         let Some(value) = self.coerce(argument, argument_ty)? else {
@@ -807,7 +807,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         let counter = counter.non_null();
         if self.carrier(counter).clif().is_none() {
-            return Err(format!("a range membership test over `{counter:?}`"));
+            return Err(declined!("a range membership test over `{counter:?}`"));
         }
         // Any of the three may TRANSFER CONTROL rather than answer — `x in 1u..break`, and the
         // same with `continue`, `return` and `throw`. The test is then unreachable and there is
@@ -817,7 +817,7 @@ impl BodyLowering<'_, '_, '_> {
             return if self.terminated {
                 Ok(None)
             } else {
-                Err("a `Unit` value in a range test".to_string())
+                Err("a `Unit` value in a range test".into())
             };
         };
         if self.terminated {
@@ -827,7 +827,7 @@ impl BodyLowering<'_, '_, '_> {
             return if self.terminated {
                 Ok(None)
             } else {
-                Err("a `Unit` range bound".to_string())
+                Err("a `Unit` range bound".into())
             };
         };
         if self.terminated {
@@ -837,7 +837,7 @@ impl BodyLowering<'_, '_, '_> {
             return if self.terminated {
                 Ok(None)
             } else {
-                Err("a `Unit` range bound".to_string())
+                Err("a `Unit` range bound".into())
             };
         };
         if self.terminated {
@@ -908,7 +908,7 @@ impl BodyLowering<'_, '_, '_> {
     /// runtime to answer yet, so one of those declines by receiver rather than by name.
     pub(super) fn indices(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
         let Some(ty) = self.type_of(receiver).map(Ty::non_null) else {
-            return Err("`indices` of a receiver with no known type".to_string());
+            return Err("`indices` of a receiver with no known type".into());
         };
         // A type parameter stands for whatever its bound admits, and `indices` is declared for the
         // bound: `fun <T : Collection<*>> f(c: T) = c.indices` asks the collection's question.
@@ -958,7 +958,7 @@ impl BodyLowering<'_, '_, '_> {
             }
             self.runtime_call("kt_iterable_count", &[any()], Ty::Int, &[value])?
         } else {
-            return Err(format!("`indices` of a `{ty:?}`"));
+            return Err(declined!("`indices` of a `{ty:?}`"));
         };
         let Some(size) = size else {
             return Ok(None);

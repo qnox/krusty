@@ -46,6 +46,18 @@ pub struct CheckedIrFile<'a> {
     pub native_plugins: &'a crate::plugins::registry::NativePlugins,
     pub module_name: &'a str,
     pub stems: &'a [String],
+    /// Where each checked node came from. A backend that declines a construct reports it at the
+    /// source span of the node it declined, which common IR identifies by origin.
+    pub origins: &'a crate::fir::OriginStore,
+}
+
+impl CheckedIrFile<'_> {
+    /// The source file (by index into the module's sources) and span a checked node came from.
+    pub fn origin_span(&self, origin: crate::fir::OriginId) -> Option<(u32, crate::diag::Span)> {
+        self.origins
+            .source_span(origin)
+            .map(|(source, span)| (source.raw(), span))
+    }
 }
 
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).

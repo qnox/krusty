@@ -95,8 +95,8 @@ pub(super) fn reflect(
         .lambda_origins
         .get(&impl_fn)
         .ok_or("a source class lambda has no source form")?;
-    let local_classifiers = crate::jvm::local_classifiers::names(ir);
-    let enum_entry_bodies = crate::jvm::local_classifiers::enum_entry_bodies(ir);
+    let local_classifiers = crate::metadata::local_classifiers::names(ir);
+    let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
     let physical = super::super::metadata_method_signatures::lambda_invoke_descriptor(
         receiver,
         values,
