@@ -4603,8 +4603,26 @@ code is the one the code generator already names: provider-owned bodies through 
   frozen `BackendCallableFact`, together with the declaration's validated parameter identities
   (context roles, extension receiver, values). Normalization attaches no compiler intrinsic: a
   KLIB declaration's implementation is its serialized IR body, and the provider attaches only
-  declaration-level semantic roles. Top-level functions are published; classes, members, properties
-  and the `SemanticPlatform` hooks come next, then the Native lane switch.
+  declaration-level semantic roles. Top-level functions and properties are published. A property
+  is signed with its public signature and its getter and setter accessor signatures, deduplicated
+  by its public signature, and normalized into the common `PropertyInfo` (semantic accessor
+  parameters, setter visibility and value name, context roles, a `const val`'s compile-time value;
+  no owner, descriptor or storage). Each accessor is an ordinary external callable whose
+  realization carries its `KlibDeclarationSignature::Accessor`; the property's
+  `ExternalPropertyRealization` joins the two accessor identities. A companion extension property
+  is signed but left to its classifier's namespace. Non-private classes are published from their
+  metadata: lookup through the package namespace and, for a nested class, its owner's classifier
+  namespace; exact kind, modality, `fun`-interface and `inner` flags, own and captured type
+  parameters (bounds, variance), the direct supertypes metadata lists (core walks inheritance),
+  companion identity and enum entries. Constructors are ordinary callables (`<init>`, primary or
+  secondary), and members, member extensions and member properties are normalized through the
+  same `CallablePlacement`-driven model as package declarations; each realizes its exact public or
+  accessor signature, deduplicated by signature. `companion { … }` block members, companion
+  extensions and an enum's `values`/`valueOf` (and `entries`, only with `hasEnumEntries`) are
+  receiver-less candidates of the classifier's namespace naming it as `associated_classifier`.
+  Private classes, members and constructors are not published, although IR gives a private class
+  member or constructor (an enum's, an object's) a public signature. The `SemanticPlatform` hooks
+  come next, then the Native lane switch.
 - **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
   decoded trees of a library set by linkable identity and answers a selected callable's frozen
   `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.
