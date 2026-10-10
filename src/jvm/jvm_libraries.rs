@@ -113,8 +113,8 @@ pub struct JvmLibraries {
     common_expectations: std::sync::Arc<super::common_metadata::CommonExpectationIndex>,
     optional_annotations: super::optional_annotations::OptionalAnnotationIndex,
     builtins_customizer: JvmBuiltInsCustomizer,
-    /// `-api-version` for this compilation. Classpath caches stay shared; availability is decided
-    /// here, per provider, when a `@SinceKotlin` callable is offered as a candidate.
+    /// `-api-version` for this compilation. It withholds `@SinceKotlin` callables newer than this
+    /// level; the shared classpath keeps one record cache per API version so views never mix.
     api_version: LanguageVersion,
     /// Classifiers whose `@SinceKotlin` callable of a given name this compilation withheld.
     /// Keyed by the declaration's receiver or owner, not by the shared classpath cache.
@@ -3822,7 +3822,10 @@ impl JvmLibraries {
         if let Some(building) = self.building_types.borrow().get(&internal_name) {
             return Some(building.clone());
         }
-        if let Some(hit) = self.cp.cached_library_type_name(internal_name) {
+        if let Some(hit) = self
+            .cp
+            .cached_library_type_name(self.api_version, internal_name)
+        {
             return hit;
         }
         // Nested builtin classifiers are stored source-facing in `.kotlin_builtins` (`Outer.Inner`),
@@ -3839,7 +3842,7 @@ impl JvmLibraries {
                 std::sync::Arc::new(shape)
             });
             self.cp
-                .cache_library_type_name(internal_name, built.clone());
+                .cache_library_type_name(self.api_version, internal_name, built.clone());
             return built;
         }
         // A classpath `typealias` (`kotlin/collections/ArrayList` → `java/util/ArrayList`) has no class of
@@ -3914,7 +3917,7 @@ impl JvmLibraries {
         }
         .or_else(|| self.optional_annotations.classifier(internal_name));
         self.cp
-            .cache_library_type_name(internal_name, built.clone());
+            .cache_library_type_name(self.api_version, internal_name, built.clone());
         built
     }
 
@@ -3940,7 +3943,7 @@ impl JvmLibraries {
         name: &str,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         use crate::libraries::{Callables, ResolvedSymbols};
-        if let Some(cached) = self.cp.cached_symbols(namespace, name) {
+        if let Some(cached) = self.cp.cached_symbols(self.api_version, namespace, name) {
             return cached;
         }
         // A typealias is a declaration in the namespace, not a JVM nested class. Package aliases
@@ -4394,6 +4397,7 @@ impl JvmLibraries {
             .register_external_callables(callables, package.map(SemanticCallableOwner::Package));
         let importable_declaration = core.importable_declaration || static_field.is_some();
         self.cp.memoize_symbols(
+            self.api_version,
             namespace,
             name,
             ResolvedSymbols {
@@ -5952,6 +5956,43 @@ mod tests {
             "Int.Companion constants={:?}",
             classifier.constants.keys().collect::<Vec<_>>()
         );
+    }
+
+    /// Classpath caches are shared by every compilation on a worker thread, but each provider
+    /// withholds `@SinceKotlin` declarations newer than its own API version. An API 1.3 compile must
+    /// not leave its narrower view behind for a later compile at the current API version.
+    #[test]
+    fn an_older_api_compile_does_not_narrow_a_later_one_on_the_same_classpath() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        fn set_value_receivers(libraries: &super::JvmLibraries) -> Vec<Ty> {
+            let symbols =
+                libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "setValue");
+            let mut receivers: Vec<Ty> = symbols
+                .callables
+                .functions()
+                .iter()
+                .filter_map(|function| function.receiver)
+                .collect();
+            receivers.sort_by_key(|receiver| format!("{receiver:?}"));
+            receivers
+        }
+        let shared = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib.clone()]));
+        let older = set_value_receivers(
+            &initialized_libraries(shared.clone())
+                .with_api_version(crate::language_version::LanguageVersion::new(1, 3)),
+        );
+        let current_after_older = set_value_receivers(&initialized_libraries(shared));
+        let current_alone = set_value_receivers(&initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        )));
+
+        assert!(
+            older.len() < current_alone.len(),
+            "API 1.3 withholds the @SinceKotlin(\"1.4\") property-reference setValue: {older:?}"
+        );
+        assert_eq!(current_after_older, current_alone);
     }
 
     #[test]

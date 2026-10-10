@@ -41,6 +41,7 @@ pub(super) use stub_overlay::StubOverlayGuard;
 mod test_support;
 mod value_class_erasure;
 
+use crate::language_version::LanguageVersion;
 pub(crate) use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
 };
@@ -1480,6 +1481,11 @@ const OPEN_ARCHIVE_CAP: usize = 16;
 const ALIAS_PACKAGE_CAP: usize = 1024;
 const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
 const SYMBOLS_CAP: usize = 65536;
+/// Per API version, the bound of the composed classifier record cache (`resolved_types`).
+const RESOLVED_TYPES_CAP: usize = 65536;
+type ResolvedTypeCache =
+    crate::lru::LruCache<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>;
+type SymbolsMemo = crate::lru::LruCache<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>;
 
 pub struct Classpath {
     entries: Vec<Entry>,
@@ -1545,9 +1551,9 @@ pub struct Classpath {
     /// `Classpath` (NOT the per-compile `JvmLibraries`) so repeated classifier metadata reads — which
     /// asks for the same stdlib types across thousands of snippets — warms across compiles instead of
     /// rebuilding each `LibraryType` (descriptor parses + `@Metadata` decodes) from cold every file.
-    resolved_types: RefCell<
-        crate::lru::LruCache<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
-    >,
+    /// One LRU per compilation API version: a record withholds `@SinceKotlin` members newer than
+    /// the API version it was built for, so one compile's view never serves another's.
+    resolved_types: RefCell<HashMap<LanguageVersion, ResolvedTypeCache>>,
     /// Parsed `.kotlin_builtins` fragments by package name.
     builtins: RefCell<HashMap<TypeName, std::sync::Arc<BuiltinsFile>>>,
     /// Complete-catalog validation succeeded once. Failures stay unset and are retried.
@@ -1573,13 +1579,9 @@ pub struct Classpath {
     package_facades_memo: RefCell<HashMap<TypeName, Vec<TypeName>>>,
     /// The classpath `SymbolSource` result memo. Namespace identity is the first key so a package and a
     /// same-named classifier cannot collide; the nested LRU accepts `&str` leaves without allocating on
-    /// cache hits.
-    symbols_memo: RefCell<
-        HashMap<
-            SymbolNamespace,
-            crate::lru::LruCache<String, std::rc::Rc<crate::libraries::ResolvedSymbols>>,
-        >,
-    >,
+    /// cache hits. The API version is part of that first key for the same reason as
+    /// [`Self::resolved_types`].
+    symbols_memo: RefCell<HashMap<(LanguageVersion, SymbolNamespace), SymbolsMemo>>,
     /// Exact JVM realizations behind the opaque dependency declaration identities carried by FIR.
     /// This is bounded by the classpath callable working set and shared with the backend through the
     /// same `Rc<Classpath>` as the symbol provider.
@@ -1791,7 +1793,7 @@ impl Classpath {
             inline_plans: RefCell::new(PlanMemo::new(META_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
-            resolved_types: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
+            resolved_types: RefCell::new(HashMap::new()),
             builtins: RefCell::new(HashMap::new()),
             builtins_validated: Cell::new(false),
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
@@ -2024,17 +2026,12 @@ impl Classpath {
         )
     }
 
-    /// Memoized `resolve_type` result for `internal` (the outer `Option` = cached-vs-not; the inner =
-    /// resolved-vs-absent). Warm across compiles because this `Classpath` is reused per worker thread.
-    pub fn cached_library_type(
-        &self,
-        internal: &str,
-    ) -> Option<Option<std::sync::Arc<crate::libraries::LibraryType>>> {
-        self.cached_library_type_name(type_name(internal))
-    }
-
+    /// Memoized `resolve_type` result for `internal` as seen at `api_version` (the outer `Option` =
+    /// cached-vs-not; the inner = resolved-vs-absent). Warm across compiles because this `Classpath`
+    /// is reused per worker thread.
     pub fn cached_library_type_name(
         &self,
+        api_version: LanguageVersion,
         internal: TypeName,
     ) -> Option<Option<std::sync::Arc<crate::libraries::LibraryType>>> {
         if !self.catalog_complete() {
@@ -2044,28 +2041,30 @@ impl Classpath {
         // Deliberately per-INSTANCE only: a `LibraryType` embeds whole-classpath facts (mapped
         // builtins from whichever stdlib wins THIS set, shadowable supertype walks, member-scope
         // recursion), so no entry-keyed process-global layer can serve it across compositions.
-        let hit = self.resolved_types.borrow_mut().get(&internal).cloned();
+        let hit = self
+            .resolved_types
+            .borrow_mut()
+            .get_mut(&api_version)
+            .and_then(|types| types.get(&internal))
+            .cloned();
         cache_stat!(resolved_types, hit.is_some());
         hit
     }
 
-    pub fn cache_library_type(
-        &self,
-        internal: &str,
-        ty: Option<std::sync::Arc<crate::libraries::LibraryType>>,
-    ) {
-        self.cache_library_type_name(type_name(internal), ty);
-    }
-
     pub fn cache_library_type_name(
         &self,
+        api_version: LanguageVersion,
         internal: TypeName,
         ty: Option<std::sync::Arc<crate::libraries::LibraryType>>,
     ) {
         if !self.catalog_complete() {
             return;
         }
-        self.resolved_types.borrow_mut().insert(internal, ty);
+        self.resolved_types
+            .borrow_mut()
+            .entry(api_version)
+            .or_insert_with(|| crate::lru::LruCache::new(RESOLVED_TYPES_CAP))
+            .insert(internal, ty);
     }
 
     /// The decoded `@Metadata` function lookups for `internal` (facade parts merged), decoded once and
@@ -3999,6 +3998,7 @@ impl Classpath {
     /// [`memoize_symbols`](Self::memoize_symbols).
     pub fn cached_symbols(
         &self,
+        api_version: LanguageVersion,
         namespace: SymbolNamespace,
         name: &str,
     ) -> Option<std::rc::Rc<crate::libraries::ResolvedSymbols>> {
@@ -4009,7 +4009,7 @@ impl Classpath {
         let hit = self
             .symbols_memo
             .borrow_mut()
-            .get_mut(&namespace)
+            .get_mut(&(api_version, namespace))
             .and_then(|symbols| symbols.get(name))
             .cloned();
         cache_stat!(symbols_memo, hit.is_some());
@@ -4020,6 +4020,7 @@ impl Classpath {
     /// hands back. See [`cached_symbols`](Self::cached_symbols).
     pub fn memoize_symbols(
         &self,
+        api_version: LanguageVersion,
         namespace: SymbolNamespace,
         name: &str,
         symbols: crate::libraries::ResolvedSymbols,
@@ -4033,7 +4034,7 @@ impl Classpath {
         if self.catalog_complete() {
             self.symbols_memo
                 .borrow_mut()
-                .entry(namespace)
+                .entry((api_version, namespace))
                 .or_insert_with(|| crate::lru::LruCache::new(SYMBOLS_CAP))
                 .insert(name.to_string(), rc.clone());
         }
@@ -6720,14 +6721,18 @@ mod fq_tests {
         assert!(libs.symbols(collections, MISSING_LEAF).is_empty());
         assert!(crate::types::existing_type_name(MISSING).is_none());
         let cached_miss = cp
-            .cached_symbols(collections, MISSING_LEAF)
+            .cached_symbols(LanguageVersion::default(), collections, MISSING_LEAF)
             .expect("empty symbol lookup is memoized");
         assert!(cached_miss.is_empty());
         assert!(crate::types::existing_type_name(MISSING).is_none());
         // Memoized (LRU): the same fqn returns the same `Rc` from the classpath's top-level memo.
         libs.symbols(kotlin, "Pair");
-        let a = cp.cached_symbols(kotlin, "Pair").expect("memoized");
-        let b = cp.cached_symbols(kotlin, "Pair").expect("memoized");
+        let a = cp
+            .cached_symbols(LanguageVersion::default(), kotlin, "Pair")
+            .expect("memoized");
+        let b = cp
+            .cached_symbols(LanguageVersion::default(), kotlin, "Pair")
+            .expect("memoized");
         assert!(std::rc::Rc::ptr_eq(&a, &b));
     }
 
@@ -6927,9 +6932,15 @@ mod fq_tests {
         let cp = Classpath::new(vec![]);
         let kotlin = SymbolNamespace::Package(type_name("kotlin"));
         let package_p = SymbolNamespace::Package(type_name("p"));
-        let warm_symbols =
-            cp.memoize_symbols(kotlin, "run", crate::libraries::ResolvedSymbols::default());
+        let api = LanguageVersion::default();
+        let warm_symbols = cp.memoize_symbols(
+            api,
+            kotlin,
+            "run",
+            crate::libraries::ResolvedSymbols::default(),
+        );
         cp.memoize_symbols(
+            api,
             package_p,
             "Widget",
             crate::libraries::ResolvedSymbols::default(),
@@ -6937,8 +6948,8 @@ mod fq_tests {
         let warm_type = type_name("kotlin/String");
         let affected_type = type_name("p/Widget");
         cp.local_cache.borrow_mut().insert(warm_type, None);
-        cp.resolved_types.borrow_mut().insert(warm_type, None);
-        cp.resolved_types.borrow_mut().insert(affected_type, None);
+        cp.cache_library_type_name(api, warm_type, None);
+        cp.cache_library_type_name(api, affected_type, None);
 
         let stubs = crate::jvm::java_stub::stub_classes(
             &[("W.java".into(), "package p; public class Widget {}".into())],
@@ -6950,22 +6961,22 @@ mod fq_tests {
 
         assert!(std::rc::Rc::ptr_eq(
             &warm_symbols,
-            &cp.cached_symbols(kotlin, "run")
+            &cp.cached_symbols(api, kotlin, "run")
                 .expect("unrelated symbol memo")
         ));
-        assert!(cp.cached_symbols(package_p, "Widget").is_none());
+        assert!(cp.cached_symbols(api, package_p, "Widget").is_none());
         assert!(cp.local_cache.borrow().contains_key(&warm_type));
-        assert!(cp.resolved_types.borrow().contains_key(&warm_type));
-        assert!(!cp.resolved_types.borrow().contains_key(&affected_type));
+        assert!(cp.cached_library_type_name(api, warm_type).is_some());
+        assert!(cp.cached_library_type_name(api, affected_type).is_none());
 
         cp.clear_stub_overlay();
         assert!(std::rc::Rc::ptr_eq(
             &warm_symbols,
-            &cp.cached_symbols(kotlin, "run")
+            &cp.cached_symbols(api, kotlin, "run")
                 .expect("warm memo after overlay")
         ));
         assert!(cp.local_cache.borrow().contains_key(&warm_type));
-        assert!(cp.resolved_types.borrow().contains_key(&warm_type));
+        assert!(cp.cached_library_type_name(api, warm_type).is_some());
     }
 
     #[test]
