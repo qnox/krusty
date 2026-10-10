@@ -121,6 +121,26 @@ private fun <T> checkTypeEquality(
 pub enum TestTarget {
     Jvm,
     Native,
+    WasmJs,
+    WasmWasi,
+}
+
+impl TestTarget {
+    /// Whether the target compiles a `value class` without the JVM's `@JvmInline` marker. Every
+    /// non-JVM target does: the annotation exists for the JVM's boxed representation alone.
+    fn full_value_classes(self) -> bool {
+        self != Self::Jvm
+    }
+
+    /// The production source-semantics target represented by this corpus lane.
+    pub fn compilation_target(self) -> crate::compilation_target::CompilationTarget {
+        match self {
+            Self::Jvm => crate::compilation_target::CompilationTarget::Jvm,
+            Self::Native => crate::compilation_target::CompilationTarget::Native,
+            Self::WasmJs => crate::compilation_target::CompilationTarget::WasmJs,
+            Self::WasmWasi => crate::compilation_target::CompilationTarget::WasmWasi,
+        }
+    }
 }
 
 /// The `helpers` package source Kotlin's codegen runner injects for `// WITH_COROUTINES`.
@@ -177,7 +197,7 @@ class ResultContinuation : Continuation<Any?> {
 ///
 /// `OPTIONAL_JVM_INLINE_ANNOTATION` is the placeholder the corpus writes where a `value class`
 /// needs `@JvmInline`. The JVM runner inserts it only while `FullValueClasses` is disabled; Native
-/// always expands it to nothing because a Kotlin/Native `value class` needs no JVM annotation.
+/// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
 pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
     let full_value_classes =
         crate::features::LangFeatures::from_source(src).has("FullValueClasses");
@@ -185,6 +205,8 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
         TestTarget::Jvm if !full_value_classes => ("@JvmInline", "\"JVM_IR\""),
         TestTarget::Jvm => ("", "\"JVM_IR\""),
         TestTarget::Native => ("", "\"NATIVE\""),
+        TestTarget::WasmJs => ("", "\"WASM_JS\""),
+        TestTarget::WasmWasi => ("", "\"WASM_WASI\""),
     };
     let mut prepared = src
         .replace("OPTIONAL_JVM_INLINE_ANNOTATION", value_class_annotation)

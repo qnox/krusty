@@ -1024,40 +1024,6 @@ fn reference_profile_reports_cache_and_server_counts() {
     );
 }
 
-fn conformance_shard() -> Option<(usize, usize)> {
-    match (
-        env("KRUSTY_CONFORMANCE_SHARD_INDEX"),
-        env("KRUSTY_CONFORMANCE_SHARD_COUNT"),
-    ) {
-        (None, None) => None,
-        (Some(index), Some(count)) => {
-            let index = index
-                .parse::<usize>()
-                .expect("KRUSTY_CONFORMANCE_SHARD_INDEX must be an integer");
-            let count = count
-                .parse::<usize>()
-                .expect("KRUSTY_CONFORMANCE_SHARD_COUNT must be an integer");
-            assert!(count > 0, "KRUSTY_CONFORMANCE_SHARD_COUNT must be positive");
-            assert!(
-                index < count,
-                "KRUSTY_CONFORMANCE_SHARD_INDEX {index} is outside 0..{count}"
-            );
-            Some((index, count))
-        }
-        _ => panic!(
-            "KRUSTY_CONFORMANCE_SHARD_INDEX and KRUSTY_CONFORMANCE_SHARD_COUNT must be set together"
-        ),
-    }
-}
-
-fn retain_conformance_shard<T>(items: Vec<T>, index: usize, count: usize) -> Vec<T> {
-    items
-        .into_iter()
-        .enumerate()
-        .filter_map(|(position, item)| (position % count == index).then_some(item))
-        .collect()
-}
-
 #[test]
 fn count_reports_have_stable_machine_format() {
     use super::common::conformance_report::count_report;
@@ -1068,21 +1034,6 @@ fn count_reports_have_stable_machine_format() {
     assert_eq!(count_report(3145, 3146), "99.9 3145 3146\n");
     assert_eq!(count_report(7, 7), "100.0 7 7\n");
     assert_eq!(count_report(0, 0), "0.0 0 0\n");
-}
-
-#[test]
-fn conformance_shards_are_stable_disjoint_and_complete() {
-    let input = (0..17).collect::<Vec<_>>();
-    let shards = (0..4)
-        .map(|index| retain_conformance_shard(input.clone(), index, 4))
-        .collect::<Vec<_>>();
-    assert_eq!(shards[0], [0, 4, 8, 12, 16]);
-    assert_eq!(shards[1], [1, 5, 9, 13]);
-    assert_eq!(shards[2], [2, 6, 10, 14]);
-    assert_eq!(shards[3], [3, 7, 11, 15]);
-    let mut union = shards.into_iter().flatten().collect::<Vec<_>>();
-    union.sort_unstable();
-    assert_eq!(union, input);
 }
 
 /// Base frame of a folded stack: the sampled thread's name, or its id when it has none.
@@ -1525,8 +1476,7 @@ fn kotlin_codegen_box_conformance() {
         .iter()
         .map(|file| box_ratchet::corpus_key(&box_dir, file))
         .collect();
-    let full_run =
-        env("KRUSTY_BOX_ONLY").is_none() && limit == usize::MAX && conformance_shard().is_none();
+    let full_run = env("KRUSTY_BOX_ONLY").is_none() && limit == usize::MAX;
     // KRUSTY_BOX_ONLY: run only files whose path contains this substring — a focused single-test debug
     // loop (pair with a `trace`-feature build + KRUSTY_TRACE=<category>). Empty/unset runs the corpus.
     if let Some(only) = env("KRUSTY_BOX_ONLY") {
@@ -1536,10 +1486,6 @@ fn kotlin_codegen_box_conformance() {
     // (a stride) rather than truncating to the first N — the first N are all `annotations/…`, which
     // would hide coverage in every other package. A full (unset) run keeps the whole corpus.
     files = krusty::conformance::evenly_sample(files, limit);
-    if let Some((index, count)) = conformance_shard() {
-        files = retain_conformance_shard(files, index, count);
-        eprintln!("box setup: conformance shard {}/{count}", index + 1);
-    }
     eprintln!("box setup: scheduled {} cases", files.len());
 
     let work = std::env::temp_dir().join(format!("krusty_box_{}", std::process::id()));
@@ -1644,7 +1590,7 @@ fn kotlin_codegen_box_conformance() {
     let no_run = env("KRUSTY_NO_RUN").is_some();
     let byte_diff_on = env("KRUSTY_BYTE_DIFF").is_some();
     // Byte-equality scoring reference-compiles every applicable case, so it is active only when a
-    // score is actually wanted: a JVM byte report (`KRUSTY_JVM_BYTE_REPORT`, set per shard by
+    // score is actually wanted: a JVM byte report (`KRUSTY_JVM_BYTE_REPORT`, set by
     // `conformance-run.sh`), an opt-in byte diff, or a focused `KRUSTY_BOX_ONLY` inspection. A plain
     // full-suite box run, or one that asks only for the case report, stays a correctness-only gate
     // and never pays the reference-compile cost. `KRUSTY_NO_RUN` compiles without running `box()`,
@@ -1957,6 +1903,11 @@ fn kotlin_codegen_box_conformance() {
         );
     }
 
+    // Publish live kotlinc recordings before this process returns so GHA can cache the complete
+    // archive and a cache-write failure is reported here, rather than silently swallowed by the
+    // process-exit safety hook.
+    common::byte_dump::flush_recorded_class_dumps();
+
     let _ = fs::remove_dir_all(&work);
 
     let mut compiled = 0usize;
@@ -2204,7 +2155,7 @@ fn check_jvm_outcomes(
     if bless {
         assert!(
             full_run,
-            "KRUSTY_BLESS_BOX_EXPECTATIONS needs a full run: unset KRUSTY_BOX_ONLY, KRUSTY_BOX_LIMIT and the shard variables"
+            "KRUSTY_BLESS_BOX_EXPECTATIONS needs a full run: unset KRUSTY_BOX_ONLY and KRUSTY_BOX_LIMIT"
         );
         assert!(
             env("CI").is_none(),

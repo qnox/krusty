@@ -173,6 +173,13 @@ impl Realizer<'_> {
         self.ir.add_expr(expression)
     }
 
+    /// A value node whose checked type this realizer decides, recorded as lowering records one.
+    fn add_checked(&mut self, expression: IrExpr, ty: Ty) -> ExprId {
+        let id = self.add(expression);
+        self.ir.logical_types.insert(id, ty);
+        id
+    }
+
     /// A second use of a leaf operand (a constant or a value read) as its own node.
     fn reread(&mut self, expression: ExprId) -> ExprId {
         let copy = self.ir.expr(expression).clone();

@@ -2251,6 +2251,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
         selected: Option<&[Ty]>,
         defaulted: Option<&[u32]>,
+        placement: super::frame_objects::Placement,
     ) -> Result<Option<Value>, Unsupported> {
         let name = internal.render();
         if let Some(omitted) = defaulted {
@@ -2356,7 +2357,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        let object = self.allocate(descriptor, size)?;
+        let object = match placement {
+            super::frame_objects::Placement::Heap => self.allocate(descriptor, size)?,
+            super::frame_objects::Placement::Frame => self.frame_object(descriptor, size),
+        };
         arguments.insert(0, object);
         let func_ref = self.func_ref(constructor);
         self.emit_call(func_ref, &arguments)?;

@@ -4396,8 +4396,19 @@ deliberately much less than a general linker; each limit below is a decision, no
   multiple of the architecture's maximum page size (`Arch::max_page_size` in
   `src/native/target_contract.rs`: 4 KiB on x86_64 and riscv64, 64 KiB on AArch64) in the file and
   in memory, so file offset and address stay congruent and no kernel page size puts both segments
-  in one page. Both segments are aligned to that size. No PIC, GOT, PLT, dynamic section or section
-  headers. The whole image must fit the 4 GiB the small code models address.
+  in one page. Both segments are aligned to that size. No PIC or section headers. The whole image
+  must fit the 4 GiB the small code models address.
+- **Imports from shared libraries** (`src/native/linker/{dynamic,libraries}.rs`; design in
+  `docs/NATIVE.md`, "Importing from shared libraries"). A program that references functions it
+  does not define, which an `ImportLibrary` exports, is linked dynamically. The output adds
+  `PT_PHDR`, `PT_INTERP`, `PT_DYNAMIC` and `PT_GNU_STACK`, and gets one bind-now offset-table slot
+  plus one stub per import. Each import is bound at its library's default symbol version. It stays
+  non-PIE at the fixed base, so references to an import resolve at link time to its stub. Only
+  libraries something is imported from are `DT_NEEDED`; with no imports the image is the static
+  one, byte for byte. Variables in shared libraries (copy relocations) are refused. Tests:
+  `dynamic.rs` links a call for every target from in-memory `ImportLibrary`s and checks the
+  headers, dynamic entries, versions, relocation and stub. `mod.rs` links a program against the
+  host's own zlib and C library and runs it.
 - **Read-only data shares the executable segment.** A separate read-only segment is cheap to add
   when the runtime holds something worth protecting; until then `.rodata` is readable and
   executable.
@@ -5287,6 +5298,25 @@ caller's own access. A nested copy marks the outer frame's line on a `nop` befor
 the caller continues. A private inline function with no default, expanded only from
 non-inline callers, still reads the field directly. Test:
 `tests/private_inline_property_access_e2e.rs`.
+
+## Wasm backend: wasm-js and wasm-wasi  🚧
+
+- `src/wasm/` lowers checked common IR to one WasmGC module per program for both kotlinc Wasm
+  targets; the targets share every instruction and differ only in the host write function and the
+  Node.js loader. Unsupported constructs decline the whole compilation by name.
+- First slice: top-level functions and properties over primitives and `String` (locals, `when`,
+  loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
+  same-file calls).
+- Box lanes `wasm-js` and `wasm-wasi` share Native's driver (`tests/box_lane.rs`) and ratchet; CI
+  runs both in a `wasm` row. They analyze against the JVM library surface until a Wasm klib
+  platform exists, so they gate the emitter and publish no conformance badge yet.
+- The backend reads each value's checked type (`IrFile::checked_type`) and the frontend-selected
+  entry (`IrFile::entry_point`, `IrFile::box_entry`); a missing or duplicate entry is rejected in
+  `Backend::check_module` before anything is emitted.
+- Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
+- Next: classes as struct subtypes with vtables, exceptions on wasm EH, library calls keyed by the
+  selected declaration, multi-file and `// MODULE:` programs, then a klib-backed library provider
+  shared with Native.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

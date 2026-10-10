@@ -1,0 +1,3 @@
+A library hides the application-only settings.
+--- module.yaml
+product: jvm/lib

@@ -69,6 +69,7 @@ pub mod trace;
 pub mod type_engine;
 pub mod types;
 pub(crate) mod value_classes;
+pub mod wasm;
 mod wide_stack;
 
 #[cfg(test)]

@@ -1,0 +1,6 @@
+A main class that YAML would read as `true`, printed as written.
+--- module.yaml
+product: jvm/app
+settings:
+  jvm:
+    mainClass: "true"

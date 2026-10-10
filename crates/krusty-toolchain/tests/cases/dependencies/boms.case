@@ -1,0 +1,121 @@
+A BOM gives versions to dependencies declared without one and constrains the versions of the
+others; a POM's parent, properties and imported BOMs make its effective POM.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - bom: org.example:platform:1.0
+  - org.example:managed
+  - org.example:pinned:1.0
+  - org.example:child:1.0
+--- m2/org/example/platform/1.0/platform-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>platform</artifactId>
+  <version>1.0</version><packaging>pom</packaging>
+  <dependencyManagement>
+    <dependencies>
+        <dependency><groupId>org.example</groupId><artifactId>managed</artifactId><version>2.0</version></dependency>
+        <dependency><groupId>org.example</groupId><artifactId>pinned</artifactId><version>1.5</version></dependency>
+        <dependency><groupId>org.example</groupId><artifactId>imported-bom</artifactId><version>1.0</version><scope>import</scope><type>pom</type></dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>
+--- m2/org/example/imported-bom/1.0/imported-bom-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>imported-bom</artifactId>
+  <version>1.0</version><packaging>pom</packaging>
+  <dependencyManagement>
+    <dependencies>
+        <dependency><groupId>org.example</groupId><artifactId>from-import</artifactId><version>3.0</version></dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>
+--- m2/org/example/managed/2.0/managed-2.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>managed</artifactId>
+  <version>2.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>from-import</artifactId></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/from-import/3.0/from-import-3.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>from-import</artifactId>
+  <version>3.0</version>
+</project>
+--- m2/org/example/pinned/1.0/pinned-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>pinned</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/pinned/1.5/pinned-1.5.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>pinned</artifactId>
+  <version>1.5</version>
+</project>
+--- m2/org/example/parent/1.0/parent-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0</version><packaging>pom</packaging>
+  <properties><leaf.version>2.0</leaf.version></properties>
+  <dependencyManagement>
+    <dependencies>
+        <dependency><groupId>org.example</groupId><artifactId>leaf</artifactId><version>${leaf.version}</version></dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>
+--- m2/org/example/child/1.0/child-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>org.example</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+  <artifactId>child</artifactId>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>leaf</artifactId></dependency>
+      <dependency><groupId>${project.groupId}</groupId><artifactId>sibling</artifactId><version>${project.version}</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/leaf/2.0/leaf-2.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>leaf</artifactId>
+  <version>2.0</version>
+</project>
+--- m2/org/example/sibling/1.0/sibling-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>sibling</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/child/1.0/child-1.0.jar
+--- m2/org/example/from-import/3.0/from-import-3.0.jar
+--- m2/org/example/leaf/2.0/leaf-2.0.jar
+--- m2/org/example/managed/2.0/managed-2.0.jar
+--- m2/org/example/pinned/1.5/pinned-1.5.jar
+--- m2/org/example/sibling/1.0/sibling-1.0.jar

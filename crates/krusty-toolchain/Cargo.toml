@@ -1,0 +1,25 @@
+[package]
+name = "krusty-toolchain"
+version = "0.0.1"
+edition = "2021"
+description = "A Kotlin Toolchain (`module.yaml`/`project.yaml`) build driver that compiles with krusty"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+# A YAML 1.2 event parser that passes the YAML test suite. The project model is built from its
+# events with explicit size and depth bounds (`yaml.rs`), so no hand-written YAML grammar decides
+# what a configuration file means.
+saphyr-parser = "0.1.0"
+# A conforming XML parser for Maven POMs, and JSON for Gradle module metadata; both are already
+# workspace dependencies.
+roxmltree = "0.21"
+serde_json = "1"
+
+[[bin]]
+name = "krusty-toolchain"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW`, so a build file is opened without following a symbolic link (`inventory.rs`).
+libc = "0.2"
