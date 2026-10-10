@@ -62,10 +62,9 @@ pub(super) fn classifier_record(
         .properties
         .iter()
         .map(|property| {
-            (
-                property.declaration.name.clone(),
-                published_property(identities, property, member, enclosing),
-            )
+            let mut published = published_property(identities, property, member, enclosing);
+            builtin_realizations::realize_member_property(identity, &mut published);
+            (property.declaration.name.clone(), published)
         })
         .collect::<Vec<_>>();
     let names = functions

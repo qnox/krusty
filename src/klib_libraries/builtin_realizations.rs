@@ -40,6 +40,21 @@ pub(super) fn realize_member(owner: TypeName, function: &mut FunctionInfo) {
     function.callable.semantic_role = role;
 }
 
+/// Attach the role the member property `property` of `owner` has, if it is a builtin one.
+pub(super) fn realize_member_property(owner: TypeName, property: &mut PropertyInfo) {
+    let params = property.getter.params.clone();
+    property.getter.semantic_role = semantic_call_role(BuiltinMemberDeclaration {
+        owner,
+        name: &property.name,
+        params: &params,
+        ret: property.ty,
+        is_property: true,
+        is_operator: false,
+        is_infix: false,
+        annotations: &[],
+    });
+}
+
 /// Attach the operation the package function `function` denotes, if it is a builtin one.
 pub(super) fn realize_package_function(package: TypeName, function: &mut FunctionInfo) {
     let name = function.callable.name.clone();

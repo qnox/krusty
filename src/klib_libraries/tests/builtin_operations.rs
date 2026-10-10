@@ -5,7 +5,7 @@ use super::super::lookup::declared_symbols;
 use super::analysis::native_stdlib;
 use crate::libraries::{CompilerIntrinsic, MemberRealization, PrimitiveBinaryIntrinsic};
 use crate::symbol_source::SymbolNamespace;
-use crate::types::{type_name, ArrayFactoryKind, Ty};
+use crate::types::{type_name, ArrayFactoryKind, SemanticCallRole, Ty};
 
 #[test]
 fn an_int_plus_member_is_the_primitive_addition() {
@@ -55,4 +55,23 @@ fn an_int_array_of_is_the_primitive_array_factory() {
             ArrayFactoryKind::PrimitiveVararg(Ty::Int)
         ))]
     );
+}
+
+#[test]
+fn a_kcallable_name_property_is_the_callable_reference_name() {
+    let Some(libraries) = native_stdlib() else {
+        return;
+    };
+    let record = classifier_record(
+        &libraries.inventory,
+        &libraries.identities,
+        type_name("kotlin/reflect/KCallable"),
+    )
+    .expect("the stdlib declares kotlin.reflect.KCallable");
+    let roles: Vec<_> = record.declared_callables["name"]
+        .properties()
+        .iter()
+        .map(|property| property.getter.semantic_role)
+        .collect();
+    assert_eq!(roles, [Some(SemanticCallRole::KotlinCallableReferenceName)]);
 }
