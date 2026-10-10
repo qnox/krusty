@@ -10030,6 +10030,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `entrySet()`/`keySet()` realize the renamed builtin properties `entries`/`keys`, is still
   rejected. Tests: `tests/java_abstract_override_e2e.rs` (runs, a byte-identical class to kotlinc's
   for the plain override, JDK skeleton collections, and the shapes that stay rejected).
+- **A sealed class is abstract, so it may leave abstract members unimplemented.** kotlinc treats
+  `sealed` as abstract: the sealed class may declare abstract members, and a subclass discharges
+  both those and any abstract members inherited from a superclass compiled in another unit.
+  krusty required the class modality to be exactly `abstract`, so
+  a sealed class that extended such a superclass and left a member open was rejected as "not
+  abstract and does not implement all abstract members". A sealed class now shares the abstract
+  exemption; a concrete or `open` class still has to implement every abstract member itself.
+  Tests: `tests/classpath_abstract_subclass_e2e.rs` (repository-owned classpath superclass,
+  source-declared members, concrete/open negatives, and kotlinc differentials).
 - **A caller's type parameter in an extension receiver is a fixed type, not a wildcard.** Only the
   callee's own formals in its declared receiver bind at the call. In
   `fun <T> lowest(xs: Iterable<T>) where T : Comparable<T> = xs.minOrNull()`, the caller's `T` is a
