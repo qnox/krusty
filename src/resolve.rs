@@ -62429,7 +62429,38 @@ impl<'a> Checker<'a> {
                 );
                 NestedConstructorRefSelection::Selected(Ty::Error)
             }
-            InheritedNestedClassifier::NotFound => NestedConstructorRefSelection::Missing,
+            InheritedNestedClassifier::NotFound => {
+                // Kotlin also admits an alias visible at the reference site when its selected
+                // expansion is an inner classifier of the already-bound LHS (`C::Alias` where
+                // `typealias Alias = C.Inner`). Select that declaration through the ordinary
+                // classifier tower, then intersect its resolved target with `owner`; never retry a
+                // package/provider spelling or reinterpret the LHS after it has bound.
+                let (selection, _, alias) = self.select_classifier_binding(scope, name);
+                let (InheritedNestedClassifier::Found(target), Some(alias)) = (selection, alias)
+                else {
+                    return NestedConstructorRefSelection::Missing;
+                };
+                let Some(alias_outer) = self
+                    .fed_source()
+                    .classifier(target)
+                    .and_then(|classifier| classifier.outer_instance)
+                else {
+                    return NestedConstructorRefSelection::Missing;
+                };
+                if !self.receiver_is_assignable(Ty::obj_name(owner), Ty::obj_name(alias_outer)) {
+                    return NestedConstructorRefSelection::Missing;
+                }
+                let target = self.apply_inner_classifier_outer(alias.expansion, applied_owner);
+                self.constructor_reference(
+                    scope,
+                    expression,
+                    expected,
+                    target,
+                    ConstructorReferenceOuter::Unbound,
+                )
+                .map(NestedConstructorRefSelection::Selected)
+                .unwrap_or(NestedConstructorRefSelection::Inapplicable)
+            }
         }
     }
 

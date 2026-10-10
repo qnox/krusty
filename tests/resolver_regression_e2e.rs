@@ -1660,6 +1660,43 @@ fun box(): String {
 }
 
 #[test]
+fn top_level_alias_to_an_inner_classifier_binds_the_implicit_outer_receiver() {
+    let src = r#"
+class Container {
+    inner class Item(val value: String)
+}
+typealias ItemAlias = Container.Item
+
+fun box(): String {
+    val container = Container()
+    val construct = Container::ItemAlias
+    return construct(container, "OK").value
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverTopLevelInnerAliasImplicitReceiver");
+}
+
+#[test]
+fn generic_top_level_alias_to_an_inner_classifier_maps_the_outer_argument() {
+    let src = r#"
+class Container<T>(val value: T) {
+    inner class Item {
+        fun result(): T = value
+    }
+}
+typealias ItemAlias<T> = Container<T>.Item
+
+fun box(): String {
+    val container = Container("OK")
+    if (container.ItemAlias<String>().result() != "OK") return "direct"
+    val construct = Container<String>::ItemAlias
+    return construct(container).result()
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverGenericTopLevelInnerAlias");
+}
+
+#[test]
 fn enabled_when_guard_uses_the_type_test_scope_and_short_circuits() {
     let src = r#"
 // LANGUAGE: +WhenGuards
