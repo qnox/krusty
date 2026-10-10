@@ -32,7 +32,9 @@ mod properties;
 mod return_labels;
 mod superclass_references;
 mod value_parameters;
-use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
+use declaration_modifiers::{
+    function_flags, has_visibility_modifier, modality_from_modifiers, modality_of, visibility_of,
+};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
 use lexical_type_parameters::LexicalTypeParameters;
@@ -115,30 +117,6 @@ fn parse_with_features_and_script(
         }
     }
     p.file
-}
-
-/// Map the parsed class modifiers to a [`Modality`]. `sealed` wins (it implies abstract+open), then
-/// `abstract`, then `open`, else `final`.
-fn modality_of(is_open: bool, is_abstract: bool, is_sealed: bool) -> crate::ast::Modality {
-    use crate::ast::Modality;
-    if is_sealed {
-        Modality::Sealed
-    } else if is_abstract {
-        Modality::Abstract
-    } else if is_open {
-        Modality::Open
-    } else {
-        Modality::Final
-    }
-}
-
-fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
-    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
-    modality_of(
-        sealed || modifiers.iter().any(|modifier| modifier == "open"),
-        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
-        sealed,
-    )
 }
 
 /// The degraded result of a tripped declaration-nesting guard: an empty final class named
