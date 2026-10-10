@@ -16,7 +16,7 @@ use crate::types::{wk, Ty, TypeName};
 use std::cmp::Ordering;
 
 /// Indices into a class's metadata function and property lists of members the compiler generates.
-pub(super) struct MemberRanges {
+pub(crate) struct MemberRanges {
     /// A data or value class's generated functions, following the declared ones.
     pub synthesized: Range<usize>,
     /// Forwarders to interface delegates, following the plugin-generated functions.
@@ -26,7 +26,7 @@ pub(super) struct MemberRanges {
 }
 
 /// A class's forwarders to interface delegates that its metadata records, in JVM method order.
-pub(super) fn delegation_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
+pub(crate) fn delegation_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
     c.methods
         .iter()
         .copied()
@@ -36,8 +36,8 @@ pub(super) fn delegation_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
 
 /// Sort delegation functions as kotlinc's `FirCallableDeclarationComparator` orders them: by name,
 /// extension receiver, return type, then value parameters (count, then types in order).
-pub(super) fn sort_delegation_functions(functions: &mut [FnMeta]) {
-    functions.sort_by(|left, right| {
+pub(crate) fn sort_delegation_functions<T>(functions: &mut [(FnMeta, T)]) {
+    functions.sort_by(|(left, _), (right, _)| {
         left.name
             .cmp(&right.name)
             .then_with(|| receiver_cmp(left.receiver, right.receiver))
@@ -99,10 +99,11 @@ fn type_cmp(left: Ty, right: Ty) -> Ordering {
 }
 
 /// Put the properties forwarding to an interface delegate in kotlinc's metadata order (by name,
-/// extension receiver, then type) within the positions they occupy (`source_orders` is permuted alongside), and return those
-/// positions.
-pub(super) fn sort_delegation_properties(
+/// extension receiver, then type) within the positions they occupy (`origins` and `source_orders`
+/// are permuted alongside), and return those positions.
+pub(crate) fn sort_delegation_properties(
     properties: &mut Vec<PropMeta>,
+    origins: &mut [super::class_declarations::PropertyOrigin],
     source_orders: &mut [u32],
 ) -> Vec<usize> {
     let positions = (0..properties.len())
@@ -119,10 +120,16 @@ pub(super) fn sort_delegation_properties(
     let mut taken = std::mem::take(properties)
         .into_iter()
         .zip(source_orders.iter().copied())
+        .zip(origins.iter().copied())
         .map(Some)
         .collect::<Vec<_>>();
     let mut delegation = sorted.into_iter();
-    for (index, order_slot) in source_orders.iter_mut().enumerate().take(taken.len()) {
+    for (index, (order_slot, origin_slot)) in source_orders
+        .iter_mut()
+        .zip(origins.iter_mut())
+        .enumerate()
+        .take(taken.len())
+    {
         let source = if positions.contains(&index) {
             delegation
                 .next()
@@ -130,9 +137,10 @@ pub(super) fn sort_delegation_properties(
         } else {
             index
         };
-        let (property, order) = taken[source].take().expect("each property moves once");
+        let ((property, order), origin) = taken[source].take().expect("each property moves once");
         properties.push(property);
         *order_slot = order;
+        *origin_slot = origin;
     }
     positions
 }
@@ -140,7 +148,7 @@ pub(super) fn sort_delegation_properties(
 /// `declared_fids` are the declared functions, which open the metadata function list; the
 /// `synthesized` indices of that list follow them (a data or value class's generated members), the
 /// plugin-generated functions follow those, and the delegation members close the list.
-pub(super) fn member_order(
+pub(crate) fn member_order(
     ir: &IrFile,
     c: &IrClass,
     prop_source_orders: &[u32],

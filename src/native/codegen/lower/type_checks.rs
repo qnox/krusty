@@ -423,7 +423,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return self.language_instance_check(op, arg, settled);
                 }
                 let Some(descriptor) = self.file.type_descriptor(type_operand)? else {
-                    return Err(format!(
+                    return Err(declined!(
                         "an `is` check against `{}`",
                         type_name_of(type_operand)
                     ));
@@ -554,7 +554,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             IrTypeOp::SafeCast => {
                 let Some(descriptor) = self.checked_cast_target(type_operand)? else {
-                    return Err(format!("an `as?` to `{}`", type_name_of(type_operand)));
+                    return Err(declined!("an `as?` to `{}`", type_name_of(type_operand)));
                 };
                 let Some(object) = self.receiver(arg)? else {
                     return Ok(None);
@@ -746,7 +746,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if super::classifier_shapes::is_pair(internal) {
             return match args {
                 [first, second] => self.pair_of(*first, *second),
-                _ => Err(format!("this constructor of `{name}`")),
+                _ => Err(declined!("this constructor of `{name}`")),
             };
         }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
@@ -773,7 +773,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         &[capacity],
                     )
                 }
-                _ => Err(format!("this constructor of `{name}`")),
+                _ => Err(declined!("this constructor of `{name}`")),
             };
         }
         // `HashMap()` / `HashSet()` and their linked spellings, the runtime's growable tables.
@@ -792,7 +792,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return match args {
                 [] => self.runtime_call(&format!("kt_{kind}_new"), &[], any(), &[]),
-                _ => Err(format!("this constructor of `{name}`")),
+                _ => Err(declined!("this constructor of `{name}`")),
             };
         }
         // `StringBuilder()`, the runtime's growable text buffer. Declared in no file either, for
@@ -823,10 +823,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     }
                     self.runtime_call("kt_string_builder_with_text", &[any()], any(), &[text])
                 }
-                _ => Err(format!("this constructor of `{name}`")),
+                _ => Err(declined!("this constructor of `{name}`")),
             };
         }
-        Err(format!("construction of `{name}`"))
+        Err(declined!("construction of `{name}`"))
     }
 
     /// The operands a `Throwable` constructor was given, as its two fields take them.
@@ -855,7 +855,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let Some(cause) =
                     self.coerce(*argument, Ty::nullable(Ty::obj("kotlin/Throwable")))?
                 else {
-                    return Err(format!("a `Unit` cause for `{name}`"));
+                    return Err(declined!("a `Unit` cause for `{name}`"));
                 };
                 if self.terminated {
                     return Ok(None);
@@ -871,7 +871,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 let Some(cause) = self.coerce(*cause, Ty::nullable(Ty::obj("kotlin/Throwable")))?
                 else {
-                    return Err(format!("a `Unit` cause for `{name}`"));
+                    return Err(declined!("a `Unit` cause for `{name}`"));
                 };
                 if self.terminated {
                     return Ok(None);
@@ -905,10 +905,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             ([argument], Some([only])) => {
                 match super::super::super::intrinsics::throwable_message(only) {
                     Some(kind) => Some((*argument, kind)),
-                    None => return Err(format!("this constructor of `{name}`")),
+                    None => return Err(declined!("this constructor of `{name}`")),
                 }
             }
-            _ => return Err(format!("this constructor of `{name}`")),
+            _ => return Err(declined!("this constructor of `{name}`")),
         };
         let Some((argument, kind)) = message else {
             // Kotlin's `null` message, which `toString` reports as the type name alone.
@@ -925,7 +925,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 }
                 let Some(value) = value else {
-                    return Err(format!("a `Unit` message for `{name}`"));
+                    return Err(declined!("a `Unit` message for `{name}`"));
                 };
                 self.runtime_call("kt_to_string", &[any()], any(), &[value])?
             }
@@ -935,7 +935,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         match value {
             Some(value) => Ok(Some(value)),
-            None => Err(format!("a `Unit` message for `{name}`")),
+            None => Err(declined!("a `Unit` message for `{name}`")),
         }
     }
 

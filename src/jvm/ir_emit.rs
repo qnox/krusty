@@ -73,7 +73,6 @@ mod discarding;
 mod diverging_value_type;
 pub(super) mod enclosure;
 mod enum_entry_subclass;
-mod enum_metadata;
 mod enum_reflection_call;
 mod explicit_backing_fields;
 mod field_read;
@@ -115,7 +114,6 @@ mod local_variable_representation;
 mod loop_emission;
 mod member_dispatch;
 mod member_schedule;
-mod metadata_member_order;
 mod metadata_policy;
 mod method_access;
 mod method_defaults;
@@ -191,9 +189,6 @@ use singleton_instance::{add_singleton_instance_field, emit_singleton_instance_c
 use synth_debug_tables::attach_synth_debug_tables;
 use type_parameter_signatures::{jvm_class_signature, jvm_type_params};
 
-use super::metadata_flags::{
-    class_metadata_flags, declaration_visibility_bits, declared_value_parameters, function_flags,
-};
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};
 pub(super) use declaration_types::class_ctor_jvm_tys;
@@ -801,19 +796,6 @@ fn ctor_field_descs(c: &IrClass) -> String {
         .collect()
 }
 
-/// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
-/// kotlinc gives it `equals`/`hashCode`/`toString` ONLY — there is nothing to copy from and no
-/// primary-constructor property to destructure. Both the constant-pool seeder and the `@Metadata`
-/// builder ask this, so a data object cannot end up describing a `copy` its class file does not have.
-fn synthesizes_data_class_members(c: &crate::ir::IrClass) -> bool {
-    c.is_data && !c.is_singleton()
-}
-
-struct DataClassMemberRealization {
-    jvm_name: Option<String>,
-    descriptor: Option<String>,
-}
-
 /// Physical JVM realization of one exact common data-class declaration. The role was bound to its
 /// [`crate::ir::FunId`] before backend renaming, so this reads the final function directly rather
 /// than recovering it from a source/physical name pair.
@@ -824,34 +806,22 @@ fn data_class_member_realization(
     source_name: &str,
     declared_params: &[Ty],
     declared_ret: Ty,
-) -> Option<DataClassMemberRealization> {
+) -> Option<crate::metadata::class_builder::JvmFunctionSignature> {
     let function = &ir.functions[ir.data_class_member(owner, role)? as usize];
     let physical = ir_method_desc(&function.params, &function.ret);
     let declared = method_descriptor(declared_params, declared_ret);
     let has_boxed_primitive = std::iter::once(declared_ret)
         .chain(declared_params.iter().copied())
         .any(|ty| ty.is_nullable() && ty.non_null().is_jvm_scalar());
-    Some(DataClassMemberRealization {
-        jvm_name: (function.name != source_name).then(|| function.name.clone()),
-        descriptor: (has_boxed_primitive || physical != declared).then_some(physical),
+    Some(crate::metadata::class_builder::JvmFunctionSignature {
+        name: (function.name != source_name).then(|| function.name.clone()),
+        desc: (has_boxed_primitive || physical != declared).then_some(physical),
     })
 }
 
 /// The synthesized `copy` declaration's exact common-IR identity, if this class owns one.
 fn data_copy_fid(ir: &IrFile, c: &crate::ir::IrClass) -> Option<u32> {
     ir.data_class_member(c.fq_name_id(), IrDataClassMemberRole::Copy)
-}
-
-/// `Function.flags` for the synthesized `copy`: [`COPY_FN_FLAGS`] (public final SYNTHESIZED member)
-/// with the visibility bits swapped to the copy's actual visibility — the primary constructor's
-/// under `DataClassCopyRespectsConstructorVisibility` (kotlinc 2.4.10: private ctor → 0xC2).
-fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
-    use crate::metadata::class_builder::COPY_FN_FLAGS;
-    let Some(fid) = data_copy_fid(ir, c) else {
-        return COPY_FN_FLAGS;
-    };
-    let visibility = declaration_visibility_bits(ir.method_visibility(fid));
-    (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
 }
 
 /// Attach kotlinc-style `LineNumberTable` + `LocalVariableTable` debug tables to a plain property
@@ -1249,16 +1219,6 @@ fn emit_jvm_interface_companion_surface(
     }
 }
 
-fn sorted_sealed_subclass_ids(c: &IrClass) -> Vec<TypeName> {
-    let mut subclasses: Vec<TypeName> = c.sealed_subclasses.iter_ids().collect();
-    subclasses.sort_by(|a, b| {
-        a.nested_segment_ref()
-            .cmp(b.nested_segment_ref())
-            .then_with(|| a.path_cmp(*b))
-    });
-    subclasses
-}
-
 fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit_permitted: bool) {
     use crate::jvm::classfile::InnerClassSpec;
     // The IR records subtype relationships for EVERY class; only a SEALED classifier turns them
@@ -1270,7 +1230,7 @@ fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit
         return;
     }
     let self_identity = c.fq_name_id();
-    let subs = sorted_sealed_subclass_ids(c);
+    let subs = crate::metadata::class_declarations::sorted_sealed_subclasses(c);
     if subs.is_empty() {
         return;
     }
@@ -1337,7 +1297,7 @@ fn new_classifier_writer(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
-    cw.set_nullability_annotations(!super::local_classifiers::is_local(ir, c));
+    cw.set_nullability_annotations(!crate::metadata::local_classifiers::is_local(ir, c));
     cw
 }
 
@@ -7697,28 +7657,6 @@ mod invariant_tests {
     }
 
     #[test]
-    fn member_metadata_flags_keep_inline_operator_and_infix_capabilities() {
-        let mut ir = IrFile::default();
-        let function = ir.add_fun(IrFunction {
-            name: "convention".into(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-            body: None,
-            is_static: false,
-            dispatch_receiver: Some(crate::types::type_name("demo/Owner")),
-            param_checks: Vec::new(),
-        });
-        ir.inline_fns.insert(function);
-        ir.operator_fns.insert(function);
-        ir.infix_fns.insert(function);
-
-        let flags = function_flags(&ir, function, &ir.functions[function as usize]);
-        assert_ne!(flags & (1 << 8), 0);
-        assert_ne!(flags & (1 << 9), 0);
-        assert_ne!(flags & (1 << 10), 0);
-    }
-
-    #[test]
     fn anonymous_enclosure_uses_the_bound_function_id_not_name_shape() {
         let mut ir = IrFile::default();
         let owner = crate::types::type_name("demo/Owner");
@@ -7775,6 +7713,7 @@ mod invariant_tests {
         // Conversely, looking nested is not sufficient: backend-generated implementation classes
         // are not declarations in Kotlin metadata.
         ir.add_class(crate::plugins::synthetic_class("demo/Outer$Impl3"));
+        crate::metadata::class_declarations::record_all(&mut ir);
 
         let metadata = build_class_metadata_with_facts(
             &ir,
