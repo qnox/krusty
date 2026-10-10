@@ -305,6 +305,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     // a member may be waiting on a module property and a module property on a member.
     let mut deferred_properties: Vec<DeferredProperty> = Vec::new();
     let empty_local_context = PassOneLocalClassContext::default();
+    // Members a compiler plugin contributes to a class's companion. Installed after the walk: a
+    // hand-written companion is a later declaration than its owner, so its own signature does not
+    // exist yet while the owner is collected.
+    let mut contributed_companions: Vec<ContributedCompanion> = Vec::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
@@ -3532,88 +3536,15 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             generic_methods,
                         },
                     );
-                    if let Some(companion_internal) =
+                    if let Some(internal) =
                         companion_internal_ref.filter(|_| !contributed_companion_methods.is_empty())
                     {
-                        if let Some(companion) = table.classes.get_mut(&companion_internal) {
-                            for name in contributed_companion_order {
-                                let signatures =
-                                    contributed_companion_methods.remove(&name).expect(
-                                        "a contributed companion name must retain its overloads",
-                                    );
-                                if !companion.declared_callable_order.contains(&name) {
-                                    companion.declared_callable_order.push(name.clone());
-                                }
-                                companion
-                                    .methods
-                                    .entry(name)
-                                    .or_default()
-                                    .extend(signatures);
-                            }
-                        } else {
-                            table.insert_class_sig(
-                                companion_internal,
-                                ClassSig {
-                                    internal: companion_internal,
-                                    stable_declaration: None,
-                                    source_file: i as u32,
-                                    source_decl: None,
-                                    is_nested: true,
-                                    visibility: Visibility::Public,
-                                    annotations: Vec::new(),
-                                    applied_annotations: Vec::new(),
-                                    annotation_class_arguments: Vec::new(),
-                                    generated_nested_classifiers: Vec::new(),
-                                    props: Vec::new(),
-                                    declared_props: HashMap::new(),
-                                    contextual_props: HashMap::new(),
-                                    constants: HashMap::new(),
-                                    member_ext_props: HashMap::new(),
-                                    member_ext_funs: HashMap::new(),
-                                    has_primary_ctor: true,
-                                    primary_constructor_declaration: None,
-                                    primary_constructor_annotations: Vec::new(),
-                                    ctor_params: Vec::new(),
-                                    ctor_param_shapes: Vec::new(),
-                                    methods: contributed_companion_methods,
-                                    declared_callable_order: contributed_companion_order,
-                                    source_methods: Vec::new(),
-                                    flags: ClassFlags::default().with_final(true).with_object(true),
-                                    inner_of: None,
-                                    companion_internal: None,
-                                    lateinit_props: Default::default(),
-                                    interfaces: Default::default(),
-                                    interface_type_args: Vec::new(),
-                                    delegated_interfaces: Vec::new(),
-                                    callable_signature: None,
-                                    callable_signatures: Vec::new(),
-                                    super_internal: None,
-                                    interfaces_before_superclass: 0,
-                                    super_type_args: Vec::new(),
-                                    super_ctor_params: Vec::new(),
-                                    ctor_param_names: Vec::new(),
-                                    ctor_implicit_integer_coercion: Vec::new(),
-                                    ctor_vararg: None,
-                                    ctor_defaults: Vec::new(),
-                                    secondary_ctors: Vec::new(),
-                                    secondary_ctor_shapes: Vec::new(),
-                                    secondary_ctor_call_sigs: Vec::new(),
-                                    secondary_constructor_declarations: Vec::new(),
-                                    secondary_constructor_annotations: Vec::new(),
-                                    type_parameters: crate::types::TypeParameters::default(),
-                                    type_parameter_extra_bounds: Vec::new(),
-                                    captured_type_parameters: crate::types::TypeParameters::default(
-                                    ),
-                                    metadata_captured_type_parameters: Vec::new(),
-                                    generic_props: HashMap::new(),
-                                    nullable_tparam_props: HashMap::new(),
-                                    generic_property_shapes: HashMap::new(),
-                                    value_field: None,
-                                    full_value: false,
-                                    generic_methods: HashMap::new(),
-                                },
-                            );
-                        }
+                        contributed_companions.push(ContributedCompanion {
+                            internal,
+                            source_file: i as u32,
+                            order: contributed_companion_order,
+                            methods: contributed_companion_methods,
+                        });
                     }
                 }
                 Decl::Property(p) => {
@@ -4276,6 +4207,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             }
         }
     }
+    install_contributed_companions(&mut table, contributed_companions);
 
     // The engine types a deferred declaration by running the REAL checker over its body, and the
     // checker resolves classifiers and callables through the table's platform. Install it before
