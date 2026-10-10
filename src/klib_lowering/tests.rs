@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 mod body_forms;
+mod callee_headers;
 mod control_forms;
 mod demo_package;
 
@@ -759,7 +760,7 @@ fn a_call_of_a_library_declaration_declines_by_its_callee() {
     assert_eq!(
         message,
         "the KLIB body of `kotlin.ranges.coerceAtLeast` \
-         (it calls `kotlin.ranges.coerceAtMost`, which no selected declaration describes)"
+         (it calls `kotlin.ranges.coerceAtMost`, which no loaded library declares)"
     );
 }
 

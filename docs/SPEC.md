@@ -14682,21 +14682,51 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `stdlib_built_in_calls_have_the_signed_operands`,
   `stdlib_structural_equality_lowers_as_its_source_does`.
 
+- **A KLIB body follows kotlinc's serialized resolution exactly.** Each call in a serialized body
+  names the declaration kotlinc resolved by its exact `IdSignature`, with its type arguments and
+  result type as serialized; lowering follows that signature and never re-resolves a call or
+  re-selects an overload by name, receiver or argument types. A call typed apart from its callee's
+  declared result declines as an inconsistency. A member signature the libraries do not serialize
+  (a fake override, which the serializer leaves for the linker to rebuild) is to be followed
+  structurally through the serialized class declarations to the real declaration; until that walk
+  exists, such a call declines by name (`a call of a member no library serializes, such as a fake
+  override`). Tests: `klib_lowering::tests::callee_headers::a_member_call_declines_by_its_form`,
+  `klib_lowering::tests::a_call_typed_apart_from_its_callee_declines`.
+
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
-  top-level declaration is joined, by its exact signature, to the frozen declaration a checked
-  call selected (`KlibCalleeFacts`, built from the backend handoff's `KlibBodyCallable` views); the
-  callee is declared in the same `DependencyBodyUnit` and the call lowers as a same-file call of it,
-  with the callee's declared parameter types as the expected argument types. Each signature is
-  lowered once, a call cycle links back to the function already declared, and the callee's body is
-  lowered after its caller's. A callee no frozen selection describes (or two do) declines by its
-  identity rather than reconstructing a declaration from the call; a callee whose own body declines
-  makes the whole lowering decline with that reason, and every function and expression the attempt
-  added is removed. Tests:
+  declaration is joined, by its exact signature, to the callee's serialized declaration in the
+  loaded trees (`KlibDeclarationBodies`, the join a body uses), and the callee is declared from
+  that declaration's header: its context parameters, extension receiver and value parameters in
+  their roles, and its result, converted structurally as the body's own types are. A value
+  parameter's identity is its serialized name and an extension receiver's is the receiver; a context
+  parameter's kind (named, anonymous, legacy receiver) is recorded only by a provider, so a callee
+  with context parameters that no checked call selected declines. When a checked call also selected
+  the callee (`KlibCalleeFacts`, built from the backend handoff's `KlibBodyCallable` views), the two
+  views must agree in name, parameter types and identities, context count and result, or the call
+  declines as an internal inconsistency; the same check runs when a function already in the unit is
+  reached, or lowered as a root, under a selection. A signature two selections describe declines.
+  The KLIB IR header is therefore the description of a dependency-only callee: nothing is frozen
+  for it in advance, and only reached bodies are read. The callee is declared in the same
+  `DependencyBodyUnit` and the call lowers as a same-file call of it, with the callee's declared
+  parameter types as the expected argument types. Each signature is lowered once, a call cycle links
+  back to the function already declared, and the callee's body is lowered after its caller's. A
+  call of a member function (a declaration with a dispatch receiver) declines by that form, since
+  member dispatch is not modelled; a call of a signature no loaded library declares declines by its
+  identity (`which no loaded library declares`). A callee whose own body declines makes the whole
+  lowering decline with that reason, and every function and expression the attempt added is
+  removed. Tests:
   `klib_lowering::tests::body_forms::a_call_of_a_dependency_function_lowers_its_callee_into_the_unit`,
   `a_call_cycle_links_back_to_the_declared_function`,
   `a_declining_callee_leaves_the_unit_as_it_was`,
-  `a_callee_no_frozen_selection_describes_declines_by_name`,
-  `stdlib_unsigned_max_declines_through_its_callee`.
+  `a_call_of_an_already_lowered_function_follows_the_active_selection`,
+  `stdlib_unsigned_max_declines_through_its_callee`,
+  `klib_lowering::tests::callee_headers::a_callee_no_checked_call_selected_is_declared_from_its_header`,
+  `a_selected_callee_that_disagrees_with_its_header_declines`,
+  `a_header_declared_function_is_cross_checked_when_selected_later`,
+  `a_call_no_loaded_library_declares_declines_by_name`,
+  `a_header_alone_does_not_describe_a_context_parameter`,
+  `stdlib_calls_reach_header_declared_callees`,
+  `stdlib_bodies_decline_inside_header_declared_callees`.
 
 - **A KLIB body's local variables are the source declarations.** A local `val`/`var` (origin
   `DEFINED`) lowers to a named variable in the next value slot after the parameters, reads of a
