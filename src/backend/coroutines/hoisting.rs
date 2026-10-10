@@ -764,7 +764,7 @@ fn hoist_protected_region(
 /// Replace each unconditional suspension call in `e` with a fresh `tmp`, appending `val tmp = <call>` to
 /// `prelude`. Recurses through value nodes that always evaluate their children; stops at conditional
 /// nodes (an inner `if`/`when`/elvis), leaving suspensions there for the flattener (or a later skip).
-fn hoist_expr(
+pub(super) fn hoist_expr(
     ir: &mut IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
@@ -1236,6 +1236,26 @@ fn hoist_expr(
             };
             e
         }
+        // A checked operation evaluates its receivers, then its arguments (or the written value),
+        // left to right: the same ordered-operand contract as a call.
+        IrExpr::Checked(_) => {
+            let mut operands = Vec::new();
+            crate::ir::for_each_child(&ir.exprs, e, &mut |child| operands.push(Some(child)));
+            let Some(hoisted) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
+                return e;
+            };
+            let replaced: HashMap<ExprId, ExprId> = operands
+                .into_iter()
+                .zip(hoisted)
+                .filter_map(|(old, new)| Some((old?, new?)))
+                .collect();
+            crate::ir::remap_direct_children(&mut ir.exprs[e as usize], |child| {
+                replaced.get(&child).copied().unwrap_or(child)
+            });
+            e
+        }
         IrExpr::PropertyRead {
             receiver,
             owner,
@@ -1309,7 +1329,7 @@ fn hoist_expr(
 /// Returns `false` — leaving `e` untouched — when a required operand snapshot cannot be typed; the
 /// caller keeps the expression unhoisted so the flattener declines the shape. A non-call intrinsic
 /// suspension point has no operands and therefore returns `true`.
-fn hoist_call_operands_in_order(
+pub(super) fn hoist_call_operands_in_order(
     ir: &mut IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
@@ -1504,6 +1524,10 @@ mod tests {
     impl CoroutineRepresentation for SemanticOnly {
         fn zero(&self, ty: &Ty) -> IrConst {
             IrConst::zero_for_value_type(*ty)
+        }
+
+        fn throwable(&self) -> crate::types::TypeName {
+            crate::types::type_name("kotlin/Throwable")
         }
     }
 

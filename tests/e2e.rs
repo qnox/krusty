@@ -1776,6 +1776,8 @@ mod native_concurrency_e2e;
 mod native_const_reference_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
+#[path = "native_coroutines_e2e.rs"]
+mod native_coroutines_e2e;
 #[path = "native_cross_file_e2e.rs"]
 mod native_cross_file_e2e;
 #[path = "native_data_class_array_rendering_e2e.rs"]

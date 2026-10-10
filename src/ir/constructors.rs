@@ -134,6 +134,71 @@ impl IrSecondaryCtorLines {
 }
 
 impl super::IrClass {
+    /// A compiler-generated final class extending `kotlin.Any`, with a primary constructor and
+    /// no members yet: the starting point a lowering fills with the fields and methods it owns.
+    pub(crate) fn generated(fq_name: crate::types::TypeName) -> Self {
+        Self {
+            fq_name,
+            is_source_declared: false,
+            is_anonymous_object: false,
+            enclosure: None,
+            is_inner_class: false,
+            is_local_class: false,
+            is_value: false,
+            is_data: false,
+            decl_line: 0,
+            decl_start_line: 0,
+            decl_end_line: 0,
+            type_param_bounds: Vec::new(),
+            type_params: Vec::new(),
+            captured_type_params: Vec::new(),
+            supertypes: Vec::new(),
+            properties: Vec::new(),
+            fields: Vec::new(),
+            field_annotations: Vec::new(),
+            property_annotations: Vec::new(),
+            ctor_param_count: 0,
+            constructor_prefix_count: 0,
+            ctor_args: Vec::new(),
+            ctor_param_annotations: Vec::new(),
+            init_body: None,
+            pre_super_param_fields: Vec::new(),
+            explicit_param_stores: false,
+            methods: Vec::new(),
+            is_interface: false,
+            is_fun_interface: false,
+            is_annotation: false,
+            annotation_impl_of: None,
+            is_sealed: false,
+            sealed_subclasses: Default::default(),
+            is_abstract: false,
+            is_open: false,
+            superclass: "kotlin/Any".into(),
+            super_arg_prelude: Vec::new(),
+            super_args: Vec::new(),
+            super_ctor_params: Vec::new(),
+            super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            is_enum: false,
+            enum_entries: Vec::new(),
+            is_enum_entry: false,
+            prop_ref: None,
+            func_ref: None,
+            lambda: None,
+            sam_wrapper: None,
+            bridges: Vec::new(),
+            interfaces: Default::default(),
+            is_object: false,
+            is_companion: false,
+            companion_class: None,
+            published_nested_classifiers: Vec::new(),
+            secondary_ctors: Vec::new(),
+            has_primary_ctor: true,
+            applied_annotations: super::DeclarationAnnotations::default(),
+            primary_ctor_annotations: super::DeclarationAnnotations::default(),
+            annotation_retention: None,
+        }
+    }
+
     /// The line kotlinc builds a primary constructor's delegating call at: where the declaration
     /// starts, annotations included.
     pub fn primary_delegation_line(&self) -> Option<u32> {

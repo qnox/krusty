@@ -59,6 +59,9 @@ impl BodyLowering<'_, '_, '_> {
         value: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
+        if is_result(classifier) {
+            return self.result_box("kt_result_box", value);
+        }
         let class = self.value_class(classifier)?;
         let (offset, _) = self.file.value_storage(class)?;
         let descriptor = self.file.classes[class as usize].descriptor;
@@ -74,10 +77,21 @@ impl BodyLowering<'_, '_, '_> {
         object: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
+        if is_result(classifier) {
+            return self.result_box("kt_result_unbox", object);
+        }
         let class = self.value_class(classifier)?;
         let (offset, ty) = self.file.value_storage(class)?;
         let clif = self.carrier(ty).clif().expect("a value is never `Unit`");
         Ok(self.builder.ins().load(clif, trusted(), object, offset))
+    }
+
+    /// A `kotlin.Result` in or out of its box. The class is the library's, so the runtime lays out
+    /// its box (see `krusty_coroutines.c`); the value inside is the raw reference a `Result` is.
+    fn result_box(&mut self, symbol: &str, operand: Value) -> Result<Value, Unsupported> {
+        Ok(self
+            .runtime_call(symbol, &[any()], any(), &[operand])?
+            .expect("the runtime answers a reference"))
     }
 
     /// The class of this file a boxed value class is laid out by. A value class declared
@@ -246,4 +260,14 @@ impl BodyLowering<'_, '_, '_> {
             (Some(Carrier::Void), _) => Err("a coercion from `Unit`".to_string()),
         }
     }
+}
+
+/// `kotlin.Result`, whose box is the runtime's.
+fn is_result(classifier: TypeName) -> bool {
+    classifier == crate::types::type_name("kotlin/Result")
+}
+
+/// A non-null `Result<T>`, which the coroutine runtime takes and answers as its raw value.
+pub(super) fn is_raw_result(ty: Ty) -> bool {
+    matches!(ty, Ty::Obj(classifier, _) if is_result(classifier))
 }

@@ -186,8 +186,34 @@ impl BodyLowering<'_, '_, '_> {
                     "`enumEntries` of `{classifier:?}`, which is not an enum"
                 )),
             },
+            IrIntrinsic::Coroutine(operation) => self.coroutine_operation(operation, args),
             other => Err(format!("the `{other:?}` intrinsic")),
         }
+    }
+
+    /// One step of the coroutine protocol, realized by the runtime (see `krusty_rt.h`).
+    fn coroutine_operation(
+        &mut self,
+        operation: crate::ir::IrCoroutineOperation,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        use crate::ir::IrCoroutineOperation as Operation;
+        let (symbol, ret) = match operation {
+            Operation::Suspended => ("kt_coroutine_suspended", any()),
+            Operation::Failure => ("kt_result_failure", any()),
+            Operation::ThrowOnFailure => ("kt_result_throw_on_failure", Ty::Unit),
+            Operation::ResumeWith => ("kt_continuation_resume_with", Ty::Unit),
+            Operation::ContextOf => ("kt_continuation_context", any()),
+        };
+        let mut operands = Vec::with_capacity(args.len());
+        for &argument in args {
+            operands.push(self.reference(argument)?);
+            if self.terminated {
+                return Ok(None);
+            }
+        }
+        let params = vec![any(); operands.len()];
+        self.runtime_call(symbol, &params, ret, &operands)
     }
 
     /// Kotlin's `assert(value)` / `assert(value) { message }`.

@@ -12261,6 +12261,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the C declaration, not the function.
   Tests: `tests/native_c_abi_e2e.rs` (`a_public_function_is_exported_and_an_internal_one_is_not`,
   `a_c_caller_sees_the_initialized_value`, `a_public_classifier_parameter_is_declined_by_name`).
+- **Native: a suspend function is a state machine over the shared suspend lowering.** Native runs
+  the target-neutral normalizations in `backend::coroutines`, then builds the same CPS state machine
+  the JVM does. The function keeps its source parameters and takes the continuation as a trailing
+  argument. It returns its value or the runtime's `COROUTINE_SUSPENDED` marker. Its frame is a
+  class of the program with the label, the caught exception and the completion first, then one
+  field per value live across a suspension. There is no stack switching. `try`/`finally` around a
+  suspension becomes a catch that remembers the exception, the cleanup, and a rethrow. A `return`
+  that crosses a `finally` carries its value through that cleanup, and a suspending loop condition
+  is tested inside the loop body. A `kotlin.Result` crosses the continuation raw (the value, or the
+  runtime's failure box) only where the declaration types it `Result`. As a type argument it stays
+  boxed, like any other value class. `Unit` has no machine value: a `Unit` parameter or local
+  carries nothing, and a `Unit` argument to a function value is the runtime's `Unit` object.
+  `createCoroutine`, `startCoroutine`, `suspendCoroutine`, `intercepted` and `coroutineContext`
+  are realized against the runtime's continuation protocol in `krusty_coroutines.c`.
+  Tests: `tests/native_coroutines_e2e.rs`, where each program runs on the JVM and on Native with
+  the same expected result, and the `coroutines/` cases of the Native box corpus.
 
 - **`-Xwarning-level=<NAME>:<SEVERITY>` configures a typed diagnostic identity.** The accepted
   severities are kotlinc's exact, case-sensitive `error`, `warning`, and `disabled` spellings.

@@ -22,6 +22,7 @@ mod c_abi;
 mod captures;
 mod classes;
 mod codegen;
+mod coroutines;
 mod dependency_references;
 mod intrinsics;
 mod linker;

@@ -117,6 +117,14 @@ typedef struct KType {
     const char *simple_name;
     uint32_t simple_name_length;
     uint32_t class_names;
+    /* On a class of the PROGRAM that implements `kotlin.coroutines.Continuation`: thunks with the
+       fixed signatures written here that call its `resumeWith` and read its `context`, both
+       virtually. NULL on every other type. A suspended computation resumes whatever continuation
+       it was handed, which may be a class of another file or one the runtime only sees as a
+       reference, so the runtime's `kt_continuation_resume_with` and `kt_continuation_context`
+       reach the member through these, as the walkers above reach `iterator`. */
+    void (*continuation_resume_with)(struct KObject *self, struct KObject *result);
+    struct KObject *(*continuation_context)(struct KObject *self);
 } KType;
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
@@ -1003,6 +1011,40 @@ extern const KType kt_type_read_after_eof_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
+
+/* Coroutines (krusty_coroutines.c). A suspend function's continuation class is the program's own;
+   these are the parts of the protocol every such class shares. A `Result<T>` travels as its raw
+   value: the value itself, or the object `kt_result_failure` makes for an exception. */
+KRef kt_coroutine_suspended(void);
+/* `kotlin.Result.Failure`, which `is Result.Failure` names. */
+extern const KType kt_type_result_failure;
+KRef kt_result_failure(KRef exception);
+void kt_result_throw_on_failure(KRef value);
+void kt_continuation_resume_with(KRef continuation, KRef result);
+KRef kt_continuation_context(KRef continuation);
+KRef kt_continuation_new(KRef context, KRef block);
+kt_boolean kt_result_is_success(KRef value);
+kt_boolean kt_result_is_failure(KRef value);
+KRef kt_suspend_coroutine(KRef block, KRef continuation);
+KRef kt_suspend_coroutine_unintercepted_or_return(KRef block, KRef continuation);
+KRef kt_create_coroutine(KRef block, KRef completion);
+KRef kt_start_coroutine_unintercepted_or_return(KRef block, KRef completion);
+KRef kt_start_coroutine_unintercepted_or_return_with_receiver(KRef block, KRef receiver,
+                                                              KRef completion);
+KRef kt_create_coroutine_with_receiver(KRef block, KRef receiver, KRef completion);
+void kt_start_coroutine(KRef block, KRef completion);
+void kt_start_coroutine_with_receiver(KRef block, KRef receiver, KRef completion);
+void kt_continuation_resume(KRef continuation, KRef value);
+void kt_continuation_resume_with_exception(KRef continuation, KRef exception);
+KRef kt_continuation_intercepted(KRef continuation);
+KRef kt_empty_coroutine_context(void);
+KRef kt_result_success(KRef value);
+extern const KType kt_type_result;
+KRef kt_result_box(KRef value);
+KRef kt_result_unbox(KRef box);
+KRef kt_result_get_or_throw(KRef value);
+KRef kt_result_get_or_null(KRef value);
+KRef kt_result_exception_or_null(KRef value);
 
 /* `Throwable(message, cause)` and `Throwable(cause)`. The second fills the message from the cause,
    as Kotlin does, so the two one-argument constructors are not one function with a flag. */

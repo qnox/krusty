@@ -429,6 +429,11 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             ("TODO", [reason], Ty::Nothing) if classifier_is(*reason, "kotlin/String") => {
                 Some("kt_not_implemented_reason".to_string())
             }
+            // `Result`'s two published helpers its inline members splice in. A `Result` crosses
+            // as its raw value here (see `krusty_coroutines.c`), so these are the runtime's own
+            // failure encoding.
+            ("throwOnFailure", [_], Ty::Unit) => Some("kt_result_throw_on_failure".to_string()),
+            ("createFailure", [_], _) => Some("kt_result_failure".to_string()),
             _ => None,
         };
     }
@@ -1978,6 +1983,12 @@ pub(super) fn builtin_companion(classifier: crate::types::TypeName) -> Option<&'
         ("kotlin/Float$Companion", "kt_float_companion"),
         ("kotlin/Double$Companion", "kt_double_companion"),
         ("kotlin/String$Companion", "kt_string_companion"),
+        // Not a companion, but the same kind of thing: an object the runtime holds one static
+        // instance of, asked about only by identity and its `toString`.
+        (
+            "kotlin/coroutines/EmptyCoroutineContext",
+            "kt_empty_coroutine_context",
+        ),
     ]
     .into_iter()
     .find_map(|(owner, symbol)| classifier.matches(owner).then_some(symbol))
@@ -2054,6 +2065,12 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
     }
     None
 }
+
+mod coroutines;
+pub(super) use coroutines::{
+    coroutine_call, coroutine_property, is_continuation_context_property,
+    is_continuation_resume_with, CoroutineCall, PropertySignature,
+};
 
 /// The runtime function realizing the selected declaration when it is one of `Any`'s three
 /// runtime-dispatched members: `kotlin/Any.toString(): String`, `kotlin/Any.hashCode(): Int` or

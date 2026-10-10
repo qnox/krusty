@@ -115,7 +115,7 @@ pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
-pub use intrinsic::IrIntrinsic;
+pub use intrinsic::{IrCoroutineOperation, IrIntrinsic};
 pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
 pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
@@ -2900,12 +2900,12 @@ pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 mod clone;
-pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub(crate) use clone::{
     clone_class_method, clone_function_implementation, make_expression_children_unique_tracked,
 };
+pub use clone::{clone_expression_dag, remap_direct_children};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,

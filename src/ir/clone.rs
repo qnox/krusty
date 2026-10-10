@@ -89,7 +89,7 @@ fn remap_argument(argument: &mut IrCheckedArgument, map: &mut impl FnMut(ExprId)
 
 /// Rewrite every direct child identity. Exhaustive by design: adding an `IrExpr` shape must update
 /// both this function and `for_each_child` before the compiler builds.
-fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) -> ExprId) {
+pub fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) -> ExprId) {
     match expression {
         IrExpr::Checked(operation) => match operation {
             IrCheckedOperation::Call {
