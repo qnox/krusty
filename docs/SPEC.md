@@ -9780,6 +9780,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_started_threads_stack_has_a_guard_below_it`), each run on x86_64, aarch64 and riscv64 (the
   architectures other than the host's built with clang and lld and run under QEMU's user-mode
   emulators, which CI installs and must use), and `tests/native_concurrency_e2e.rs`.
+- **Native: the process boundary — `main(args)` and standard input.** The program's entry is the
+  `main` the frontend selected (`IrFile::entry_point`): the backend realizes that record and reads
+  its form only to decide whether to build and pass the argument array, so `main(args:
+  Array<String>?)`, `main(vararg args: String)` and a file that also declares `main()` or other
+  `main` overloads all start where kotlinc's frontend says. `main` receives the arguments the
+  program was started with, without its own name (`argv[0]`). Bytes from outside are decoded as
+  UTF-8 with one U+FFFD per maximal ill-formed subpart, which is what Kotlin/Native and the JVM
+  launcher under a UTF-8 locale both answer for arguments, except that the launcher reads a
+  surrogate encoded as bytes (`ED A0 80`) as one U+FFFD where Kotlin/Native and krusty read three;
+  the runtime's strings stay well-formed.
+  `readLine()` and `readlnOrNull()` answer the next line of standard input without its `\n` or
+  `\r\n` (a lone `\r` is the line's own text), keep an unterminated last line, and answer `null`
+  at the end of input; `readln()` raises `kotlin.io.ReadAfterEOFException("EOF has already been
+  reached")` there. Line splitting is the JVM's and the common stdlib's: Kotlin/Native's own
+  `readLine` is one `read(2)` of up to 4095 bytes with trailing CR/LF trimmed, a line only on a
+  terminal. Ill-formed input is decoded as Kotlin/Native decodes it, where the JVM's `readLine`
+  raises `MalformedInputException`. `_start` hands the kernel's initial stack to `kt_process_start`,
+  which records `argc`, `argv` and the environment block. Tests: `tests/native_process_e2e.rs`,
+  each case compared exactly (status, stdout, stderr) with a recorded Kotlin/Native run, a live JVM
+  run, or both; `native::intrinsics::tests::console_input_is_matched_by_its_whole_declaration`.
 - **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
   what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
   slot and returns, and the caller's check of that slot is the propagation. So every runtime entry
