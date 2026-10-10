@@ -105,6 +105,7 @@ const FAILURES: &str = "tests/box_expected_failures/native/2.4.20.txt";
 const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/jvm/2.4.20.txt";
 const CLI_FAILURES: &str = "tests/cli_expected_failures/jvm/2.4.20.txt";
 const CLI_NOT_APPLICABLE: &str = "tests/cli_expected_not_applicable/jvm/2.4.20.txt";
+const KLIB_UNCOVERED: &str = "tests/klib_uncovered_externals/native/2.4.20.txt";
 
 #[test]
 fn removing_entries_passes() {
@@ -207,6 +208,31 @@ fn a_growing_cli_expected_failure_manifest_fails() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
         "outcome-lists: tests/cli_expected_failures/jvm/2.4.20.txt gains 1 entry:\n    warnings/newly_broken.args\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    );
+}
+
+#[test]
+fn a_growing_klib_uncovered_external_manifest_fails() {
+    let repo = Repo::new("klib-uncovered");
+    repo.write(
+        KLIB_UNCOVERED,
+        "class kotlin.Int: fun plus(kotlin.Int): kotlin.Int\n",
+    );
+    let base = repo.commit();
+    repo.write(
+        KLIB_UNCOVERED,
+        "class kotlin.Int: fun plus(kotlin.Int): kotlin.Int\n\
+         package kotlin: fun newlyUncovered(): kotlin.Unit\n",
+    );
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        "outcome-lists: tests/klib_uncovered_externals/native/2.4.20.txt gains 1 entry:\n    package kotlin: fun newlyUncovered(): kotlin.Unit\n\
          outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
     );
 }
