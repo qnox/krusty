@@ -426,6 +426,27 @@ mod tests {
     }
 
     #[test]
+    fn klib_body_lowering_is_target_neutral() {
+        // Dependency bodies lower into common IR that Native and Wasm consume alike. The tests
+        // beside the lowering may also reach the frontend to lower equivalent source.
+        let allowed = [
+            "backend",
+            "fir",
+            "ir",
+            "klib_libraries",
+            "libraries",
+            "metadata",
+            "types",
+        ];
+        assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);
+        for path in rust_files_under("src/klib_lowering") {
+            if path.file_name() != Some(std::ffi::OsStr::new("tests.rs")) {
+                assert_allowed_crate_modules_in_file(&path, &allowed);
+            }
+        }
+    }
+
+    #[test]
     fn klib_container_reader_depends_on_no_compiler_module() {
         assert_allowed_crate_modules("src/klib.rs", &[]);
     }
