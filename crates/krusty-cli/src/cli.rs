@@ -4,7 +4,6 @@
 //! kotlinc argument krusty does not implement is a fatal error: the same command line must never
 //! compile successfully into something other than what it asks kotlinc for.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -22,94 +21,13 @@ use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, Va
 
 mod arguments;
 mod language_features;
+mod warning_policy;
 
 use arguments::{
-    apply, collect_sources, finish_jvm_target, finish_language_settings, take_reference_version,
-    unsupported, ParsedSettings,
+    apply, collect_sources, finish_jvm_target, finish_language_settings, finish_warning_policy,
+    take_reference_version, unsupported, ParsedSettings,
 };
-
-/// Stable diagnostic names exposed through kotlinc's `-Xwarning-level` contract. A name enters
-/// this registry only when krusty can emit that diagnostic; accepting any other spelling would
-/// promise a policy the compiler cannot apply.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum WarningName {
-    CliArgDisablesStableFeature,
-    DeprecatedCliArg,
-    DeprecatedLanguageVersion,
-    ExperimentalLanguageVersion,
-    RedundantCliArg,
-    RemovedCliArg,
-}
-
-impl WarningName {
-    fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "CLI_ARG_DISABLES_STABLE_FEATURE" => Self::CliArgDisablesStableFeature,
-            "DEPRECATED_CLI_ARG" => Self::DeprecatedCliArg,
-            "DEPRECATED_LANGUAGE_VERSION" => Self::DeprecatedLanguageVersion,
-            "EXPERIMENTAL_LANGUAGE_VERSION" => Self::ExperimentalLanguageVersion,
-            "REDUNDANT_CLI_ARG" => Self::RedundantCliArg,
-            "REMOVED_CLI_ARG" => Self::RemovedCliArg,
-            _ => return None,
-        })
-    }
-}
-
-/// The three severities accepted by kotlinc's warning-level option.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WarningLevel {
-    Error,
-    Warning,
-    Disabled,
-}
-
-impl WarningLevel {
-    fn parse(level: &str) -> Option<Self> {
-        Some(match level {
-            "error" => Self::Error,
-            "warning" => Self::Warning,
-            "disabled" => Self::Disabled,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct WarningPolicy {
-    configured: BTreeMap<WarningName, WarningLevel>,
-}
-
-impl WarningPolicy {
-    fn configure(&mut self, value: &str) -> Result<(), String> {
-        let Some((name, severity)) = value.split_once(':') else {
-            return Err(format!(
-                "invalid value '{value}' for -Xwarning-level: expected <NAME>:<error|warning|disabled>"
-            ));
-        };
-        let Some(name) = WarningName::parse(name) else {
-            let name = value.split_once(':').map_or(value, |(name, _)| name);
-            return Err(format!("warning with name \"{name}\" does not exist"));
-        };
-        let Some(severity) = WarningLevel::parse(severity) else {
-            return Err(format!(
-                "invalid severity '{severity}' in -Xwarning-level={value}; supported severities: error, warning, disabled"
-            ));
-        };
-        if self.configured.contains_key(&name) {
-            let name = value.split_once(':').map_or(value, |(name, _)| name);
-            return Err(format!(
-                "warning with name \"{name}\" has already been configured"
-            ));
-        }
-        self.configured.insert(name, severity);
-        Ok(())
-    }
-
-    pub fn level(&self, name: Option<WarningName>) -> WarningLevel {
-        name.and_then(|name| self.configured.get(&name).copied())
-            .unwrap_or(WarningLevel::Warning)
-    }
-}
+pub use warning_policy::{WarningDisposition, WarningLevel, WarningName, WarningPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CliWarning {
@@ -442,6 +360,7 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
             message: kotlinc_arguments::render(&message),
         })
         .collect();
+    finish_warning_policy(&mut opts, &parsed);
     finish_jvm_target(&mut opts, &parsed);
     finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, lifecycle);
     opts
@@ -1558,8 +1477,8 @@ mod tests {
             assert_eq!(
                 parsed
                     .warning_policy
-                    .level(Some(WarningName::RedundantCliArg)),
-                expected,
+                    .configured_level(WarningName::RedundantCliArg),
+                Some(expected),
                 "{flag}"
             );
             assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
@@ -1577,8 +1496,8 @@ mod tests {
         assert_eq!(
             parsed
                 .warning_policy
-                .level(Some(WarningName::RedundantCliArg)),
-            WarningLevel::Disabled
+                .configured_level(WarningName::RedundantCliArg),
+            Some(WarningLevel::Disabled)
         );
 
         for (bad, severity) in [
@@ -1627,8 +1546,8 @@ mod tests {
         assert_eq!(
             parsed
                 .warning_policy
-                .level(Some(WarningName::RedundantCliArg)),
-            WarningLevel::Error,
+                .configured_level(WarningName::RedundantCliArg),
+            Some(WarningLevel::Error),
             "a rejected duplicate must not mutate the first configuration"
         );
     }
@@ -1692,6 +1611,42 @@ mod tests {
               {disable, strict, warning}"
             ]
         );
+    }
+
+    /// `-Werror` and `-nowarn` are one global policy. Promotion wins when both are present,
+    /// independent of argument order; named levels remain explicit overrides.
+    #[test]
+    fn global_warning_flags_configure_one_policy() {
+        let parsed = parse_args(&["-Werror", "f.kt"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            WarningDisposition::WarningAndFail
+        );
+        assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
+
+        let parsed = parse_args(&["-nowarn", "f.kt"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            WarningDisposition::Disabled
+        );
+
+        for arguments in [
+            ["-Werror", "-nowarn", "f.kt"],
+            ["-nowarn", "-Werror", "f.kt"],
+        ] {
+            let parsed = parse_args(&arguments);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+            assert_eq!(
+                parsed.warning_policy.compiler_disposition(),
+                WarningDisposition::WarningAndFail,
+                "{arguments:?}"
+            );
+        }
     }
 
     /// `-opt-in` accepts markers in both spellings, repeated and comma-separated.

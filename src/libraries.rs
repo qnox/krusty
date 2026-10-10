@@ -30,8 +30,8 @@ pub use annotation_application::{
 };
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, KlibDeclarationSignature, NonvirtualCallRealization,
-    OverriddenCallKind, OverriddenCallRealization,
+    ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
+    NonvirtualCallRealization, OverriddenCallKind, OverriddenCallRealization,
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
@@ -61,8 +61,14 @@ pub use inline_body::{
     InlineIterationTraversal,
 };
 pub(crate) use metadata_normalization::{
-    function_generic_sig, function_parameter_identities, only_input_type_formals, package_function,
-    reified_type_parameter_ordinals, FunctionParameterIdentities,
+    associated_function_parameter_identities, associated_property_parameter_identities,
+    classifier_shape, constructor_parameter_identities, constructor_parameter_list,
+    declared_constructor, declared_function, declared_property, declared_retention,
+    declared_targets, enum_entries_getter, enum_value_of, enum_values, function_generic_sig,
+    function_parameter_identities, member_record, only_input_type_formals,
+    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
+    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
+    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -672,19 +678,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         &[]
     }
 
-    /// Platform spellings for physical zero-arg getters when declaration metadata is unavailable.
-    /// Common resolution asks for a semantic property name; the target returns every physical spelling
-    /// as one provider result because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
-    /// The candidates are most-conventional first
-    /// (`id` → `getId`, `getID`; `urlPath` → `getUrlPath`, `getURLPath`) — the inverse of
-    /// Kotlin's decapitalize-smart getter-to-property mapping.
-    fn physical_property_getter_names(&self, _property: &str) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Project accessor methods inherited through a foreign classifier into semantic Kotlin
     /// properties. Core supplies the federated declaration source so a provider can pair methods
-    /// across module/library boundaries; the returned values are ordinary [`PropertyInfo`] records.
+    /// across module/library boundaries; the provider derives each property from the methods the
+    /// hierarchy declares, and the returned values are ordinary [`PropertyInfo`] records.
     /// Targets without accessor-property interop return an empty set.
     fn inherited_accessor_properties(
         &self,

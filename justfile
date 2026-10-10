@@ -261,16 +261,20 @@ kotlinc-arguments VERSION=`just max-version`:
 kotlin-native VERSION=`just max-version`:
     @scripts/kotlin-native.sh "{{VERSION}}" "$PWD/target/cache/kotlin-native"
 
-# This lane is deliberately required: the integration test may be optional in an ordinary local
+# This lane is deliberately required: the integration tests may be optional in an ordinary local
 # run, but this recipe provisions the distribution and turns absence or an undecodable fragment
-# into a failure.
+# into a failure. It also runs the tests that take kotlinc-native as their reference compiler,
+# with that compiler required, so a source set no recording covers is compiled live instead of
+# skipped.
 klib-semantics VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(just kotlin-native "{{VERSION}}")"
     # KLIB semantics read the Native distribution only, never the box or CLI corpus.
-    KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
-      ./run-tests.sh --test e2e klib_ -- --nocapture
+    KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KOTLIN_NATIVE=1 \
+      KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
+      ./run-tests.sh --test e2e -- klib_ value_class_declaration_e2e \
+        native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. The same checkout carries the command-line corpus,

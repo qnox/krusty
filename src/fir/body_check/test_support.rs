@@ -108,7 +108,7 @@ fn try_checked_source_set_function_body_rewriting(
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         inputs,
-        platform,
+        crate::frontend::PlatformProvider::jvm(platform),
         features,
         &mut diagnostics,
     );

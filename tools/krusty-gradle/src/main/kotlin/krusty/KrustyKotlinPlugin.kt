@@ -356,10 +356,9 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
-    // `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is the
-    // authoritative place to validate names and apply severities.
-    reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
+    // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is
+    // the authoritative place to validate names and apply severities. `-Werror` is the global
+    // form of that policy: the compiler fails the compilation when any warning is emitted.
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
     reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
@@ -391,6 +390,9 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
     if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
     if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
+    if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
+        arguments.add("-Werror")
+    }
     return arguments
 }
 

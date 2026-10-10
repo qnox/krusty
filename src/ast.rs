@@ -912,6 +912,8 @@ pub struct PropParam {
     pub is_override: bool,
     /// `open` or `override` without `final`.
     pub is_open: bool,
+    /// The declaration wrote `final`.
+    pub is_final: bool,
     /// Declaration visibility (`public` by default), from the constructor-parameter modifier list.
     /// A `private` property's backing field gets NO accessor (kotlinc reads it directly in-class), so
     /// the accessor synthesis skips it; `internal`/`protected` currently accessor like `public`.
@@ -1048,6 +1050,9 @@ pub struct ClassDecl {
     /// Span of the `value` keyword. Absent for a legacy `inline class` and for an ordinary class.
     /// The missing-`@JvmInline` diagnostic points here.
     pub value_modifier_span: Option<Span>,
+    /// Span of the primary constructor's parameter list, `(` through `)`. Absent when the class
+    /// writes no parameter list.
+    pub primary_constructor_parameters_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
@@ -1058,6 +1063,9 @@ pub struct ClassDecl {
     /// `is_open` + `is_abstract` + `is_sealed` booleans; read via the `is_open()` / `is_abstract()` /
     /// `is_sealed()` accessors (which preserve the prior bool semantics, incl. `sealed ⟹ abstract+open`).
     pub modality: Modality,
+    /// The declaration wrote `final`. [`Self::modality`] is `Final` by default too; a compiler
+    /// plugin that changes the default modality (all-open) keeps an explicit one.
+    pub final_modifier: bool,
     /// `inner class` — captures the enclosing instance: emitted with a synthetic `this$0` field of the
     /// outer type (the first field + first constructor parameter). `Some(outer_class_simple_name)`.
     pub inner_of: Option<String>,
@@ -1321,6 +1329,8 @@ pub struct PropDecl {
     /// `open` or `override` (without `final`) — the accessors are overridable, so the JVM backend
     /// must not emit `ACC_FINAL` on them (same rule as `FunDecl::is_open`).
     pub is_open: bool,
+    /// The declaration wrote `final`.
+    pub is_final: bool,
     pub is_override: bool,
     /// No initializer was written for `None`. This is valid syntax for abstract, expect, external,
     /// lateinit, deferred, and accessor-defined properties; semantic validation decides whether the

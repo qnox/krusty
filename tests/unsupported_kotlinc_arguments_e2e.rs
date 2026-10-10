@@ -12,8 +12,7 @@ const SOURCE: &str = "fun box(): String = \"OK\"\n";
 fn an_unsupported_kotlinc_argument_exits_nonzero_and_writes_nothing() {
     for argument in [
         // Diagnostics policy.
-        "-Werror",
-        "-nowarn",
+        "-Wextra",
         // Language semantics.
         "-Xallow-reified-type-in-catch",
         "-Xjsr305=strict",

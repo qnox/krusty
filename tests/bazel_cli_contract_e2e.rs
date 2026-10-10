@@ -323,7 +323,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
             r#"{"exitCode":0,"output":"","requestId":2}"#,
             r#"{"exitCode":1,"output":"krusty: krusty has no Java front end, so this target cannot be built by it: --java-count 4","requestId":3}"#,
             r#"{"exitCode":0,"output":"","requestId":4}"#,
-            r#"{"exitCode":0,"output":"krusty: no effect on output: --warn off\n","requestId":5}"#,
+            r#"{"exitCode":0,"output":"","requestId":5}"#,
         ],
         "one exact response per request: {text}"
     );

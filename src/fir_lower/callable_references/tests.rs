@@ -1567,7 +1567,7 @@ fn module_member_callable(
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(source).with_file_stem(stem)],
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );

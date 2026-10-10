@@ -11,6 +11,7 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod anonymous_functions;
+mod class_recovery;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
@@ -33,8 +34,10 @@ mod return_labels;
 mod superclass_references;
 mod type_parameters;
 mod value_parameters;
-use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
-use declaration_modifiers::{modality_from_modifiers, modality_of};
+use class_recovery::error_class_decl;
+use declaration_modifiers::{
+    function_flags, has_visibility_modifier, modality_from_modifiers, modality_of, visibility_of,
+};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
 use lexical_type_parameters::LexicalTypeParameters;
@@ -119,53 +122,6 @@ fn parse_with_features_and_script(
         }
     }
     p.file
-}
-
-/// The degraded result of a tripped declaration-nesting guard: an empty final class named
-/// `<error>`. That source-impossible synthetic name cannot collide with a declared class, and the
-/// empty body gives the later passes nothing to recurse over.
-fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
-    ClassDecl {
-        name_span: span,
-        primary_ctor_visibility: Visibility::Public,
-        name: "<error>".to_string(),
-        visibility: Visibility::Public,
-        annotations: Vec::new(),
-        annotation_args: Vec::new(),
-        type_parameters: crate::ast::ClassTypeParameters::new(Vec::new(), Vec::new(), Vec::new()),
-        context_params: Vec::new(),
-        lexical_type_parameter_captures: Vec::new(),
-        props: Vec::new(),
-        methods: Vec::new(),
-        companion: None,
-        body_props: Vec::new(),
-        init_order: Vec::new(),
-        is_data: false,
-        is_value: false,
-        value_modifier_span: None,
-        kind: ClassKind::Class,
-        singleton: false,
-        enum_entries: Vec::new(),
-        is_fun_interface: false,
-        modality: crate::ast::Modality::Final,
-        inner_of: None,
-        supertypes: Vec::new(),
-        interface_delegations: Vec::new(),
-        base_class: None,
-        base_class_span: None,
-        base_type_args: Vec::new(),
-        base_args: Vec::new(),
-        primary_ctor_annotations: Some(Vec::new()),
-        primary_ctor_annotation_args: Vec::new(),
-        secondary_ctors: Vec::new(),
-        type_aliases: Vec::new(),
-        span,
-        ctor_close_line: 0,
-        companion_block_members: Vec::new(),
-        decl_line: 0,
-        decl_start_line: 0,
-        decl_end_line: 0,
-    }
 }
 
 /// A non-nullable, non-generic type reference.
@@ -1261,6 +1217,7 @@ impl<'a> Parser<'a> {
                     let value_modifier_span = self.take_value_modifier_span(&mods);
                     let mut d = self.parse_class();
                     d.modality = modality_from_modifiers(&mods);
+                    d.final_modifier = mods.iter().any(|modifier| modifier == "final");
                     d.is_value = is_value;
                     d.value_modifier_span = value_modifier_span;
                     self.register_top_level_classifier(d, &mods, decls_before);
@@ -2139,9 +2096,11 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -2225,6 +2184,7 @@ impl<'a> Parser<'a> {
                     is_property,
                     is_actual: epmods.iter().any(|modifier| modifier == "actual"),
                     is_override: epmods.iter().any(|modifier| modifier == "override"),
+                    is_final: epmods.iter().any(|modifier| modifier == "final"),
                     is_open: !epmods.iter().any(|modifier| modifier == "final")
                         && epmods
                             .iter()
@@ -2526,11 +2486,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes: enum_supertypes,
             interface_delegations: Vec::new(),
@@ -2947,6 +2909,7 @@ impl<'a> Parser<'a> {
 
         if matches!(nested.kind, ClassKind::Class | ClassKind::Interface) {
             nested.modality = modality_from_modifiers(modifiers);
+            nested.final_modifier = modifiers.iter().any(|modifier| modifier == "final");
             // `value class` (and the legacy `inline class` spelling) — like top-level registration,
             // `value`/`inline` is a MODIFIER consumed into `modifiers` before the `class` keyword.
             // Without this a nested value class registers as a PLAIN class and miscompiles: a public
@@ -3044,7 +3007,9 @@ impl<'a> Parser<'a> {
         }
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
+        let primary_ctor_open = self.tok().span.lo;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
+        let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
             self.skip_newlines();
@@ -3098,6 +3063,7 @@ impl<'a> Parser<'a> {
                     is_property,
                     is_actual: cpmods.iter().any(|modifier| modifier == "actual"),
                     is_override: cpmods.iter().any(|modifier| modifier == "override"),
+                    is_final: cpmods.iter().any(|modifier| modifier == "final"),
                     is_open: !cpmods.iter().any(|modifier| modifier == "final")
                         && cpmods
                             .iter()
@@ -3117,7 +3083,10 @@ impl<'a> Parser<'a> {
             // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
             // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
             ctor_close_lo = self.tok().span.lo;
-            self.expect(TokenKind::RParen, "')'");
+            let close = self.tok().span;
+            if self.expect(TokenKind::RParen, "')'") {
+                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
+            }
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
@@ -3225,11 +3194,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -3590,11 +3561,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations: Vec::new(),
@@ -3703,11 +3676,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -3838,11 +3813,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -4575,6 +4552,7 @@ impl<'a> Parser<'a> {
                 // Preserves the prior behavior: this path applied open/abstract but left `is_sealed`
                 // at its default `false` (so a local `sealed` class never reported `is_sealed`).
                 d.modality = modality_of(is_open, is_abstract, false);
+                d.final_modifier = mods.iter().any(|modifier| modifier == "final");
                 let nested: Vec<crate::ast::DeclId> = self.file.decls[nested_start..].to_vec();
                 let classifier = d.name.clone();
                 let stmt = self.finish_stmt(Stmt::LocalClass(d), start);

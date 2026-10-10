@@ -1,14 +1,31 @@
-//! The merged package inventory of a set of KLIB libraries.
+//! The merged declaration inventory of a set of KLIB libraries.
 
 use std::collections::{HashMap, HashSet};
 
-use super::declaration_signatures::{sign_package_function, KlibLibraryError, SignedFunction};
+use super::classifier_signatures::{sign_package_classes, SignedClassifier};
+use super::declaration_signatures::{
+    sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
+};
 use crate::metadata::semantic::KotlinPackage;
-use crate::types::{existing_type_name_child, type_name_child, TypeName, Visibility};
+use crate::types::{existing_type_name_child, type_name, type_name_child, TypeName, Visibility};
 
-/// Signed declarations by package, plus every package namespace a qualifier walk may pass through.
+/// A companion extension (`companion fun C.name()`, `companion val C.name`), joined with the
+/// package that declares it. It is named through the classifier `C` itself, not through a value of
+/// `C`, so it belongs to `C`'s namespace rather than to its package's.
+pub(super) struct CompanionExtension<T> {
+    pub(super) package: TypeName,
+    pub(super) signed: T,
+}
+
+/// Signed declarations by namespace, plus every package namespace a qualifier walk may pass
+/// through.
 pub(super) struct PackageInventory {
     functions: HashMap<TypeName, Vec<SignedFunction>>,
+    properties: HashMap<TypeName, Vec<SignedProperty>>,
+    classifiers: HashMap<TypeName, SignedClassifier>,
+    /// Companion extensions by the classifier they are named through.
+    companion_functions: HashMap<TypeName, Vec<CompanionExtension<SignedFunction>>>,
+    companion_properties: HashMap<TypeName, Vec<CompanionExtension<SignedProperty>>>,
     /// Each declared package and all of its enclosing packages. The root package is not listed:
     /// it is not a child of any namespace.
     namespaces: HashSet<TypeName>,
@@ -20,6 +37,10 @@ impl PackageInventory {
     ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
             functions: HashMap::new(),
+            properties: HashMap::new(),
+            classifiers: HashMap::new(),
+            companion_functions: HashMap::new(),
+            companion_properties: HashMap::new(),
             namespaces: HashSet::new(),
         };
         // A public IdSignature is the serialized declaration identity used to join metadata to
@@ -37,11 +58,68 @@ impl PackageInventory {
                 .filter(|function| function.visibility != Visibility::Private)
                 .map(|function| sign_package_function(&segments, function))
                 .collect::<Result<Vec<_>, _>>()?;
-            inventory.functions.entry(identity).or_default().extend(
-                signed
-                    .into_iter()
-                    .filter(|function| declared_signatures.insert(function.signature.clone())),
-            );
+            for function in signed {
+                if !declared_signatures.insert(function.signature.clone()) {
+                    continue;
+                }
+                if function.declaration.is_static {
+                    // A static top-level declaration is a companion extension; one without a
+                    // classifier receiver names nothing it could be called through.
+                    if let Some(classifier) = companion_receiver(&function.declaration.receiver) {
+                        inventory
+                            .companion_functions
+                            .entry(classifier)
+                            .or_default()
+                            .push(CompanionExtension {
+                                package: identity,
+                                signed: function,
+                            });
+                    }
+                    continue;
+                }
+                inventory
+                    .functions
+                    .entry(identity)
+                    .or_default()
+                    .push(function);
+            }
+            let signed = package
+                .properties
+                .into_iter()
+                // As for functions, a private top-level property has a file-local identity.
+                .filter(|property| property.visibility != Visibility::Private)
+                .map(|property| sign_package_property(&segments, property))
+                .collect::<Result<Vec<_>, _>>()?;
+            for property in signed {
+                if !declared_signatures.insert(property.signature.clone()) {
+                    continue;
+                }
+                if property.declaration.is_static {
+                    // A static top-level declaration is a companion extension; one without a
+                    // classifier receiver names nothing it could be called through.
+                    if let Some(classifier) = companion_receiver(&property.declaration.receiver) {
+                        inventory
+                            .companion_properties
+                            .entry(classifier)
+                            .or_default()
+                            .push(CompanionExtension {
+                                package: identity,
+                                signed: property,
+                            });
+                    }
+                    continue;
+                }
+                inventory
+                    .properties
+                    .entry(identity)
+                    .or_default()
+                    .push(property);
+            }
+            for (classifier, signed) in
+                sign_package_classes(&segments, package.classes, &mut declared_signatures)?
+            {
+                inventory.classifiers.insert(classifier, signed);
+            }
         }
         Ok(inventory)
     }
@@ -70,4 +148,59 @@ impl PackageInventory {
             .flatten()
             .filter(move |function| function.declaration.name == name)
     }
+
+    /// The top-level properties `package` declares under `name`, in library order.
+    pub(super) fn properties<'a>(
+        &'a self,
+        package: TypeName,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a SignedProperty> {
+        self.properties
+            .get(&package)
+            .into_iter()
+            .flatten()
+            .filter(move |property| property.declaration.name == name)
+    }
+
+    /// The published class with exactly this identity.
+    pub(super) fn classifier(&self, identity: TypeName) -> Option<&SignedClassifier> {
+        self.classifiers.get(&identity)
+    }
+
+    /// The companion extension functions named `name` that are named through `classifier`.
+    pub(super) fn companion_functions<'a>(
+        &'a self,
+        classifier: TypeName,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a CompanionExtension<SignedFunction>> {
+        self.companion_functions
+            .get(&classifier)
+            .into_iter()
+            .flatten()
+            .filter(move |extension| extension.signed.declaration.name == name)
+    }
+
+    /// The companion extension properties named `name` that are named through `classifier`.
+    pub(super) fn companion_properties<'a>(
+        &'a self,
+        classifier: TypeName,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a CompanionExtension<SignedProperty>> {
+        self.companion_properties
+            .get(&classifier)
+            .into_iter()
+            .flatten()
+            .filter(move |extension| extension.signed.declaration.name == name)
+    }
+}
+
+/// The classifier a companion extension names through its receiver; signing proved the receiver
+/// a plain class type.
+fn companion_receiver(
+    receiver: &Option<crate::metadata::semantic::KotlinType>,
+) -> Option<TypeName> {
+    receiver
+        .as_ref()
+        .and_then(|receiver| receiver.internal())
+        .map(type_name)
 }

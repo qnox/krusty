@@ -57,9 +57,10 @@ impl SelectedCallFacts {
                 } => !condition && *index == argument as usize,
                 // `returns() implies actual`: the boolean argument itself holds, and the
                 // extractor only takes this shape for an argument spelled `value != null`.
-                Condition::BoolParam(ParamRef::Param(index)) => {
-                    condition && *index == argument as usize
-                }
+                Condition::BoolParam {
+                    param: ParamRef::Param(index),
+                    negated: false,
+                } => condition && *index == argument as usize,
                 Condition::And(left, right) => {
                     proves(left, argument, condition) || proves(right, argument, condition)
                 }

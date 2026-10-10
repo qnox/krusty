@@ -193,6 +193,9 @@ pub(super) struct ParsedSettings {
     /// applies last so they override everything else.
     manual_feature_values: Vec<String>,
     progressive: bool,
+    /// The last `-Werror` and `-nowarn` values, settled together by [`finish_warning_policy`].
+    all_warnings_as_errors: bool,
+    suppress_warnings: bool,
 }
 
 /// The error for an argument krusty refuses ([`crate::kotlinc_arguments::Disposition::Unsupported`]).
@@ -244,6 +247,8 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
         "-language-version" => parsed.language_version = Some(text.to_string()),
         "-api-version" => parsed.api_version = Some(text.to_string()),
         "-progressive" => parsed.progressive = flag,
+        "-Werror" => parsed.all_warnings_as_errors = flag,
+        "-nowarn" => parsed.suppress_warnings = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(
@@ -355,6 +360,17 @@ pub(super) fn apply(opts: &mut Options, parsed: &mut ParsedSettings, occurrence:
         "-version" => opts.print_version = flag,
         "-help" | "-X" => opts.print_help |= flag,
         _ => unreachable!("{name} is listed as applied but has no rule"),
+    }
+}
+
+/// Apply the global warning policy once both of its arguments are known: `-Werror` wins over
+/// `-nowarn` whichever comes first, as in kotlinc.
+pub(super) fn finish_warning_policy(opts: &mut Options, parsed: &ParsedSettings) {
+    if parsed.suppress_warnings {
+        opts.warning_policy.suppress_compiler_warnings();
+    }
+    if parsed.all_warnings_as_errors {
+        opts.warning_policy.promote_warnings();
     }
 }
 

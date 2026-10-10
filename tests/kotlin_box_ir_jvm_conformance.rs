@@ -396,7 +396,7 @@ fn compile_source(
     let stems = [stem.to_string()];
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &options.language_settings.features,
         &mut diags,
     );
@@ -622,7 +622,7 @@ fn compile_blocks_mixed(
     );
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &options.language_settings.features,
         &mut diags,
     );

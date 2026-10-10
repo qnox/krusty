@@ -386,8 +386,6 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                     translate_language_features(&mut unit, features, flag)?;
                 } else {
                     match value.as_str() {
-                        // Diagnostic policy only; record these no-ops for Bazel to print.
-                        "-nowarn" => unit.inert.push(value),
                         "-Xexplicit-api=disable" => unit.inert.push(value),
                         // kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with only a "flag is
                         // not supported by this version of the compiler" warning and emits
@@ -417,7 +415,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             "--warn" => {
                 let value = value_of(index, flag)?;
                 if value == "off" {
-                    unit.inert.push(format!("--warn {value}"));
+                    unit.kotlinc_args.push("-nowarn".to_string());
                 } else {
                     return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
@@ -879,9 +877,10 @@ mod tests {
                 unit.kotlinc_args
             );
         }
-        for inert in ["--warn off"] {
-            assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
-        }
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            crate::cli::WarningDisposition::Disabled
+        );
     }
 
     /// The worker and batch surfaces must not disagree about a semantic option. Until progressive

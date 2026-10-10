@@ -20,6 +20,7 @@ pub enum Disposition {
 /// The arguments `cli` applies, by canonical name.
 pub const APPLIED: &[&str] = &[
     "-P",
+    "-Werror",
     "-X",
     "-XXLanguage",
     "-Xcompiler-plugin",
@@ -56,6 +57,7 @@ pub const APPLIED: &[&str] = &[
     "-no-jdk",
     "-no-reflect",
     "-no-stdlib",
+    "-nowarn",
     "-opt-in",
     "-progressive",
     "-version",
@@ -74,7 +76,6 @@ pub const INERT: &[&str] = &[
 
 /// The kotlinc arguments krusty refuses, by canonical name.
 pub const UNSUPPORTED: &[&str] = &[
-    "-Werror",
     "-Wextra",
     "-XXdebug-level-compiler-checks",
     "-XXdump-model",
@@ -215,7 +216,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-expression",
     "-include-runtime",
     "-kotlin-home",
-    "-nowarn",
     "-script",
     "-script-templates",
     "-verbose",

@@ -1234,7 +1234,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             &inputs,
             request.result_count,
             inferred_count,
-            platform,
+            krusty::frontend::PlatformProvider::jvm(platform),
             &language.features,
         );
         let (analyses, implementation_relations) = if request.diagnostics_only {
@@ -1419,7 +1419,7 @@ fn render_dump_request(
         &inputs,
         result_count,
         inferred_count,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &language.features,
     );
     let text = render_analyzed_dump(

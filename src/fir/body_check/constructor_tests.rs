@@ -532,7 +532,7 @@ fn cross_file_generic_primary_constructor_binds_the_stable_declaration() {
             SourceInput::kotlin("fun make(): Box<String> = Box(\"answer\")\n")
                 .with_file_stem("Make"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -652,7 +652,7 @@ fn reparsed_cross_file_constructor_retains_nullable_top_type_argument() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
