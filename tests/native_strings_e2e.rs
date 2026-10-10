@@ -211,3 +211,63 @@ fn a_for_loop_over_text_reads_each_character_at_its_index() {
     assert_eq!(expect_box_run_with_stdlib(source, "ForOverText"), "OK");
     expect_native_box(source, "ForOverText", "OK");
 }
+
+#[test]
+fn an_ascii_string_is_indexed_directly_and_still_bounds_checked() {
+    // A `String` counts its UTF-16 length once and, when every byte is ASCII, reads `s[i]` as byte
+    // `i`. The count must not outlive the text it describes: a view of non-ASCII storage is counted
+    // on its own, a builder (whose text changes) is counted again after each append, and the direct
+    // path checks the index exactly as the walk does.
+    let source = "fun box(): String {\n\
+         \x20   val ascii = \"hello\"\n\
+         \x20   if (ascii.length != 5) return \"fail length: \" + ascii.length\n\
+         \x20   if (ascii[0] != 'h' || ascii[4] != 'o') return \"fail ends\"\n\
+         \x20   try {\n\
+         \x20       ascii[5]\n\
+         \x20       return \"fail past the end\"\n\
+         \x20   } catch (e: IndexOutOfBoundsException) {}\n\
+         \x20   val mixed = \"\\u00E9abc\"\n\
+         \x20   val tail = mixed.substring(1)\n\
+         \x20   if (tail.length != 3 || tail[0] != 'a' || tail[2] != 'c') return \"fail tail\"\n\
+         \x20   if (mixed.length != 4 || mixed[0] != '\\u00E9' || mixed[3] != 'c') return \"fail mixed\"\n\
+         \x20   val builder = StringBuilder(\"ab\")\n\
+         \x20   if (builder.length != 2) return \"fail builder\"\n\
+         \x20   builder.append('\\u00E9')\n\
+         \x20   if (builder.length != 3 || builder[2] != '\\u00E9') return \"fail grown builder\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    assert_eq!(expect_box_run_with_stdlib(source, "AsciiIndexing"), "OK");
+    expect_native_box(source, "AsciiIndexing", "OK");
+}
+
+#[test]
+fn indexing_non_ascii_text_resumes_where_the_last_read_stopped() {
+    // A non-ASCII string remembers the code point its last `s[i]` found, so an ascending scan walks
+    // the text once. Every other order must read the same units: a step back, a repeat, both halves
+    // of a surrogate pair, and an index past the end once the walk has moved on.
+    let source = "fun box(): String {\n\
+         \x20   val text = \"a\\u00E9\\uD83D\\uDC4Db\\u20ACc\"\n\
+         \x20   if (text.length != 7) return \"fail length: \" + text.length\n\
+         \x20   var forward = \"\"\n\
+         \x20   for (i in text.indices) forward += text[i].code.toString() + \",\"\n\
+         \x20   if (forward != \"97,233,55357,56397,98,8364,99,\") return \"fail forward: \" + forward\n\
+         \x20   var backward = \"\"\n\
+         \x20   for (i in text.indices.reversed()) backward += text[i].code.toString() + \",\"\n\
+         \x20   if (backward != \"99,8364,98,56397,55357,233,97,\") return \"fail backward: \" + backward\n\
+         \x20   if (text[3] != '\\uDC4D' || text[3] != '\\uDC4D' || text[2] != '\\uD83D') return \"fail pair\"\n\
+         \x20   if (text[6] != 'c' || text[0] != 'a' || text[5] != '\\u20AC') return \"fail jumps\"\n\
+         \x20   try {\n\
+         \x20       text[7]\n\
+         \x20       return \"fail past the end\"\n\
+         \x20   } catch (e: IndexOutOfBoundsException) {}\n\
+         \x20   try {\n\
+         \x20       text[-1]\n\
+         \x20       return \"fail negative\"\n\
+         \x20   } catch (e: IndexOutOfBoundsException) {}\n\
+         \x20   val tail = text.substring(2)\n\
+         \x20   if (tail[1] != '\\uDC4D' || tail[0] != '\\uD83D' || tail[4] != 'c') return \"fail tail\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    assert_eq!(expect_box_run_with_stdlib(source, "ResumedIndexing"), "OK");
+    expect_native_box(source, "ResumedIndexing", "OK");
+}

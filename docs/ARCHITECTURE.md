@@ -65,6 +65,12 @@ sources, module name, processor inputs, per-module JDK selection, friend paths, 
 because silently ignoring any of those can cache a short or semantically different artifact. An
 environment that cannot honor a recorded input must refuse the unit before computing a cache key.
 
+`crates/krusty-toolchain` reads Kotlin Toolchain projects (`project.yaml` and `module.yaml`, the
+format JetBrains' `kotlin` command builds) and is meant to build them with krusty, the way krusty
+stands in for `kotlinc`. It reports the toolchain's own diagnostics, checked against output recorded
+from the real `kotlin` command, and refuses by name whatever it does not implement. See
+[KOTLIN_TOOLCHAIN.md](KOTLIN_TOOLCHAIN.md).
+
 Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
 Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("krusty")`, sources under
 `src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and

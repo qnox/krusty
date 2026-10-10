@@ -100,6 +100,10 @@ pub(crate) struct PassContext<'a> {
     pub value_classes: &'a dyn ValueClasses,
     /// The slots `this` and the parameters take, which slot compaction leaves where they are.
     pub parameter_slots: u16,
+    /// This body has passed through the coroutine transformer. Its conservative safe-call receiver
+    /// temporary may cross the selector's debug-line label even though an ordinary kotlinc
+    /// temporary never does.
+    pub post_coroutine: bool,
 }
 
 /// What the passes did to the method.
@@ -155,7 +159,11 @@ impl Run {
                 redundant_boxing::eliminate(method, context.owner, context.value_classes).ok()?
             }
             Pass::TemporaryVariables => {
-                match temporaries::eliminate(method, &self.constant_condition_labels) {
+                match temporaries::eliminate(
+                    method,
+                    &self.constant_condition_labels,
+                    context.post_coroutine,
+                ) {
                     Some(done) => {
                         self.pinned = done.pinned;
                         true
@@ -256,6 +264,7 @@ mod tests {
             owner: "T",
             value_classes,
             parameter_slots: 0,
+            post_coroutine: false,
         }
     }
 

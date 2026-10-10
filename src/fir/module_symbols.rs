@@ -225,7 +225,14 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.access = declaration_header.visibility.into();
         projected.source_file = Some(anchor.source.raw());
         projected.stable_declaration = Some(owner);
-        projected.is_nested = internal.nested_owner().is_some();
+        projected.is_nested = declaration_header.owner.is_some_and(|owner| {
+            self.index.declaration_header(owner).is_some_and(|owner| {
+                matches!(
+                    owner.kind,
+                    DeclarationKind::Classifier | DeclarationKind::EnumEntry
+                )
+            })
+        });
         projected.outer_instance = flags
             .has(DeclarationFlags::INNER)
             .then(|| {
@@ -578,6 +585,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             reflection_name: Some(name.to_owned()),
             compiler_intrinsic: None,
             semantic_role: None,
+            overridden_declarations: Box::new([]),
             collection_barrier: None,
             inline_body_plan: None,
             plugin_expression: None,

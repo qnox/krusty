@@ -3,7 +3,26 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use super::{ClassWriter, InnerClassResolver, InnerClassSpec};
+use super::ClassWriter;
+
+/// One candidate `InnerClasses` entry: the nested class, its enclosing class (`None` for an anonymous
+/// local), its simple name (`None` when anonymous), and the entry's access flags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InnerClassSpec {
+    pub inner: String,
+    pub outer: Option<String>,
+    pub name: Option<String>,
+    pub access: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InnerClassDetails {
+    pub outer: Option<String>,
+    pub name: Option<String>,
+    pub access: u16,
+}
+
+pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 /// kotlinc's `fqNameWhenAvailable` of each class declared in executable code, by internal name.
 pub(crate) type DeclarationPaths = Rc<HashMap<String, String>>;
@@ -19,6 +38,82 @@ pub(super) struct LocalDeclarations {
     /// Specialized suspend lambdas regenerated into a caller. The caller references them without
     /// an `InnerClasses` row; the class itself and classes it encloses still list the row.
     call_sites: Rc<std::collections::HashSet<String>>,
+    /// The table orders the file's writers computed, shared by all of them.
+    orders: Rc<TableOrders>,
+}
+
+/// Table orders already computed for one file's writers.
+///
+/// Every writer of a file registers the file's whole nest, and most of them order exactly the same
+/// candidates. The order is a function of the candidates and the file's declaration paths and
+/// declaring classes, plus the pool position of classes whose qualified names tie. An order computed
+/// without a tie is therefore reused by any writer whose candidates are equal, instead of every
+/// writer sorting the whole nest again.
+#[derive(Default)]
+pub(crate) struct TableOrders {
+    known: std::cell::RefCell<Vec<TableOrder>>,
+}
+
+struct TableOrder {
+    candidates: Vec<InnerClassSpec>,
+    paths: DeclarationPaths,
+    declaring: Rc<HashMap<String, String>>,
+    /// The candidate index each table row takes, in table order.
+    order: Vec<usize>,
+}
+
+/// The orders kept: the registration order a writer starts from and the table order it ends with
+/// (which a writer orders again when it is written), with room for a writer's own discoveries.
+const KEPT_TABLE_ORDERS: usize = 4;
+
+impl TableOrders {
+    fn find(&self, candidates: &[InnerClassSpec], local: &LocalDeclarations) -> Option<Vec<usize>> {
+        self.known
+            .borrow()
+            .iter()
+            .find(|known| {
+                Rc::ptr_eq(&known.paths, &local.paths)
+                    && Rc::ptr_eq(&known.declaring, &local.declaring)
+                    && known.candidates == candidates
+            })
+            .map(|known| known.order.clone())
+    }
+
+    fn remember(
+        &self,
+        candidates: Vec<InnerClassSpec>,
+        local: &LocalDeclarations,
+        order: Vec<usize>,
+    ) {
+        let mut known = self.known.borrow_mut();
+        if known.len() == KEPT_TABLE_ORDERS {
+            known.remove(0);
+        }
+        known.push(TableOrder {
+            candidates,
+            paths: local.paths.clone(),
+            declaring: local.declaring.clone(),
+            order,
+        });
+    }
+}
+
+impl PartialEq for TableOrders {
+    /// One file's shared orders are the same orders; their contents are a cache.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for TableOrders {}
+
+impl std::fmt::Debug for TableOrders {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TableOrders")
+            .field("known", &self.known.borrow().len())
+            .finish()
+    }
 }
 
 /// How a class's `InnerClasses` table is built.
@@ -54,6 +149,23 @@ impl ClassWriter {
         self.inner_class_candidates.push(spec);
     }
 
+    /// Register several candidates, in order, exactly as [`Self::add_inner_class`] would one at a
+    /// time. A file's whole nest is registered on each of its class writers, so the duplicate check
+    /// goes through one set instead of a scan of the candidates per entry.
+    pub(crate) fn add_inner_classes(&mut self, specs: &[InnerClassSpec]) {
+        let mut known: HashSet<&str> = self
+            .inner_class_candidates
+            .iter()
+            .map(|spec| spec.inner.as_str())
+            .collect();
+        let added: Vec<InnerClassSpec> = specs
+            .iter()
+            .filter(|spec| known.insert(spec.inner.as_str()))
+            .cloned()
+            .collect();
+        self.inner_class_candidates.extend(added);
+    }
+
     pub fn set_inner_class_resolver(&mut self, resolver: Option<InnerClassResolver>) {
         self.inner_class_resolver = resolver;
     }
@@ -80,6 +192,13 @@ impl ClassWriter {
     ) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.call_sites = call_sites;
+        }
+    }
+
+    /// The table orders shared by the writers of one file.
+    pub(crate) fn set_table_orders(&mut self, orders: Rc<TableOrders>) {
+        if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
+            own.orders = orders;
         }
     }
 
@@ -173,28 +292,38 @@ impl ClassWriter {
     /// present, and a kept row's outer is what makes an enclosing row present. kotlinc adds every
     /// enclosing class of a referenced nested class to the table, so `A$B$C` keeps `A$B` even
     /// when that row sorts first and nothing else names `A$B`.
+    ///
+    /// Presence only ever adds a row, so the kept rows are the least fixpoint however it is reached:
+    /// each row is first judged against the pool once, and a row's seeds then revisit only the row
+    /// they name.
     fn retained_inner_rows(&self) -> Vec<InnerClassSpec> {
         let specs = &self.inner_class_candidates;
-        let mut retained = vec![false; specs.len()];
-        let mut seeded: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        loop {
-            let mut grew = false;
-            for (index, spec) in specs.iter().enumerate() {
-                if retained[index] {
+        let by_inner: HashMap<&str, usize> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (spec.inner.as_str(), index))
+            .collect();
+        let mut retained: Vec<bool> = specs
+            .iter()
+            .map(|spec| self.retains_inner_class_with_presence(spec, self.names_class(&spec.inner)))
+            .collect();
+        let mut pending: Vec<usize> = (0..specs.len()).filter(|&row| retained[row]).collect();
+        let mut seeded: HashSet<&str> = HashSet::new();
+        while let Some(row) = pending.pop() {
+            let spec = &specs[row];
+            for seed in std::iter::once(spec.inner.as_str()).chain(spec.outer.as_deref()) {
+                if !seeded.insert(seed) {
                     continue;
                 }
-                let present = self.names_class(&spec.inner) || seeded.contains(spec.inner.as_str());
-                if self.retains_inner_class_with_presence(spec, present) {
-                    retained[index] = true;
-                    grew = true;
-                    seeded.insert(&spec.inner);
-                    if let Some(outer) = &spec.outer {
-                        seeded.insert(outer);
-                    }
+                let Some(&seeded_row) = by_inner.get(seed) else {
+                    continue;
+                };
+                if !retained[seeded_row]
+                    && self.retains_inner_class_with_presence(&specs[seeded_row], true)
+                {
+                    retained[seeded_row] = true;
+                    pending.push(seeded_row);
                 }
-            }
-            if !grew {
-                break;
             }
         }
         specs
@@ -231,30 +360,48 @@ impl ClassWriter {
             annotation_refs.sort();
             referenced.extend(annotation_refs);
             referenced.extend(self.signature_classes());
-            for inner in referenced {
-                if self
-                    .inner_class_candidates
-                    .iter()
-                    .any(|candidate| candidate.inner == inner)
-                {
+            let mut known: HashSet<&str> = self
+                .inner_class_candidates
+                .iter()
+                .map(|candidate| candidate.inner.as_str())
+                .collect();
+            let mut discovered = Vec::new();
+            for inner in &referenced {
+                if known.contains(inner.as_str()) {
                     continue;
                 }
-                let Some(details) = resolve(&inner) else {
+                let Some(details) = resolve(inner) else {
                     continue;
                 };
-                self.add_inner_class(InnerClassSpec {
-                    inner,
+                known.insert(inner);
+                discovered.push(InnerClassSpec {
+                    inner: inner.clone(),
                     outer: details.outer,
                     name: details.name,
                     access: details.access,
                 });
             }
+            self.inner_class_candidates.extend(discovered);
         }
         // kotlinc writes the complete table stably sorted by qualified name (`C.Companion`,
         // `C.NestObj`, `C.Nested`, case-sensitive), classpath-discovered entries included, the
         // classes with an equal name in the order they were met.
         if let InnerClassTable::Referenced(local) = &self.inner_class_table {
+            if let Some(order) = local.orders.find(&self.inner_class_candidates, local) {
+                let mut rows = std::mem::take(&mut self.inner_class_candidates)
+                    .into_iter()
+                    .map(Some)
+                    .collect::<Vec<_>>();
+                self.inner_class_candidates = order
+                    .into_iter()
+                    .map(|row| rows[row].take().expect("each row is ordered once"))
+                    .collect();
+                return;
+            }
+            let candidates = self.inner_class_candidates.clone();
             let keys = qualified_names(&self.inner_class_candidates, &local.paths);
+            let mut distinct_keys = HashSet::with_capacity(keys.len());
+            let tied = !keys.iter().all(|key| distinct_keys.insert(key.as_str()));
             // Pool order follows the methods, the order kotlinc's codegen meets their classes.
             let met: HashMap<String, usize> = self
                 .cp
@@ -275,6 +422,27 @@ impl ClassWriter {
                 .into_iter()
                 .map(|(_, _, spec)| spec)
                 .collect();
+            if !tied {
+                let index: HashMap<&str, usize> = candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(row, spec)| (spec.inner.as_str(), row))
+                    .collect();
+                let order = self
+                    .inner_class_candidates
+                    .iter()
+                    .map(|spec| index[spec.inner.as_str()])
+                    .collect::<Vec<_>>();
+                // A table order is reusable only when each row names a class of its own.
+                if index.len() == order.len() {
+                    let identity = (0..order.len()).collect();
+                    drop(index);
+                    local.orders.remember(candidates, local, order);
+                    local
+                        .orders
+                        .remember(self.inner_class_candidates.clone(), local, identity);
+                }
+            }
         }
     }
 }
@@ -374,7 +542,8 @@ fn qualified_names(rows: &[InnerClassSpec], paths: &HashMap<String, String>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{declaration_order, HashMap, InnerClassSpec};
+    use super::{declaration_order, HashMap, InnerClassSpec, Rc, TableOrders};
+    use crate::jvm::classfile::ClassWriter;
 
     fn row(key: &str, inner: &str) -> (String, usize, InnerClassSpec) {
         (
@@ -418,5 +587,84 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ordered, ["Root", "Child"]);
+    }
+
+    fn nested(inner: &str, outer: &str, name: &str) -> InnerClassSpec {
+        InnerClassSpec {
+            inner: inner.to_string(),
+            outer: Some(outer.to_string()),
+            name: Some(name.to_string()),
+            access: 0x0019,
+        }
+    }
+
+    /// What one file shares between its writers, as `InnerClasses::register` hands it over.
+    #[derive(Default)]
+    struct FileNest {
+        paths: super::DeclarationPaths,
+        declaring: Rc<HashMap<String, String>>,
+        orders: Rc<TableOrders>,
+    }
+
+    fn table_order(nest: &[InnerClassSpec], file: Option<&FileNest>) -> Vec<String> {
+        let mut writer = ClassWriter::new("app/Outer", "java/lang/Object");
+        writer.add_inner_classes(nest);
+        if let Some(file) = file {
+            writer.set_declaration_paths(file.paths.clone());
+            writer.set_declaring_classes(file.declaring.clone());
+            writer.set_table_orders(file.orders.clone());
+        }
+        writer.resolve_inner_classes();
+        // A writer orders its table again when it is written.
+        writer.resolve_inner_classes();
+        writer
+            .inner_class_candidates
+            .iter()
+            .map(|spec| spec.inner.clone())
+            .collect()
+    }
+
+    #[test]
+    fn writers_of_one_file_share_the_table_order_they_compute() {
+        let nest = [
+            nested("app/Outer$Zeta", "app/Outer", "Zeta"),
+            nested("app/Outer$Alpha", "app/Outer", "Alpha"),
+            nested("app/Outer$Alpha$Inner", "app/Outer$Alpha", "Inner"),
+        ];
+        let alone = table_order(&nest, None);
+        assert_eq!(
+            alone,
+            ["app/Outer$Alpha", "app/Outer$Alpha$Inner", "app/Outer$Zeta"]
+        );
+        let file = FileNest::default();
+        assert_eq!(table_order(&nest, Some(&file)), alone);
+        assert_eq!(file.orders.known.borrow().len(), 2);
+        // The next writer of the file reuses both orders and keeps no new one.
+        assert_eq!(table_order(&nest, Some(&file)), alone);
+        assert_eq!(file.orders.known.borrow().len(), 2);
+        // A writer of another file, with paths of its own, does not take this file's order.
+        let other = FileNest {
+            orders: file.orders.clone(),
+            ..FileNest::default()
+        };
+        assert_eq!(table_order(&nest, Some(&other)), alone);
+        assert_eq!(file.orders.known.borrow().len(), 4);
+    }
+
+    #[test]
+    fn a_table_whose_qualified_names_tie_is_not_shared() {
+        // `app/B$C` nested in `app/B` and a top-level `app/B.C` row both read `app.B.C`.
+        let nest = [
+            nested("app/B$C", "app/B", "C"),
+            InnerClassSpec {
+                inner: "app/B.C".to_string(),
+                outer: None,
+                name: None,
+                access: 0x0019,
+            },
+        ];
+        let file = FileNest::default();
+        assert_eq!(table_order(&nest, Some(&file)), table_order(&nest, None));
+        assert!(file.orders.known.borrow().is_empty());
     }
 }

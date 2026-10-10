@@ -1077,6 +1077,16 @@ fn semantic_function_shape(
     })
 }
 
+/// The role a written context parameter declares. Metadata records an anonymous context parameter
+/// (`context(_: T)`) under the reserved name kotlinc gives it, `_` or `<unused var>`, never as a
+/// name a source declaration could bind.
+fn context_parameter_kind(name: &str) -> crate::types::ContextParameterKind {
+    match name {
+        "_" | "<unused var>" => crate::types::ContextParameterKind::Anonymous,
+        _ => crate::types::ContextParameterKind::Named,
+    }
+}
+
 fn semantic_function(
     body: &[u8],
     tables: &SemanticTables<'_>,
@@ -1190,7 +1200,14 @@ fn semantic_function(
     let contexts = if context_params.is_empty() {
         context_receivers
             .into_iter()
-            .map(|ty| (ty, String::new(), false))
+            .map(|ty| {
+                (
+                    ty,
+                    String::new(),
+                    false,
+                    crate::types::ContextParameterKind::LegacyReceiver,
+                )
+            })
             .collect::<Vec<_>>()
     } else if context_receivers.is_empty()
         || context_receivers
@@ -1199,7 +1216,10 @@ fn semantic_function(
     {
         context_params
             .into_iter()
-            .map(|parameter| (parameter.ty, parameter.name, parameter.has_default))
+            .map(|parameter| {
+                let kind = context_parameter_kind(&parameter.name);
+                (parameter.ty, parameter.name, parameter.has_default, kind)
+            })
             .collect()
     } else {
         return Err(semantic_error(
@@ -1208,9 +1228,13 @@ fn semantic_function(
     };
     let context_types = contexts
         .iter()
-        .map(|(ty, _, _)| ty.clone())
+        .map(|(ty, _, _, _)| ty.clone())
         .collect::<Vec<_>>();
-    for (ty, name, has_default) in contexts {
+    let context_kinds = contexts
+        .iter()
+        .map(|(_, _, _, kind)| *kind)
+        .collect::<Vec<_>>();
+    for (ty, name, has_default, _) in contexts {
         top_params.push(ty);
         param_names.push(name);
         param_defaults.push(has_default);
@@ -1289,6 +1313,7 @@ fn semantic_function(
         is_expect: function.is_expect,
         is_static: function.is_static,
         context_count: context_types.len(),
+        context_kinds,
         annotations,
     });
     Ok((member, top))
@@ -1308,12 +1333,13 @@ fn semantic_property(
         tables.qnames,
         "property declaration",
     )?;
-    // `.kotlin_builtins` writes a property's annotations to `BuiltInsProtoBuf.propertyAnnotation`
-    // (field 150), the same extension number a function uses. The other annotation fields above are
-    // accessor and KLIB extensions; this one is the property declaration's own annotations.
+    // The property declaration's own annotations: `.kotlin_builtins` writes them to
+    // `BuiltInsProtoBuf.propertyAnnotation` (field 150), the same extension number a function uses,
+    // and a KLIB to `KlibMetadataProtoBuf.propertyAnnotation` (170). The other annotation fields
+    // above are accessor, backing-field and delegate annotations.
     let annotations = annotation_identities(
         body,
-        &[150],
+        &[150, 170],
         tables.strings,
         tables.qnames,
         "property declaration",
@@ -1957,6 +1983,7 @@ pub(super) fn parse(
         if result.classes.insert(name.clone(), class).is_some() {
             return Err(semantic_error(format!("duplicate class identity {name}")));
         }
+        result.class_order.push(name);
     }
     Ok(result)
 }

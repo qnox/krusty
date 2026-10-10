@@ -448,6 +448,7 @@ impl BodyLowering<'_> {
             lhs: index_read,
             rhs: one,
         });
+        self.ir.logical_types.insert(next_index, Ty::Int);
         let update = self.ir.add_expr(IrExpr::SetValue {
             var: index_slot,
             value: next_index,
@@ -672,6 +673,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                overridden_declarations,
                 suspend,
                 can_inline,
                 inline_plan,
@@ -687,6 +689,7 @@ impl BodyLowering<'_> {
                     declared_result: *declared_result,
                     overridden_results,
                     semantic_role: *semantic_role,
+                    overridden_declarations,
                     suspend: *suspend,
                     can_inline: *can_inline,
                     inline_plan: inline_plan.as_deref(),

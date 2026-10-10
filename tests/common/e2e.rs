@@ -561,6 +561,13 @@ pub fn reference_error_blocks(sources: &[(&str, &str)], extra_args: &[String]) -
     error_blocks(&stderr, true)
 }
 
+/// Complete error messages already rendered by one compiler invocation. Each diagnostic starts
+/// with `file:line:column: first line`; subsequent message lines are prefixed with `| `. Kotlinc's
+/// source excerpt and caret are omitted.
+pub fn rendered_error_blocks(output: &str, excerpted: bool) -> Vec<String> {
+    error_blocks(output, excerpted)
+}
+
 /// Krusty's error blocks with the standard language/API settings from the reference invocation.
 pub fn krusty_error_blocks_with_args(
     sources: &[(&str, &str)],

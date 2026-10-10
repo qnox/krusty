@@ -185,31 +185,6 @@ fn package_from_common(package: common::KotlinPackage) -> BuiltinPackage {
                 constant: property.constant,
             })
             .collect(),
-        functions: package
-            .functions
-            .into_iter()
-            .map(|function| super::BuiltinFunction {
-                name: function.name,
-                receiver: function.receiver.map(ty_from_common),
-                params: function.params.into_iter().map(ty_from_common).collect(),
-                ret: ty_from_common(function.ret),
-                formals: function
-                    .formals
-                    .into_iter()
-                    .map(type_param_from_common)
-                    .collect(),
-                param_names: function.param_names,
-                param_defaults: function.param_defaults,
-                vararg: function.vararg,
-                visibility: function.visibility,
-                is_inline: function.is_inline,
-                has_reified_type_params: function.has_reified_type_params,
-                is_suspend: function.is_suspend,
-                is_operator: function.is_operator,
-                is_infix: function.is_infix,
-                context_count: function.context_count,
-                annotations: function.annotations,
-            })
-            .collect(),
+        functions: package.functions,
     }
 }

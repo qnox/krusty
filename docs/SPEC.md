@@ -8419,6 +8419,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A visibility `@Suppress` is a lexical policy over signatures too.** A resolved `kotlin.Suppress`
+  application naming `INVISIBLE_REFERENCE` or `INVISIBLE_MEMBER` holds for the annotated
+  declaration and everything written inside it. Each declaration publishes the policy in force at
+  it (its file's, its lexically enclosing declarations', and its own applications), and a
+  signature scope reads only that declaration-owned fact: every resolver a signature scope builds
+  installs it as part of its access context, so classifier access in a supertype or member type,
+  constructor and function candidate visibility, and member access sites all consume one policy,
+  as the body checker consumes its policy stack. Signature solving is the one diagnostic authority
+  for a supertype reference, including one it resolves while publishing a classifier header; the
+  file-scope fallback no longer rechecks a superclass reference outside its declaration's policy.
+  Like kotlinc, an inaccessible superclass is reported twice: at the supertype reference and at
+  the constructor call's callee name (`: lib.Base(1)` reports at `lib` and at `Base`); the callee
+  report is checked under the class's own lexical policy. The policy relaxes visibility alone: a
+  final superclass is still rejected with kotlinc's FINAL_SUPERTYPE (`this type is final, so it
+  cannot be extended.`, at the superclass reference), and kotlinc's exposed-supertype and
+  exposed-signature checks are independent of it. An annotation whose resolved identity is not
+  `kotlin.Suppress` opens no policy. Tests:
+  `tests/internal_classpath_access_e2e.rs::invisible_reference_suppression_matches_kotlinc_exactly`
+  (`SupertypeSuppressed.kt`, `NestedSuppressed.kt`, `OuterSuppressed.kt`,
+  `MemberSignatureSuppressed.kt`, and the custom `Suppress` case),
+  `::signature_visibility_without_suppression_matches_kotlinc_exactly`,
+  `::invisible_reference_suppression_keeps_the_final_supertype_error`.
 - **A public-API `inline` function cannot call a non-public-API function.** Public and protected
   are public API, and so is `@PublishedApi internal`: the annotation's resolved classifier
   identity (`kotlin/PublishedApi`) is the declaration fact, on both the inline function and the
@@ -9780,6 +9802,64 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_started_threads_stack_has_a_guard_below_it`), each run on x86_64, aarch64 and riscv64 (the
   architectures other than the host's built with clang and lld and run under QEMU's user-mode
   emulators, which CI installs and must use), and `tests/native_concurrency_e2e.rs`.
+- **Native: a static program's POSIX comes from the kernel, not a C library.** `platform.posix`
+  is how Kotlin/Native code reaches the system, and a static program links no libc, so the runtime
+  serves the POSIX functions a server needs straight from system calls, as Go's `syscall` package
+  does: descriptors, `stat`, directories and a minimal unbuffered-write `stdio`
+  (`krusty_posix_io.c`); sockets and epoll (`krusty_posix_net.c`); the environment, `sysconf`,
+  signals, clocks, sleeping and `exit` (`krusty_posix_process.c`); `pthread_create`/`join`/`detach`
+  on the runtime's own `clone`, futex mutexes and condition variables (`krusty_posix_thread.c`); and
+  `<string.h>` (`krusty_posix_string.c`). Each has the C library's name and signature, returns -1 and
+  sets `errno` on failure, and takes glibc's struct layouts for the target: `stat` and `dirent` are
+  the kernel's on every supported target and pass through, as does `epoll_event` (packed on x86_64
+  only), while `sigaction` is translated from glibc's 1024-bit `sigset_t` to the kernel's 64-bit one,
+  with a restorer on x86_64 and aarch64. `errno` is per thread through `__errno_location`: the layer
+  owns the thread pointer (`%fs`, `tpidr_el0`, `tp`), which points at a block that is also the
+  `pthread_t`; the runtime reaches it only through two weak hooks, `kt_os_thread_begin`/`_end`, so a
+  program that links a real C library (which owns the thread pointer) leaves these translation units
+  out and nothing else changes. Where C's own rules are stricter than the kernel's, the layer keeps
+  C's: `fcntl` reads its third argument as nothing, an `int` or a pointer as the command says (a
+  command it does not know is EINVAL), since a variadic argument that was never passed cannot be
+  read; `raise` signals the calling thread (`tgkill`), not the process, whose handler could run on
+  another thread; `abort` unblocks SIGABRT, so a blocked one still ends the process on the signal
+  rather than with an exit status; and `memmove` picks its direction on the addresses as integers,
+  since `<` between pointers into two objects is undefined. Not yet: `printf`, `malloc`, buffered
+  writes, `fork`/`exec`. Tests: `tests/native_runtime_e2e.rs`
+  (`posix_files_answer_with_glibcs_layouts_and_errno`,
+  `posix_process_calls_cover_the_environment_signals_and_clocks`,
+  `posix_sockets_and_epoll_serve_a_loopback_connection`,
+  `posix_threads_keep_their_own_errno_and_share_mutexes`,
+  `posix_memmove_copies_between_objects_and_within_one_either_way`,
+  `posix_abort_ends_the_process_on_sigabrt_even_when_it_is_blocked`,
+  `posix_numbers_are_each_targets_own`), whose drivers compile against each target's own glibc
+  headers and link with no C library. Every number the layer copied by hand (open flags, `fcntl`
+  commands, errno values, `sysconf` names, signal flags, system call numbers) is checked by
+  `_Static_assert` against those headers (`posix_abi.c`), so a value copied from another
+  architecture fails that target's build; aarch64's `O_DIRECTORY`, for one, is `040000`, not the
+  asm-generic `0200000`. The drivers run on x86_64, aarch64 and riscv64, the last two under QEMU,
+  except that the two that install signal actions are only built for riscv64: QEMU 8.2's riscv64
+  `rt_sigaction` takes a structure one word longer than the riscv64 kernel's, which has no
+  `sa_restorer`.
+- **Native: the process boundary — `main(args)` and standard input.** The program's entry is the
+  `main` the frontend selected (`IrFile::entry_point`): the backend realizes that record and reads
+  its form only to decide whether to build and pass the argument array, so `main(args:
+  Array<String>?)`, `main(vararg args: String)` and a file that also declares `main()` or other
+  `main` overloads all start where kotlinc's frontend says. `main` receives the arguments the
+  program was started with, without its own name (`argv[0]`). Bytes from outside are decoded as
+  UTF-8 with one U+FFFD per maximal ill-formed subpart, which is what Kotlin/Native and the JVM
+  launcher under a UTF-8 locale both answer for arguments, except that the launcher reads a
+  surrogate encoded as bytes (`ED A0 80`) as one U+FFFD where Kotlin/Native and krusty read three;
+  the runtime's strings stay well-formed.
+  `readLine()` and `readlnOrNull()` answer the next line of standard input without its `\n` or
+  `\r\n` (a lone `\r` is the line's own text), keep an unterminated last line, and answer `null`
+  at the end of input; `readln()` raises `kotlin.io.ReadAfterEOFException("EOF has already been
+  reached")` there. Line splitting is the JVM's and the common stdlib's: Kotlin/Native's own
+  `readLine` is one `read(2)` of up to 4095 bytes with trailing CR/LF trimmed, a line only on a
+  terminal. Ill-formed input is decoded as Kotlin/Native decodes it, where the JVM's `readLine`
+  raises `MalformedInputException`. `_start` hands the kernel's initial stack to `kt_process_start`,
+  which records `argc`, `argv` and the environment block. Tests: `tests/native_process_e2e.rs`,
+  each case compared exactly (status, stdout, stderr) with a recorded Kotlin/Native run, a live JVM
+  run, or both; `native::intrinsics::tests::console_input_is_matched_by_its_whole_declaration`.
 - **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
   what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
   slot and returns, and the caller's check of that slot is the propagation. So every runtime entry
@@ -10030,6 +10110,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `entrySet()`/`keySet()` realize the renamed builtin properties `entries`/`keys`, is still
   rejected. Tests: `tests/java_abstract_override_e2e.rs` (runs, a byte-identical class to kotlinc's
   for the plain override, JDK skeleton collections, and the shapes that stay rejected).
+- **A sealed class is abstract, so it may leave abstract members unimplemented.** kotlinc treats
+  `sealed` as abstract: the sealed class may declare abstract members, and a subclass discharges
+  both those and any abstract members inherited from a superclass compiled in another unit.
+  krusty required the class modality to be exactly `abstract`, so
+  a sealed class that extended such a superclass and left a member open was rejected as "not
+  abstract and does not implement all abstract members". A sealed class now shares the abstract
+  exemption; a concrete or `open` class still has to implement every abstract member itself.
+  Tests: `tests/classpath_abstract_subclass_e2e.rs` (repository-owned classpath superclass,
+  source-declared members, concrete/open negatives, and kotlinc differentials).
 - **A caller's type parameter in an extension receiver is a fixed type, not a wildcard.** Only the
   callee's own formals in its declared receiver bind at the call. In
   `fun <T> lowest(xs: Iterable<T>) where T : Comparable<T> = xs.minOrNull()`, the caller's `T` is a
@@ -10584,6 +10673,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   box's physical type on the unboxed result, so the return unboxed the carrier again and the class
   failed verification. Tests: `tests/value_class_delegated_result_e2e.rs`. Corpus:
   `inlineClasses/boxReturnValueOnOverride/kt31585` and `kt31585Generic`.
+- **A `$default` stub takes a value class over a null-capable carrier as its box, wherever the
+  class is declared.** A defaulted non-null parameter of a value class whose carrier can hold
+  `null` (`Port(val raw: String?)`) is the box in the stub's descriptor and the carrier in the real
+  method's, and the stub unboxes it with `unbox-impl()` returning the carrier. Both sides of that
+  boundary read the class's facts, the same ones for a class this file, a sibling file or a
+  dependency declares: the `unbox-impl`/`box-impl` descriptors name the carrier (they named `Object`
+  for a class declared outside the file, which failed verification), and a call into a sibling
+  file's stub boxes a supplied argument and names the box in the descriptor (it named the carrier,
+  a `NoSuchMethodError`). Tests: `tests/sibling_value_class_data_class_e2e.rs` (cross-checked
+  against the reference compiler).
 - **A value class's constructors build the value in a temporary.** The static `constructor-impl`
   that runs a value class's `init` block first stores its parameter in an unnamed temporary typed
   as the value class; `this` and the class's property in the block read it, a `this` passed as a
@@ -11800,8 +11899,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array form is chosen first); two functions of one form are conflicting overloads the same pass
   reports, and no entry is recorded. Common lowering only maps the recorded callable to its function
   (`IrFile::entry_point`); an unmapped one is an internal error. The entry is a Kotlin rule; a
-  harness's `box(): String` is not, and a backend receives it as a driver-selected identity instead
-  of finding it by name. Tests: `src/fir/entry_point_tests.rs`, `src/fir_lower/entry_point_tests.rs`.
+  harness's `box(): String` is not, but it is selected by the same pass and recorded the same way
+  (`ResolvedModuleIndex::source_box_entry`, lowered to `IrFile::box_entry`): a top-level,
+  parameterless, non-generic `box` without receivers or context parameters whose result the
+  checker's subtyping places under `String?` (the corpus declares both `String` and `String?`;
+  `Nothing` and `Nothing?` do not count), and only when its unit declares one. A member, local or
+  differently
+  shaped `box` is an ordinary function. A backend never finds either entry by spelling; `backend::Entry::selected`
+  reads the recorded identity. Tests: `src/fir/entry_point_tests.rs`,
+  `src/fir_lower/entry_point_tests.rs`.
+- **A runnable program declares exactly one entry, checked before anything is written.** A backend
+  that links one program (Wasm) reports `krusty: the program declares no <entry> to start in` when
+  no unit recorded the driver's entry, and `krusty: the program declares <entry> in both <A> and
+  <B>` when two did, where `<entry>` is `` `fun main()` `` or `` `fun box(): String` ``. Both are
+  errors raised in `Backend::check_module`, which the driver calls after the last file and before
+  `finalize`, so a rejected program emits no artifact at all. Tests: `wasm::codegen::tests`.
+- **A backend reads each value's checked type; it chooses only the carrier.** Common lowering
+  records the checker's type of every lowered FIR expression in `IrFile::logical_types`, and the
+  producer of each value node it synthesizes records that node's type too (the `when` under a
+  subject block, a short-circuit `&&`/`||`, a `Unit` value after an effect, an increment's sum, an
+  assertion under a coercion). A node that names its type in itself needs no record: a constant, a
+  type operation's target, an intrinsic call's declared result, and a comparison or equality.
+  `IrFile::checked_type` is that one contract; it never derives a parent's type from its children.
+  The Wasm backend declines a value without a checked type by name rather than inferring one.
+  Tests: the `wasm-js`/`wasm-wasi` box lanes.
 - **Native targets: every prebuilt runtime object is its target's, and the runtime is closed.**
   `build.rs` compiles each runtime source once per supported target and, after each compile, reads
   the object's ELF identity: it must be 64-bit (`EI_CLASS` 2), little-endian (`EI_DATA` 1), a
@@ -12352,6 +12473,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, object member or parameter is "'R|pkg/NAME|' is not a valid invocation kind." (object
   members as `Q|Owner|.R|/Owner.NAME|`, parameters as `R|<local>/name|`). Verified against kotlinc
   2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)
+- **An implicit extension call's not-null contract narrows that receiver.**
+  `returns(true) implies (this@f != null)` on `fun T?.f()` applies when the call is written
+  without a receiver (`f() && this.member`). The proof is the extension receiver the call
+  selected, so the right operand of `&&` and a later explicit `this` see the non-null type. An
+  explicit receiver (`x.f()`) still narrows `x`. Among competing implicit receivers the proof
+  belongs only to the receiver overload selection bound (the nearest applicable one); another
+  receiver of the same nullable shape stays nullable, read bare or as `this@label`.
+  (`tests/contract_user_e2e.rs::implicit_extension_receiver_not_null_contract_narrows_the_conjunction`,
+  `implicit_receiver_contract_narrows_only_the_selected_receiver`,
+  `implicit_receiver_contract_selected_receiver_runs`.)
+- **A labeled `this` reads its receiver's flow type.** `this@f` denotes the same receiver-tower
+  coordinate as the bare `this` it labels, so `if (this@f != null)`, `if (this != null)` and
+  `if (this@f is C)` narrow a later `this@f` read, including an outer receiver read inside a
+  receiver lambda. Verified against kotlinc 2.4.20.
+  (`tests/this_smartcast_e2e.rs::a_labeled_this_reads_the_narrowed_receiver`.)
 - **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
   once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
   receives as a parameter is read again for the setter, and so is every `this` receiver, including
@@ -16167,3 +16303,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the call's line after the locals end; the load and its `pop` are removed together. A computed
   value still ends the locals first and returns to the inline body's line with a `nop` after the
   value (`jvm/ir_emit/block_scope.rs`). Test: `tests/also_apply_result_line_e2e.rs`.
+
+- **The Wasm backend keeps Kotlin's text and arithmetic in the module.** `src/wasm/` compiles one
+  program to one WasmGC module for either kotlinc Wasm target; `wasm-js` and `wasm-wasi` differ only
+  in the host function that writes bytes (`src/wasm/host.rs`). A `String` is a struct over a mutable
+  `i16` array, so length and indexing are UTF-16 units as on the JVM; it is written out as UTF-8,
+  with a lone surrogate written as the three bytes its unit encodes to, as the Native runtime does.
+  `Int`/`Long` division and remainder follow Kotlin, not wasm's trap: `MIN_VALUE / -1` is
+  `MIN_VALUE` and `MIN_VALUE % -1` is `0`; division by zero still traps, which ends the program
+  without a `box()` answer until exceptions land. A value narrowed to `Byte`, `Short` or `Char`
+  wraps as on the JVM. Every file's top-level property initializer runs before the entry, in file
+  order, as on Native. Anything else the generator has not been taught declines the whole
+  compilation with `krusty: the wasm backend does not support <construct> yet` and writes nothing.
+  Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
+  (`tests/kotlin_box_wasm_conformance.rs`).

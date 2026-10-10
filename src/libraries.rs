@@ -19,6 +19,7 @@ mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
@@ -29,8 +30,8 @@ pub use annotation_application::{
 };
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, NonvirtualCallRealization, OverriddenCallKind,
-    OverriddenCallRealization,
+    ExternalPropertyRealization, KlibDeclarationSignature, NonvirtualCallRealization,
+    OverriddenCallKind, OverriddenCallRealization,
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
@@ -58,6 +59,10 @@ pub use inline_body::{
     InlineBodyRecovery, InlineBodySource, InlineBodyValue, InlineCollectionAppend,
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
+};
+pub(crate) use metadata_normalization::{
+    function_generic_sig, function_parameter_identities, only_input_type_formals, package_function,
+    reified_type_parameter_ordinals, FunctionParameterIdentities,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -250,6 +255,8 @@ pub struct LibraryMember {
     /// Exact language-level role retained from the selected declaration. Providers assign this at
     /// their boundary; checked FIR carries it without re-identifying the member from its spelling.
     pub semantic_role: Option<SemanticCallRole>,
+    /// See [`LibraryCallable::overridden_declarations`].
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// Exact singleton instance that dispatches this selected object member. This is a semantic
     /// call-shape fact: checked FIR materializes the value as its dispatch receiver, while lowering
     /// only consumes that receiver and the already-selected callable identity.
@@ -718,6 +725,7 @@ impl LibraryMember {
             external_default_provider: None,
             external_property_identity: None,
             semantic_role: None,
+            overridden_declarations: Box::new([]),
             singleton_dispatch: None,
             name,
             owner: None,
@@ -887,6 +895,10 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// Exact identities of the declarations this callable overrides, as the core member hierarchy
+    /// proved them while normalizing the selected family; empty for a declaration that overrides
+    /// nothing or was not reached through a hierarchy walk.
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// JVM collection barrier role of this exact decoded builtin declaration.
     pub collection_barrier: Option<CollectionBarrierOutcome>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
@@ -1937,6 +1949,7 @@ impl FunctionInfo {
         member.external_identity = self.callable.external_identity;
         member.external_property_identity = self.callable.external_property_identity;
         member.semantic_role = self.callable.semantic_role;
+        member.overridden_declarations = self.callable.overridden_declarations.clone();
         member.singleton_dispatch = self.callable.singleton_dispatch.clone();
         member.stable_declaration = self.stable_declaration;
         member.source_member = self.source_member;

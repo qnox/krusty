@@ -34,6 +34,9 @@ const COMMON_FLAGS: &[&str] = &[
     "-fno-stack-protector",
     "-fno-asynchronous-unwind-tables",
     "-fno-unwind-tables",
+    // One section per function, so the linker can tell which runtime functions a program reaches
+    // (the runtime is linked whole, and a definition being present is not a use).
+    "-ffunction-sections",
     "-O2",
     "-c",
 ];
@@ -48,8 +51,18 @@ const SOURCES: &[&str] = &[
     "krusty_gc.c",
     "krusty_threads.c",
     "krusty_start.c",
+    "krusty_posix_thread.c",
+    "krusty_posix_io.c",
+    "krusty_posix_net.c",
+    "krusty_posix_process.c",
+    "krusty_posix_string.c",
 ];
-const HEADERS: &[&str] = &["krusty_sys.h", "krusty_rt.h", "krusty_internal.h"];
+const HEADERS: &[&str] = &[
+    "krusty_sys.h",
+    "krusty_rt.h",
+    "krusty_internal.h",
+    "krusty_posix.h",
+];
 
 fn main() {
     if let Err(error) = prebuild_runtime() {

@@ -174,6 +174,7 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: member.member.semantic_role,
+                        overridden_declarations: member.member.overridden_declarations.clone(),
                         suspend: member.member.suspend(),
                         can_inline: member.member.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
@@ -240,6 +241,7 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: callable.semantic_role,
+                        overridden_declarations: callable.overridden_declarations.clone(),
                         suspend: callable.suspend,
                         can_inline: callable.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
@@ -325,6 +327,7 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: None,
+                        overridden_declarations: Box::new([]),
                         suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(

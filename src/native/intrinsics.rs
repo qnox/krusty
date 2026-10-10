@@ -91,6 +91,8 @@ pub(super) struct FunctionSignature<'a> {
     pub(super) receiver: Option<Ty>,
     pub(super) params: &'a [Ty],
     pub(super) ret: Ty,
+    /// Exact declarations this one overrides, as the member hierarchy froze them.
+    pub(super) overridden: &'a [crate::types::OverriddenDeclaration],
 }
 
 impl<'a> FunctionSignature<'a> {
@@ -101,11 +103,20 @@ impl<'a> FunctionSignature<'a> {
             receiver: None,
             params,
             ret,
+            overridden: &[],
         }
     }
 
     pub(super) fn with_receiver(mut self, receiver: Option<Ty>) -> Self {
         self.receiver = receiver;
+        self
+    }
+
+    pub(super) fn with_overridden(
+        mut self,
+        overridden: &'a [crate::types::OverriddenDeclaration],
+    ) -> Self {
+        self.overridden = overridden;
         self
     }
 }
@@ -434,6 +445,25 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             ("abs", [Ty::Long], Ty::Long) => Some("kt_abs_long".to_string()),
             ("abs", [Ty::Float], Ty::Float) => Some("kt_abs_float".to_string()),
             ("abs", [Ty::Double], Ty::Double) => Some("kt_abs_double".to_string()),
+            _ => None,
+        };
+    }
+    if signature.owner.package_matches("kotlin/io") {
+        // The console's input half. `readLine` and `readlnOrNull` are one function, answering
+        // `null` at the end of input; `readln` raises `ReadAfterEOFException` there instead.
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
+            ("readLine" | "readlnOrNull", [], Ty::Nullable(line))
+                if classifier_is(*line, "kotlin/String") =>
+            {
+                Some("kt_read_line".to_string())
+            }
+            ("readln", [], line @ Ty::Obj(..)) if classifier_is(line, "kotlin/String") => {
+                Some("kt_read_line_or_throw".to_string())
+            }
             _ => None,
         };
     }
@@ -1308,6 +1338,7 @@ pub(super) fn iteration_runtime_member(
         receiver: _,
         params,
         ret,
+        overridden: _,
     } = signature;
     if !params.is_empty() {
         return None;
@@ -1981,17 +2012,9 @@ pub(super) fn runtime_companion_member(
 /// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
 /// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
 /// which is what `4.toString()` means anyway.
-pub(super) fn runtime_member(
-    signature: FunctionSignature<'_>,
-    semantic_role: Option<crate::types::SemanticCallRole>,
-) -> Option<&'static str> {
-    if is_any_runtime_member(signature, semantic_role) {
-        return match signature.name {
-            "toString" => Some("kt_to_string"),
-            "hashCode" => Some("kt_hash_code"),
-            "equals" => Some("kt_equals"),
-            _ => None,
-        };
+pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'static str> {
+    if let Some(symbol) = any_runtime_symbol(signature) {
+        return Some(symbol);
     }
     // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
     // package's file facade; everything it takes and answers is a reference, which is this path.
@@ -2032,33 +2055,66 @@ pub(super) fn runtime_member(
     None
 }
 
-/// Whether the exact selected declaration is one of `Any`'s three runtime-dispatched members.
+/// The runtime function realizing the selected declaration when it is one of `Any`'s three
+/// runtime-dispatched members: `kotlin/Any.toString(): String`, `kotlin/Any.hashCode(): Int` or
+/// `kotlin/Any.equals(Any?): Boolean` itself, or a declaration that overrides one of them.
 ///
-/// An override may have a physical owner of its own, so the checked hierarchy fact is retained for
-/// that case. It only admits the operation when the complete semantic signature agrees; neither a
-/// role by itself nor a coincidental callable spelling is a native implementation key. A direct
-/// `Any` declaration can be recognized by its exact owner and signature even when an older provider
-/// omitted the hierarchy fact.
-pub(super) fn is_any_runtime_member(
-    signature: FunctionSignature<'_>,
-    semantic_role: Option<crate::types::SemanticCallRole>,
-) -> bool {
-    use crate::types::SemanticCallRole;
-
-    let nullable_any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
-    let exact = match (signature.name, signature.params, signature.ret) {
-        ("toString", [], result) if is_string_type(&result) => {
-            Some(SemanticCallRole::KotlinAnyToString)
-        }
-        ("hashCode", [], Ty::Int) => Some(SemanticCallRole::KotlinAnyHashCode),
-        ("equals", [parameter], Ty::Boolean) if *parameter == nullable_any => {
-            Some(SemanticCallRole::KotlinAnyEquals)
-        }
-        _ => None,
-    };
-    exact.is_some_and(|exact| {
-        semantic_role == Some(exact) || signature.owner.classifier_matches("kotlin/Any")
+/// Both are exact declaration identities: the selected declaration's own owner and signature, and
+/// the overridden declarations the member hierarchy froze for it. A member that merely has the same
+/// name and shape on another owner, with no recorded override of `Any`'s, is not one of them, and
+/// nothing at the call site takes part, so an inlined copy of the call asks the same question.
+fn any_runtime_symbol(signature: FunctionSignature<'_>) -> Option<&'static str> {
+    let own = signature.owner.classifier_matches("kotlin/Any").then(|| {
+        any_declaration_symbol(
+            signature.name,
+            signature.receiver,
+            signature.params,
+            signature.ret,
+        )
+    });
+    own.flatten().or_else(|| {
+        signature.overridden.iter().find_map(|overridden| {
+            classifier_matches(overridden.owner, "kotlin/Any")
+                .then(|| {
+                    any_declaration_symbol(
+                        &overridden.name,
+                        overridden.receiver,
+                        &overridden.params,
+                        overridden.ret,
+                    )
+                })
+                .flatten()
+        })
     })
+}
+
+/// The runtime function for one of `Any`'s own declarations, by its complete declared signature.
+fn any_declaration_symbol(
+    name: &str,
+    receiver: Option<Ty>,
+    params: &[Ty],
+    ret: Ty,
+) -> Option<&'static str> {
+    if receiver.is_some() {
+        return None;
+    }
+    let nullable_any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    match (name, params, ret) {
+        ("toString", [], result)
+            if !matches!(result, Ty::Nullable(_)) && is_string_type(&result) =>
+        {
+            Some("kt_to_string")
+        }
+        ("hashCode", [], Ty::Int) => Some("kt_hash_code"),
+        ("equals", [parameter], Ty::Boolean) if *parameter == nullable_any => Some("kt_equals"),
+        _ => None,
+    }
+}
+
+/// Whether the exact selected declaration is one of `Any`'s three runtime-dispatched members; see
+/// [`any_runtime_symbol`].
+pub(super) fn is_any_runtime_member(signature: FunctionSignature<'_>) -> bool {
+    any_runtime_symbol(signature).is_some()
 }
 
 #[cfg(test)]
@@ -2352,15 +2408,12 @@ mod tests {
     #[test]
     fn string_plus_has_no_name_based_runtime_fallback() {
         assert_eq!(
-            runtime_member(
-                function(
-                    member("java/lang/String"),
-                    "plus",
-                    &[Ty::String],
-                    Ty::String,
-                ),
-                None,
-            ),
+            runtime_member(function(
+                member("java/lang/String"),
+                "plus",
+                &[Ty::String],
+                Ty::String,
+            ),),
             None,
             "String.plus is admitted only by its CompilerIntrinsic identity"
         );
@@ -2400,74 +2453,131 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn any_runtime_members_require_complete_declaration_signatures() {
-        use crate::types::SemanticCallRole;
+    fn any_declaration(
+        name: &str,
+        receiver: Option<Ty>,
+        params: &[Ty],
+        ret: Ty,
+    ) -> crate::types::OverriddenDeclaration {
+        crate::types::OverriddenDeclaration {
+            owner: crate::types::type_name("kotlin/Any"),
+            name: name.into(),
+            receiver,
+            params: params.into(),
+            ret,
+        }
+    }
 
+    #[test]
+    fn any_runtime_members_are_keyed_by_exact_declaration_identities() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let to_string = [any_declaration("toString", None, &[], Ty::String)];
+        let hash_code = [any_declaration("hashCode", None, &[], Ty::Int)];
+        let equals = [any_declaration("equals", None, &[any], Ty::Boolean)];
+
+        // `Any`'s own declarations, by owner and complete signature.
         assert_eq!(
-            runtime_member(
-                function(member("kotlin/String"), "plus", &[any], Ty::String),
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            runtime_member(
-                function(member("kotlin/Int"), "toString", &[], Ty::String),
-                Some(SemanticCallRole::KotlinAnyToString),
-            ),
+            runtime_member(function(member("kotlin/Any"), "toString", &[], Ty::String)),
             Some("kt_to_string")
         );
         assert_eq!(
-            runtime_member(
-                function(
-                    member("kotlin/Int"),
-                    "physicalNameDoesNotMatter",
-                    &[],
-                    Ty::String,
-                ),
-                Some(SemanticCallRole::KotlinAnyToString),
-            ),
-            None,
-            "the checked override fact does not replace the declaration signature"
+            runtime_member(function(member("kotlin/Any"), "hashCode", &[], Ty::Int)),
+            Some("kt_hash_code")
         );
         assert_eq!(
-            runtime_member(
-                function(member("kotlin/Any"), "hashCode", &[], Ty::String),
-                Some(SemanticCallRole::KotlinAnyHashCode),
-            ),
-            None,
-            "the result is part of the declaration signature"
-        );
-        assert_eq!(
-            runtime_member(
-                function(member("kotlin/Any"), "hashCode", &[], Ty::Int),
-                None,
-            ),
-            Some("kt_hash_code"),
-            "the exact Any declaration does not need a duplicate backend role"
-        );
-        assert_eq!(
-            runtime_member(
-                function(member("kotlin/Any"), "equals", &[any], Ty::Boolean),
-                None,
-            ),
+            runtime_member(function(
+                member("kotlin/Any"),
+                "equals",
+                &[any],
+                Ty::Boolean
+            )),
             Some("kt_equals")
         );
         assert_eq!(
-            runtime_member(
-                function(member("sample/Unrelated"), "equals", &[any], Ty::Boolean,),
-                None,
-            ),
+            runtime_member(function(member("kotlin/Any"), "hashCode", &[], Ty::String)),
             None,
-            "an unrelated declaration with the same shape is not Any.equals"
+            "the result is part of Any's declaration signature"
+        );
+
+        // Overrides, by the overridden declaration the hierarchy recorded.
+        for builder in ["kotlin/text/StringBuilder", "java/lang/StringBuilder"] {
+            assert_eq!(
+                runtime_member(
+                    function(member(builder), "toString", &[], Ty::String)
+                        .with_overridden(&to_string)
+                ),
+                Some("kt_to_string"),
+                "the builder's toString overrides Any.toString"
+            );
+        }
+        assert_eq!(
+            runtime_member(
+                function(member("kotlin/Pair"), "hashCode", &[], Ty::Int)
+                    .with_overridden(&hash_code)
+            ),
+            Some("kt_hash_code")
         );
         assert_eq!(
             runtime_member(
-                function(member("kotlin/String"), "repeat", &[Ty::Int], Ty::String,),
-                None,
+                function(member("sample/Declared"), "equals", &[any], Ty::Boolean)
+                    .with_overridden(&equals)
             ),
+            Some("kt_equals")
+        );
+
+        // The same name and shape without a recorded override of Any's declaration.
+        assert_eq!(
+            runtime_member(function(
+                member("sample/Declared"),
+                "equals",
+                &[any],
+                Ty::Boolean
+            )),
+            None,
+            "a matching shape is no override evidence"
+        );
+        assert_eq!(
+            runtime_member(function(member("kotlin/Int"), "toString", &[], Ty::String)),
+            None,
+            "a member with no recorded override is not Any.toString"
+        );
+        let unrelated = [crate::types::OverriddenDeclaration {
+            owner: crate::types::type_name("sample/Base"),
+            ..any_declaration("toString", None, &[], Ty::String)
+        }];
+        assert_eq!(
+            runtime_member(
+                function(member("sample/Declared"), "toString", &[], Ty::String)
+                    .with_overridden(&unrelated)
+            ),
+            None,
+            "overriding another classifier's same-shaped declaration is not overriding Any's"
+        );
+        assert_eq!(
+            runtime_member(
+                function(facade("sample/DeclaredKt"), "toString", &[], Ty::String)
+                    .with_overridden(&[])
+            ),
+            None,
+            "a package function overrides nothing"
+        );
+        let extension = [any_declaration("toString", Some(Ty::Int), &[], Ty::String)];
+        assert_eq!(
+            runtime_member(
+                function(member("sample/Declared"), "toString", &[], Ty::String)
+                    .with_receiver(Some(Ty::Int))
+                    .with_overridden(&extension)
+            ),
+            None,
+            "a member extension is not Any.toString"
+        );
+        assert_eq!(
+            runtime_member(function(
+                member("kotlin/String"),
+                "repeat",
+                &[Ty::Int],
+                Ty::String
+            )),
             None,
             "an unimplemented member must decline"
         );
@@ -2500,14 +2610,38 @@ mod tests {
             "a missing runtime function must produce a diagnostic, never a call to a symbol that \
              does not exist"
         );
+    }
+
+    #[test]
+    fn console_input_is_matched_by_its_whole_declaration() {
+        let read =
+            |name, ret| runtime_function(function(facade("kotlin/io/ConsoleKt"), name, &[], ret));
+        assert_eq!(
+            read("readLine", Ty::nullable(Ty::String)).as_deref(),
+            Some("kt_read_line")
+        );
+        assert_eq!(
+            read("readlnOrNull", Ty::nullable(Ty::String)).as_deref(),
+            Some("kt_read_line")
+        );
+        assert_eq!(
+            read("readln", Ty::String).as_deref(),
+            Some("kt_read_line_or_throw")
+        );
+        assert_eq!(
+            read("readln", Ty::nullable(Ty::String)),
+            None,
+            "`readln` never answers null, so a nullable shape is not it"
+        );
         assert_eq!(
             runtime_function(function(
                 facade("kotlin/io/ConsoleKt"),
                 "readLine",
-                &[],
+                &[Ty::Int],
                 Ty::nullable(Ty::String),
             )),
-            None
+            None,
+            "a parameter makes it a different declaration"
         );
     }
 
@@ -2567,27 +2701,21 @@ mod tests {
     #[test]
     fn a_facade_append_is_vararg_and_only_the_builders_own_append_is_answered() {
         assert_eq!(
-            runtime_member(
-                function(
-                    facade("kotlin/text/StringsKt"),
-                    "append",
-                    &[Ty::array(Ty::String)],
-                    Ty::obj("kotlin/text/StringBuilder"),
-                ),
-                None,
-            ),
+            runtime_member(function(
+                facade("kotlin/text/StringsKt"),
+                "append",
+                &[Ty::array(Ty::String)],
+                Ty::obj("kotlin/text/StringBuilder"),
+            ),),
             None
         );
         assert_eq!(
-            runtime_member(
-                function(
-                    member("kotlin/text/StringBuilder"),
-                    "append",
-                    &[Ty::String],
-                    Ty::obj("kotlin/text/StringBuilder"),
-                ),
-                None,
-            ),
+            runtime_member(function(
+                member("kotlin/text/StringBuilder"),
+                "append",
+                &[Ty::String],
+                Ty::obj("kotlin/text/StringBuilder"),
+            ),),
             Some("kt_string_builder_append")
         );
     }
