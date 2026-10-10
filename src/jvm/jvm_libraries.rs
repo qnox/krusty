@@ -6,6 +6,7 @@
 mod builtin_classifier_shapes;
 mod builtin_property_realization;
 mod builtins_customizer;
+mod callable_availability;
 mod catalog_presence;
 mod classifier_facts;
 #[cfg(test)]
@@ -973,35 +974,6 @@ impl JvmLibraries {
             api_withheld: Default::default(),
             building_types: Default::default(),
         })
-    }
-
-    /// Select which `@SinceKotlin` declarations this compilation may call.
-    pub fn with_api_version(mut self, api_version: LanguageVersion) -> Self {
-        self.api_version = api_version;
-        self
-    }
-
-    /// `@Deprecated(HIDDEN)` and a `@SinceKotlin` newer than [`Self::api_version`] are both absent
-    /// from overload resolution. Kotlinc reports the missing callable as an unresolved reference,
-    /// and omits the receiver type when the withheld declaration was the applicable one.
-    fn hides_callable(
-        &self,
-        deprecated_hidden: bool,
-        since_kotlin: Option<LanguageVersion>,
-    ) -> bool {
-        deprecated_hidden || self.since_kotlin_withheld(since_kotlin)
-    }
-
-    fn since_kotlin_withheld(&self, since_kotlin: Option<LanguageVersion>) -> bool {
-        since_kotlin.is_some_and(|since| since > self.api_version)
-    }
-
-    fn note_api_withheld(&self, owner: TypeName, name: &str) {
-        self.api_withheld
-            .borrow_mut()
-            .entry(owner)
-            .or_default()
-            .insert(name.to_string());
     }
 
     /// The type Kotlin metadata declares for a property named `name` on `internal`, or on its
@@ -2374,31 +2346,13 @@ impl JvmLibraries {
             // The members half of the same decision (see the supertype block below): for a mapped
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
-            let mut hidden_deprecated_callables = meta_fns
-                .iter()
-                .filter(|declaration| {
-                    declaration.deprecated_hidden()
-                        && !self.since_kotlin_withheld(declaration.since_kotlin())
-                })
-                .map(|declaration| declaration.kotlin_name.clone())
-                .collect::<std::collections::HashSet<_>>();
-            hidden_deprecated_callables.extend(
-                metadata::class_properties(&ci)
-                    .iter()
-                    .filter(|property| property.deprecated_hidden)
-                    .map(|property| property.name.clone()),
+            let hidden_deprecated_callables = self.hidden_deprecated_callables(
+                internal_name,
+                &ci,
+                &meta_fns,
+                &members,
+                kotlin_scope_is_authoritative,
             );
-            if kotlin_scope_is_authoritative {
-                hidden_deprecated_callables.extend(
-                    members
-                        .iter()
-                        .filter(|member| {
-                            mapped_builtin_member_status(internal_name, ci.this_class, member)
-                                == MappedBuiltinMemberStatus::DeprecatedHidden
-                        })
-                        .map(|member| member.name.clone()),
-                );
-            }
             if kotlin_scope_is_authoritative {
                 // Retain only physical members admitted to this mapped Kotlin declaration by the
                 // provider-owned, versioned JVM-builtins policy.
