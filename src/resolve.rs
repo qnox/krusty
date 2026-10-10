@@ -68,6 +68,10 @@ mod callable_reference_lhs;
 mod callable_reference_prefilter;
 mod callable_reference_selection;
 mod candidate_display;
+use candidate_display::{
+    ambiguous_classifier_message, classifier_access_display_from_shape,
+    inaccessible_classifier_message,
+};
 mod capture_analysis;
 mod capture_field_order;
 mod capture_storage;
@@ -150,6 +154,7 @@ pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
+mod plugin_status;
 mod postponed_applicability;
 mod postponed_constraints;
 mod postponed_diagnostics;
@@ -287,6 +292,7 @@ pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
+use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -2807,33 +2813,6 @@ enum PropertyReadSelection {
     /// The selected extension, with the actual receiver when it mentions a postponed call's type
     /// variables: reading the property adds that receiver constraint to the call.
     Extension(Box<ResolvedPropertyAccess>, Option<Ty>),
-}
-
-struct PropertyReadMemberSelection {
-    name: String,
-    ty: Ty,
-    owner: TypeName,
-    interface: bool,
-    getter: Option<crate::symbol_resolver::ResolvedMember>,
-    accessor: Option<Box<crate::libraries::LibraryCallable>>,
-    /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
-    producer: crate::libraries::PropertyProducer,
-    /// Provider-published constant-value expression fact for this selected read.
-    metadata_constant_read: bool,
-    context_access: Option<Box<ResolvedPropertyAccess>>,
-    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-    compile_time_constant: Option<crate::libraries::LibraryConst>,
-    source_member: Option<crate::libraries::SourceMember>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    access: Option<(Visibility, TypeName)>,
-    /// Whether a second read through the same receiver returns the same value.
-    stable_read: bool,
-}
-
-enum PropertyReadAmbiguity {
-    MemberExtension,
-    Extension,
-    MissingContext,
 }
 
 type ModuleSymbolCache = HashMap<
@@ -11785,6 +11764,9 @@ impl<'a> Checker<'a> {
                         })
                 });
             if let Some(selected) = declaration {
+                if !selected.competing_accessors.is_empty() {
+                    return Err(self.competing_accessor_ambiguity(name, &selected));
+                }
                 let owner = selected.owner;
                 let visibility = selected.visibility;
                 let mut selected_property = selected.property;
@@ -12665,6 +12647,12 @@ impl<'a> Checker<'a> {
                         diagnostic_span,
                         format!("No context argument for '{name}' found."),
                     );
+                }
+                return Ty::Error;
+            }
+            Err(PropertyReadAmbiguity::Accessors(candidates)) => {
+                if report_diagnostics {
+                    self.report_accessor_ambiguity(diagnostic_span, candidates);
                 }
                 return Ty::Error;
             }
@@ -22640,6 +22628,9 @@ impl<'a> Checker<'a> {
                         missing.display(&names)
                     ),
                 ),
+                PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                    self.report_accessor_ambiguity(target_span, candidates)
+                }
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
                 | PropertyWriteSelection::Receiverless(_)
@@ -22917,6 +22908,9 @@ impl<'a> Checker<'a> {
                             target_span,
                             format!("No context argument for '{name}' found."),
                         ),
+                        PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                            self.report_accessor_ambiguity(target_span, candidates)
+                        }
                         PropertyWriteSelection::None => self
                             .diags
                             .error(span, format!("unresolved reference '{name}'.")),
@@ -23133,6 +23127,13 @@ impl<'a> Checker<'a> {
                     })
             })
             .flatten();
+        if let Some(candidates) = selected_member_property
+            .as_ref()
+            .and_then(|selected| self.competing_accessor_candidates(&name, selected))
+        {
+            self.report_accessor_ambiguity(self.assignment_target_span(s), candidates);
+            return;
+        }
         let accessor_member_property = selected_member_property.as_ref().and_then(|selected| {
             let property = selected.property.as_ref()?;
             Some((selected.owner, selected.interface, property.clone()))
@@ -24021,73 +24022,11 @@ impl<'a> Checker<'a> {
     }
 }
 
-fn inaccessible_classifier_message(
-    name: &str,
-    access: crate::symbol_source::ClassifierAccess,
-) -> String {
-    use crate::symbol_source::ClassifierAccess;
-
-    let kind = match access {
-        ClassifierAccess::Private => "private",
-        ClassifierAccess::Protected => "protected",
-        ClassifierAccess::Internal => "internal",
-        ClassifierAccess::PackagePrivate => "package-private",
-        ClassifierAccess::Public => "public",
-    };
-    format!("cannot access '{name}': it is {kind}")
-}
-
-/// kotlinc's `OVERLOAD_RESOLUTION_AMBIGUITY` for a classifier name: each equally visible
-/// classifier rendered as its declaration header, in candidate order.
-fn ambiguous_classifier_message<Shape: std::ops::Deref<Target = crate::libraries::LibraryType>>(
-    candidates: &[TypeName],
-    shape: impl Fn(TypeName) -> Option<Shape>,
-) -> String {
-    let mut message = "overload resolution ambiguity between candidates:".to_string();
-    for &candidate in candidates {
-        if let Some(shape) = shape(candidate) {
-            message.push('\n');
-            message.push_str(&classifier_access_display_from_shape(candidate, &shape));
-        }
-    }
-    message
-}
-
-fn classifier_access_display_from_shape(
-    internal: TypeName,
-    shape: &crate::libraries::LibraryType,
-) -> String {
-    let kind = match shape.kind {
-        crate::libraries::TypeKind::Class => "class",
-        crate::libraries::TypeKind::Interface => "interface",
-        crate::libraries::TypeKind::Annotation => "annotation class",
-        crate::libraries::TypeKind::Enum => "enum class",
-        crate::libraries::TypeKind::Object => "object",
-    };
-    let supertypes = shape
-        .supertypes
-        .iter_ids()
-        .map(|supertype| {
-            let ty = Ty::obj_name(supertype);
-            if ty.is_erased_top() {
-                "Any".to_string()
-            } else {
-                ty.source_name()
-            }
-        })
-        .collect::<Vec<_>>();
-    let supertypes = if supertypes.is_empty() {
-        String::new()
-    } else {
-        format!(" : {}", supertypes.join(", "))
-    };
-    format!("{} {}{supertypes}", kind, internal.nested_segment_ref())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::LangFeatures;
+    use crate::frontend::{PlatformLibraries, PlatformProvider};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features};
 
@@ -24109,6 +24048,10 @@ mod tests {
     ) -> crate::jvm::jvm_libraries::JvmLibraries {
         crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization")
+    }
+
+    fn jvm_platform(libraries: impl Into<PlatformLibraries>) -> PlatformProvider {
+        PlatformProvider::jvm(libraries)
     }
 
     #[test]
@@ -24968,7 +24911,8 @@ val result = object { fun value(): String = captured }
         platform: Box<dyn crate::libraries::SemanticPlatform>,
     ) -> (File, TypeInfo, DiagSink) {
         let mut diagnostics = DiagSink::new();
-        let (file, _, info) = crate::frontend::analyze_source(src, platform, &mut diagnostics);
+        let (file, _, info) =
+            crate::frontend::analyze_source(src, jvm_platform(platform), &mut diagnostics);
         let info = info.expect("production frontend must retain checked platform analysis");
         (file, info, diagnostics)
     }
@@ -24988,7 +24932,7 @@ val result = object { fun value(): String = captured }
             .collect::<Vec<_>>();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             prepare_symbols,
             &mut diagnostics,
@@ -25028,7 +24972,7 @@ val result = object { fun value(): String = captured }
         ];
         let mut analysis = crate::frontend::analyze_source_set(
             &sources,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &mut diagnostics,
         );
         let info = analysis.types.get_mut(3).and_then(Option::take);
@@ -28097,7 +28041,7 @@ fun box(): String {
              }";
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[crate::source::SourceInput::kotlin(source).with_file_stem("Diamond")],
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &crate::features::LangFeatures::new(),
             &mut diagnostics,
         );
@@ -28402,7 +28346,7 @@ fun box(): String {
         let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
         let (file, symbols, info) = crate::frontend::analyze_source(
             source,
-            Box::new(initialized_jvm_libraries(cp)),
+            jvm_platform(Box::new(initialized_jvm_libraries(cp))),
             &mut diagnostics,
         );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
@@ -29732,8 +29676,11 @@ fun box(): String {
                  if ((PREFIX as String?) == \"ignored\") return \"early\"\n\
                  return consume(PREFIX)\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert_no_diags(&diagnostics);
     }
 
@@ -29805,7 +29752,7 @@ fun box(): String {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
-            Box::new(platform),
+            jvm_platform(Box::new(platform)),
             &LangFeatures::from_source(source),
             &mut diagnostics,
         );
@@ -30680,8 +30627,11 @@ fun use() {
                  execute(Command::Add); execute(Command(), Command::InnerAdd)\n\
                  use0(o::Inner).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30694,8 +30644,11 @@ fun use() {
              fun withO(block: (String) -> String): String = \"\"\n\
              object Host { fun hostFoo(vararg values: String): String = \"\" }\n\
              fun use() { consume(::of); withO(::hostFoo) }";
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let _ = info.expect("production frontend must check the source");
         let files = vec![file];
@@ -30755,8 +30708,11 @@ fun use() {
                  use0(o::Inner1).result; use1(o::Inner1).result\n\
                  use0(o::Inner2).result; use1(o::Inner2).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30842,8 +30798,11 @@ fun use() {
     fn unannotated_delegated_properties_infer_classpath_extension_getvalue_return() {
         let source = "package test\nclass Delegate\nval prop by Delegate()";
         let mut diagnostics = DiagSink::new();
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let info = info.expect("production frontend must check the source");
         assert!(
@@ -31988,7 +31947,7 @@ fun use(counter: Counter) {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             |_, symbols| {
                 // Keep interface search active when superclass metadata is external.
@@ -32183,8 +32142,11 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
         let platform = initialized_jvm_libraries(classpath);
-        let (_, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(platform), &mut diagnostics);
+        let (_, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(platform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         assert!(info.is_some(), "production frontend must check the source");
         {
@@ -59055,6 +59017,9 @@ impl<'a> Checker<'a> {
                                 self.span(target),
                                 format!("No context argument for '{name}' found."),
                             ),
+                            PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                                self.report_accessor_ambiguity(self.span(target), candidates)
+                            }
                             PropertyWriteSelection::None
                             | PropertyWriteSelection::Implicit(_)
                             | PropertyWriteSelection::Receiverless(_)

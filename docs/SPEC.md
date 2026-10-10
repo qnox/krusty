@@ -1583,8 +1583,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unboxed carrier, so an unrejected `a === b` silently compares two scalar carriers or boxes one as an
   unrelated JVM wrapper. No source/classpath branch is part of the identity policy.
   `referential_equality_on_a_value_class_operand` in `tests/resolve_parser_diag_coverage_e2e.rs`.
-- **A `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and rejected
-  otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
+- **Only the JVM requires `@JvmInline` on an inline `value class`.** JS, Wasm (wasm-js and
+  wasm-wasi) and Native read a single-field `value class` as inline from the `value` keyword alone
+  and give it the same unboxed representation an annotated one has. Which rules apply is the
+  compilation target (`CompilationTarget`), a required input of every frontend request
+  (`PlatformProvider::new`) and distinct from the semantic platform that supplies library
+  declarations. The analysis carries it to the backend, and a backend refuses a source set analyzed
+  for another target, so a Native build can never be checked under JVM rules. Every target counts
+  the primary constructor's parameters the same way, measured against kotlinc, kotlinc-js,
+  kotlinc-wasm and kotlinc-native 2.4.20:
+  - No parameter list: `primary constructor is required for value classes.` at `value`; with
+    `FullValueClasses` a final class reports `… for final value classes.`.
+  - `()`: `value class must have exactly one primary constructor parameter.` at the parameter list;
+    with `FullValueClasses` an unannotated final class reports `final value class must have at least
+    one primary constructor parameter.` there, and an annotated one `@JvmInline value class must
+    have exactly one primary constructor parameter.`.
+  - One parameter: inline (on the JVM only with `@JvmInline`, see below); with `FullValueClasses`
+    an unannotated one is a full value class.
+  - Several parameters: with `@JvmInline` the wrong-count message at the parameter list; without it
+    `the feature "full value classes" is experimental and should be enabled explicitly. …` at
+    `value`, and a full value class with the feature. A multi-field class is never inline, so it
+    never takes its first property as a carrier.
+  On a non-JVM target `@JvmInline` is an optional expectation that kotlinc resolves from a KLIB
+  library (and rejects outside common sources); an annotated declaration there arrives with the
+  KLIB library provider. `tests/value_class_declaration_e2e.rs` compares every form on every target
+  with its reference compiler (recorded; kotlinc-native required in the `klib-semantics` lane);
+  `a_value_class_needs_no_jvm_inline_on_native` in `tests/native_value_classes_e2e.rs` checks the
+  runtime answer against kotlinc-native's; `a_backend_refuses_a_source_set_analyzed_for_another_target`
+  in `src/compiler.rs`.
+- **On the JVM a `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and
+  rejected otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
   supported.`, pointed at the `value` keyword. The annotation is the resolved `kotlin.jvm.JvmInline`
   identity, so `import kotlin.jvm.JvmInline as Inline` / `@Inline` stays unboxed. A legacy
   `inline class` is unboxed without the annotation. With the feature, the class is a final JVM
@@ -6839,6 +6867,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The prefix commits
   as a package and `Ctx` is one classifier edge. The checker records the selected constructor and
   result identity; lowering consumes those facts. Test: `tests/fq_ctor_call_e2e.rs`.
+- **A construction of a module class records the selected constructor declaration.** Common IR
+  maps each construction to the checked constructor declaration the checker selected, and copies
+  one module record per such declaration, and per constructor the file itself declares: the
+  constructed classifier's qualified identity and declaration flags, the constructor's flags,
+  visibility, context-parameter count, its complete declared parameter list at stored value types,
+  and an inner class's enclosing classifier. The declaring file and every constructing file copy
+  the record from the same declaration, so a backend realizes both sides of the call from
+  identical facts. Test: `a_cross_file_construction_records_the_selected_constructor_and_its_declaration`
+  in `src/fir_lower/construction_target_tests.rs`.
 - **`break` / `continue` in EXPRESSION position (`val v = x ?: continue`, a `when` arm).** Kotlin's
   `break`/`continue` are `Nothing`-typed expressions (like `return`/`throw`), not only statements — new
   `Expr::Break`/`Expr::Continue` (parsed in `parse_prefix`, typed `Ty::Nothing`, `expr_diverges`), lowered
@@ -7644,9 +7681,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/jvm/java_stub.rs::interface_fields_are_implicitly_public_static_final`).
 
 - **All-caps Java getters map to decapitalize-smart properties.** `getID()` reads as `id`,
-  `getURLPath()` as `urlPath` — the physical-getter fallback tries the re-uppercased leading-run
-  spelling after the conventional `getX`
+  `getURLPath()` as `urlPath`: the method's spelling lowercases its leading uppercase run
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_maps_all_caps_java_getters_to_properties`).
+  An `isX` property keeps `isX()` and also accepts `getIsX()` (`getIsInstanceType()` reads as
+  `isInstanceType`), including from inside an extension of the same name
+  (`tests/java_source_interop_e2e.rs::java_get_is_accessor_is_an_is_property`). kotlinc never
+  reads `getIsX()` as `x`, reads a non-boolean `String isX()` as `isX`, and makes no property of a
+  lowercase `getisX()`, a getter with a parameter, or a static getter; both compilers report the
+  same unresolved references (`java_is_prefixed_getter_spellings_match_kotlinc`). The JVM provider
+  inventories a Java classifier's methods once and indexes each by the property its spelling
+  declares; lookup reads that index and never guesses getter spellings from the property name.
+  `isX()` and `getIsX()` both declaring `isX` make a read ambiguous ("overload resolution ambiguity
+  between candidates:" listing `val isX: …` for each, the `isX` getter first). A setter is named
+  from its getter's spelling: `isX` pairs with `setX`, `getIsX` with `setIsX` (so `getIsX` plus
+  `setX` is a `val`), and `getURLPath` with `setURLPath`. Verified against kotlinc 2.4.20
+  (`java_accessor_collisions_and_setter_pairing_match_kotlinc`,
+  `java_get_is_accessor_pairs_with_its_own_setter`).
 
 - **Modifier-prefixed local functions parse in any body.** `tailrec fun`/`suspend fun` local
   declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
@@ -10061,7 +10111,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so the three phases cannot disagree. The language server and the in-process test helpers select
   every native extension explicitly (`PluginRegistry::every_native_extension`); the Bazel worker and
   `krusty-build` refuse plugin flags, so their compiles now match kotlinc without the plugin.
-  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the all-open,
+  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the
   no-arg and Compose jars wherever the reference distribution ships them, fail; so does a `-P` for an
   unknown id; serialization with and without the plugin emits kotlinc's class set; comma lists; a
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
@@ -10085,6 +10135,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`kotlincs_default_scripting_plugin_is_accepted_beside_serialization`), and the Gradle lane's
   `krusty-build` `gradle::tests::serialization_plugin_compiles_through_krusty` (serializers generated
   in both orders and exercised at run time across modules; all-open applied before krusty fails).
+- **All-open makes `open` the default modality of the classes its annotations match.**
+  `-Xplugin=allopen-compiler-plugin.jar` (registrar `AllOpenComponentRegistrar`) with
+  `-P plugin:org.jetbrains.kotlin.allopen:annotation=<fqname>` or `preset=spring|micronaut|quarkus`
+  runs krusty's native pass, as serialization does. kotlinc's plugin is a FIR status transformer
+  matched by `annotated(names) or metaAnnotated(names, includeItself = true)` and by supertypes
+  (`AbstractSimpleClassPredicateMatchingService`), so a class matches through its own annotation, an
+  annotation meta-annotated with one at any depth (`@Service` → `@Component`), or any supertype that
+  matches, from source or from a dependency. A matched `class` that wrote no modality becomes
+  `open`; an interface, object, enum, annotation or value class, and a `@JvmRecord`, keeps its own.
+  Every function and property a matched non-local `class` declares becomes `open` unless it wrote
+  `final`, `abstract` or `open` (an explicit `final class` still opens its members); a static
+  companion-block member and the compiler-generated `componentN`/`copy` stay final. A private member
+  is open too, and kotlinc emits it without `ACC_FINAL`. A data class the plugin opens reads its
+  properties through their getters in `componentN`, `copy` defaults, `toString`, `hashCode` and
+  `equals`, as kotlinc's `DataClassMembersGenerator` does for a non-final class. A written `final`
+  on a classifier or property is recorded as `DeclarationFlags::FINAL_MODIFIER`, because a
+  classifier's `FINAL` is its default. An option key the plugin's command-line processor does not
+  declare is kotlinc's error, `unsupported plugin option: <id>:<key>=<value>`. A local class is not
+  transformed yet: its annotations resolve only during body checking, after declaration headers are
+  published. Tests: `tests/allopen_plugin_e2e.rs` (direct, meta and supertype matches, explicit
+  `final`, data, private and interface members byte-identical to kotlinc and run; the `spring` preset
+  through a dependency each compiler builds for itself), `plugins::allopen` and `plugins::registry`
+  unit tests (`allopen_resolves_to_native_and_reads_its_options`,
+  `an_option_key_the_plugin_does_not_declare_is_kotlincs_error`).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,
@@ -11947,6 +12021,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IrFile::checked_type` is that one contract; it never derives a parent's type from its children.
   The Wasm backend declines a value without a checked type by name rather than inferring one.
   Tests: the `wasm-js`/`wasm-wasi` box lanes.
+- **An arithmetic operator's result is the selected operator's declared result, recorded once.**
+  Kotlin's mixed numeric promotion (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
+  `Char.minus(Char): Int`, `Byte`/`Short` operands answering `Int`) is a fact of the operator the
+  checker selected. Common lowering records it on every non-`Boolean` `PrimitiveBinOp` through
+  `IrFile::add_arithmetic`, taking a source operator's type from the checked call and a node it
+  synthesizes (an increment's sum, a loop index step, a data-class hash step, a serializer mask)
+  from the operation it builds. `IrFile::validate_complete_facts` rejects an arithmetic node with no
+  recorded result before any backend runs. Native and Wasm keep no promotion table: they choose the
+  operand widening and narrow the answer to the recorded type (`Char` after an `Int`-width add).
+  Tests: `fir_lower::tests::arithmetic_result_types`, `wasm::codegen::tests::
+  mixed_numeric_operators_lower_at_their_selected_result`, `tests/native_mixed_arithmetic_e2e.rs`.
 - **Native targets: every prebuilt runtime object is its target's, and the runtime is closed.**
   `build.rs` compiles each runtime source once per supported target and, after each compile, reads
   the object's ELF identity: it must be 64-bit (`EI_CLASS` 2), little-endian (`EI_DATA` 1), a
@@ -12297,14 +12382,79 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Native: a file's top-level initializers run once, including from another file.** Each source
   file exports one initializer. The entry calls its own before `main` or `box`. A call to a
   top-level function defined in another file of the module calls that file's initializer first, so
-  a property declared there has its value even when that file is not the entry. The initializer
+  a property declared there has its value even when that file is not the entry. A read or write of a
+  package-level property declared in another file calls that property's getter or setter entry
+  point, which the declaring file defines from the checked property identity: the entry point runs
+  the initializer, then reads or writes the property the way a use in its own file does (its slot,
+  or its source-written or delegated accessor), converting between that storage and the declared
+  type. The value crosses at the declared type, so a value-class property is its underlying value
+  and a property with an explicit backing field is read at its public type. An inline function
+  spliced into the caller still updates the property in the file that declared it. An assignment
+  evaluates its right-hand side before the setter runs the initializer, so the initializer cannot
+  observe the assigned value and cannot overwrite it. The initializer
   runs at most once: a second call, from the entry or from another file, is a return. The
   once-only flag is set before the initializers run, so an initializer that reaches back into its
   own file sees the property defaults and does not recurse. A property initializer that increments
-  a `var` and is then read through two calls still reports the one increment.
+  a `var` and is then read through two calls still reports the one increment. A `lateinit` read
+  from another file throws `UninitializedPropertyAccessException` until the property is assigned.
   Tests: `tests/native_cross_file_e2e.rs`
   (`a_top_level_property_in_another_file_is_initialized_before_the_call`,
-  `a_file_initializer_runs_once_however_many_calls_arrive`).
+  `a_file_initializer_runs_once_however_many_calls_arrive`,
+  `a_package_property_is_read_from_the_file_that_stores_it`,
+  `an_inline_function_updates_a_package_property_in_its_own_file`,
+  `an_assignment_evaluates_its_value_before_the_defining_file_initializes`,
+  `a_lateinit_package_property_throws_until_assigned`,
+  `a_package_value_class_property_is_stored_as_its_value`,
+  `an_explicit_backing_field_is_read_at_the_public_type`,
+  `a_source_written_package_accessor_runs_in_its_own_file`).
+- **Native: a member property declared in another file is reached through its declaring file.**
+  A member property of a class, object, or enum declared in another file of the module is read and
+  written through the same getter and setter entry points as a package property, keyed by the
+  checked property identity; they take the receiver first, typed as the declaring classifier. The
+  declaring file realizes the access as a use in that file does: a backing field (a `lateinit`
+  field throws `UninitializedPropertyAccessException` until assigned), a source-written or
+  delegated accessor, or the dispatch slot of an `open` member, so an override in a subclass is
+  selected. The value crosses at the declared type: a value-class-typed member is its underlying
+  value, and a generic member is its declared type parameter, which each use site adapts to its own
+  instantiation (`Box<Int>` reads an `Int`, `Box<String>` a `String`). The using file evaluates the
+  receiver first and, for an assignment, the new value next. The entry point does not run the
+  declaring file's top-level initializer: the instance's constructor has already run. An interface
+  or annotation member, a classifier constant, an extension or context property, and a property of
+  a local or anonymous class are not this access.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_member_val_is_read_from_the_file_that_declares_the_class`,
+  `a_member_var_is_updated_from_another_file`,
+  `an_initializer_in_another_file_reads_a_member`,
+  `a_member_assignment_evaluates_the_receiver_before_the_value`,
+  `a_lateinit_member_throws_until_assigned`,
+  `a_value_class_typed_member_is_carried_as_its_value`,
+  `a_generic_member_is_read_at_each_instantiation`,
+  `an_open_member_and_a_source_written_getter_run_in_the_declaring_file`).
+- **Native: a class declared in another file is constructed through its declaring file.** A
+  construction of a module class whose layout this file does not hold calls the allocating entry
+  point of the constructor the checker selected. Both files derive that entry point from one
+  module record of the constructor declaration: its symbol spells the class's qualified name and
+  the constructor's complete declared parameter list (behind an inner class's enclosing
+  classifier), so two constructors of one class never share it and neither file depends on the
+  other's lowering. The constructing file evaluates every argument in source order first. The
+  entry point then runs the declaring file's top-level initializer, allocates, converts each
+  declared parameter to what that file's constructor takes, and calls it; a value class answers
+  its underlying value. An inner class takes its enclosing instance first. A generic class takes
+  its declared type parameters, which each construction adapts from its own instantiation. An
+  interface, annotation, enum, object, abstract, sealed, local, or `expect` class, a private
+  constructor, a constructor with context parameters, and a call that leaves a default argument
+  to the declaration are not this call. A constructor the plan supports but the declaring file
+  cannot realize is an internal error in that file, not a missing symbol.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_class_is_constructed_from_the_file_that_does_not_declare_it`,
+  `a_constructed_member_var_is_updated_from_the_calling_file`,
+  `an_empty_constructor_runs_the_property_initializer`,
+  `a_secondary_constructor_in_another_file_delegates`,
+  `overloaded_constructors_in_another_file_stay_distinct`,
+  `a_constructor_reads_its_own_file_after_the_arguments_are_evaluated`,
+  `a_generic_class_is_constructed_at_each_instantiation_from_another_file`,
+  `an_inner_class_is_constructed_with_its_outer_instance`,
+  `a_value_class_constructed_in_another_file_is_its_value`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
@@ -12332,8 +12482,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's wording. The configured severity is applied before compilation: `error` fails the
   invocation, `warning` reports it, and `disabled` omits it. The Bazel worker normalizes
   `--x_warning_level` to the standard compiler option, and the Gradle plugin transports the option
-  unchanged; neither owns a duplicate diagnostic-name registry. `-Werror` and
-  `allWarningsAsErrors` remain rejected until the compiler models their global policy.
+  unchanged; neither owns a duplicate diagnostic-name registry. One warning policy owns the
+  global and named settings. `-Werror` reports and fails on every warning without an explicit
+  override; `-nowarn` suppresses compiler and module warnings; and `-Werror` wins when both global
+  flags are present, independent of order. Kotlinc's command-line configuration warnings remain
+  visible under plain `-nowarn`. An explicit named `warning`, `error`, or `disabled` level wins over
+  either global flag. Gradle's `compilerOptions.allWarningsAsErrors` forwards `-Werror` into that
+  same policy. `compilerVersion` must equal the applied Kotlin Gradle plugin version, which must be
+  an exact supported release; a pre-release or RC suffix is rejected.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
@@ -14557,6 +14713,69 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_lowering::ir_builtins::tests::relations_are_signed_as_the_stdlib_calls_them`,
   `klib_lowering::tests::a_built_in_relation_lowers_as_the_source_comparison_does`,
   `stdlib_coerce_bodies_lower_as_their_source_does`.
+
+- **A KLIB body's equality and negation built-ins are the source operators.** Kotlin serializes
+  `a == b` as `kotlin.internal.ir.EQEQ(Any?, Any?)`, or as `ieee754equals(T?, T?)` when both
+  operands have the static type `Float` or `Double`, `a === b` as `EQEQEQ(Any?, Any?)`, and `!b` as
+  `kotlin.Boolean.not()`; `a != b` and `a !== b` are `not` over the equality, marked with the origin
+  `EXCLEQ`/`EXCLEQEQ`. Lowering joins each call by its mangler-computed signature and lowers it as
+  checked FIR lowers the source: `==`/`!=` become one equality whose mode is the checker's own rule
+  over the operand types (IEEE 754 for one floating-point type, primitive for other scalar pairs,
+  structural otherwise), `===`/`!==` the reference comparison, `!` the recorded negation. A
+  serialized built-in the checker's rule would classify differently (`EQEQ` over two `Double`s,
+  `ieee754equals` over `Int`s or nullable operands) declines rather than picking a mode, as does a
+  `not` of any other origin (`!in`). Tests:
+  `klib_lowering::ir_builtins::tests::equalities_and_negation_are_signed_as_the_stdlib_calls_them`,
+  `klib_lowering::tests::body_forms::equality_built_ins_lower_as_the_source_operators_do`,
+  `negation_lowers_as_the_source_operator_does`,
+  `an_equality_the_checker_would_classify_otherwise_declines`,
+  `stdlib_built_in_calls_have_the_signed_operands`,
+  `stdlib_structural_equality_lowers_as_its_source_does`.
+
+- **A KLIB body's call of a dependency function lowers that function too.** A call of a public
+  top-level declaration is joined, by its exact signature, to the frozen declaration a checked
+  call selected (`KlibCalleeFacts`, built from the backend handoff's `KlibBodyCallable` views); the
+  callee is declared in the same `DependencyBodyUnit` and the call lowers as a same-file call of it,
+  with the callee's declared parameter types as the expected argument types. Each signature is
+  lowered once, a call cycle links back to the function already declared, and the callee's body is
+  lowered after its caller's. A callee no frozen selection describes (or two do) declines by its
+  identity rather than reconstructing a declaration from the call; a callee whose own body declines
+  makes the whole lowering decline with that reason, and every function and expression the attempt
+  added is removed. Tests:
+  `klib_lowering::tests::body_forms::a_call_of_a_dependency_function_lowers_its_callee_into_the_unit`,
+  `a_call_cycle_links_back_to_the_declared_function`,
+  `a_declining_callee_leaves_the_unit_as_it_was`,
+  `a_callee_no_frozen_selection_describes_declines_by_name`,
+  `stdlib_unsigned_max_declines_through_its_callee`.
+
+- **A KLIB body's local variables are the source declarations.** A local `val`/`var` (origin
+  `DEFINED`) lowers to a named variable in the next value slot after the parameters, reads of a
+  `val` publish a stable binding and reads of a `var` a mutable one, and an assignment is a `Unit`
+  `SetValue`, as checked FIR lowering publishes them. The serialized local-variable flags are, from
+  bit 0: has annotations, `var`, `const`, `lateinit`. Compiler temporaries, `lateinit` and `const`
+  locals, a declaration without an initializer and an assignment to a `val` decline by form. Tests:
+  `local_variables_lower_as_the_source_declarations_do`,
+  `unmodelled_local_variables_decline_by_form`,
+  `stdlib_local_variable_flags_have_the_decoded_layout`.
+
+- **A KLIB body's implicit cast to the value's own type is no conversion.** An `IMPLICIT_CAST`
+  whose target is the operand's semantic type adds no node, as the source has none; any other
+  implicit cast, and every other type operator, declines by name. Tests:
+  `an_implicit_cast_to_the_value_type_adds_nothing`,
+  `a_converting_or_unmodelled_type_operator_declines`.
+
+- **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
+  is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its
+  type; one of origin `IF` is an `if`-`else if` chain and lowers to nested two-branch `when`s, each
+  typed with the chain's type, recording only a `Unit` one as exhaustive, as checked FIR lowers the
+  source. `&&`/`||` (origins `ANDAND`/`OROR`) and a `when` without an `else` decline. Tests:
+  `a_flat_when_lowers_as_the_source_when_does`,
+  `a_flat_if_chain_lowers_as_the_source_else_if_chain_does`,
+  `a_short_circuit_or_a_when_without_else_declines`.
+
+- **Every value a KLIB body lowers to has a checked type.** Each value expression of a lowered body
+  answers `IrFile::checked_type`, so a backend that types every value (Wasm) never meets an
+  untyped one. Test: `every_lowered_value_has_a_checked_type`.
 
 - **Open-end membership names `rangeUntil`.** `x in a..<b`, `x in a until b`, and
   `x in a downTo b` first select that syntax's operator. The result then uses `contains` unless the

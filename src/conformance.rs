@@ -126,10 +126,14 @@ pub enum TestTarget {
 }
 
 impl TestTarget {
-    /// Whether the target compiles a `value class` without the JVM's `@JvmInline` marker. Every
-    /// non-JVM target does: the annotation exists for the JVM's boxed representation alone.
-    fn full_value_classes(self) -> bool {
-        self != Self::Jvm
+    /// The production source-semantics target represented by this corpus lane.
+    pub fn compilation_target(self) -> crate::compilation_target::CompilationTarget {
+        match self {
+            Self::Jvm => crate::compilation_target::CompilationTarget::Jvm,
+            Self::Native => crate::compilation_target::CompilationTarget::Native,
+            Self::WasmJs => crate::compilation_target::CompilationTarget::WasmJs,
+            Self::WasmWasi => crate::compilation_target::CompilationTarget::WasmWasi,
+        }
     }
 }
 
@@ -205,21 +209,6 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
         prepared.push_str(EXACT_TYPE_HELPER);
     }
     prepared
-}
-
-/// Language features Kotlin's codegen-test runner supplies for one target, followed by the test's
-/// own ordered `// LANGUAGE:` overrides.
-///
-/// Kotlin/Native accepts full value classes without the JVM-only `@JvmInline` marker. Treating the
-/// absence of that annotation through the JVM feature baseline rejects the source before the
-/// Native backend can be tested.
-pub fn test_features(src: &str, target: TestTarget) -> crate::features::LangFeatures {
-    let mut features = crate::features::LangFeatures::new();
-    if target.full_value_classes() {
-        features.enable("FullValueClasses");
-    }
-    features.apply_source_directives(src);
-    features
 }
 
 /// Whether a box test applies to the backend tokens `names`, per kotlinc's test-runner directives, for
@@ -1062,21 +1051,6 @@ mod tests {
         assert_eq!(
             prepare_test_source(source, TestTarget::Jvm),
             "@JvmInline\nvalue class V(val x: Int)\nval here = \"JVM_IR\""
-        );
-    }
-
-    #[test]
-    fn native_test_features_accept_unannotated_value_classes_and_keep_directive_overrides() {
-        assert!(
-            test_features("value class V(val x: Int)", TestTarget::Native).has("FullValueClasses")
-        );
-        assert!(!test_features(
-            "// LANGUAGE: -FullValueClasses\nvalue class V(val x: Int)",
-            TestTarget::Native,
-        )
-        .has("FullValueClasses"));
-        assert!(
-            !test_features("value class V(val x: Int)", TestTarget::Jvm).has("FullValueClasses")
         );
     }
 
