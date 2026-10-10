@@ -216,7 +216,14 @@ impl BodyLowering<'_> {
             FirProgressionSource::Value {
                 progression,
                 iterable,
-            } => self.progression_value(progression, *iterable)?,
+                stepped,
+            } => {
+                let stepped = stepped
+                    .as_deref()
+                    .map(|stepped| self.progression_source(stepped).map(Box::new))
+                    .transpose()?;
+                self.progression_value(progression, *iterable, stepped)?
+            }
             FirProgressionSource::Step {
                 nested,
                 step,
@@ -239,6 +246,7 @@ impl BodyLowering<'_> {
         &mut self,
         progression: &FirProgressionClass,
         iterable: FirExprId,
+        stepped: Option<Box<IrProgressionSource>>,
     ) -> Result<IrProgressionSource, FirLoweringFailure> {
         let value = self.expression(iterable)?;
         let iterable_ty = self
@@ -279,6 +287,7 @@ impl BodyLowering<'_> {
             first,
             last,
             step,
+            stepped,
         })
     }
 
