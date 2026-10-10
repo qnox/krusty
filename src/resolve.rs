@@ -50012,6 +50012,19 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        if let Some((span, superclass)) = cl.base_class_span.zip(
+            current_classifier
+                .as_ref()
+                .and_then(|classifier| classifier.stable_declaration)
+                .and_then(|declaration| {
+                    self.resolved_index?
+                        .classifier_header(declaration)?
+                        .superclass
+                })
+                .map(|superclass| superclass.get()),
+        ) {
+            self.record_finalized_superclass_type(span, superclass);
+        }
         if !body_local_class && self.active_declarations.is_none() {
             // The retained inspection pipeline keeps the original declaration AST so editor
             // navigation can point from each header occurrence to the declaration selected by the

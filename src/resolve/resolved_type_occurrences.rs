@@ -1,11 +1,20 @@
 //! Rebinding reparsed declaration annotations to finalized semantic types.
 
 use crate::ast::TypeRef;
+use crate::diag::Span;
 use crate::types::Ty;
 
 use super::Checker;
 
 impl Checker<'_> {
+    /// Publish the superclass occurrence from the classifier header Pass 1 already finalized.
+    /// The detached parser copy is not resolved again: doing so would lose the declaration's
+    /// lexical visibility policy, while editor navigation still needs the selected identity at
+    /// the written source span.
+    pub(super) fn record_finalized_superclass_type(&mut self, span: Span, semantic: Ty) {
+        self.resolved_type_tys.insert((span.lo, span.hi), semantic);
+    }
+
     /// Rebind a reparsed value-parameter annotation to the semantic type finalized in Pass 1.
     /// Signatures store a vararg's callable-facing array type, while the annotation occurrence
     /// denotes its element type; record that syntax-facing view and return the callable-facing type
