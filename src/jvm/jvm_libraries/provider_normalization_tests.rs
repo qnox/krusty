@@ -1,5 +1,4 @@
 use super::JvmLibraries;
-use crate::libraries::SemanticPlatform;
 use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, Ty};
 
