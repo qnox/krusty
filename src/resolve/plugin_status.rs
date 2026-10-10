@@ -46,7 +46,7 @@ impl OpenByDefault {
             table,
             annotations: annotations.into_iter().collect(),
             classes: HashMap::new(),
-            meta: HashMap::new(),
+            matching_meta: HashSet::new(),
         };
         let jvm_record = crate::types::type_name("kotlin/jvm/JvmRecord");
         let mut open = OpenByDefault::default();
@@ -148,7 +148,11 @@ struct Matcher<'a> {
     table: &'a SymbolTable,
     annotations: HashSet<TypeName>,
     classes: HashMap<TypeName, bool>,
-    meta: HashMap<TypeName, bool>,
+    /// Positive meta-annotation reachability. A negative result cannot be cached while walking a
+    /// cycle: another node in that cycle may still reach a configured annotation after the edge
+    /// back to the active node. Each top-level query therefore owns its visiting set, and only a
+    /// proven match becomes shared state.
+    matching_meta: HashSet<TypeName>,
 }
 
 impl Matcher<'_> {
@@ -170,18 +174,31 @@ impl Matcher<'_> {
 
     /// Whether `annotation` is one of the plugin's, or is annotated with one at any depth.
     fn annotation_matches(&mut self, annotation: TypeName) -> bool {
+        self.annotation_matches_from(annotation, &mut HashSet::new())
+    }
+
+    fn annotation_matches_from(
+        &mut self,
+        annotation: TypeName,
+        visiting: &mut HashSet<TypeName>,
+    ) -> bool {
         if self.annotations.contains(&annotation) {
             return true;
         }
-        if let Some(&known) = self.meta.get(&annotation) {
-            return known;
+        if self.matching_meta.contains(&annotation) {
+            return true;
         }
-        self.meta.insert(annotation, false);
+        if !visiting.insert(annotation) {
+            return false;
+        }
         let (meta_annotations, _) = self.annotations_and_supertypes(annotation);
         let matches = meta_annotations
             .into_iter()
-            .any(|meta| self.annotation_matches(meta));
-        self.meta.insert(annotation, matches);
+            .any(|meta| self.annotation_matches_from(meta, visiting));
+        visiting.remove(&annotation);
+        if matches {
+            self.matching_meta.insert(annotation);
+        }
         matches
     }
 

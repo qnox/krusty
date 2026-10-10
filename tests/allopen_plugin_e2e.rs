@@ -202,6 +202,23 @@ class Svc(val id: String) { fun describe() = "svc:$id" }
 
 class SvcImpl : Svc("x") { override fun describe() = "impl" }
 
+@CycleB
+@AllOpen
+annotation class CycleA
+
+@CycleA
+annotation class CycleB
+
+// Visiting CycleA first reaches the configured annotation only after crossing CycleB's edge back
+// to CycleA. That must not leave CycleB cached as unmatched for the later declaration.
+@CycleA
+class FirstCycle { fun first() = "first" }
+
+@CycleB
+class SecondCycle { fun second() = "second" }
+
+class CycleImpl : SecondCycle() { override fun second() = "cycle" }
+
 @AllOpen
 abstract class Root { fun r() = "root" }
 
@@ -234,6 +251,8 @@ fun box(): String {
     if (b.inside() != "s") return "inside"
     val s: Svc = SvcImpl()
     if (s.describe() != "impl") return "describe"
+    val cycle: SecondCycle = CycleImpl()
+    if (FirstCycle().first() != "first" || cycle.second() != "cycle") return "cycle"
     val l: Mid = Leaf()
     if (l.m() != "leaf" || l.r() != "leafroot") return "leaf"
     if (Closed().c() != "c" || Impl().own() != "own" || Single.s() != "s") return "others"
