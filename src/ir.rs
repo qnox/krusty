@@ -37,6 +37,7 @@ mod bridges;
 mod callee;
 mod cast_targets;
 mod catches;
+mod checked_types;
 mod companion_blocks;
 mod constants;
 mod constructors;
@@ -1814,6 +1815,10 @@ pub struct IrFile {
     pub package_functions: Vec<IrPackageFunction>,
     /// The Kotlin `main` this file declares, if any. See [`IrEntryPoint`].
     pub entry_point: Option<IrEntryPoint>,
+    /// The `fun box(): String` test entry this file declares, as the frontend selected it
+    /// (`fir::ResolvedModuleIndex::source_box_entry`). A runnable backend starts a `codegen/box`
+    /// program here and never looks for `box` by its spelling.
+    pub box_entry: Option<FunId>,
     /// Source properties declared directly in this file's package. Storage/accessor representation
     /// remains target-owned; this record contains only checked Kotlin declaration semantics.
     pub package_properties: Vec<IrPackageProperty>,
@@ -1945,9 +1950,10 @@ pub struct IrFile {
     /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
     /// logical type may be a value class (`runCatching{…}: Result`), so the pass knows the result is the
     /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
-    /// consumed by the value-class pass (the sole owner of value-class knowledge) and — for scalar and
-    /// `String` types only, where logical = physical representation — by the suspend pass's operand
-    /// snapshot typing (`hoisted_value_ty`) for external callees.
+    /// consumed by the value-class pass (the sole owner of value-class knowledge) and by target-neutral
+    /// rewrites that preserve a value in a new temporary. Such a rewrite first consults
+    /// [`Self::physical_types`] when a backend has already changed the representation, then uses this
+    /// checked type when no physical override exists.
     pub logical_types: std::collections::HashMap<u32, Ty>,
     /// Deferred source-local declaration → its declared semantic type before an inline expansion
     /// specializes type parameters. The parser supplies a target-neutral zero expression because

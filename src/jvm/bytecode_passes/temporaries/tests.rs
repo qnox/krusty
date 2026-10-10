@@ -186,7 +186,7 @@ impl Code {
     /// The rewritten instructions, or `None` when the pass declined and left the body alone.
     fn run(mut self) -> Option<Vec<Insn>> {
         let before = self.method.clone();
-        let outcome = eliminate(&mut self.method, &BTreeSet::new());
+        let outcome = eliminate(&mut self.method, &BTreeSet::new(), false);
         if outcome.is_none() {
             assert_eq!(
                 self.method, before,
@@ -198,15 +198,21 @@ impl Code {
 
     /// The instructions left, whether or not the pass itself changed anything.
     fn run_after_earlier_passes(mut self) -> Vec<Insn> {
-        eliminate(&mut self.method, &BTreeSet::new());
+        eliminate(&mut self.method, &BTreeSet::new(), false);
         self.method.instructions().cloned().collect()
+    }
+
+    /// Run at the representation boundary after coroutine transformation.
+    fn run_post_coroutine(mut self) -> Option<Vec<Insn>> {
+        eliminate(&mut self.method, &BTreeSet::new(), true)
+            .map(|_| self.method.instructions().cloned().collect())
     }
 
     /// Run with the exact labels a preceding constant-condition pass retained while deleting
     /// unreachable instructions.
     fn run_with_preserved_labels(mut self, at: &[usize]) -> Vec<Insn> {
         let labels = at.iter().map(|&index| self.labels[index]).collect();
-        eliminate(&mut self.method, &labels);
+        eliminate(&mut self.method, &labels, false);
         self.method.instructions().cloned().collect()
     }
 }
@@ -712,6 +718,51 @@ fn a_line_number_at_the_non_null_target_keeps_the_reload() {
 }
 
 #[test]
+fn a_post_coroutine_safe_call_folds_its_generated_receiver_across_the_selector_line() {
+    // Coroutine emission conservatively stores the receiver so FixStack sees an empty operand
+    // prefix. Once the transformer has consumed its markers, only the selector's source-line label
+    // separates the guard from the reload; the post-coroutine pass restores kotlinc's stack shape.
+    let code = Code::new(&[
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 7),
+        aload(1),
+        call("suspendCall"),
+        op(ARETURN),
+        op(ACONST_NULL),
+        op(ARETURN),
+    ])
+    .line(4);
+    let expected = code.insns(&[
+        aload(0),
+        op(DUP),
+        jump(IFNULL, 7),
+        call("suspendCall"),
+        op(ARETURN),
+        op(POP),
+        op(ACONST_NULL),
+        op(ARETURN),
+    ]);
+    assert_eq!(code.run_post_coroutine(), Some(expected));
+
+    // The ordinary optimizer keeps kotlinc's raw-adjacency rule unchanged.
+    let ordinary = Code::new(&[
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 7),
+        aload(1),
+        call("suspendCall"),
+        op(ARETURN),
+        op(ACONST_NULL),
+        op(ARETURN),
+    ])
+    .line(4);
+    assert_eq!(ordinary.run(), None);
+}
+
+#[test]
 fn a_return_in_front_of_the_non_null_target_keeps_the_reload() {
     // `if (s == null) return 0; return s.length`: kotlinc's `ireturn` is followed by a dead
     // `nop` that falls into the target, so the jump is not its only predecessor.
@@ -1024,7 +1075,7 @@ fn statement_safe_call(line: bool) -> StatementSafeCall {
             *target = if *op == IFNULL { null_target } else { join };
         }
     }
-    let outcome = eliminate(&mut code.method, &BTreeSet::new());
+    let outcome = eliminate(&mut code.method, &BTreeSet::new(), false);
     StatementSafeCall {
         method: code.method,
         labels: [code.labels[7], null_target, join],

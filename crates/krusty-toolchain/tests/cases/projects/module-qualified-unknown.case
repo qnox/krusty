@@ -1,0 +1,10 @@
+Prefixes and qualifiers on properties that do not take them. The toolchain ignores a qualifier on `description`; krusty-toolchain refuses it.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product: jvm/lib
+test-layout: default
+description@jvm: x
+--- krusty-refusal
+error	a/module.yaml:3:1: ERROR: krusty-toolchain reads JVM modules only; it refuses the qualifier `@jvm` on `description`
+error	a/module.yaml:2:1: ERROR: Unknown property `test-layout`

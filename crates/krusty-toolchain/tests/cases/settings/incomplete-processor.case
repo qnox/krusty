@@ -1,0 +1,9 @@
+A processor missing a required property is reported and left out.
+--- module.yaml
+product: jvm/lib
+settings:
+  java:
+    annotationProcessing:
+      processors:
+        - groupId: org.example
+        - org.example:processor:1.0

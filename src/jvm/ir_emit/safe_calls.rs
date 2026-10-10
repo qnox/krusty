@@ -334,6 +334,15 @@ fn duplicated_safe_call(
     if !is_null_equality(emitter.ir, *condition, temporary) {
         return None;
     }
+    // A suspension point opens its `beforeInlineCall` bracket before its receiver, and FixStack
+    // saves every value already on the stack when the bracket opens. A receiver left there by
+    // `dup` would be saved away from its own invoke, so the temporary stays; the bytecode
+    // optimizer folds its store and load into kotlinc's `dup` after the coroutine transform.
+    if selector_call(emitter.ir, *selector)
+        .is_some_and(|call| emitter.transformed_result(call).is_some())
+    {
+        return None;
+    }
     selector_reads_temporary_once_as_receiver(emitter.ir, *selector, temporary).then_some(
         DuplicatedSafeCall {
             declaration: *variable,
@@ -402,6 +411,21 @@ fn selector_reads_temporary_once_as_receiver(
                 ..
             } => return reads_temporary(ir, *receiver, temporary),
             _ => return false,
+        }
+    }
+}
+
+/// The call or property read a selector performs, under its implicit coercions.
+fn selector_call(ir: &crate::ir::IrFile, mut selector: u32) -> Option<u32> {
+    loop {
+        match ir.expr(selector) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => selector = *arg,
+            IrExpr::Call { .. } | IrExpr::PropertyRead { .. } => return Some(selector),
+            _ => return None,
         }
     }
 }
