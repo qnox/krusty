@@ -45415,7 +45415,9 @@ impl<'a> Checker<'a> {
                 self.file.prioritized_enum_entries,
             );
         }
-        if classifier.is_enum_entry(name) {
+        if classifier.is_enum_entry(name)
+            && self.entries_clash(owner, name) != Some(enum_entries::EntriesClash::Property)
+        {
             return None;
         }
         if name == "entries" && classifier.is_enum() && !self.file.enum_entries_enabled {
@@ -49313,21 +49315,7 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // Duplicate enum entry names (`enum class E { A, B, A }`) are illegal.
-        {
-            let mut seen = std::collections::HashSet::new();
-            for entry in &cl.enum_entries {
-                if !seen.insert(entry.name.as_str()) {
-                    self.diags.error(
-                        cl.span,
-                        format!(
-                            "conflicting declaration: enum entry '{}' is declared more than once",
-                            entry.name
-                        ),
-                    );
-                }
-            }
-        }
+        self.check_enum_entry_declarations(cl);
         // An `abstract` member is only allowed in an abstract class, an interface, or an enum
         // class (whose entries override the abstract member per-entry) — kotlinc rejects it in a
         // final class: "modifier 'abstract' is not applicable inside a final class".
@@ -60575,6 +60563,9 @@ impl<'a> Checker<'a> {
                         .record_receiverless_property_read(e, &name, associated)
                         .unwrap_or(Ty::Error);
                     return self.set(e, ty);
+                }
+                if self.report_ambiguous_entries(e, owner, &name) {
+                    return self.set(e, Ty::Error);
                 }
                 if let Some((owner, property)) = self.classifier_property_for_owner(owner, &name) {
                     if self.reject_inaccessible_classifier_expression(receiver, owner) {

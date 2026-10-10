@@ -40,6 +40,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     gates.collection_literals = features.gate("CollectionLiterals");
     gates.functional_type_with_extension_as_supertype =
         features.gate("FunctionalTypeWithExtensionAsSupertype");
+    gates.enum_entry_named_entries = features.deprecation("ForbidEnumEntryNamedEntries");
     gates.intersection_reified_type_parameter =
         features.deprecation("ProhibitIntersectionReifiedTypeParameter");
     gates.value_classes = ValueClassRules {
