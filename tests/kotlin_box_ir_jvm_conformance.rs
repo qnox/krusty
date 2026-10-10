@@ -303,7 +303,10 @@ fn compile_source(
     let inputs = [krusty::source::SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(platform),
+        &features,
+        &mut diags,
     );
     let modes = krusty::conformance::UnitCodegenModes::of_unit([src]);
     let backend = krusty::jvm::JvmBackend::new(cp)
@@ -540,7 +543,10 @@ fn compile_blocks_mixed(
             .map(|(stem, content)| krusty::source::SourceInput::java(content).with_file_stem(stem)),
     );
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, features, &mut diags,
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(platform),
+        features,
+        &mut diags,
     );
     let modes = krusty::conformance::UnitCodegenModes::of_unit(
         blocks.iter().map(|(_, source)| source.as_str()),

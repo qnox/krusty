@@ -327,6 +327,10 @@ pub(super) enum Slot {
         declared: Ty,
         /// The property type as the implementation has it: the carrier `target_slot` expects.
         implemented: Ty,
+        /// A member extension's receiver, as the interface declares it and as the implementation
+        /// takes it: `GFoo<T>.(T.extVal)` takes a box where `GFoo<S>`'s implementation takes the
+        /// value of `S`.
+        receiver: Option<(Ty, Ty)>,
         /// Whether this stands in for the setter — which takes the value and answers nothing —
         /// rather than the getter.
         setter: bool,
@@ -673,11 +677,17 @@ fn place_interface_slots(
                 // `B`'s number only after conversion, since `B.foo(T, U)` carries both as
                 // references. Reading the entry for both numbers put the raw body where `B`'s
                 // caller passes a boxed integer.
-                let supplied = layout
-                    .interface_bridges
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| entry.clone());
+                // An abstract redeclaration's bridge forwards to no body: like the entry it stands
+                // for, it supplies nothing, and an implementor fills the number with its own.
+                let supplied = match layout.interface_bridges.get(key) {
+                    Some(Slot::Bridge {
+                        target,
+                        target_slot: None,
+                        ..
+                    }) if ir.functions[*target as usize].body.is_none() => Slot::Abstract,
+                    Some(bridge) => bridge.clone(),
+                    None => entry.clone(),
+                };
                 if !matches!(supplied, Slot::Abstract) {
                     let member = &mut members[number as usize];
                     match member.defaults.iter_mut().find(|(who, _)| *who == id) {
@@ -1347,6 +1357,7 @@ fn layout_class(
             vtable[base_slot as usize] = Slot::AccessorBridge {
                 declared,
                 implemented,
+                receiver: None,
                 setter,
                 target_slot: slot,
             };
@@ -1426,6 +1437,7 @@ fn layout_class(
                 vtable[base_slot as usize] = Slot::AccessorBridge {
                     declared,
                     implemented: property.ty,
+                    receiver: None,
                     setter,
                     target_slot: slot,
                 };
@@ -1464,20 +1476,6 @@ fn layout_class(
         ] {
             vtable[slot] = Slot::AnnotationMember { class: id, member };
         }
-    }
-    // An `inner` class of a value class — Kotlin admits one only with its error suppressed — holds
-    // its outer instance as a value this layout has no storage decision for yet.
-    if class.is_inner_class
-        && class
-            .ctor_args
-            .iter()
-            .take(class.constructor_prefix_count as usize)
-            .any(|argument| values.unboxed(argument.ty).is_some())
-    {
-        return Err(format!(
-            "an inner class of a value class (`{}`)",
-            class.fq_name()
-        ));
     }
     // A value class's box answers `kotlin.Any`'s three by the value it holds. One the class
     // declares itself keeps its own, reached through the unboxing bridge `build` installs.
@@ -1590,8 +1588,13 @@ fn register_inherited_interface_members(
         // would have a caller read that integer as a pointer; the number takes a bridge wearing
         // the interface's carrier instead. A property is what `bridges/test7.kt` is about, which
         // is why the method check did not catch it.
+        // A member extension's receiver is an operand like any other, and crosses the same way.
+        let receiver = edge.declared_receiver.zip(edge.implementation_receiver);
         let bridged = representation(values, edge.implementation_type)
-            != representation(values, edge.declared_type);
+            != representation(values, edge.declared_type)
+            || receiver.is_some_and(|(declared, implemented)| {
+                representation(values, declared) != representation(values, implemented)
+            });
         for setter in [false, true] {
             let (from, to) = if setter {
                 (
@@ -1611,6 +1614,7 @@ fn register_inherited_interface_members(
                         .or_insert(Slot::AccessorBridge {
                             declared: edge.declared_type,
                             implemented: edge.implementation_type,
+                            receiver,
                             setter,
                             target_slot: slot,
                         });

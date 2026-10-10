@@ -410,7 +410,7 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
         &inputs,
         plan.checked.len(),
         inputs.len(),
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &features,
     );
 

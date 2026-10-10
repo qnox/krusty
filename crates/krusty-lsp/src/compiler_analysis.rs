@@ -415,7 +415,10 @@ fn receiver_type_parameter_shared_with_result(
 
 #[cfg(test)]
 pub fn analyze_standalone_source_set(sources: &[&str]) -> SourceSetAnalysis {
-    analyze_source_set(sources, Box::new(StandaloneKotlinSymbols))
+    analyze_source_set(
+        sources,
+        krusty::frontend::PlatformProvider::jvm(Box::new(StandaloneKotlinSymbols)),
+    )
 }
 
 /// Minimal semantic dependency used by standalone LSP analysis. It is an ordinary symbol provider,
@@ -814,7 +817,7 @@ mod tests {
             &inputs,
             1,
             1,
-            Box::new(krusty::libraries::EmptySymbolSource),
+            krusty::frontend::PlatformProvider::jvm(Box::new(krusty::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
         );
 
@@ -844,7 +847,7 @@ mod tests {
             &inputs,
             1,
             2,
-            Box::new(krusty::libraries::EmptySymbolSource),
+            krusty::frontend::PlatformProvider::jvm(Box::new(krusty::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
         );
 
@@ -1080,7 +1083,8 @@ mod tests {
                       \u{20} return w.size() + pt.x() + n\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1133,7 +1137,8 @@ mod tests {
                       \u{20} override fun getStyle(): DialogStyle = DialogStyle.COMPACT\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1179,7 +1184,8 @@ mod tests {
 
         let source = "package a\nfun use(x: p.Item): String = x.name";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1228,7 +1234,8 @@ mod tests {
                       \u{20} return u.size\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1290,7 +1297,8 @@ mod tests {
                       \u{20} return if (error) null else list\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1354,7 +1362,10 @@ mod tests {
                       \u{20} return null\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source, support], platform);
+        let analysis = analyze_source_set(
+            &[source, support],
+            krusty::frontend::PlatformProvider::jvm(platform),
+        );
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1411,7 +1422,8 @@ mod tests {
                       \u{20} Registry.Handler.publish(Event(\"x\"))\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1466,7 +1478,8 @@ mod tests {
                       \u{20} return v.length\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1535,7 +1548,7 @@ mod tests {
             &inputs,
             1,
             1,
-            platform,
+            krusty::frontend::PlatformProvider::jvm(platform),
             &krusty::features::LangFeatures::new(),
             &mut diags,
         );
@@ -1588,7 +1601,8 @@ mod tests {
                       class V : Visitor()\n\
                       fun go(): Holder = Holder(V())";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1646,7 +1660,8 @@ mod tests {
                       \u{20} h.reg(\"y\")\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1726,7 +1741,8 @@ mod tests {
                       \u{20} Builder.analyze(\"f\") { place, dep -> println(place) }\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1778,7 +1794,8 @@ mod tests {
                       \u{20} return m[\"x\"] ?: 0\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1825,7 +1842,8 @@ mod tests {
         let source = "package a\n\
                       fun use(l: p.Language): String = l.id + l.urlPath";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         assert!(
             analysis.files[0].diagnostics.is_empty(),
@@ -1881,7 +1899,8 @@ mod tests {
                       \u{20} x.rank = 1\n\
                       }";
         let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
-        let analysis = analyze_source_set(&[source], platform);
+        let analysis =
+            analyze_source_set(&[source], krusty::frontend::PlatformProvider::jvm(platform));
 
         let messages: Vec<&str> = analysis.files[0]
             .diagnostics

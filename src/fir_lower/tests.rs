@@ -3010,7 +3010,7 @@ fn common_ir_sink_consumes_scheduled_function_body_and_defaults() {
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(source).with_file_stem("Sink")],
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3058,7 +3058,7 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(source).with_file_stem("InlineSink")],
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3179,7 +3179,7 @@ pub(crate) fn lower_single_source_with_platform(
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(source).with_file_stem(stem)],
-        platform,
+        crate::frontend::PlatformProvider::jvm(platform),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3252,7 +3252,7 @@ pub(crate) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usi
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );

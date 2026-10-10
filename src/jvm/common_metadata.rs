@@ -808,7 +808,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[SourceInput::kotlin("fun answer() = 42")],
-            provider,
+            crate::frontend::PlatformProvider::jvm(provider),
             &LangFeatures::new(),
             &mut diagnostics,
         );
@@ -989,7 +989,9 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[SourceInput::kotlin("fun answer() = missing")],
-            JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![stdlib]))),
+            crate::frontend::PlatformProvider::jvm(JvmLibraries::new(std::rc::Rc::new(
+                Classpath::new(vec![stdlib]),
+            ))),
             &LangFeatures::new(),
             &mut diagnostics,
         );

@@ -7,6 +7,71 @@
 
 use super::*;
 
+pub(super) fn inaccessible_classifier_message(
+    name: &str,
+    access: crate::symbol_source::ClassifierAccess,
+) -> String {
+    use crate::symbol_source::ClassifierAccess;
+
+    let kind = match access {
+        ClassifierAccess::Private => "private",
+        ClassifierAccess::Protected => "protected",
+        ClassifierAccess::Internal => "internal",
+        ClassifierAccess::PackagePrivate => "package-private",
+        ClassifierAccess::Public => "public",
+    };
+    format!("cannot access '{name}': it is {kind}")
+}
+
+/// kotlinc's `OVERLOAD_RESOLUTION_AMBIGUITY` for a classifier name: each equally visible
+/// classifier rendered as its declaration header, in candidate order.
+pub(super) fn ambiguous_classifier_message<
+    Shape: std::ops::Deref<Target = crate::libraries::LibraryType>,
+>(
+    candidates: &[TypeName],
+    shape: impl Fn(TypeName) -> Option<Shape>,
+) -> String {
+    let mut message = "overload resolution ambiguity between candidates:".to_string();
+    for &candidate in candidates {
+        if let Some(shape) = shape(candidate) {
+            message.push('\n');
+            message.push_str(&classifier_access_display_from_shape(candidate, &shape));
+        }
+    }
+    message
+}
+
+pub(super) fn classifier_access_display_from_shape(
+    internal: TypeName,
+    shape: &crate::libraries::LibraryType,
+) -> String {
+    let kind = match shape.kind {
+        crate::libraries::TypeKind::Class => "class",
+        crate::libraries::TypeKind::Interface => "interface",
+        crate::libraries::TypeKind::Annotation => "annotation class",
+        crate::libraries::TypeKind::Enum => "enum class",
+        crate::libraries::TypeKind::Object => "object",
+    };
+    let supertypes = shape
+        .supertypes
+        .iter_ids()
+        .map(|supertype| {
+            let ty = Ty::obj_name(supertype);
+            if ty.is_erased_top() {
+                "Any".to_string()
+            } else {
+                ty.source_name()
+            }
+        })
+        .collect::<Vec<_>>();
+    let supertypes = if supertypes.is_empty() {
+        String::new()
+    } else {
+        format!(" : {}", supertypes.join(", "))
+    };
+    format!("{} {}{supertypes}", kind, internal.nested_segment_ref())
+}
+
 impl Checker<'_> {
     /// Render a callable directly from its semantic record. The receiver is an attribute of an
     /// extension, never positional parameter zero.

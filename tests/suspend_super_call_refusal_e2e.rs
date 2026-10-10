@@ -31,7 +31,7 @@ fn located_diagnostics(sources: &[&str], cp_jars: &[std::path::PathBuf]) -> Vec<
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diags,

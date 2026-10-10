@@ -1583,8 +1583,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unboxed carrier, so an unrejected `a === b` silently compares two scalar carriers or boxes one as an
   unrelated JVM wrapper. No source/classpath branch is part of the identity policy.
   `referential_equality_on_a_value_class_operand` in `tests/resolve_parser_diag_coverage_e2e.rs`.
-- **A `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and rejected
-  otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
+- **Only the JVM requires `@JvmInline` on an inline `value class`.** JS, Wasm (wasm-js and
+  wasm-wasi) and Native read a single-field `value class` as inline from the `value` keyword alone
+  and give it the same unboxed representation an annotated one has. Which rules apply is the
+  compilation target (`CompilationTarget`), a required input of every frontend request
+  (`PlatformProvider::new`) and distinct from the semantic platform that supplies library
+  declarations. The analysis carries it to the backend, and a backend refuses a source set analyzed
+  for another target, so a Native build can never be checked under JVM rules. Every target counts
+  the primary constructor's parameters the same way, measured against kotlinc, kotlinc-js,
+  kotlinc-wasm and kotlinc-native 2.4.20:
+  - No parameter list: `primary constructor is required for value classes.` at `value`; with
+    `FullValueClasses` a final class reports `… for final value classes.`.
+  - `()`: `value class must have exactly one primary constructor parameter.` at the parameter list;
+    with `FullValueClasses` an unannotated final class reports `final value class must have at least
+    one primary constructor parameter.` there, and an annotated one `@JvmInline value class must
+    have exactly one primary constructor parameter.`.
+  - One parameter: inline (on the JVM only with `@JvmInline`, see below); with `FullValueClasses`
+    an unannotated one is a full value class.
+  - Several parameters: with `@JvmInline` the wrong-count message at the parameter list; without it
+    `the feature "full value classes" is experimental and should be enabled explicitly. …` at
+    `value`, and a full value class with the feature. A multi-field class is never inline, so it
+    never takes its first property as a carrier.
+  On a non-JVM target `@JvmInline` is an optional expectation that kotlinc resolves from a KLIB
+  library (and rejects outside common sources); an annotated declaration there arrives with the
+  KLIB library provider. `tests/value_class_declaration_e2e.rs` compares every form on every target
+  with its reference compiler (recorded; kotlinc-native required in the `klib-semantics` lane);
+  `a_value_class_needs_no_jvm_inline_on_native` in `tests/native_value_classes_e2e.rs` checks the
+  runtime answer against kotlinc-native's; `a_backend_refuses_a_source_set_analyzed_for_another_target`
+  in `src/compiler.rs`.
+- **On the JVM a `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and
+  rejected otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
   supported.`, pointed at the `value` keyword. The annotation is the resolved `kotlin.jvm.JvmInline`
   identity, so `import kotlin.jvm.JvmInline as Inline` / `@Inline` stays unboxed. A legacy
   `inline class` is unboxed without the annotation. With the feature, the class is a final JVM

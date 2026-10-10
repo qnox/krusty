@@ -5,6 +5,7 @@ use crate::ast::{Decl, File};
 use crate::backend::{
     Artifact, Backend, BackendClassifierSource, BackendModuleFacts, CheckedBackendClassifiers,
 };
+use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::frontend::FrontendSymbols;
 use crate::jvm::names::{file_class_name, type_descriptor};
@@ -1086,6 +1087,10 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
 
 impl Backend for JvmBackend {
     type State = JvmState;
+
+    fn compilation_target(&self) -> CompilationTarget {
+        CompilationTarget::Jvm
+    }
 
     fn lower_ir_file(
         &self,

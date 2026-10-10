@@ -252,7 +252,7 @@ mod tests {
     fn checked(source: &str, diags: &mut DiagSink) -> SourceSetAnalysis {
         analyze_source_set_with_features(
             &[SourceInput::kotlin(source)],
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
             &crate::features::LangFeatures::default(),
             diags,
         )

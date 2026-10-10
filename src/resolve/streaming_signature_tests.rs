@@ -44,7 +44,7 @@ fn generated_data_class_copy_publishes_its_complete_callable_header() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -113,7 +113,7 @@ class Implementation : Contract {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -155,7 +155,7 @@ fn compact_classifier_publication_does_not_restore_a_validated_cycle_edge() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -192,7 +192,7 @@ fun test(): A = consume(O)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -232,7 +232,7 @@ fn large_arity_typealias_does_not_replace_a_sibling_classifier_header() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(&source),
         &mut diagnostics,
     );
@@ -261,7 +261,7 @@ fun box() = Outer().nested().value
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -289,7 +289,7 @@ fun box() = Outer().nested().value
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -318,7 +318,7 @@ fun box() = Derived().nested().value
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -348,7 +348,7 @@ enum class Game {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -371,7 +371,7 @@ class Holder(val value: (() -> String) -> String) {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -399,7 +399,7 @@ class Scope {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -427,7 +427,7 @@ fun inferred() = Alias.value()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -452,7 +452,7 @@ fun <T> value(): Any {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -484,7 +484,7 @@ fun box(): String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -508,7 +508,7 @@ fun box() = make(::Value).text
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -554,10 +554,10 @@ fun box() = Sam(Outer("O")::Inner).get("K").text()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -590,10 +590,10 @@ fun array(): IntArray = Sam(::IntArray).make(2)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -628,10 +628,10 @@ fun merge(map: java.util.HashMap<String, Int>) = map.merge("a", 2, Int::plus)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -667,10 +667,10 @@ fun adapt(): BottomSam = BottomSam(::thr)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -711,10 +711,10 @@ fun box() = Reader(Value::read)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -758,10 +758,10 @@ class App {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -798,7 +798,7 @@ class A {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -830,7 +830,7 @@ fun chosen() = ONE
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -862,12 +862,12 @@ fn inferred_explicit_backing_field_uses_public_type_as_generic_expectation() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 crate::jvm::classpath::Classpath::new(classpath),
             ))
             .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
@@ -908,7 +908,7 @@ class Derived {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
@@ -945,7 +945,7 @@ fn inferred_member_signature_resolves_invoke_on_this() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -986,7 +986,7 @@ class Host {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1008,7 +1008,7 @@ fn inferred_signature_keeps_anonymous_type_while_consuming_its_local_member() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1038,7 +1038,7 @@ fn inferred_signature_demands_member_of_anonymous_object_property() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1080,7 +1080,7 @@ class Holder {
     .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(platform),
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1104,7 +1104,7 @@ fn inferred_anonymous_member_sees_its_enclosing_dispatch_receiver() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1141,7 +1141,7 @@ fun box() = result
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1170,7 +1170,7 @@ fun box(): String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1201,7 +1201,7 @@ fun box(): String = Outer().Inner().callback.invoke()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1228,7 +1228,7 @@ fun box(): Int {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1254,7 +1254,7 @@ fun value(expected: String): String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1279,7 +1279,7 @@ fun value(expected: String): String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1304,7 +1304,7 @@ fun value(expected: String): String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1332,7 +1332,7 @@ fun box(): Any {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1368,7 +1368,7 @@ fun <T> test(emitter: MaybeCallbacks<T>) {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1425,7 +1425,7 @@ fun <T, R> test(emitter: MaybeCallbacks<R>) {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -1464,10 +1464,10 @@ class Callable<T> : suspend (T) -> String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::from_source(source),
         |_, _| {},
         &mut diagnostics,
@@ -1517,7 +1517,7 @@ class Wrapper(delegate: Source<String>) : Source<String> by delegate
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1566,7 +1566,7 @@ class B(val delegate: A) : A by delegate
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1627,7 +1627,7 @@ context(View) val Int.dp get() = coefficient
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
@@ -1674,7 +1674,7 @@ val errorTest = object : ErrorTest {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1711,7 +1711,7 @@ fun make(): Any {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1764,7 +1764,7 @@ fun make(): Any {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1812,7 +1812,7 @@ fun box(): String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1853,7 +1853,7 @@ fun box(): String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1879,7 +1879,7 @@ fn nonlocal_generic_member_is_selected_instead_of_extracted_as_a_local_effect() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1920,7 +1920,7 @@ fn inferred_signature_demands_a_local_class_property_inside_a_receiver_lambda() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1957,7 +1957,7 @@ fn unused_generic_local_declaration_does_not_block_unit_signature_inference() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1991,7 +1991,7 @@ fn inner_secondary_constructor_defaults_are_available_to_signature_selection() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2028,7 +2028,7 @@ fn inner_constructor_in_an_inner_default_uses_the_enclosing_receiver() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2067,7 +2067,7 @@ fn labeled_and_unlabeled_super_members_use_the_checked_receiver_scope() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2103,7 +2103,7 @@ fn enum_entry_super_member_uses_the_enclosing_enum_as_its_direct_superclass() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2142,7 +2142,7 @@ fn bare_super_property_falls_through_to_a_direct_interface_default() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2177,7 +2177,7 @@ fn same_named_context_property_does_not_replace_a_constructor_property_signature
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2211,7 +2211,7 @@ fn named_companion_value_and_instance_member_keep_scope_tower_priority() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2249,10 +2249,10 @@ fn java_static_field_qualifier_becomes_a_value_before_member_selection() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2290,10 +2290,10 @@ fn java_source_static_call_finalizes_through_classifier_candidates() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2329,7 +2329,7 @@ fn super_qualified_inherited_inner_constructor_uses_the_selected_receiver() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2392,7 +2392,7 @@ fun explicitInvoke() = { value: String -> value }.invoke("invoked")
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2454,7 +2454,7 @@ fun invokeSafely(receiver: Int?, operation: Int.(Int) -> Int) = receiver?.operat
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2512,7 +2512,7 @@ context(value: String) fun functionResult() = function()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2539,7 +2539,7 @@ fun box() = scoped(Node("D")) { render() + Node("E").render() }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2588,7 +2588,7 @@ fun result() = withReceiver(Context("OK")) { Target().compute { text } }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
@@ -2629,7 +2629,7 @@ fun Carrier<String>.result() = 0.combine("OK")
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2673,7 +2673,7 @@ fn inferred_property_constructor_call_does_not_require_default_abi_realization()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2697,10 +2697,10 @@ fn inferred_property_reference_finalizes_before_body_streaming() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2731,10 +2731,10 @@ fn companion_lateinit_reference_finalizes_inferred_boolean_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::from_source(inputs[0].text),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2770,10 +2770,10 @@ fn inferred_signature_invokes_nominal_constructor_reference_through_callable_sha
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2823,10 +2823,10 @@ fn inferred_signatures_select_nested_and_unbound_inner_constructor_references() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2871,7 +2871,7 @@ fun box() = Holder().factory.make("OK").result
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2910,7 +2910,7 @@ fn inner_classifier_signatures_retain_captured_outer_type_arguments() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2961,10 +2961,10 @@ fn qualified_companion_singleton_reference_is_bound_during_signature_solving() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2989,10 +2989,10 @@ fn object_property_reference_is_bound_in_the_signature_graph() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3036,10 +3036,10 @@ fn natural_bound_callable_reference_prefers_the_member_rung_over_extensions() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3079,10 +3079,10 @@ class Child : Base<String>("") {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3147,10 +3147,10 @@ fn delegated_signature_checks_bound_property_reference_against_reflective_parame
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3184,10 +3184,10 @@ fn nested_object_value_resolves_in_a_delegated_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3219,10 +3219,10 @@ fn extension_delegate_conventions_receive_the_property_extension_receiver() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3267,10 +3267,10 @@ fn same_named_delegated_extensions_form_distinct_signature_dependencies() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3314,10 +3314,10 @@ fn inline_delegate_preparation_does_not_commit_unchecked_constructor_types() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3351,10 +3351,10 @@ fn explicit_generic_constructor_shapes_a_trailing_lambda_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3383,10 +3383,10 @@ fn expected_callable_reference_specializes_a_postponed_generic_argument() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3417,7 +3417,7 @@ fn expected_callable_reference_demands_an_inferred_source_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3448,7 +3448,7 @@ fn adapted_reference_to_an_imported_object_member_demands_its_inferred_signature
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3478,7 +3478,7 @@ fn callable_valued_generic_extension_property_is_specialized_before_invoke() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3511,7 +3511,7 @@ fn companion_member_supplies_lambda_expectation_to_an_enclosing_class_body() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3542,7 +3542,7 @@ fn postponed_receiver_lambda_constraints_finalize_an_inferred_property() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3576,7 +3576,7 @@ fn pcla_constraints_and_conditional_sibling_finalize_an_inferred_function() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3618,7 +3618,7 @@ fn pcla_receiver_constraints_cross_nested_local_classifier_scopes() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3662,7 +3662,7 @@ fn selected_anonymous_member_effect_constrains_postponed_receiver_lambda() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3698,7 +3698,7 @@ fn explicit_generic_call_shapes_bound_extension_reference_for_sam_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3734,7 +3734,7 @@ fn inferred_extension_bound_reference_selects_declared_member_without_a_false_cy
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3786,10 +3786,10 @@ fn compact_graph_finalizes_an_extension_property_after_legacy_approximation_decl
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3834,7 +3834,7 @@ fn demanded_anonymous_property_keeps_its_enclosing_receiver_lambda_scope() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3868,7 +3868,7 @@ fn contextual_extension_lambda_adopts_its_declared_result_in_a_generic_member() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3903,7 +3903,7 @@ fn contextual_receiver_shadows_enclosing_this_in_callable_reference_signature() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3955,10 +3955,10 @@ fn inherited_generic_member_extension_is_visible_inside_a_receiver_lambda() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3993,7 +3993,7 @@ fn explicit_type_arguments_specialize_a_projected_sam_lambda_in_pass_one() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4037,7 +4037,7 @@ val contextObject = ContextSam { value: String -> implicit<Context>().accept(val
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
@@ -4081,7 +4081,7 @@ fn unqualified_generic_sam_constructor_publishes_applied_result() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4128,7 +4128,7 @@ fn qualified_nested_fun_interface_constructor_finalizes_in_pass_one() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4158,7 +4158,7 @@ fn package_qualified_internal_sibling_property_finalizes_in_pass_one() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4195,7 +4195,7 @@ fn type_alias_constructor_calls_and_references_preserve_fixed_arguments() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4240,7 +4240,7 @@ fn invoke_constraints_use_function_member_and_extension_operator_scopes() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4280,7 +4280,7 @@ fn nested_class_lambda_reads_its_enclosing_private_companion_during_signature_so
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4316,7 +4316,7 @@ fn exposed_anonymous_object_signature_uses_its_declared_base_class() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4361,7 +4361,7 @@ fn public_signature_keeps_anonymous_local_exact_until_its_member_is_consumed() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4396,7 +4396,7 @@ fn contextual_unit_lambda_coerces_its_value_result_during_signature_solving() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4431,7 +4431,7 @@ fn lambda_passed_to_any_uses_its_natural_function_type() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4462,7 +4462,7 @@ fn anonymous_function_keeps_its_declared_result_in_generic_signature_inference()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4492,7 +4492,7 @@ fn generic_constructor_adapts_integer_literal_through_ordinary_class_bound() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4523,7 +4523,7 @@ fn boolean_and_and_if_conditions_refine_signature_operands() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4556,7 +4556,7 @@ fn callable_references_in_a_generic_vararg_use_the_selected_element_expectation(
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4587,7 +4587,7 @@ fn compact_star_bounds_preserve_the_classifier_inside_a_vararg_array() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4632,7 +4632,7 @@ class Outer {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4681,7 +4681,7 @@ fun nested(value: Boxed<Cargo>): Boxed<Cargo> = value
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -4735,7 +4735,7 @@ fn nested_builder_constraints_finalize_the_enclosing_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -4813,7 +4813,7 @@ fn star_captured_self_bound_keeps_the_callers_type_parameter_in_checked_fir() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -4844,7 +4844,7 @@ fn postponed_generic_result_preserves_its_non_null_formal_bound() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -4877,12 +4877,12 @@ fn dependency_extension_constraints_finalize_the_enclosing_generic_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 crate::jvm::classpath::Classpath::new(classpath),
             ))
             .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -4932,12 +4932,12 @@ fn bounded_contract_declaration_publishes_by_stable_identity() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 crate::jvm::classpath::Classpath::new(classpath),
             ))
             .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -5001,12 +5001,12 @@ fn generic_source_contract_uses_callee_type_parameter_identity_at_call_site() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 crate::jvm::classpath::Classpath::new(classpath),
             ))
             .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -5081,12 +5081,12 @@ fn pass_one_contract_is_visible_when_caller_source_streams_first() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
                 crate::jvm::classpath::Classpath::new(classpath),
             ))
             .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -5112,7 +5112,7 @@ fn constructor_parameter_rung_is_limited_to_class_initialization_signatures() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5149,7 +5149,7 @@ fn alias_star_projection_publishes_target_bound_and_reads_without_projection_wra
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -5186,7 +5186,7 @@ fn bounded_classifier_star_publishes_its_declared_upper_bound() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5288,7 +5288,7 @@ fn stable_constructor_annotations_are_published_without_occurrence_coordinates()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5348,7 +5348,7 @@ fn stable_constructor_annotations_keep_their_lexically_bound_identity() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5416,7 +5416,7 @@ fn stable_callable_and_property_annotations_keep_their_lexically_bound_identity(
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5601,10 +5601,10 @@ fn nested_generic_member_signature_uses_its_published_type_parameter_identity() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::from_source(source),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -5698,7 +5698,7 @@ fn assert_streaming_frontend(source: &str, stem: &str) {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
@@ -5719,10 +5719,10 @@ fn assert_jvm_streaming_frontend(source: &str, stem: &str) {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::from_source(source),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -5751,10 +5751,10 @@ fun statement(scope: Scope<List<String>>) = exec { scope returns emptyList() }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5788,10 +5788,10 @@ fun broken() = run { undefinedCall(); 1 }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5852,10 +5852,10 @@ fun sourceContract(runtime: Runtime?) = run {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5904,10 +5904,10 @@ fun destructured(line: String) = run {
     let mut diagnostics = DiagSink::new();
     let _ = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -6002,10 +6002,10 @@ class Holder {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -6055,10 +6055,10 @@ fun explicit(repo: Repo, scope: Scope) = stub { repo.delete(scope.any()) }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -6111,10 +6111,10 @@ fun safeNe(r: Runtime?) = run { if (r?.status != null) r.mock else false }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -6159,10 +6159,10 @@ fun conditional(r: Runtime?, flag: Boolean) = run {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -6260,7 +6260,7 @@ class Host(delegate: Api) : Api by delegate
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
