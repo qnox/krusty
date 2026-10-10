@@ -18,7 +18,8 @@ use crate::ir::{
 use crate::types::Ty;
 
 use super::{
-    constant_bound, constant_value, is_unsigned, step_constant, CounterLoopStyle, Operand, Realizer,
+    constant_bound, constant_value, is_unsigned, step_constant, CounterLoopStyle, Operand,
+    Realizer, UntilSteps,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,7 +236,15 @@ impl Realizer<'_> {
                 first,
                 last,
                 step,
-            } => self.progression_value_header(ty, *setup, *first, *last, *step),
+                stepped,
+            } => match stepped
+                .as_deref()
+                .filter(|_| self.until_steps == UntilSteps::Counted)
+                .and_then(|stepped| self.counted_until_step(stepped, ty))
+            {
+                Some(header) => header,
+                None => self.progression_value_header(ty, *setup, *first, *last, *step),
+            },
             IrProgressionSource::Step {
                 nested,
                 step,
@@ -249,6 +258,39 @@ impl Realizer<'_> {
                 self.reversed_header(nested)
             }
         }
+    }
+
+    /// `start until end step step` counted rather than built: the `until` becomes `start..end - 1`,
+    /// which `step` can take, when `end` is a constant with a value below it. `None` keeps the
+    /// built progression; `until Int.MIN_VALUE` is empty and has no such bound, and neither has an
+    /// unsigned `until 0u`, whose constant is not checked against its own minimum here.
+    fn counted_until_step(
+        &mut self,
+        stepped: &IrProgressionSource,
+        ty: Ty,
+    ) -> Option<ProgressionHeader> {
+        let IrProgressionSource::Step {
+            nested,
+            step,
+            last_element,
+        } = stepped
+        else {
+            return None;
+        };
+        let IrProgressionSource::Literal {
+            operation: FirRangeOperation::Until | FirRangeOperation::OpenEnd,
+            start,
+            end,
+        } = **nested
+        else {
+            return None;
+        };
+        if is_unsigned(ty) {
+            return None;
+        }
+        let last = exclusive_bound(self.ir, end, Direction::Decreasing, ty)?;
+        let nested = self.range_literal_header(ty, FirRangeOperation::Through, start, last);
+        Some(self.stepped_header(nested, *step, last_element))
     }
 
     /// `RangeToHandler`, `DownToHandler`, `UntilHandler` and `RangeUntilHandler`: an inclusive

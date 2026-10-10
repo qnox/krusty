@@ -163,6 +163,10 @@ fn progression_source(
             runtime_function(last_element, names);
         }
         super::IrProgressionSource::Reversed(nested) => progression_source(nested, names),
+        super::IrProgressionSource::Value {
+            stepped: Some(stepped),
+            ..
+        } => progression_source(stepped, names),
         super::IrProgressionSource::Literal { .. } | super::IrProgressionSource::Value { .. } => {}
     }
 }

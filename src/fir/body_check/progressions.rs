@@ -110,8 +110,48 @@ impl BodyFirChecker<'_> {
                     end: *end,
                 }))
             }
-            _ => self.progression_value(checked, source),
+            _ => {
+                let stepped = self.stepped_until(source, checked)?;
+                self.progression_value(checked, source, stepped)
+            }
         }
+    }
+
+    /// `start until end step step` with a constant `end` and `step` and a constant or local
+    /// `start`, as a `Step` over its `until`: the form a target may count instead of building the
+    /// progression kotlinc builds (see [`FirProgressionSource::Value`]). Those operands are read
+    /// again rather than evaluated again, which only a constant or a local read allows.
+    fn stepped_until(
+        &self,
+        source: ExprId,
+        checked: FirExprId,
+    ) -> Result<Option<Box<FirProgressionSource>>, BodyCheckFailure> {
+        let Some((CompilerIntrinsic::ProgressionStep, receiver_source, receiver, Some(step))) =
+            self.progression_builder_call(source, checked)
+        else {
+            return Ok(None);
+        };
+        let Some(
+            nested @ FirProgressionSource::Literal {
+                operation: FirRangeOperation::Until | FirRangeOperation::OpenEnd,
+                start,
+                end,
+            },
+        ) = self.progression_source(receiver_source, receiver)?
+        else {
+            return Ok(None);
+        };
+        let kind = |value: FirExprId| self.body.expr(value).map(|expression| &expression.kind);
+        let constant = |value| matches!(kind(value), Some(FirExprKind::Constant(_)));
+        let read = |value| matches!(kind(value), Some(FirExprKind::ValueRead(_)));
+        if !constant(end) || !constant(step) || !(constant(start) || read(start)) {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(FirProgressionSource::Step {
+            nested: Box::new(nested),
+            step,
+            last_element: self.progression_last_element(checked, source)?,
+        })))
     }
 
     /// A call to one of the `kotlin.ranges` builders, matched on the selected declaration.
@@ -223,6 +263,7 @@ impl BodyFirChecker<'_> {
         &self,
         iterable: FirExprId,
         source: ExprId,
+        stepped: Option<Box<FirProgressionSource>>,
     ) -> Result<Option<FirProgressionSource>, BodyCheckFailure> {
         let Some(class) = self.most_precise_type(iterable) else {
             return Ok(None);
@@ -257,6 +298,7 @@ impl BodyFirChecker<'_> {
         Ok(Some(FirProgressionSource::Value {
             progression: Box::new(progression),
             iterable: value,
+            stepped,
         }))
     }
 

@@ -179,8 +179,9 @@ impl Backend for CraneliftBackend {
 /// Native keeps the entry test at the top and carries unsigned counters in their own machine
 /// representation. The common backend-boundary realizer therefore needs no JVM-style inline-call
 /// provenance or Java loop shape.
-const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
+pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
     crate::backend::counted_loops::CountedLoopPolicy {
         style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
         inlining: crate::backend::counted_loops::HeaderInlining::None,
+        until_steps: crate::backend::counted_loops::UntilSteps::Counted,
     };
