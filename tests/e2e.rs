@@ -40,6 +40,8 @@ mod abstract_member_shape_e2e;
 mod abstract_modifier_consistency_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
 mod adapted_callable_reference_equality_e2e;
+#[path = "allopen_plugin_e2e.rs"]
+mod allopen_plugin_e2e;
 #[path = "also_apply_result_line_e2e.rs"]
 mod also_apply_result_line_e2e;
 #[path = "annotated_class_decl_line_e2e.rs"]

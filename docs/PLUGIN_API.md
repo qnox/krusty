@@ -89,6 +89,18 @@ contract. A future tightening could pass a phase-scoped facade instead of raw `&
 common IR. `IrClass::applied_annotations` already carries the resolved identities and folded
 arguments, so plugins do not inspect parser syntax or compare annotation strings.
 
+### Declaration status — `all-open`
+
+kotlinc's all-open plugin is a FIR status transformer, not a generator: it makes `open` the default
+modality of the classes its annotations match and of the members they declare. Its native port is
+configuration only. `IrPlugin::open_by_default_annotations` names the annotations (from
+`annotation=<fqname>` and the `spring`/`micronaut`/`quarkus` presets), and the frontend
+(`resolve::plugin_status`) matches them the way kotlinc's `AbstractSimpleClassPredicateMatchingService`
+does: a class's own annotation, a meta-annotation at any depth, or a supertype that matches, over
+source declarations and dependency classifiers alike. The transformed modality is applied where each
+declaration header is published, so the checker, common lowering and the backends all read the same
+`open` declaration and no later phase knows a plugin was involved.
+
 ### Reference plugin — `serialization`
 
 `@Serializable class Foo(val a: Int, val b: String)` → the PoC synthesizes the structure kotlinc's
@@ -220,7 +232,10 @@ to run. Drop-in rules it enforces:
 - **kotlinc's syntax exactly.** `-Xplugin=<jar>,<jar>` is repeatable and split on `,` (a `:` is part
   of the path); `-P plugin:<id>:<key>=<value>` and `-P=…`; the experimental
   `-Xcompiler-plugin=<jars>[=<key>=<value>,…]`, which kotlinc refuses to mix with the legacy pair. A
-  missing jar and a malformed `-P` are kotlinc's own errors, in its words.
+  modern registration's options configure the plugin its jars load, exactly as `-P` options under
+  that plugin's id do (`PluginConfig::options_for`); an undeclared key there is kotlinc's
+  `unsupported plugin option: <NO_ID>:<key>=<value>`. A missing jar and a malformed `-P` are
+  kotlinc's own errors, in its words.
 - **Versions are not flags.** Serialization's ABI comes from the `kotlinx-serialization-core` jar on
   `-classpath` (`SerializationAbi::from_classpath`); KSP's from its jar coordinate (`KspToolchain`,
   tied to the targeted kotlinc version). Same inputs as kotlinc → same codegen.
@@ -232,12 +247,13 @@ silently dropping a plugin would emit wrong bytecode, each activated plugin gets
 
 | Situation | Diagnostic | Severity |
 |---|---|---|
-| native reimpl (serialization) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
+| native reimpl (serialization, all-open) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
 | hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
 | hosted (KSP), from a driver with no codegen host (`Activation::codegen_host == false`) | `HostUnavailable` — reporting it hosted would drop its generated sources | **ERROR** (fails the compile) |
-| `-Xplugin` jar declaring a registrar no extension answers to (Compose, all-open, no-arg, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
+| `-Xplugin` jar declaring a registrar no extension answers to (Compose, no-arg, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
 | `-Xplugin` entry krusty cannot read (not a zip, not a directory) | `Unsupported` — it cannot be identified, so it cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:…` for an id no extension answers to | `Unsupported` (`plugin id '<id>'`) — the option cannot be honoured | **ERROR** (fails the compile) |
+| `-P plugin:<id>:<key>=…` with a key the extension's command-line processor does not declare (checked where the extension lists its keys, as all-open does) | `UnsupportedOption` — kotlinc's own `unsupported plugin option: <id>:<key>=<value>` | **ERROR** (fails the compile) |
 
 So a build that pulls in Compose fails loudly with a clear message ("remove the plugin or compile this
 module with kotlinc") instead of producing a silently-broken artifact, and a serialization build is

@@ -15,6 +15,7 @@
 //! AST vs IR (see the doc): declaration/supertype generation belongs before type checking so
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
+pub mod allopen;
 pub mod cli;
 pub mod codegen_loop;
 pub mod deps;
@@ -661,6 +662,15 @@ pub trait IrPlugin {
         None
     }
 
+    /// Annotations that make `open` the default modality of the classes they match and of the
+    /// members those classes declare, as kotlinc's FIR status transformer for all-open does. A class
+    /// matches when it, a meta-annotation of one of its annotations at any depth, or one of its
+    /// supertypes carries one of them. The frontend applies the status before any declaration's
+    /// modality is published, so every later phase sees the transformed declaration.
+    fn open_by_default_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -1072,6 +1082,14 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::open_by_default_annotations`].
+    pub fn open_by_default_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.open_by_default_annotations().iter().copied())
+            .collect()
     }
 
     pub fn generate_frontend_declarations(

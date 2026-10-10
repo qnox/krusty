@@ -17,9 +17,13 @@
 /// The real kotlinc plugin ids (the `<id>` in `-P plugin:<id>:...`).
 pub const SERIALIZATION_PLUGIN_ID: &str = "org.jetbrains.kotlinx.serialization";
 pub const KSP_PLUGIN_ID: &str = "com.google.devtools.ksp.symbol-processing";
+pub const ALLOPEN_PLUGIN_ID: &str = "org.jetbrains.kotlin.allopen";
 /// kotlinc's default scripting plugin, which kotlinc loads into every compilation and the Kotlin
 /// Gradle plugin also passes explicitly on every JVM compile's `-Xplugin` classpath.
 pub const SCRIPTING_PLUGIN_ID: &str = "kotlin.scripting";
+
+/// The plugin id kotlinc shows for an `-Xcompiler-plugin` option, which names no plugin.
+pub const MODERN_OPTION_ID: &str = "<NO_ID>";
 
 /// One `-P plugin:<id>:<key>=<value>` option.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +166,31 @@ impl PluginConfig {
     /// module knows no plugin by name beyond the ids kotlinc documents.
     pub fn configures(&self, plugin_id: &str) -> bool {
         self.options.iter().any(|option| option.id == plugin_id)
+    }
+
+    /// The options configuring `plugin_id`, whose jar `jar` (when one activated it) declares it: its
+    /// `-P plugin:<id>:…` options, then the options of the `-Xcompiler-plugin` registration that
+    /// loads `jar`. A modern option names no plugin; it carries [`MODERN_OPTION_ID`], as kotlinc
+    /// renders it in its errors.
+    pub fn options_for(&self, plugin_id: &str, jar: Option<&str>) -> Vec<PluginOption> {
+        let legacy = self
+            .options
+            .iter()
+            .filter(|option| option.id == plugin_id)
+            .cloned();
+        let modern = self
+            .compiler_plugins
+            .iter()
+            .filter(|plugin| {
+                jar.is_some_and(|jar| plugin.classpath.iter().any(|entry| entry == jar))
+            })
+            .flat_map(|plugin| plugin.options.iter())
+            .map(|(key, value)| PluginOption {
+                id: MODERN_OPTION_ID.to_string(),
+                key: key.clone(),
+                value: value.clone(),
+            });
+        legacy.chain(modern).collect()
     }
 
     /// All values for `-P plugin:<id>:<key>` (a key may repeat — KSP `apoption`/`apclasspath`).
