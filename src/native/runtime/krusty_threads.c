@@ -302,22 +302,12 @@ void kt_callback_leave(KThreadEntry *entry) {
 #define KT_THREAD_STACK_BYTES ((size_t)8 * 1024 * 1024)
 #define KT_GUARD_BYTES ((size_t)4096)
 
-/* CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM |
-   CLONE_CHILD_CLEARTID: a thread of this process, whose id word the kernel clears and wakes when it
-   ends. */
-#define KT_CLONE_FLAGS 0x00250f00ul
-
 struct KThreadHandle {
     uint32_t exited;
     void *stack;
 };
 
-/* Start `routine(argument)` on a new thread whose stack ends at `stack_top`; the kernel clears
-   `*exited` and wakes it when the thread ends. Answers the thread's id or a negated errno. The
-   routine and argument ride on the new stack, where only the child reads them. */
-long kt_clone(unsigned long flags, void *stack_top, uint32_t *exited, void (*routine)(void *),
-              void *argument);
-
+/* The routine and argument ride on the new stack, where only the child reads them. */
 #if defined(__x86_64__)
 /* clone(flags, stack, parent_tid, child_tid, tls): rdi, rsi, rdx, r10, r8. */
 __asm__(".text\n"
@@ -398,6 +388,7 @@ __asm__(".text\n"
 __attribute__((noreturn)) static void kt_thread_main(void *start) {
     KThread *thread = (KThread *)start;
     uintptr_t bottom = 0;
+    kt_os_thread_begin();
     kt_lock();
     kt_running = thread;
     thread->tid = kt_sys_gettid();
@@ -412,6 +403,7 @@ __attribute__((noreturn)) static void kt_thread_main(void *start) {
     kt_thread_remove(thread);
     kt_running = NULL;
     kt_unlock();
+    kt_os_thread_end();
     kt_sys_exit_thread();
 }
 
@@ -421,7 +413,7 @@ static long kt_spawn(KThreadHandle *handle, KThread *thread) {
        instead of running on into whatever the kernel mapped next to it. */
     kt_protect_none(handle->stack, KT_GUARD_BYTES);
     __atomic_store_n(&handle->exited, 1, __ATOMIC_RELEASE);
-    return kt_clone(KT_CLONE_FLAGS, (char *)handle->stack + KT_THREAD_STACK_BYTES, &handle->exited,
+    return kt_clone(KT_CLONE_THREAD_FLAGS, (char *)handle->stack + KT_THREAD_STACK_BYTES, &handle->exited,
                     kt_thread_main, thread);
 }
 
