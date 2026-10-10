@@ -9,7 +9,7 @@
 //! plugin's configuration: the `annotation` and `preset` options, and the preset annotation lists of
 //! kotlinc's `AllOpenPluginNames.SUPPORTED_PRESETS`.
 
-use crate::plugins::cli::{PluginOption, ALLOPEN_PLUGIN_ID};
+use crate::plugins::cli::PluginOption;
 use crate::plugins::IrPlugin;
 use crate::types::TypeName;
 
@@ -62,13 +62,11 @@ pub struct AllOpenPlugin {
 }
 
 impl AllOpenPlugin {
-    /// Configure from the compilation's `-P plugin:org.jetbrains.kotlin.allopen:<key>=<value>`
-    /// options: every `annotation=<fqname>`, then the annotations of every `preset=<name>`. Like
-    /// kotlinc, an unknown preset name contributes nothing.
+    /// Configure from the options the compilation gives all-open, in either syntax (see
+    /// [`crate::plugins::cli::PluginConfig::options_for`]): every `annotation=<fqname>`, then the
+    /// annotations of every `preset=<name>`. Like kotlinc, an unknown preset name contributes
+    /// nothing.
     pub fn from_options(options: &[PluginOption]) -> AllOpenPlugin {
-        let options = options
-            .iter()
-            .filter(|option| option.id == ALLOPEN_PLUGIN_ID);
         let mut qualified = Vec::new();
         let mut presets = Vec::new();
         for option in options {
@@ -129,6 +127,7 @@ pub(crate) fn classifier_identities(qualified: &str) -> Vec<TypeName> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::cli::ALLOPEN_PLUGIN_ID;
 
     fn option(key: &str, value: &str) -> PluginOption {
         PluginOption {

@@ -10,7 +10,7 @@
 //! configuration: the `annotation`, `preset` and `invokeInitializers` options, and the `jpa`
 //! preset of kotlinc's `NoArgPluginNames.SUPPORTED_PRESETS`.
 
-use crate::plugins::cli::{PluginOption, NOARG_PLUGIN_ID};
+use crate::plugins::cli::PluginOption;
 use crate::plugins::IrPlugin;
 use crate::types::TypeName;
 
@@ -33,12 +33,11 @@ pub struct NoArgPlugin {
 }
 
 impl NoArgPlugin {
-    /// Configure from the compilation's `-P plugin:org.jetbrains.kotlin.noarg:<key>=<value>`
-    /// options: every `annotation=<fqname>`, then the annotations of every `preset=<name>`. Like
+    /// Configure from the options the compilation gives no-arg, in either syntax (see
+    /// [`crate::plugins::cli::PluginConfig::options_for`]): every `annotation=<fqname>`, then the annotations of every `preset=<name>`. Like
     /// kotlinc, an unknown preset name contributes nothing. `invokeInitializers=true` is refused
     /// by the registry before a plugin is built, so the constructor never runs initializers.
     pub fn from_options(options: &[PluginOption]) -> NoArgPlugin {
-        let options = options.iter().filter(|option| option.id == NOARG_PLUGIN_ID);
         let mut qualified = Vec::new();
         let mut presets = Vec::new();
         for option in options {
@@ -75,6 +74,7 @@ impl IrPlugin for NoArgPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::cli::NOARG_PLUGIN_ID;
 
     fn option(key: &str, value: &str) -> PluginOption {
         PluginOption {

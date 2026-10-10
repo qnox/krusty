@@ -247,7 +247,10 @@ to run. Drop-in rules it enforces:
 - **kotlinc's syntax exactly.** `-Xplugin=<jar>,<jar>` is repeatable and split on `,` (a `:` is part
   of the path); `-P plugin:<id>:<key>=<value>` and `-P=…`; the experimental
   `-Xcompiler-plugin=<jars>[=<key>=<value>,…]`, which kotlinc refuses to mix with the legacy pair. A
-  missing jar and a malformed `-P` are kotlinc's own errors, in its words.
+  modern registration's options configure the plugin its jars load, exactly as `-P` options under
+  that plugin's id do (`PluginConfig::options_for`); an undeclared key there is kotlinc's
+  `unsupported plugin option: <NO_ID>:<key>=<value>`. A missing jar and a malformed `-P` are
+  kotlinc's own errors, in its words.
 - **Versions are not flags.** Serialization's ABI comes from the `kotlinx-serialization-core` jar on
   `-classpath` (`SerializationAbi::from_classpath`); KSP's from its jar coordinate (`KspToolchain`,
   tied to the targeted kotlinc version). Same inputs as kotlinc → same codegen.

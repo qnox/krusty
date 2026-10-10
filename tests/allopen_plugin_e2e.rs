@@ -46,6 +46,23 @@ class Svc(val id: String) { fun describe() = "svc:$id" }
 
 class SvcImpl : Svc("x") { override fun describe() = "impl" }
 
+@CycleB
+@AllOpen
+annotation class CycleA
+
+@CycleA
+annotation class CycleB
+
+// Visiting CycleA first reaches the configured annotation only after crossing CycleB's edge back
+// to CycleA. That must not leave CycleB cached as unmatched for the later declaration.
+@CycleA
+class FirstCycle { fun first() = "first" }
+
+@CycleB
+class SecondCycle { fun second() = "second" }
+
+class CycleImpl : SecondCycle() { override fun second() = "cycle" }
+
 @AllOpen
 abstract class Root { fun r() = "root" }
 
@@ -78,6 +95,8 @@ fun box(): String {
     if (b.inside() != "s") return "inside"
     val s: Svc = SvcImpl()
     if (s.describe() != "impl") return "describe"
+    val cycle: SecondCycle = CycleImpl()
+    if (FirstCycle().first() != "first" || cycle.second() != "cycle") return "cycle"
     val l: Mid = Leaf()
     if (l.m() != "leaf" || l.r() != "leafroot") return "leaf"
     if (Closed().c() != "c" || Impl().own() != "own" || Single.s() != "s") return "others"
@@ -95,6 +114,22 @@ fn all_open_classes_and_members_match_kotlinc() {
     let fixture = PluginFixture::new("same-module");
     let sources = [("Main.kt", SAME_MODULE)];
     let switches = allopen_switches(&["annotation=AllOpen"]);
+    let stdlib = vec![common::stdlib_jar()];
+    let reference = fixture.kotlinc("main", &sources, &[], &switches);
+    let krusty = fixture.krusty("main", &sources, &[], &switches);
+    assert_same_classes_and_box(&reference, &krusty, &stdlib);
+}
+
+/// The same program configured through kotlinc's modern syntax,
+/// `-Xcompiler-plugin=<jar>=annotation=AllOpen`: its options reach the plugin its jar loads.
+#[test]
+fn modern_syntax_options_match_kotlinc() {
+    let fixture = Fixture::new("modern-syntax");
+    let sources = [("Main.kt", SAME_MODULE)];
+    let switches = vec![format!(
+        "-Xcompiler-plugin={}=annotation=AllOpen",
+        allopen_jar().display()
+    )];
     let stdlib = vec![common::stdlib_jar()];
     let reference = fixture.kotlinc("main", &sources, &[], &switches);
     let krusty = fixture.krusty("main", &sources, &[], &switches);

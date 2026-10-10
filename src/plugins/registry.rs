@@ -43,7 +43,8 @@ pub struct Activation<'a> {
 
 /// Builds the native `IrPlugin` for an extension, configured from the activation context and the
 /// release of the compiler-plugin jar that activated it (see [`declared_release`]), when one did.
-type NativeBuilder = fn(&Activation, Option<&str>) -> Box<dyn IrPlugin>;
+/// The options are the ones configuring that extension, from either syntax.
+type NativeBuilder = fn(&Activation, Option<&str>, &[PluginOption]) -> Box<dyn IrPlugin>;
 
 /// What a registered extension *is* to krusty.
 pub enum ExtensionKind {
@@ -226,6 +227,8 @@ struct EnabledNative {
     build: NativeBuilder,
     /// The activating jar's [`declared_release`].
     release: Option<String>,
+    /// The options configuring this extension ([`PluginConfig::options_for`]).
+    options: Vec<PluginOption>,
 }
 
 impl NativePlugins {
@@ -258,7 +261,11 @@ impl NativePlugins {
         };
         let mut host = PluginHost::new();
         for native in &self.enabled {
-            host.register((native.build)(&activation, native.release.as_deref()));
+            host.register((native.build)(
+                &activation,
+                native.release.as_deref(),
+                &native.options,
+            ));
         }
         host
     }
@@ -279,7 +286,11 @@ impl Resolved {
 
 /// Build the native serialization plugin, reading its target ABI from the classpath runtime jar and
 /// its diagnostics' wording from the compiler-plugin jar's release.
-fn build_serialization(act: &Activation, release: Option<&str>) -> Box<dyn IrPlugin> {
+fn build_serialization(
+    act: &Activation,
+    release: Option<&str>,
+    _options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
     let abi = SerializationAbi::from_classpath(act.classpath).unwrap_or_default();
     Box::new(
         SerializationPlugin::new(abi, act.module_name.to_string())
@@ -287,14 +298,22 @@ fn build_serialization(act: &Activation, release: Option<&str>) -> Box<dyn IrPlu
     )
 }
 
-/// Build the native all-open plugin from the compilation's `-P` options for it.
-fn build_allopen(act: &Activation, _release: Option<&str>) -> Box<dyn IrPlugin> {
-    Box::new(AllOpenPlugin::from_options(&act.config.options))
+/// Build the native all-open plugin from the compilation's options for it.
+fn build_allopen(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(AllOpenPlugin::from_options(options))
 }
 
-/// Build the native no-arg plugin from the compilation's `-P` options for it.
-fn build_noarg(act: &Activation, _release: Option<&str>) -> Box<dyn IrPlugin> {
-    Box::new(NoArgPlugin::from_options(&act.config.options))
+/// Build the native no-arg plugin from the compilation's options for it.
+fn build_noarg(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(NoArgPlugin::from_options(options))
 }
 
 /// The set of extensions krusty knows about — independent of any compilation.
@@ -382,6 +401,7 @@ impl PluginRegistry {
                         plugin_id: ext.plugin_id,
                         build,
                         release: None,
+                        options: Vec::new(),
                     }),
                     ExtensionKind::CodegenHost | ExtensionKind::ScriptsOnly => None,
                 })
@@ -423,12 +443,11 @@ impl PluginRegistry {
             if jar.is_none() && !act.config.configures(ext.plugin_id) {
                 continue;
             }
+            let options = act.config.options_for(ext.plugin_id, jar.as_deref());
             if let Some(keys) = ext.option_keys {
                 diagnostics.extend(
-                    act.config
-                        .options
+                    options
                         .iter()
-                        .filter(|option| option.id == ext.plugin_id)
                         .filter(|option| !keys.contains(&option.key.as_str()))
                         .map(|option| PluginDiagnostic::UnsupportedOption {
                             option: option.clone(),
@@ -436,10 +455,8 @@ impl PluginRegistry {
                 );
             }
             diagnostics.extend(
-                act.config
-                    .options
+                options
                     .iter()
-                    .filter(|option| option.id == ext.plugin_id)
                     .filter(|option| {
                         ext.unimplemented_options
                             .iter()
@@ -455,6 +472,7 @@ impl PluginRegistry {
                         plugin_id: ext.plugin_id,
                         build,
                         release: jar.as_deref().and_then(declared_release),
+                        options,
                     });
                     diagnostics.push(PluginDiagnostic::NativeSubstitution {
                         plugin_id: ext.plugin_id.to_string(),
@@ -653,6 +671,51 @@ mod tests {
             errors,
             vec!["unsupported plugin option: org.jetbrains.kotlin.allopen:annotations=AllOpen"]
         );
+    }
+
+    /// kotlinc's modern syntax configures the plugin its jars load:
+    /// `-Xcompiler-plugin=<jar>=annotation=…,preset=…`.
+    #[test]
+    fn modern_syntax_options_configure_the_plugin_their_jar_loads() {
+        let jar = plugin_jar(
+            "allopen-compiler-plugin.jar",
+            &[registrar_of(ALLOPEN_PLUGIN_ID)],
+        );
+        let c = cfg(&[&format!(
+            "-Xcompiler-plugin={jar}=annotation=test.AllOpen,preset=spring"
+        )]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(
+            resolved.diagnostics,
+            vec![PluginDiagnostic::NativeSubstitution {
+                plugin_id: ALLOPEN_PLUGIN_ID.to_string(),
+                jar: Some(jar),
+            }]
+        );
+        let host = resolved.native.host("app");
+        let annotations = host.open_by_default_annotations();
+        assert!(annotations.contains(&crate::types::type_name("test/AllOpen")));
+        assert!(annotations.contains(&crate::types::type_name(
+            "org/springframework/stereotype/Component"
+        )));
+    }
+
+    /// kotlinc 2.4.20 refuses an undeclared key given in the modern syntax too, naming no plugin.
+    #[test]
+    fn an_undeclared_modern_syntax_key_is_kotlincs_error() {
+        let jar = plugin_jar(
+            "allopen-compiler-plugin.jar",
+            &[registrar_of(ALLOPEN_PLUGIN_ID)],
+        );
+        let c = cfg(&[&format!("-Xcompiler-plugin={jar}=bogus=1")]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        let errors = resolved
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .map(PluginDiagnostic::message)
+            .collect::<Vec<_>>();
+        assert_eq!(errors, vec!["unsupported plugin option: <NO_ID>:bogus=1"]);
     }
 
     #[test]
@@ -972,7 +1035,7 @@ mod tests {
     fn third_party_native_extension_can_be_registered() {
         // The registry is OPEN: registering a new native extension makes krusty honor its plugin —
         // proving registration is general, not hardcoded to the two builtins.
-        fn build_noop(_: &Activation, _: Option<&str>) -> Box<dyn IrPlugin> {
+        fn build_noop(_: &Activation, _: Option<&str>, _: &[PluginOption]) -> Box<dyn IrPlugin> {
             struct NoOp;
             impl IrPlugin for NoOp {
                 fn name(&self) -> &str {
