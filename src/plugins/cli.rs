@@ -17,6 +17,7 @@
 /// The real kotlinc plugin ids (the `<id>` in `-P plugin:<id>:...`).
 pub const SERIALIZATION_PLUGIN_ID: &str = "org.jetbrains.kotlinx.serialization";
 pub const KSP_PLUGIN_ID: &str = "com.google.devtools.ksp.symbol-processing";
+pub const ALLOPEN_PLUGIN_ID: &str = "org.jetbrains.kotlin.allopen";
 /// kotlinc's default scripting plugin, which kotlinc loads into every compilation and the Kotlin
 /// Gradle plugin also passes explicitly on every JVM compile's `-Xplugin` classpath.
 pub const SCRIPTING_PLUGIN_ID: &str = "kotlin.scripting";

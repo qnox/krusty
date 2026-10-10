@@ -9977,7 +9977,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so the three phases cannot disagree. The language server and the in-process test helpers select
   every native extension explicitly (`PluginRegistry::every_native_extension`); the Bazel worker and
   `krusty-build` refuse plugin flags, so their compiles now match kotlinc without the plugin.
-  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the all-open,
+  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the
   no-arg and Compose jars wherever the reference distribution ships them, fail; so does a `-P` for an
   unknown id; serialization with and without the plugin emits kotlinc's class set; comma lists; a
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
@@ -10001,6 +10001,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`kotlincs_default_scripting_plugin_is_accepted_beside_serialization`), and the Gradle lane's
   `krusty-build` `gradle::tests::serialization_plugin_compiles_through_krusty` (serializers generated
   in both orders and exercised at run time across modules; all-open applied before krusty fails).
+- **All-open makes `open` the default modality of the classes its annotations match.**
+  `-Xplugin=allopen-compiler-plugin.jar` (registrar `AllOpenComponentRegistrar`) with
+  `-P plugin:org.jetbrains.kotlin.allopen:annotation=<fqname>` or `preset=spring|micronaut|quarkus`
+  runs krusty's native pass, as serialization does. kotlinc's plugin is a FIR status transformer
+  matched by `annotated(names) or metaAnnotated(names, includeItself = true)` and by supertypes
+  (`AbstractSimpleClassPredicateMatchingService`), so a class matches through its own annotation, an
+  annotation meta-annotated with one at any depth (`@Service` → `@Component`), or any supertype that
+  matches, from source or from a dependency. A matched `class` that wrote no modality becomes
+  `open`; an interface, object, enum, annotation or value class, and a `@JvmRecord`, keeps its own.
+  Every function and property a matched non-local `class` declares becomes `open` unless it wrote
+  `final`, `abstract` or `open` (an explicit `final class` still opens its members); a static
+  companion-block member and the compiler-generated `componentN`/`copy` stay final. A private member
+  is open too, and kotlinc emits it without `ACC_FINAL`. A data class the plugin opens reads its
+  properties through their getters in `componentN`, `copy` defaults, `toString`, `hashCode` and
+  `equals`, as kotlinc's `DataClassMembersGenerator` does for a non-final class. A written `final`
+  on a classifier or property is recorded as `DeclarationFlags::FINAL_MODIFIER`, because a
+  classifier's `FINAL` is its default. An option key the plugin's command-line processor does not
+  declare is kotlinc's error, `unsupported plugin option: <id>:<key>=<value>`. A local class is not
+  transformed yet: its annotations resolve only during body checking, after declaration headers are
+  published. Tests: `tests/allopen_plugin_e2e.rs` (direct, meta and supertype matches, explicit
+  `final`, data, private and interface members byte-identical to kotlinc and run; the `spring` preset
+  through a dependency each compiler builds for itself), `plugins::allopen` and `plugins::registry`
+  unit tests (`allopen_resolves_to_native_and_reads_its_options`,
+  `an_option_key_the_plugin_does_not_declare_is_kotlincs_error`).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,

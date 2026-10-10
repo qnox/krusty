@@ -4695,12 +4695,14 @@ pub(crate) fn finalized_streamed_signature_index(
     // spellings are destroyed. This is declaration-scaled persistent state; it contains neither
     // parser IDs nor unresolved type syntax.
     let mut deferred_interface_delegations = Vec::new();
+    let open_by_default =
+        super::plugin_status::OpenByDefault::collect(headers, table, &classifier_types);
     for stub in &headers.stubs {
         let anchor = headers
             .declarations
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
-        let mut flags = stub.flags;
+        let mut flags = open_by_default.status(headers, stub.id, stub.kind, stub.flags);
         if stub.kind == DeclarationKind::Classifier
             && flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
         {

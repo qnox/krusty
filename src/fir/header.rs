@@ -1040,6 +1040,7 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::EXPECT, property.is_expect)
                 .with(DeclarationFlags::CONST, property.is_const)
                 .with(DeclarationFlags::OPEN, property.is_open)
+                .with(DeclarationFlags::FINAL_MODIFIER, property.is_final)
                 .with(DeclarationFlags::OVERRIDE, property.is_override)
                 .with(DeclarationFlags::ABSTRACT, property.is_abstract)
                 .with(DeclarationFlags::MUTABLE, property.is_var)
@@ -1183,6 +1184,7 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::ABSTRACT, class.is_abstract())
                 .with(DeclarationFlags::SEALED, class.is_sealed())
                 .with(DeclarationFlags::FINAL, class.is_final())
+                .with(DeclarationFlags::FINAL_MODIFIER, class.final_modifier)
                 .with(DeclarationFlags::ANNOTATION_CLASS, class.is_annotation())
                 .with(DeclarationFlags::INNER, class.inner_of.is_some())
                 .with(DeclarationFlags::COMPANION, is_companion)
@@ -1252,6 +1254,7 @@ fn extract_file_stub_inventory(
                     .with(DeclarationFlags::PROPERTY_PARAMETER, true)
                     .with(DeclarationFlags::MUTABLE, property.is_var)
                     .with(DeclarationFlags::OPEN, property.is_open)
+                    .with(DeclarationFlags::FINAL_MODIFIER, property.is_final)
                     .with(DeclarationFlags::OVERRIDE, property.is_override)
                     .with(
                         DeclarationFlags::HAS_VISIBILITY_MODIFIER,
