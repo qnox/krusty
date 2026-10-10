@@ -822,12 +822,8 @@ mod tests {
                     "duplicate freeCompilerArg '-Xskip-prerelease-check'",
                 ),
                 (
-                    "all-warnings-as-errors",
-                    "krusty does not support compilerOptions.allWarningsAsErrors",
-                ),
-                (
-                    "free-werror",
-                    "krusty does not support warning policy freeCompilerArg '-Werror'",
+                    "dev-compiler-version",
+                    "Kotlin compiler 2.4.10-dev-7885 differs from Kotlin Gradle plugin 2.4.10",
                 ),
                 (
                     "empty-opt-in",
@@ -985,6 +981,79 @@ mod tests {
                     .all(|argument| !argument.starts_with("-Xmetadata-version")),
                 "{language_2_2_run:?}",
             );
+
+            // `-Werror` and `allWarningsAsErrors` both reach krusty as one warning policy. This
+            // module intentionally carries two unresolved opt-in markers, so each form must fail
+            // with the complete ordered compiler diagnostic stream. Setting both is idempotent,
+            // like kotlinc's command line, rather than a transport conflict.
+            let diagnostic_log = root.join("krusty-diagnostics.txt");
+            let expected_werror_diagnostics = "krusty: ignoring unsupported option '-Xskip-prerelease-check'\n\
+warning: opt-in requirement marker 'krusty.fixture.ExperimentalFirstApi' is unresolved. Make sure it's present in the module dependencies.\n\
+warning: opt-in requirement marker 'krusty.fixture.ExperimentalSecondApi' is unresolved. Make sure it's present in the module dependencies.\n\
+error: warnings found and -Werror specified\n";
+            for case in ["all-warnings-as-errors", "free-werror", "werror-overlap"] {
+                let _ = std::fs::remove_file(&log);
+                let _ = std::fs::remove_file(&diagnostic_log);
+                let result = build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run();
+                let status = match result {
+                    Err(GradleError::Failed { status, .. }) => status,
+                    other => {
+                        panic!("{case}: expected the warning-bearing module to fail, got {other:?}")
+                    }
+                };
+                assert_eq!(status, "exit status: 1", "{case}");
+                assert_eq!(
+                    std::fs::read_to_string(&diagnostic_log).expect("recorded krusty diagnostics"),
+                    expected_werror_diagnostics,
+                    "{case}",
+                );
+                let invocation = single_module_invocation(&log, "kotlin-compiler-util");
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|argument| argument.as_str() == "-Werror")
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}"
+                );
+            }
+
+            // A named level remains an override when the structured global policy is enabled.
+            // `-Xcontext-parameters` is redundant at language level 2.4, so success proves that
+            // the transported `:warning` exception was applied rather than promoted by `-Werror`.
+            let _ = std::fs::remove_file(&log);
+            let output = build()
+                .property("krusty.negative", "werror-warning-exception")
+                .tasks([":compiler:util:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| panic!("werror warning exception: {error}"));
+            let expected_warning = "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.";
+            assert_eq!(
+                output
+                    .lines()
+                    .filter(|line| line.trim() == expected_warning)
+                    .count(),
+                1,
+                "werror warning exception output:\n{output}"
+            );
+            let invocation = single_module_invocation(&log, "kotlin-compiler-util");
+            for expected in [
+                "-Werror",
+                "-Xcontext-parameters",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:warning",
+            ] {
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|argument| argument.as_str() == expected)
+                        .count(),
+                    1,
+                    "{expected}: {invocation:?}"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1569,11 +1638,12 @@ fun main() {
             // the recorded invocations carry the resolved path, so the normalization root must too.
             let root = root.canonicalize().expect("canonicalize fixture root");
             let log = root.join("krusty-invocations.txt");
+            let diagnostics = root.join("krusty-diagnostics.txt");
             let proxy = root.join("recording-krusty");
             let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
                 .map(PathBuf::from)
                 .expect("KRUSTY_GRADLE_TEST_BIN must name the built krusty CLI");
-            write_krusty_proxy(&proxy, &log, &actual);
+            write_krusty_proxy(&proxy, &log, &diagnostics, &actual);
             let wrapper = root.join("gradlew");
             std::fs::write(
                 &wrapper,
@@ -1772,6 +1842,18 @@ fun main() {
         runs.into_iter().next().expect("single invocation")
     }
 
+    /// The one compiler invocation for `module`. A requested task may first rebuild a changed
+    /// dependency, so the complete Gradle build log need not contain only one invocation.
+    fn single_module_invocation(log: &Path, module: &str) -> Vec<String> {
+        let text = std::fs::read_to_string(log).expect("bridge invocation log");
+        let mut runs = invocations(&text)
+            .into_iter()
+            .filter(|arguments| has_pair(arguments, "-module-name", module))
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), 1, "module {module}: {text}");
+        runs.pop().expect("single module invocation")
+    }
+
     fn invocations(text: &str) -> Vec<Vec<String>> {
         let mut out = Vec::new();
         let mut current = Vec::new();
@@ -1790,16 +1872,22 @@ fun main() {
         out
     }
 
-    fn write_krusty_proxy(path: &Path, log: &Path, actual: &Path) {
+    fn write_krusty_proxy(path: &Path, log: &Path, diagnostics: &Path, actual: &Path) {
         let quote = |value: &Path| value.display().to_string().replace('\'', "'\\''");
         let script = r#"#!/bin/sh
 {
   echo "----"
   printf '%s\n' "$@"
 } >> "LOGPATH"
-exec 'ACTUAL' "$@"
+diagnostics="DIAGNOSTICSPATH.$$"
+'ACTUAL' "$@" 2> "$diagnostics"
+status=$?
+cat "$diagnostics" >&2
+mv "$diagnostics" "DIAGNOSTICSPATH"
+exit "$status"
 "#
         .replace("LOGPATH", &quote(log))
+        .replace("DIAGNOSTICSPATH", &quote(diagnostics))
         .replace("ACTUAL", &quote(actual));
         std::fs::write(path, script).expect("write recording krusty");
     }
@@ -2112,8 +2200,9 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 }
 
 kotlin {
-    if (krustyNegative == "compiler-version") {
-        compilerVersion.set("2.4.0")
+    when (krustyNegative) {
+        "compiler-version" -> compilerVersion.set("2.4.0")
+        else -> {}
     }
     sourceSets.named("main") {
         kotlin.srcDir("src")
@@ -2122,6 +2211,16 @@ kotlin {
     }
     sourceSets.named("test") {
         kotlin.srcDir("test-src")
+    }
+}
+
+// Override krusty's own task input, not KotlinTopLevelExtension.compilerVersion: changing the
+// latter asks KGP to resolve a different build-tools implementation before krusty can validate it.
+afterEvaluate {
+    if (krustyNegative == "dev-compiler-version") {
+        tasks.withType<krusty.KrustyCompileTask>().configureEach {
+            compilerVersion.set("KGP_VERSION-dev-7885")
+        }
     }
 }
 
@@ -2171,6 +2270,15 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
+            "werror-overlap" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Werror")
+            }
+            "werror-warning-exception" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Xcontext-parameters")
+                freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:warning")
+            }
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
             "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")

@@ -45,6 +45,15 @@ pub enum WarningLevel {
     Disabled,
 }
 
+/// What the driver does with one warning after global and named policy have been combined.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarningDisposition {
+    Disabled,
+    Warning,
+    Error,
+    WarningAndFail,
+}
+
 impl WarningLevel {
     fn parse(level: &str) -> Option<Self> {
         Some(match level {
@@ -56,9 +65,19 @@ impl WarningLevel {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct WarningPolicy {
+    compiler_default: WarningLevel,
     configured: BTreeMap<WarningName, WarningLevel>,
+}
+
+impl Default for WarningPolicy {
+    fn default() -> Self {
+        Self {
+            compiler_default: WarningLevel::Warning,
+            configured: BTreeMap::new(),
+        }
+    }
 }
 
 impl WarningPolicy {
@@ -87,11 +106,46 @@ impl WarningPolicy {
         Ok(())
     }
 
-    pub fn level(&self, name: WarningName) -> WarningLevel {
-        self.configured
-            .get(&name)
-            .copied()
-            .unwrap_or(WarningLevel::Warning)
+    /// Apply kotlinc's global `-Werror` policy. It wins over `-nowarn` regardless of argument
+    /// order; an explicit per-diagnostic level still wins over this default.
+    fn promote_warnings(&mut self) {
+        self.compiler_default = WarningLevel::Error;
+    }
+
+    /// Apply kotlinc's global `-nowarn` policy. `-Werror` wins when both are present, independent
+    /// of argument order, as measured against kotlinc 2.4.20.
+    fn suppress_compiler_warnings(&mut self) {
+        if self.compiler_default != WarningLevel::Error {
+            self.compiler_default = WarningLevel::Disabled;
+        }
+    }
+
+    /// The configured level for a diagnostic, before global policy is considered.
+    fn configured_level(&self, name: WarningName) -> Option<WarningLevel> {
+        self.configured.get(&name).copied()
+    }
+
+    /// Command-line configuration warnings are not hidden by plain `-nowarn`. An explicit named
+    /// level still wins, while global `-Werror` retains warning severity and fails afterward.
+    pub fn command_line_disposition(&self, name: WarningName) -> WarningDisposition {
+        match self.configured_level(name) {
+            Some(WarningLevel::Disabled) => WarningDisposition::Disabled,
+            Some(WarningLevel::Warning) => WarningDisposition::Warning,
+            Some(WarningLevel::Error) => WarningDisposition::Error,
+            None if self.compiler_default == WarningLevel::Error => {
+                WarningDisposition::WarningAndFail
+            }
+            None => WarningDisposition::Warning,
+        }
+    }
+
+    /// Policy for compiler and module warnings that have no configurable identity yet.
+    pub fn compiler_disposition(&self) -> WarningDisposition {
+        match self.compiler_default {
+            WarningLevel::Disabled => WarningDisposition::Disabled,
+            WarningLevel::Warning => WarningDisposition::Warning,
+            WarningLevel::Error => WarningDisposition::WarningAndFail,
+        }
     }
 }
 
@@ -236,9 +290,7 @@ const IGNORED_WITH_VALUE: &[&str] = &["-kotlin-home", "-script-templates", "-exp
 /// kotlinc valueless flags that krusty ignores (accept + drop).
 const IGNORED_FLAGS: &[&str] = &[
     "-include-runtime",
-    "-nowarn",
     "-verbose",
-    "-Werror",
     "-progressive",
     "-script",
     "-Xuse-ir",
@@ -575,6 +627,11 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // before compiling, never dropped: a plugin that changes the output must either run
             // natively or fail the compile.
             flag if opts.plugins.accept(flag, || it.next()) => {}
+            // Global warning policy is kept in the same object as named overrides. `-Werror`
+            // dominates `-nowarn` regardless of ordering; an explicit `-Xwarning-level` entry
+            // still wins for its diagnostic.
+            "-Werror" => opts.warning_policy.promote_warnings(),
+            "-nowarn" => opts.warning_policy.suppress_compiler_warnings(),
             "-java-parameters" => opts.java_parameters = true,
             "-version" => opts.print_version = true,
             "-help" | "-h" | "-X" => opts.print_help = true,
@@ -1444,8 +1501,10 @@ mod tests {
             assert!(parsed.errors.is_empty(), "{flag}: {:?}", parsed.errors);
             assert!(parsed.ignored.is_empty(), "{flag}: {:?}", parsed.ignored);
             assert_eq!(
-                parsed.warning_policy.level(WarningName::RedundantCliArg),
-                expected,
+                parsed
+                    .warning_policy
+                    .configured_level(WarningName::RedundantCliArg),
+                Some(expected),
                 "{flag}"
             );
             assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
@@ -1461,8 +1520,10 @@ mod tests {
             ["warning with name \"NO_SUCH_DIAGNOSTIC\" does not exist".to_string()]
         );
         assert_eq!(
-            parsed.warning_policy.level(WarningName::RedundantCliArg),
-            WarningLevel::Disabled
+            parsed
+                .warning_policy
+                .configured_level(WarningName::RedundantCliArg),
+            Some(WarningLevel::Disabled)
         );
 
         for (bad, severity) in [
@@ -1509,8 +1570,10 @@ mod tests {
             ["warning with name \"REDUNDANT_CLI_ARG\" has already been configured".to_string()]
         );
         assert_eq!(
-            parsed.warning_policy.level(WarningName::RedundantCliArg),
-            WarningLevel::Error,
+            parsed
+                .warning_policy
+                .configured_level(WarningName::RedundantCliArg),
+            Some(WarningLevel::Error),
             "a rejected duplicate must not mutate the first configuration"
         );
     }
@@ -1574,6 +1637,42 @@ mod tests {
               {disable, strict, warning}"
             ]
         );
+    }
+
+    /// `-Werror` and `-nowarn` are one global policy. Promotion wins when both are present,
+    /// independent of argument order; named levels remain explicit overrides.
+    #[test]
+    fn global_warning_flags_configure_one_policy() {
+        let parsed = parse_args(&["-Werror", "f.kt"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            WarningDisposition::WarningAndFail
+        );
+        assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
+
+        let parsed = parse_args(&["-nowarn", "f.kt"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            WarningDisposition::Disabled
+        );
+
+        for arguments in [
+            ["-Werror", "-nowarn", "f.kt"],
+            ["-nowarn", "-Werror", "f.kt"],
+        ] {
+            let parsed = parse_args(&arguments);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+            assert_eq!(
+                parsed.warning_policy.compiler_disposition(),
+                WarningDisposition::WarningAndFail,
+                "{arguments:?}"
+            );
+        }
     }
 
     /// `-opt-in` accepts markers in both spellings, repeated and comma-separated.
