@@ -16324,9 +16324,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its checked adapter template, including its bound receiver and captures, so kotlinc's direct call
   and `pN` inline locals are retained without rediscovering the reference target. The other
   expressions use the common function-value invocation path. On the JVM, `FunctionN.invoke` remains
-  inside the provider's inline frame, while adapting its erased result to the checked type closes
-  that frame and consumes the post-inline line reset, returning to the caller's line once before
-  any surrounding store. FIR storage
+  inside the provider's inline frame. A source local declaration restores the caller line before
+  adapting the erased result to the checked type, so the real `checkcast`/unbox anchors that line
+  once before the store and consumes the ordinary post-inline reset. A branch condition makes the
+  same transition at the adaptation and leaves that line in effect for its jump without writing a
+  duplicate line-table entry. A return keeps the
+  reset pending until its return instruction, after result adaptation. FIR storage
   representation therefore cannot make
   `object : R { override fun run(t: Throwable?) { t?.let(x) } }` reach a backend as an external
   `StandardKt.let` call. Tests:

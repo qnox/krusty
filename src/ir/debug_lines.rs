@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{ExprId, IrFile};
+use super::{ExprId, IrExpr, IrFile, IrTypeOp};
 
 /// Where the `return` a `Unit` body is completed with takes its source line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +56,10 @@ pub(super) struct GeneratedLineMarks {
     /// caller's line. The adaptation consumes the ordinary post-inline line reset; repeating that
     /// reset after the expansion would move the same caller line onto the following expression.
     inline_result_adaptation_boundaries: HashSet<ExprId>,
+    /// Generated function-value invocations whose consumer restores the caller line at the result
+    /// adaptation. Source local initializers and branch conditions do so before their store/jump;
+    /// a return instead leaves the ordinary post-inline reset pending for the return instruction.
+    early_result_adaptations: HashSet<ExprId>,
 }
 
 impl IrFile {
@@ -157,10 +161,53 @@ impl IrFile {
             .copied()
     }
 
-    pub(crate) fn mark_inline_result_adaptation_boundary(&mut self, expression: ExprId) {
+    /// Let a consumer that restores its source line before a store or branch claim an inline
+    /// expansion's final result adaptation.
+    ///
+    /// The expansion and invocation are separate nodes. Follow only transparent trailing-value
+    /// edges: this is consumer ownership recorded after lowering, not a search for an arbitrary
+    /// invocation inside the initializer.
+    pub(crate) fn mark_early_inline_result_adaptation(&mut self, expression: ExprId) {
+        let mut current = expression;
+        let mut expansion = None;
+        loop {
+            if self.external_inline_expansions.contains(&current) {
+                expansion = Some(current);
+            }
+            if self
+                .generated_lines
+                .invocation_result_adaptations
+                .contains_key(&current)
+            {
+                let Some(expansion) = expansion else {
+                    return;
+                };
+                self.generated_lines
+                    .inline_result_adaptation_boundaries
+                    .insert(expansion);
+                self.generated_lines
+                    .early_result_adaptations
+                    .insert(current);
+                return;
+            }
+            current = match self.expr(current) {
+                IrExpr::Block {
+                    value: Some(value), ..
+                } => *value,
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => *arg,
+                _ => return,
+            };
+        }
+    }
+
+    pub(crate) fn inline_result_adaptation_restores_early(&self, expression: ExprId) -> bool {
         self.generated_lines
-            .inline_result_adaptation_boundaries
-            .insert(expression);
+            .early_result_adaptations
+            .contains(&expression)
     }
 
     pub(crate) fn inline_result_adaptation_restores_caller(&self, expression: ExprId) -> bool {
@@ -205,6 +252,9 @@ impl IrFile {
         }
         if marks.inline_result_adaptation_boundaries.contains(&source) {
             marks.inline_result_adaptation_boundaries.insert(target);
+        }
+        if marks.early_result_adaptations.contains(&source) {
+            marks.early_result_adaptations.insert(target);
         }
     }
 }
