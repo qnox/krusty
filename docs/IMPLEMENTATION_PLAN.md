@@ -4583,6 +4583,17 @@ code is the one the code generator already names: provider-owned bodies through 
   accessor exactly as its IR declares them. Over the Kotlin/Native 2.4.20 stdlib it also reproduces
   every public function, property, accessor, constructor and class signature; the misses are
   `@OptionalExpectation` annotation classes, which IR omits, and non-public nested classes.
+- **Provider (in progress).** `klib_libraries::KlibLibraries` is a target-neutral `SymbolSource`
+  over decoded KLIB metadata, shared by Native and Wasm. It signs every declaration when it is
+  built and normalizes lazily, memoized per lookup key, through the target-free
+  `libraries::metadata_normalization` (which the JVM `.kotlin_builtins` path also uses for its
+  function signatures). Each published callable's identity is interned by its exact public
+  signature, and its realization carries that signature (`declaration_signature`) through to the
+  frozen `BackendCallableFact`, together with the declaration's validated parameter identities
+  (context roles, extension receiver, values). Normalization attaches no compiler intrinsic: a
+  KLIB declaration's implementation is its serialized IR body, and the provider attaches only
+  declaration-level semantic roles. Top-level functions are published; classes, members, properties
+  and the `SemanticPlatform` hooks come next, then the Native lane switch.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator
