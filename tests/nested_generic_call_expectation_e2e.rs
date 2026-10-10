@@ -48,3 +48,41 @@ fn an_expectation_still_reaches_a_nested_generic_call_result() {
     );
     assert_eq!(d, Vec::<String>::new());
 }
+
+#[test]
+fn a_property_qualified_member_call_hands_its_parameter_to_a_nested_generic_call() {
+    // `service.create(emptyCrate())` starts with a top-level property, while `local.create(...)`
+    // starts with a member property. The parser shape is retained until the root is bound, so both
+    // calls use the member's `Crate<String>` parameter to type the nested repository-owned generic
+    // call. The classifier-qualified call exercises the non-value interpretation of the same graph
+    // node and must not be rerouted through member lookup.
+    const MAIN: &str = "class Crate<T>\n\
+        fun <T> emptyCrate(): Crate<T> = Crate()\n\
+        class Service {\n\
+        fun create(name: String, members: Crate<String>): String = name\n\
+        }\n\
+        fun <T> exec(block: () -> T): T = block()\n\
+        fun use(value: String): String = value\n\
+        class Factory {\n\
+            companion object { fun create(members: Crate<String>): String = \"c\" }\n\
+        }\n\
+        val service = Service()\n\
+        class Holder {\n\
+            private val local = Service()\n\
+            fun member() =\n\
+                exec<String> {\n\
+                    val created = local.create(\"b\", emptyCrate())\n\
+                    use(created)\n\
+                }\n\
+        }\n\
+        fun topLevel() =\n\
+            exec<String> {\n\
+                val created = service.create(\"a\", emptyCrate())\n\
+                use(created)\n\
+            }\n\
+        fun qualified() = Factory.create(emptyCrate())\n\
+        fun box(): String =\n\
+            if (topLevel() == \"a\" && Holder().member() == \"b\" && qualified() == \"c\") \"OK\" else \"FAIL\"\n";
+    common::assert_accepted_like_kotlinc(MAIN);
+    common::expect_box_same_as_kotlinc(MAIN, "QualifiedNestedGenericCall");
+}
