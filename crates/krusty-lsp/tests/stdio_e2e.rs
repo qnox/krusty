@@ -835,8 +835,8 @@ fn stdio_server_reports_no_diagnostics_for_vararg_spread_and_named_shapes() {
     // Valid Kotlin vararg call shapes that used to surface false positives: a mixed
     // element + spread call on a vararg extension, and a named argument binding the
     // defaulted parameter after positional vararg elements. Both must produce NO diagnostics.
-    // The server runs with `-no-jdk`, where kotlinc reports a member access on `Int` or `Array`
-    // as a missing `java.io.Serializable` supertype, so the bodies touch neither.
+    // The server compiles without a JDK, so the source touches no `Int` or `Array` member: kotlinc
+    // reports their missing `java.io.Serializable` supertype there.
     let diagnostics = diagnostics_after_open(
         &[],
         "file:///vararg_shapes.kt",
