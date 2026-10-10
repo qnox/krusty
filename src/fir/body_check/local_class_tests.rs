@@ -22,7 +22,7 @@ fn checked_streamed_owned_bodies(
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );
@@ -63,7 +63,7 @@ fn production_frontend_ok(source: &str) {
     let mut diagnostics = crate::diag::DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );

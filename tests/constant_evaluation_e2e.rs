@@ -154,9 +154,13 @@ fn folded_values_are_kotlin_values() {
                \x20   if (failed.length > 0) return \"failed$failed\"\n\
                \x20   return \"${1.0f / 3}|${1e7}|${1e-4}|${100.0}|${'x'}${true}${null}|${7L * 3}\"\n\
                }\n";
-    let actual =
-        common::compile_and_run_box(src, "constant_evaluation", &[common::stdlib_jar()], None)
-            .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        src,
+        "constant_evaluation",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "0.33333334|1.0E7|1.0E-4|100.0|xtruenull|21");
 }
 
@@ -186,8 +190,12 @@ fn overflowing_constant_arithmetic_folds_without_a_diagnostic() {
                val shifted = 1 shl 40\n\
                fun negated(): Int = -(-2147483647 - 1)\n";
     assert_eq!(kotlinc_diagnostics("overflow", src), (0, String::new()));
-    let krusty =
-        common::compile_in_process_diagnostics(src, "Overflow", &[common::stdlib_jar()], None);
+    let krusty = common::compile_in_process_diagnostics(
+        src,
+        "Overflow",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    );
     assert_eq!(krusty, Vec::<String>::new());
     assert_matches_kotlinc("FoldedOverflow", src);
 }

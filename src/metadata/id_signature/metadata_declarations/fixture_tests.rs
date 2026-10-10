@@ -151,10 +151,9 @@ fn sign_package(package_segments: &[String], package: &KotlinPackage, out: &mut 
             classes: &chain,
             ..around
         };
+        // A private member of a class keeps a public signature: unlike a private top-level
+        // declaration, it is not file-local.
         for member in &class.members {
-            if member.visibility == Visibility::Private {
-                continue;
-            }
             out.public.insert(member_signature(inside, member).unwrap());
             if member.is_property {
                 out.accessors.insert(
@@ -227,8 +226,8 @@ fn metadata_signs_every_declaration_exactly_as_the_serialized_ir() {
         "computed from metadata but not declared by IR"
     );
     assert_eq!(serialized, computed);
-    assert_eq!(serialized.public.len(), 39);
-    assert_eq!(serialized.accessors.len(), 12);
+    assert_eq!(serialized.public.len(), 72);
+    assert_eq!(serialized.accessors.len(), 20);
 
     // Renaming every type parameter leaves the member ids alone; only the paths differ.
     let member_id = |path: &str| {

@@ -1,0 +1,18 @@
+# version	stable	deprecated	unsupported	apiStable	apiDeprecated	apiUnsupported
+1.0	stable	-	unsupported	stable	-	unsupported
+1.1	stable	-	unsupported	stable	-	unsupported
+1.2	stable	-	unsupported	stable	-	unsupported
+1.3	stable	-	unsupported	stable	-	unsupported
+1.4	stable	-	unsupported	stable	-	unsupported
+1.5	stable	-	unsupported	stable	-	unsupported
+1.6	stable	-	unsupported	stable	-	unsupported
+1.7	stable	-	unsupported	stable	-	unsupported
+1.8	stable	-	unsupported	stable	-	unsupported
+1.9	stable	-	unsupported	stable	-	unsupported
+2.0	stable	deprecated	-	stable	deprecated	-
+2.1	stable	deprecated	-	stable	deprecated	-
+2.2	stable	-	-	stable	-	-
+2.3	stable	-	-	stable	-	-
+2.4	stable	-	-	stable	-	-
+2.5	-	-	-	-	-	-
+2.6	-	-	-	-	-	-

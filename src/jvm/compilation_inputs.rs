@@ -120,15 +120,37 @@ impl JvmCompilationInputInventory {
     }
 }
 
+/// The JDK compilation reads: `-jdk-home`, else `JAVA_HOME`.
+fn selected_jdk_home(jdk_home: Option<&Path>) -> Option<PathBuf> {
+    jdk_home
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))
+}
+
+/// The feature release of the selected JDK, read from its `release` file:
+/// `JAVA_VERSION="25.0.4.1"` is 25 and `JAVA_VERSION="1.8.0_402"` is 8. `None` when the home has
+/// no readable `release` file or the version does not parse.
+pub fn selected_jdk_feature_release(jdk_home: Option<&Path>) -> Option<u16> {
+    let release = std::fs::read_to_string(selected_jdk_home(jdk_home)?.join("release")).ok()?;
+    let version = release.lines().find_map(|line| {
+        line.strip_prefix("JAVA_VERSION=")
+            .map(|value| value.trim().trim_matches('"'))
+    })?;
+    let version = version.strip_prefix("1.").unwrap_or(version);
+    let feature = version
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .filter(|digits| !digits.is_empty())?;
+    feature.parse().ok()
+}
+
 /// Select the JDK's bootclasspath root from a home: the `lib/modules` jimage on JDK 9+, falling
 /// back to the `jre/lib/rt.jar` archive on JDK 8 and earlier, which have no jimage. The fallback
 /// is a selection, not a new container kind: `rt.jar` is classified and read as an ordinary
 /// archive classpath entry, so every consumer (provider, build cache, LSP) treats both roots
 /// identically.
 pub(crate) fn selected_jdk_modules(jdk_home: Option<&Path>) -> Option<PathBuf> {
-    let base = jdk_home
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from))?;
+    let base = selected_jdk_home(jdk_home)?;
     let modules = base.join("lib").join("modules");
     if modules.is_file() {
         return Some(modules);

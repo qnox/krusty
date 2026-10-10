@@ -243,7 +243,6 @@ binaryOp/kt11163_properIeee754comparisons.kt
 binaryOp/kt23030_properIeee754comparisons.kt
 binaryOp/kt44402.kt
 binaryOp/kt6747_identityEquals.kt
-binaryOp/overflowLong.kt
 binaryOp/primitiveEqualsSafeCall.kt
 boxing/boxBoolean.kt
 boxing/box_cache0.kt
@@ -2305,7 +2304,6 @@ diagnostics/functions/tailRecursion/returnInFinally.kt
 diagnostics/functions/tailRecursion/returnInIfInFinally.kt
 diagnostics/functions/tailRecursion/returnInTry.kt
 diagnostics/functions/tailRecursion/shortCircuit.kt
-diagnostics/functions/tailRecursion/sum.kt
 diagnostics/functions/tailRecursion/tailCallInBlockInParentheses.kt
 diagnostics/functions/tailRecursion/tailRecursionInFinally.kt
 diagnostics/functions/tailRecursion/tailrecWithExplicitCompanionObjectDispatcher.kt
@@ -2684,8 +2682,6 @@ fp/mulZeroInfinityDouble.kt
 fp/mulZeroInfinityFloat.kt
 fp/powDouble.kt
 fp/powFloat.kt
-fp/precisionAround2p53Double.kt
-fp/precisionAround2p53Float.kt
 fp/remainderMixedFpInfinitiesNans.kt
 fp/remainderMixedFpSubnormalDivisor.kt
 fp/remainderMixedIntFp.kt
@@ -4475,7 +4471,6 @@ multiDecl/forRange/explicitRangeTo/MultiDeclForValCaptured.kt
 multiDecl/forRange/explicitRangeTo/int/MultiDeclForComponentExtensionsValCaptured.kt
 multiDecl/forRange/explicitRangeTo/int/MultiDeclForComponentMemberExtensions.kt
 multiDecl/forRange/explicitRangeTo/int/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
-multiDecl/forRange/explicitRangeTo/long/MultiDeclForComponentExtensions.kt
 multiDecl/forRange/explicitRangeTo/long/MultiDeclForComponentExtensionsValCaptured.kt
 multiDecl/forRange/explicitRangeTo/long/MultiDeclForComponentMemberExtensions.kt
 multiDecl/forRange/explicitRangeTo/long/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
@@ -4494,7 +4489,6 @@ multiDecl/forRange/explicitRangeToWithDot/long/MultiDeclForComponentMemberExtens
 multiDecl/forRange/int/MultiDeclForComponentExtensionsValCaptured.kt
 multiDecl/forRange/int/MultiDeclForComponentMemberExtensions.kt
 multiDecl/forRange/int/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
-multiDecl/forRange/long/MultiDeclForComponentExtensions.kt
 multiDecl/forRange/long/MultiDeclForComponentExtensionsValCaptured.kt
 multiDecl/forRange/long/MultiDeclForComponentMemberExtensions.kt
 multiDecl/forRange/long/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
@@ -4865,9 +4859,7 @@ operatorConventions/compareTo/doubleLong.kt
 operatorConventions/compareTo/extensionArray.kt
 operatorConventions/compareTo/extensionObject.kt
 operatorConventions/compareTo/intDouble.kt
-operatorConventions/compareTo/intLong.kt
 operatorConventions/compareTo/longDouble.kt
-operatorConventions/compareTo/longInt.kt
 operatorConventions/genericArrayAccessCall.kt
 operatorConventions/incDecOnObject.kt
 operatorConventions/kt14201.kt
@@ -5151,7 +5143,6 @@ publishedApi/inlineFromFriendModule.kt
 publishedApi/simple.kt
 publishedApi/topLevel.kt
 ranges/capturedLoopVar.kt
-ranges/contains/comparisonWithRangeBoundEliminated.kt
 ranges/contains/evaluationOrderForCollection.kt
 ranges/contains/evaluationOrderForComparableRange.kt
 ranges/contains/evaluationOrderForDownTo.kt

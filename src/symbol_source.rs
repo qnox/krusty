@@ -199,6 +199,16 @@ impl SymbolSource for CompositeSource<'_> {
             .find_map(|child| child.external_callable(identity))
     }
 
+    /// As for callables, only the child that assigned the opaque identity answers for it.
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.children
+            .iter()
+            .find_map(|child| child.external_property(identity))
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         use crate::libraries::Callables;
         // Classifier: first source wins (user shadows library). Callables: concatenate in precedence
@@ -319,6 +329,20 @@ impl SymbolSource for CachedCompositeSource<'_> {
         self.source.api_withheld_callable(owner, name)
     }
 
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.source.external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.source.external_property(identity)
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         if let Some(symbols) = self
             .cache
@@ -387,6 +411,49 @@ mod tests {
 
         assert!(std::rc::Rc::ptr_eq(&first, &second));
         assert_eq!(source.queries.get(), 1);
+    }
+
+    struct PropertyRealizationSource;
+
+    impl SymbolSource for PropertyRealizationSource {
+        fn external_property(
+            &self,
+            identity: crate::fir::ExternalPropertyId,
+        ) -> Option<crate::libraries::ExternalPropertyRealization> {
+            (identity == crate::fir::ExternalPropertyId::from_raw(7)).then(|| {
+                crate::libraries::ExternalPropertyRealization {
+                    name: "answer".to_owned(),
+                    getter: crate::fir::ExternalCallableId::from_raw(11),
+                    setter: None,
+                    declares_value_class_storage: false,
+                    compile_time_constant: None,
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn composite_wrappers_forward_an_external_property_to_its_provider() {
+        let provider = PropertyRealizationSource;
+        let identity = crate::fir::ExternalPropertyId::from_raw(7);
+        let direct = CompositeSource::new(vec![&provider]);
+        assert_eq!(
+            direct
+                .external_property(identity)
+                .expect("the assigning provider answers through a composite")
+                .name,
+            "answer"
+        );
+
+        let cache = SymbolQueryCache::default();
+        let cached = CachedCompositeSource::new(vec![&provider], &cache);
+        assert_eq!(
+            cached
+                .external_property(identity)
+                .expect("the assigning provider answers through a cached composite")
+                .getter,
+            crate::fir::ExternalCallableId::from_raw(11)
+        );
     }
 
     /// A minimal source: one top-level overload of a chosen name, one type shape.

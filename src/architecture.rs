@@ -10,6 +10,8 @@ mod tests {
             "src/frontend.rs",
             &[
                 "ast",
+                // The target a request analyzes for: a closed value with no dependencies.
+                "compilation_target",
                 "diag",
                 "diagnostic_wording",
                 "features",
@@ -80,7 +82,12 @@ mod tests {
         // frontend symbol table.
         // It also names the native plugins the frontend ran (a selection, not a plugin's state), so
         // the backend runs exactly those.
-        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "ir", "plugins"]);
+        // A backend names the target it emits for, so the handoff can refuse an analysis checked
+        // under another target's rules.
+        assert_allowed_crate_modules(
+            "src/backend.rs",
+            &["compilation_target", "diag", "fir", "ir", "plugins"],
+        );
         assert_allowed_crate_modules_in_tree(
             "src/backend",
             &[
@@ -102,6 +109,7 @@ mod tests {
             &[
                 "ast",
                 "backend",
+                "compilation_target",
                 "diag",
                 "fir",
                 "fir_lower",
@@ -206,22 +214,30 @@ mod tests {
                 continue;
             }
             let mut allowed = vec!["analysis", "diag", "jvm", "source", "types"];
-            // `features` is the compiler's language-toggle surface. It is in budget exactly where a
-            // module turns a PROJECT's own configuration into compiler settings: option parsing, the
-            // project sync that reads them off the model, the analysis worker that applies them, and
-            // the parity scanner, which is a batch worker applying each module's own toggles.
+            // `features` and the language settings built on it are the compiler's language-toggle
+            // surface. They are in budget exactly where a module turns a PROJECT's own
+            // configuration into compiler settings: option parsing, the project sync that reads
+            // them off the model, the analysis worker that applies them, and the parity scanner,
+            // which is a batch worker applying each module's own toggles.
             if path.ends_with("options.rs")
                 || path.ends_with("project/sync.rs")
                 || path.ends_with("worker.rs")
                 || path.ends_with("parity.rs")
                 || path.ends_with("jvm_analysis.rs")
             {
-                allowed.push("features");
+                allowed.extend(["features", "language_settings", "language_version"]);
+            }
+            // The worker validates the levels the supervisor sends against the kotlinc release it
+            // targets, the same check the command line makes.
+            if path.ends_with("worker.rs") {
+                allowed.push("kotlin_version");
             }
             // Standalone analysis has no project model to supply a configured target. Keep JDK
             // discovery in one explicit JVM adapter; compiler_analysis itself remains target-free.
+            // It is also where that analysis names the JVM as its compilation target.
             if path.ends_with("jvm_analysis.rs") {
                 allowed.push("toolchain");
+                allowed.push("frontend");
             }
             // The worker renders the dev-mode dump. Only the presentation layer is in budget: the
             // lowering its IR section needs lives behind `dump`, so the worker never reaches into
@@ -229,6 +245,11 @@ mod tests {
             // the dump was written to.
             if path.ends_with("worker.rs") {
                 allowed.push("dump");
+            }
+            // The analysis worker and the parity scanner analyze a JVM project, and name that
+            // target in their requests.
+            if path.ends_with("worker.rs") || path.ends_with("parity.rs") {
+                allowed.push("frontend");
             }
             assert_allowed_external_crate_modules_in_file(&path, &allowed);
         }
@@ -256,6 +277,8 @@ mod tests {
         let allowed = [
             "ast",
             "backend",
+            // The JVM backend names the target it emits for.
+            "compilation_target",
             "contracts",
             "diag",
             "fir",
@@ -353,6 +376,7 @@ mod tests {
             &[
                 "ast",
                 "backend",
+                "compilation_target",
                 "diag",
                 "frontend",
                 "ir",
@@ -396,6 +420,7 @@ mod tests {
             "src/js/backend.rs",
             &[
                 "backend",
+                "compilation_target",
                 "compiler",
                 "diag",
                 "features",
@@ -414,15 +439,30 @@ mod tests {
     #[test]
     fn klib_library_provider_is_target_neutral() {
         // The provider publishes metadata declarations through the common symbol boundary. It
-        // names no target: Native and Wasm consume it alike.
-        assert_allowed_crate_modules(
-            "src/klib_libraries.rs",
-            &["fir", "libraries", "metadata", "symbol_source", "types"],
-        );
-        assert_allowed_crate_modules_in_tree(
-            "src/klib_libraries",
-            &["fir", "libraries", "metadata", "symbol_source", "types"],
-        );
+        // names no target: Native and Wasm consume it alike. It opens the libraries a compilation
+        // selects through the container reader, which itself depends on no compiler module, and
+        // recognizes the contract DSL through the common contract model. Its tests may also
+        // analyze a source set against the provisioned stdlib KLIB.
+        let provider = [
+            "contracts",
+            "fir",
+            "klib",
+            "libraries",
+            "metadata",
+            "symbol_source",
+            "types",
+        ];
+        assert_allowed_crate_modules("src/klib_libraries.rs", &provider);
+        let tests = source_path("src/klib_libraries/tests");
+        for path in rust_files_under("src/klib_libraries") {
+            if path.starts_with(&tests) || path.ends_with("tests.rs") {
+                let mut budget = provider.to_vec();
+                budget.extend(["compilation_target", "diag", "frontend", "toolchain"]);
+                assert_allowed_crate_modules_in_file(&path, &budget);
+            } else {
+                assert_allowed_crate_modules_in_file(&path, &provider);
+            }
+        }
     }
 
     #[test]
@@ -439,7 +479,9 @@ mod tests {
         ];
         assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);
         for path in rust_files_under("src/klib_lowering") {
-            if path.file_name() != Some(std::ffi::OsStr::new("tests.rs")) {
+            let test_module = path.file_name() == Some(std::ffi::OsStr::new("tests.rs"))
+                || path.starts_with(source_path("src/klib_lowering/tests"));
+            if !test_module {
                 assert_allowed_crate_modules_in_file(&path, &allowed);
             }
         }
@@ -448,6 +490,13 @@ mod tests {
     #[test]
     fn klib_container_reader_depends_on_no_compiler_module() {
         assert_allowed_crate_modules("src/klib.rs", &[]);
+    }
+
+    /// The compilation target is a contract between the frontend request and the backend
+    /// handoff, so it depends on neither.
+    #[test]
+    fn compilation_target_has_no_crate_dependencies() {
+        assert_allowed_crate_modules("src/compilation_target.rs", &[]);
     }
 
     #[test]
@@ -476,7 +525,10 @@ mod tests {
     fn the_code_generator_uses_only_ir_contract_dependencies() {
         // The facade receives the closed backend handoff. It neither retains a provider nor reaches
         // back into frontend state while emitting.
-        assert_allowed_crate_modules("src/native/codegen/mod.rs", &["backend", "diag"]);
+        assert_allowed_crate_modules(
+            "src/native/codegen/mod.rs",
+            &["backend", "compilation_target", "diag"],
+        );
         // `fir` names only the opaque checked property/callable ids already carried by IR. `backend`
         // supplies their frozen facts; it is not a provider or another lookup surface.
         assert_allowed_crate_modules(
@@ -514,7 +566,10 @@ mod tests {
         ] {
             assert_allowed_crate_modules(path, &[]);
         }
-        assert_allowed_crate_modules("src/wasm/codegen.rs", &["backend", "diag", "types"]);
+        assert_allowed_crate_modules(
+            "src/wasm/codegen.rs",
+            &["backend", "compilation_target", "diag", "types"],
+        );
         assert_allowed_crate_modules("src/wasm/codegen/lower.rs", &["ir", "types"]);
     }
 
@@ -778,6 +833,7 @@ mod tests {
             &[
                 "ast",
                 "backend",
+                "compilation_target",
                 "compiler",
                 "conformance",
                 "dhat",

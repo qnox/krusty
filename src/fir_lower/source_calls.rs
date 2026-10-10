@@ -121,6 +121,8 @@ pub(super) struct ExternalCallRequest<'a> {
 
 pub(super) struct ModuleConstructorRequest<'a> {
     pub(super) classifier: crate::types::TypeName,
+    /// The checked constructor declaration the call selected.
+    pub(super) constructor: crate::fir::DeclarationId,
     pub(super) argument_parameter_types: &'a [Ty],
     pub(super) declaration_parameter_types: &'a [Ty],
     pub(super) primary_in_current_file: bool,
@@ -1410,6 +1412,7 @@ impl BodyLowering<'_> {
     ) -> Option<ExprId> {
         let ModuleConstructorRequest {
             classifier,
+            constructor,
             argument_parameter_types,
             declaration_parameter_types,
             primary_in_current_file,
@@ -1479,6 +1482,10 @@ impl BodyLowering<'_> {
             .construction_declared_params
             .insert(construction, declared_parameters);
         self.ir.construction_targets.insert(construction, target);
+        self.ir
+            .module_constructions
+            .selected
+            .insert(construction, constructor);
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
