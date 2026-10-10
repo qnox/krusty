@@ -139,19 +139,18 @@ pub(super) fn hierarchy_inventory(source: &dyn SymbolSource, receiver: Ty) -> Ac
         let Some(classifier) = source.classifier(internal) else {
             continue;
         };
-        // Synthetic accessor properties are Java interop. A Kotlin `fun getName()` remains a
-        // function even when reached through a Java supertype elsewhere in the hierarchy; Kotlin
-        // metadata is the authoritative declaration model for that classifier.
-        if !classifier.is_kotlin {
-            methods.extend(
-                classifier
-                    .members
-                    .iter()
-                    .filter(|member| !member.is_member_extension())
-                    .map(|member| member.name.clone()),
-            );
-            methods.extend(classifier.declared_callable_order.iter().cloned());
-        }
+        // This inventory is entered only for a non-Kotlin receiver. Methods inherited by that Java
+        // classifier are part of its Java surface even when Kotlin metadata owns the declaration
+        // in a superclass (`JavaSubclass : KotlinBase`); the direct Kotlin receiver is rejected at
+        // the provider entry point before this walk begins.
+        methods.extend(
+            classifier
+                .members
+                .iter()
+                .filter(|member| !member.is_member_extension())
+                .map(|member| member.name.clone()),
+        );
+        methods.extend(classifier.declared_callable_order.iter().cloned());
         pending.extend(crate::symbol_resolver::direct_supertypes(source, current));
     }
     AccessorInventory::from_methods(methods.iter().map(String::as_str))

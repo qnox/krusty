@@ -109,7 +109,15 @@ impl SymbolResolver<'_> {
                 .into_iter()
                 .filter(|candidate| Some(rank(candidate)) == best)
                 .collect::<Vec<_>>();
-            let local_property = (!tied.is_empty()).then(|| tied.remove(0));
+            // Ordinary equal-ranked declarations retain the existing last-declaration winner
+            // (for example, a mapped method realization published after its physical field).
+            // Accessor-derived candidates are different declarations of one synthetic property:
+            // keep their provider order and report the rest as competing candidates below.
+            let local_property = match tied.first() {
+                None => None,
+                Some((_, property)) if property.accessor_derived() => Some(tied.remove(0)),
+                Some(_) => tied.pop(),
+            };
             if let Some(((accessible, _), mut property)) = local_property {
                 // Two accessor methods of one classifier that declare the same synthetic property
                 // (`isX()` and `getIsX()`) are competing candidates, not an override pair.
