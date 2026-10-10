@@ -6,8 +6,9 @@
 //! completes formals no argument reached and rejects bindings the declaration forbids.
 
 use super::{
-    merge_inferred_ty, ty_subst, ty_subst_keep_unbound, unify_ty_from_symbols,
-    ExplicitTypeArgumentFixity, GSigBinds, GenericSig, SourceOracle, SymbolSource,
+    formal_variance_in_type, merge_inferred_ty, ty_subst, ty_subst_keep_unbound,
+    unify_ty_from_symbols, ExplicitTypeArgumentFixity, GSigBinds, GenericSig, SourceOracle,
+    SymbolSource,
 };
 use crate::types::Ty;
 
@@ -264,6 +265,7 @@ pub(crate) fn resolve_bound_violating_bindings(
     // normal unifier extracts only declaration-owned variables from matching positions.
     loop {
         let mut additions = GSigBinds::new();
+        let mut widened = GSigBinds::new();
         for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
             let Some(actual) = bindings.get(formal).copied() else {
                 continue;
@@ -289,11 +291,32 @@ pub(crate) fn resolve_bound_violating_bindings(
                     };
                     if candidate == *formal
                         || explicit.fixes(index)
-                        || bindings.contains_key(&candidate)
                         || solution == Ty::Error
                         || solution.mentions_pending()
                         || solution_mentions_open_formal(generic_sig, bindings, solution)
                     {
+                        continue;
+                    }
+                    if let Some(known) = bindings.get(&candidate).copied() {
+                        // A covariant occurrence in the bound is one more LOWER bound on an
+                        // already-inferred formal: `<T, C : Collection<T>> C.has(t: T)` on a
+                        // `List<Base>` receiver with a `Sub` argument has `Sub <: T` and
+                        // `Base <: T`, so `T = Base`. Widen only to a supertype of the known
+                        // solution; anything else is an ordinary bound violation. A bare
+                        // type-parameter bound (`C : T`) carries no class position to read.
+                        if known != solution
+                            && matches!(bound.non_null(), Ty::Obj(..))
+                            && formal_variance_in_type(source, *bound, &candidate)
+                                == Some(crate::types::TypeVariance::Out)
+                            && crate::assignable::is_subtype(
+                                &crate::assignable::TyCtx::new(),
+                                &oracle,
+                                known,
+                                solution,
+                            )
+                        {
+                            widened.insert(candidate, solution);
+                        }
                         continue;
                     }
                     additions
@@ -305,10 +328,11 @@ pub(crate) fn resolve_bound_violating_bindings(
                 }
             }
         }
-        if additions.is_empty() {
+        if additions.is_empty() && widened.is_empty() {
             break;
         }
         bindings.extend(additions);
+        bindings.extend(widened);
     }
     // A written `_` is an explicit request to infer this position. After argument and applied-bound
     // propagation have had priority, a single concrete declared upper bound is the remaining

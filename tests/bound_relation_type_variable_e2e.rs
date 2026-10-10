@@ -151,3 +151,54 @@ fn a_violating_call_with_no_solution_stays_rejected() {
         "a violating call with no solution must stay rejected"
     );
 }
+
+/// `<T, C : Collection<T>> C.holds(element: T)` on a `List<Shape>` receiver with a `Circle`
+/// argument: the argument gives `Circle <: T` and the receiver, through `C`'s bound, gives
+/// `Shape <: T`, so `T = Shape`. Keeping the argument's `Circle` left `C`'s bound violated and
+/// rejected the candidate with a receiver type mismatch. The `Iterable` form, the infix form, and an
+/// argument already at the bound's element type are covered together.
+const COVARIANT_BOUND: &str = "sealed class Shape {\n\
+        class Circle(val r: Int) : Shape()\n\
+        class Square(val side: Int) : Shape()\n\
+    }\n\
+    class Bag<out E>(val items: List<E>) : AbstractCollection<E>() {\n\
+        override val size: Int get() = items.size\n\
+        override fun iterator(): Iterator<E> = items.iterator()\n\
+    }\n\
+    infix fun <T, C : Collection<T>> C.holds(element: T): C {\n\
+        for (item in this) if (item == element) return this\n\
+        throw IllegalStateException(\"missing\")\n\
+    }\n\
+    fun <T, I : Iterable<T>> I.firstAs(element: T): T {\n\
+        for (item in this) if (item == element) return item\n\
+        throw IllegalStateException(\"missing\")\n\
+    }\n\
+    val circle = Shape.Circle(1)\n\
+    val square = Shape.Square(2)\n\
+    fun shapes(): Bag<Shape> = Bag(listOf(circle, square))\n\
+    fun box(): String {\n\
+        val held: Bag<Shape> = shapes() holds circle\n\
+        val found: Shape = shapes().firstAs(circle)\n\
+        val exact: Shape = shapes().firstAs(square as Shape)\n\
+        return if (held.size == 2 && found === circle && exact === square) \"OK\" else \"FAIL\"\n\
+    }\n";
+
+#[test]
+fn a_covariant_bound_occurrence_widens_an_argument_bound_variable() {
+    let result =
+        common::compiler_diagnostics(&[("Main.kt", COVARIANT_BOUND)], &[common::stdlib_jar()]);
+    assert_eq!(
+        result.reference_code, 0,
+        "kotlinc must accept the fixture: {}",
+        result.reference_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), []);
+    assert_eq!(
+        result.krusty_code, 0,
+        "krusty rejected the fixture: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    common::expect_box_same_as_kotlinc(COVARIANT_BOUND, "CovariantBound");
+}
