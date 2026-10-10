@@ -456,11 +456,7 @@ impl Checker<'_> {
                 let operator = SyntheticOperatorCall::from_name(op.operator_name())?;
                 self.operator_access(expression, operator, span)
             }
-            Expr::IncDec {
-                target,
-                dec,
-                prefix,
-            } => {
+            Expr::IncDec { dec, prefix, .. } => {
                 let span = self.span(expression);
                 let span = if *prefix {
                     Span::new(span.lo, span.lo.saturating_add(2))
