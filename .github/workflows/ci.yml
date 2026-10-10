@@ -2,6 +2,7 @@ name: ci
 
 # Build the conformance test binary once. Every supported Kotlin version gets independent JVM and
 # Native matrix rows: JVM runs its box corpus plus the non-box suites; Native runs its box corpus.
+# Wasm matrix rows run the box corpus through both Wasm targets, wasm-js and wasm-wasi.
 # Publish only after all rows pass and every version matches its committed platform expectations.
 # `ci-and-conformance` is the one required check over core CI, KLIB semantics, conformance, and
 # Gradle release/compatibility validation.
@@ -130,9 +131,11 @@ jobs:
       # The native runtime's thread drivers run on every supported architecture: built for each
       # with clang and lld, and run under QEMU's user-mode emulators (tests/native_runtime_e2e.rs).
       - name: install cross-architecture runners
+        # The POSIX drivers compile against each target's own glibc headers, so the layer's
+        # hand-copied numbers and layouts are checked against the target's, not the host's.
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user lld
+          sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
       - name: just ci
         env:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
@@ -179,8 +182,10 @@ jobs:
       - name: cache Kotlin/Native distribution
         uses: actions/cache@v6
         with:
-          path: target/cache/kotlin-native
-          key: klib-semantics-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
+          path: |
+            target/cache/kotlin-native
+            target/cache/krusty-deps
+          key: klib-semantics-serialization-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
       - name: cache kotlin toolchain
         uses: actions/cache@v6
         with:
@@ -191,8 +196,42 @@ jobs:
         with:
           path: target/cache/box-corpus
           key: klib-semantics-box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
-      - name: decode the Kotlin/Native stdlib through common metadata
+      - name: restore recorded kotlinc-native bytes
+        id: native-recordings
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/native-recordings
+          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-
+      - name: select kotlinc-native recording mode
+        id: native-recording-mode
+        env:
+          CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
+          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          write=0
+          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
+            write=1
+          fi
+          echo "write=$write" >> "$GITHUB_OUTPUT"
+      - name: decode and compare Kotlin/Native metadata
+        env:
+          # A cold lane provisions and launches kotlinc-native to create the exact binary
+          # reference before comparing it. Keep the ordinary local test deadline unchanged.
+          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just klib-semantics
+      - name: save recorded kotlinc-native bytes
+        if: steps.native-recording-mode.outputs.write == '1'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/native-recordings
+          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.sha }}
 
   # One gate build of the binaries the matrices run. Conformance uses the test binary and the
   # CLI. Gradle uses the same CLI and the krusty-build test binary; it does not compile krusty.
@@ -257,7 +296,7 @@ jobs:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.versions.outputs.matrix) }}
-        target: [jvm, native]
+        target: [jvm, native, wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -280,14 +319,14 @@ jobs:
           # Do not reuse the former box-only immutable cache: it can never acquire the newly
           # required serialization/KSP inputs.
           key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
-      - name: cache Kotlin compiler for Native conformance (${{ matrix.version }})
-        if: matrix.target == 'native'
+      - name: cache Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
+        if: matrix.target != 'jvm'
         uses: actions/cache@v6
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
-          # Do not let a Native row publish the JVM row's broader immutable cache before its
-          # serialization/KSP inputs exist. Both keys still identify one exact compiler version.
-          key: kotlin-native-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # Do not let a Native or Wasm row publish the JVM row's broader immutable cache before its
+          # serialization/KSP inputs exist. Every key still identifies one exact compiler version.
+          key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: cache box corpus (${{ matrix.version }})
         uses: actions/cache@v6
         with:
@@ -362,6 +401,22 @@ jobs:
       - name: enforce native box conformance ${{ matrix.version }}
         if: matrix.target == 'native' && steps.native_box.outcome == 'failure'
         run: exit 1
+      # Both Wasm lanes run every accepted case under Node.js, which runs WasmGC without flags from
+      # version 22. Each lane's ratchet fails the step on a regression or an unrecorded pass. The
+      # lanes still analyze against the JVM library surface, so they gate the Wasm emitter and
+      # publish no conformance badge until a Wasm klib platform backs them.
+      - uses: actions/setup-node@v4
+        if: matrix.target == 'wasm'
+        with:
+          node-version: '22'
+      - name: run wasm box conformance ${{ matrix.version }}
+        if: matrix.target == 'wasm'
+        run: |
+          set -euo pipefail
+          chmod +x conformance-bin
+          for lane in wasm-js wasm-wasi; do
+            just wasm-conformance-run "$lane" "$PWD/conformance-bin" "${{ matrix.version }}"
+          done
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:

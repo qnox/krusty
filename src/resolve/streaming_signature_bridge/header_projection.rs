@@ -698,6 +698,7 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
         bounds,
         supertypes,
         base,
+        base_callee: _,
         context_parameters: _,
         primary_parameters,
         delegations,

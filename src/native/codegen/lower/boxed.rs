@@ -39,7 +39,7 @@ impl BodyLowering<'_, '_, '_> {
             if self.terminated {
                 return Ok(None);
             }
-            return Err(format!("a `Unit` receiver of a `{ty:?}` step"));
+            return Err(declined!("a `Unit` receiver of a `{ty:?}` step"));
         };
         if self.terminated {
             return Ok(None);
