@@ -681,8 +681,8 @@ pub trait SignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
-        /// The parser supplied a qualified callee and its root was bound as a namespace, not a
-        /// value. This is graph structure, not a fact reconstructed from `spelling`.
+        // The parser supplied a qualified callee and its root was bound as a namespace, not a
+        // value. This is graph structure, not a fact reconstructed from `spelling`.
         qualified: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
