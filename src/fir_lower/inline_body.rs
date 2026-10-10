@@ -1198,7 +1198,7 @@ impl BodyLowering<'_> {
         let function = *args.get(lambda_parameter)?;
         let invoke_function = |lowering: &mut Self| {
             lowering
-                .invoke_external_function_value(function, lambda_ty, invocation_operands)
+                .invoke_external_function_value(function, lambda_ty, invocation_operands, call_line)
                 .map(|invocation| (invocation, None))
         };
         let lambda_slot = match self.ir.expr(function) {
@@ -1387,7 +1387,9 @@ impl BodyLowering<'_> {
         );
         if let Some(line) = call_line {
             self.ir.expr_lines.insert(marker, line);
-            if frame.inline_only && first_body_line(self.ir, inline_body) == Some(line) {
+            if frame.inline_only
+                && (callable_reference || first_body_line(self.ir, template) == Some(line))
+            {
                 self.ir.inline_synthetic_lines.insert(marker);
             }
         }
@@ -1470,6 +1472,7 @@ impl BodyLowering<'_> {
         function: ExprId,
         lambda_ty: Ty,
         invocation_operands: &[(ExprId, Ty)],
+        result_line: Option<u32>,
     ) -> Option<ExprId> {
         let Ty::Fun(signature) = lambda_ty else {
             return None;
@@ -1477,16 +1480,18 @@ impl BodyLowering<'_> {
         if invocation_operands.len() != signature.params.len() {
             return None;
         }
-        Some(
-            self.ir.add_expr(IrExpr::InvokeFunction {
-                func: function,
-                args: invocation_operands
-                    .iter()
-                    .map(|(operand, _)| *operand)
-                    .collect(),
-                params: signature.params.to_vec(),
-                ret: signature.ret,
-            }),
-        )
+        let invocation = self.ir.add_expr(IrExpr::InvokeFunction {
+            func: function,
+            args: invocation_operands
+                .iter()
+                .map(|(operand, _)| *operand)
+                .collect(),
+            params: signature.params.to_vec(),
+            ret: signature.ret,
+        });
+        if let Some(line) = result_line {
+            self.ir.mark_invocation_result_adaptation(invocation, line);
+        }
+        Some(invocation)
     }
 }

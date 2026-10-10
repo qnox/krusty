@@ -152,9 +152,9 @@ fn dependency_scope_plans_invoke_every_checked_function_expression() {
     let identity = ir
         .functions
         .iter()
-        .position(|function| function.name == "identity")
+        .position(|function| function.name == "id")
         .and_then(|function| crate::ir::FunId::try_from(function).ok())
-        .expect("identity function");
+        .expect("id function");
     for (name, expected) in [
         (
             "property",
