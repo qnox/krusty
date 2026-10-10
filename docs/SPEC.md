@@ -11936,6 +11936,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IrFile::checked_type` is that one contract; it never derives a parent's type from its children.
   The Wasm backend declines a value without a checked type by name rather than inferring one.
   Tests: the `wasm-js`/`wasm-wasi` box lanes.
+- **An arithmetic operator's result is the selected operator's declared result, recorded once.**
+  Kotlin's mixed numeric promotion (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
+  `Char.minus(Char): Int`, `Byte`/`Short` operands answering `Int`) is a fact of the operator the
+  checker selected. Common lowering records it on every non-`Boolean` `PrimitiveBinOp` through
+  `IrFile::add_arithmetic`, taking a source operator's type from the checked call and a node it
+  synthesizes (an increment's sum, a loop index step, a data-class hash step, a serializer mask)
+  from the operation it builds. `IrFile::validate_complete_facts` rejects an arithmetic node with no
+  recorded result before any backend runs. Native and Wasm keep no promotion table: they choose the
+  operand widening and narrow the answer to the recorded type (`Char` after an `Int`-width add).
+  Tests: `fir_lower::tests::arithmetic_result_types`, `wasm::codegen::tests::
+  mixed_numeric_operators_lower_at_their_selected_result`, `tests/native_mixed_arithmetic_e2e.rs`.
 - **Native targets: every prebuilt runtime object is its target's, and the runtime is closed.**
   `build.rs` compiles each runtime source once per supported target and, after each compile, reads
   the object's ELF identity: it must be 64-bit (`EI_CLASS` 2), little-endian (`EI_DATA` 1), a

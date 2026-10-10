@@ -384,16 +384,8 @@ fn synthesize_hash_code(
             for hash in rest {
                 let previous = ir.add_expr(IrExpr::GetValue(RESULT));
                 let factor = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(31)));
-                let multiplied = ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Mul,
-                    lhs: previous,
-                    rhs: factor,
-                });
-                let value = ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Add,
-                    lhs: multiplied,
-                    rhs: *hash,
-                });
+                let multiplied = ir.add_arithmetic(IrBinOp::Mul, previous, factor, Ty::Int);
+                let value = ir.add_arithmetic(IrBinOp::Add, multiplied, *hash, Ty::Int);
                 statements.push(ir.add_expr(IrExpr::SetValue { var: RESULT, value }));
             }
             ir.add_expr(IrExpr::GetValue(RESULT))
