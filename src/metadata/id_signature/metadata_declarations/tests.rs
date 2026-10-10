@@ -233,11 +233,17 @@ fn an_extension_property_with_a_type_parameter() {
         ty: class("kotlin/Int", Vec::new()),
         formals: vec![type_parameter(0, "T", Vec::new())],
         visibility: Visibility::Public,
+        setter_visibility: Visibility::Public,
+        setter_parameter_name: None,
         is_var: false,
+        is_const: false,
         is_expect: false,
         is_static: false,
         context_count: 0,
+        context_param_names: Vec::new(),
+        context_kinds: Vec::new(),
         constant: None,
+        annotations: Vec::new(),
     };
     let signature =
         package_property_signature(top_level(&kotlin_collections), &last_index).unwrap();
@@ -313,11 +319,17 @@ fn an_extension_property_without_type_parameters() {
         ty: class("kotlin/Int", Vec::new()),
         formals: Vec::new(),
         visibility: Visibility::Public,
+        setter_visibility: Visibility::Public,
+        setter_parameter_name: None,
         is_var: false,
+        is_const: false,
         is_expect: false,
         is_static: false,
         context_count: 0,
+        context_param_names: Vec::new(),
+        context_kinds: Vec::new(),
         constant: None,
+        annotations: Vec::new(),
     };
     let signature = package_property_signature(top_level(&kotlin_text), &last_index).unwrap();
     assert_eq!(member_id(&signature), 1_266_685_057_648_611_082);
@@ -333,11 +345,17 @@ fn a_getter_is_a_function_with_the_property_receiver_and_type_parameters() {
         ty: class("kotlin/Int", Vec::new()),
         formals: vec![type_parameter(0, "T", Vec::new())],
         visibility: Visibility::Public,
+        setter_visibility: Visibility::Public,
+        setter_parameter_name: None,
         is_var: false,
+        is_const: false,
         is_expect: false,
         is_static: false,
         context_count: 0,
+        context_param_names: Vec::new(),
+        context_kinds: Vec::new(),
         constant: None,
+        annotations: Vec::new(),
     };
     let getter = package_property_accessor_signature(
         top_level(&kotlin_collections),

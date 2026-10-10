@@ -64,4 +64,11 @@ impl SymbolSource for KlibLibraries {
     ) -> Option<crate::libraries::ExternalCallableRealization> {
         self.identities.realization(identity)
     }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.identities.property(identity)
+    }
 }

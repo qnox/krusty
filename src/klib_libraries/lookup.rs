@@ -6,7 +6,10 @@ use std::rc::Rc;
 
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
-use crate::libraries::{package_function, Callables, FunctionSet, PropertySet, ResolvedSymbols};
+use crate::libraries::{
+    package_function, package_property, Callables, FunctionSet, PropertyAccessorNames, PropertySet,
+    ResolvedSymbols,
+};
 use crate::symbol_source::SymbolNamespace;
 
 /// The records of one namespace, by declaration name.
@@ -46,7 +49,8 @@ impl SymbolLookups {
 
 /// The declarations at one key, normalized into selection candidates.
 ///
-/// Only top-level functions are published so far; a classifier namespace declares nothing yet.
+/// Only top-level functions and properties are published so far; a classifier namespace declares
+/// nothing yet.
 pub(super) fn declared_symbols(
     inventory: &PackageInventory,
     identities: &ExternalIdentities,
@@ -68,8 +72,28 @@ pub(super) fn declared_symbols(
             function
         })
         .collect();
+    let properties = inventory
+        .properties(package, name)
+        .map(|signed| {
+            // Each accessor keeps the name its library declares it under.
+            let accessors = PropertyAccessorNames {
+                getter: signed.getter.name(),
+                setter: signed.setter.as_ref().map(|setter| setter.name()),
+            };
+            let mut property =
+                package_property(package, &signed.declaration, &signed.parameters, accessors);
+            // As for functions, the implementation is the serialized IR body of each accessor.
+            identities.assign_property(signed, &mut property);
+            property
+        })
+        .collect();
     ResolvedSymbols {
-        callables: Callables::from_parts(FunctionSet { overloads }, PropertySet::default()),
+        callables: Callables::from_parts(
+            FunctionSet { overloads },
+            PropertySet {
+                overloads: properties,
+            },
+        ),
         ..ResolvedSymbols::default()
     }
 }

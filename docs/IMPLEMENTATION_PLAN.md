@@ -4592,8 +4592,15 @@ code is the one the code generator already names: provider-owned bodies through 
   frozen `BackendCallableFact`, together with the declaration's validated parameter identities
   (context roles, extension receiver, values). Normalization attaches no compiler intrinsic: a
   KLIB declaration's implementation is its serialized IR body, and the provider attaches only
-  declaration-level semantic roles. Top-level functions are published; classes, members, properties
-  and the `SemanticPlatform` hooks come next, then the Native lane switch.
+  declaration-level semantic roles. Top-level functions and properties are published. A property
+  is signed with its public signature and its getter and setter accessor signatures, deduplicated
+  by its public signature, and normalized into the common `PropertyInfo` (semantic accessor
+  parameters, setter visibility and value name, context roles, a `const val`'s compile-time value;
+  no owner, descriptor or storage). Each accessor is an ordinary external callable whose
+  realization carries its `KlibDeclarationSignature::Accessor`; the property's
+  `ExternalPropertyRealization` joins the two accessor identities. A companion extension property
+  is signed but left to its classifier's namespace. Classes, members and the `SemanticPlatform`
+  hooks come next, then the Native lane switch.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator

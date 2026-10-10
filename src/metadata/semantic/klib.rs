@@ -1357,6 +1357,8 @@ fn semantic_property(
     let mut context_receivers = Vec::new();
     let mut context_params = Vec::new();
     let mut constant = None;
+    let mut setter_flags = None;
+    let mut setter_parameter_name = None;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "property declaration")?;
         match (number, wire) {
@@ -1420,26 +1422,27 @@ fn semantic_property(
                 constant = semantic_constant(value, tables.strings)?;
             }
             (11, 0) => modern_flags = Some(cursor.varint("property flags")?),
+            (8, 0) => setter_flags = Some(cursor.varint("property setter flags")?),
             (6, 2) => {
                 let parameter = cursor.length_delimited("property setter parameter")?.0;
-                semantic_value_parameter(
-                    parameter,
-                    tables,
-                    &type_parameters,
-                    "property setter parameter",
-                )?;
-            }
-            (17, 2) => {
-                let parameter = cursor.length_delimited("property context parameter")?.0;
-                context_params.push(
+                setter_parameter_name = Some(
                     semantic_value_parameter(
                         parameter,
                         tables,
                         &type_parameters,
-                        "property context parameter",
+                        "property setter parameter",
                     )?
-                    .ty,
+                    .name,
                 );
+            }
+            (17, 2) => {
+                let parameter = cursor.length_delimited("property context parameter")?.0;
+                context_params.push(semantic_value_parameter(
+                    parameter,
+                    tables,
+                    &type_parameters,
+                    "property context parameter",
+                )?);
             }
             (_, wire) => cursor.skip(wire, "property declaration")?,
         }
@@ -1466,16 +1469,49 @@ fn semantic_property(
         (body, id) => Some(tables.type_ref(body, id, &type_parameters, "property receiver")?),
     };
     // As for functions, a context parameter is also written as a legacy context receiver.
-    let context_params = if context_params.is_empty() {
+    let contexts = if context_params.is_empty() {
         context_receivers
-    } else if context_receivers.is_empty() || context_receivers == context_params {
+            .into_iter()
+            .map(|ty| {
+                (
+                    ty,
+                    String::new(),
+                    crate::types::ContextParameterKind::LegacyReceiver,
+                )
+            })
+            .collect::<Vec<_>>()
+    } else if context_receivers.is_empty()
+        || context_receivers
+            .iter()
+            .eq(context_params.iter().map(|parameter| &parameter.ty))
+    {
         context_params
+            .into_iter()
+            .map(|parameter| {
+                let kind = context_parameter_kind(&parameter.name);
+                (parameter.ty, parameter.name, kind)
+            })
+            .collect()
     } else {
         return Err(semantic_error(
             "property context parameters disagree with its legacy context receivers",
         ));
     };
+    let context_params = contexts
+        .iter()
+        .map(|(ty, _, _)| ty.clone())
+        .collect::<Vec<_>>();
+    let context_param_names = contexts
+        .iter()
+        .map(|(_, name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let context_kinds = contexts
+        .iter()
+        .map(|(_, _, kind)| *kind)
+        .collect::<Vec<_>>();
     let visibility = metadata::declaration_visibility(flags);
+    // An absent setter flag word means the setter has its property's default flags.
+    let setter_visibility = setter_flags.map_or(visibility, metadata::declaration_visibility);
     let member = metadata::KotlinMember {
         name: name.clone(),
         receiver: receiver.clone(),
@@ -1502,7 +1538,7 @@ fn semantic_property(
         param_names: Vec::new(),
         param_defaults: Vec::new(),
         vararg: None,
-        annotations,
+        annotations: annotations.clone(),
     };
     let property = top_level.then_some(metadata::KotlinProperty {
         name,
@@ -1510,12 +1546,18 @@ fn semantic_property(
         ty: ret,
         formals,
         visibility,
+        setter_visibility,
+        setter_parameter_name,
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
+        is_const: flags & crate::metadata::property_flags::IS_CONST != 0,
         is_expect: flags & crate::metadata::property_flags::IS_EXPECT != 0,
         is_static,
         context_count: context_params.len(),
         context_params,
+        context_param_names,
+        context_kinds,
         constant,
+        annotations,
     });
     Ok((member, property))
 }

@@ -414,15 +414,20 @@ mod tests {
     #[test]
     fn klib_library_provider_is_target_neutral() {
         // The provider publishes metadata declarations through the common symbol boundary. It
-        // names no target: Native and Wasm consume it alike.
-        assert_allowed_crate_modules(
-            "src/klib_libraries.rs",
-            &["fir", "libraries", "metadata", "symbol_source", "types"],
-        );
-        assert_allowed_crate_modules_in_tree(
-            "src/klib_libraries",
-            &["fir", "libraries", "metadata", "symbol_source", "types"],
-        );
+        // names no target: Native and Wasm consume it alike. Its tests may also open a KLIB
+        // fixture through the container reader, which itself depends on no compiler module.
+        let provider = ["fir", "libraries", "metadata", "symbol_source", "types"];
+        assert_allowed_crate_modules("src/klib_libraries.rs", &provider);
+        let tests = source_path("src/klib_libraries/tests");
+        for path in rust_files_under("src/klib_libraries") {
+            if path.starts_with(&tests) || path.ends_with("tests.rs") {
+                let mut budget = provider.to_vec();
+                budget.push("klib");
+                assert_allowed_crate_modules_in_file(&path, &budget);
+            } else {
+                assert_allowed_crate_modules_in_file(&path, &provider);
+            }
+        }
     }
 
     #[test]

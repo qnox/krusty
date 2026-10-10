@@ -213,13 +213,26 @@ pub struct KotlinProperty {
     pub ty: KotlinType,
     pub formals: Vec<KotlinTypeParameter>,
     pub visibility: Visibility,
+    /// The setter's own visibility (`var x: Int private set`); the property's visibility when
+    /// metadata records no setter flags. Meaningful only for a `var`.
+    pub setter_visibility: Visibility,
+    /// Source name of an explicitly declared setter value parameter; `None` for a default setter.
+    pub setter_parameter_name: Option<String>,
     pub is_var: bool,
+    /// A `const val`, whose compile-time value is `constant`.
+    pub is_const: bool,
     pub is_expect: bool,
     /// Whether metadata declares this property static: a companion extension property
     /// (`companion val C.name`), which KLIB signature mangling marks static.
     pub is_static: bool,
     pub context_count: usize,
+    /// Source names parallel to `context_params`; empty for a legacy context receiver.
+    pub context_param_names: Vec<String>,
+    /// The role of each context parameter, parallel to `context_params`.
+    pub context_kinds: Vec<crate::types::ContextParameterKind>,
     pub constant: Option<crate::libraries::LibConst>,
+    /// Qualified identities of annotations declared on this property.
+    pub annotations: Vec<crate::types::TypeName>,
 }
 
 pub struct KotlinConstructor {

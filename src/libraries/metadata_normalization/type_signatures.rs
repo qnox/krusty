@@ -4,22 +4,45 @@ use std::collections::HashMap;
 
 use crate::libraries::GenericSig;
 use crate::metadata::semantic::{
-    semantic_bounds, semantic_ty, KotlinFunction, KotlinTypeParameter,
+    semantic_bounds, semantic_ty, KotlinFunction, KotlinProperty, KotlinType, KotlinTypeParameter,
 };
 
 /// A top-level function's declared signature: its own type parameters with their bounds, the
 /// extension receiver, every parameter (context parameters first), and the result. No target
 /// erasure is applied; a target derives its physical shape from this.
 pub(crate) fn function_generic_sig(function: &KotlinFunction) -> GenericSig {
-    let bounds = semantic_bounds(&function.formals, &HashMap::new());
+    declared_generic_sig(
+        &function.formals,
+        function.receiver.as_ref(),
+        &function.params,
+        &function.ret,
+    )
+}
+
+/// A top-level property's declared signature, in the shape of its getter: its own type parameters
+/// with their bounds, the extension receiver, its context parameters, and the property type.
+pub(crate) fn property_generic_sig(property: &KotlinProperty) -> GenericSig {
+    declared_generic_sig(
+        &property.formals,
+        property.receiver.as_ref(),
+        &property.context_params,
+        &property.ty,
+    )
+}
+
+fn declared_generic_sig(
+    formals: &[KotlinTypeParameter],
+    receiver: Option<&KotlinType>,
+    params: &[KotlinType],
+    ret: &KotlinType,
+) -> GenericSig {
+    let bounds = semantic_bounds(formals, &HashMap::new());
     GenericSig {
-        formals: function
-            .formals
+        formals: formals
             .iter()
             .map(|parameter| parameter.name.clone())
             .collect(),
-        formal_bounds: function
-            .formals
+        formal_bounds: formals
             .iter()
             .map(|parameter| {
                 parameter
@@ -29,16 +52,12 @@ pub(crate) fn function_generic_sig(function: &KotlinFunction) -> GenericSig {
                     .collect()
             })
             .collect(),
-        receiver: function
-            .receiver
-            .as_ref()
-            .map(|receiver| semantic_ty(receiver, &bounds)),
-        params: function
-            .params
+        receiver: receiver.map(|receiver| semantic_ty(receiver, &bounds)),
+        params: params
             .iter()
             .map(|parameter| semantic_ty(parameter, &bounds))
             .collect(),
-        ret: semantic_ty(&function.ret, &bounds),
+        ret: semantic_ty(ret, &bounds),
         return_policy: Default::default(),
     }
 }

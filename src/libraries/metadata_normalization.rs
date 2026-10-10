@@ -8,8 +8,11 @@ mod package_declarations;
 mod parameter_identities;
 mod type_signatures;
 
-pub(crate) use package_declarations::package_function;
-pub(crate) use parameter_identities::{function_parameter_identities, FunctionParameterIdentities};
+pub(crate) use package_declarations::{package_function, package_property, PropertyAccessorNames};
+pub(crate) use parameter_identities::{
+    function_parameter_identities, property_parameter_identities, FunctionParameterIdentities,
+    PropertyParameterIdentities,
+};
 pub(crate) use type_signatures::{
     function_generic_sig, only_input_type_formals, reified_type_parameter_ordinals,
 };

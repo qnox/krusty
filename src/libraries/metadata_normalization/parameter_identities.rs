@@ -2,7 +2,7 @@
 
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::CallSig;
-use crate::metadata::semantic::KotlinFunction;
+use crate::metadata::semantic::{KotlinFunction, KotlinProperty};
 use crate::types::ContextParameterKind;
 
 /// A decoded declaration whose parameter list does not describe one consistent source shape.
@@ -93,5 +93,84 @@ pub(crate) fn function_parameter_identities(
     Ok(FunctionParameterIdentities {
         arguments,
         physical,
+    })
+}
+
+/// The source identities of a top-level property's context parameters and of its accessors'
+/// parameters, validated once against its shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PropertyParameterIdentities {
+    /// One per context parameter, each by its declared role.
+    pub(crate) contexts: Vec<ResolvedParameterIdentity>,
+    /// One per physical getter parameter: the context parameters, then the extension receiver.
+    pub(crate) getter: Box<[ResolvedParameterIdentity]>,
+    /// One per physical setter parameter of a `var`: the getter's, then the assigned value.
+    pub(crate) setter: Option<Box<[ResolvedParameterIdentity]>>,
+}
+
+/// Derive and validate the parameter identities of a decoded top-level property.
+pub(crate) fn property_parameter_identities(
+    property: &KotlinProperty,
+) -> Result<PropertyParameterIdentities, InconsistentParameters> {
+    let count = property.context_params.len();
+    if property.context_count != count
+        || property.context_kinds.len() != count
+        || property.context_param_names.len() != count
+    {
+        return Err(InconsistentParameters {
+            detail: format!(
+                "property {} declares {} context parameters with {} types, {} roles and {} names",
+                property.name,
+                property.context_count,
+                count,
+                property.context_kinds.len(),
+                property.context_param_names.len()
+            ),
+        });
+    }
+    if property.context_kinds.contains(&ContextParameterKind::None) {
+        return Err(InconsistentParameters {
+            detail: format!(
+                "property {} has a context parameter without a context role",
+                property.name
+            ),
+        });
+    }
+    let contexts: Vec<_> = property
+        .context_param_names
+        .iter()
+        .zip(&property.context_kinds)
+        .enumerate()
+        .map(|(ordinal, (name, role))| {
+            ResolvedParameterIdentity::declared(
+                u32::try_from(ordinal).expect("a declaration's parameter ordinal fits u32"),
+                name,
+                *role,
+            )
+        })
+        .collect();
+    let getter: Box<[_]> = contexts
+        .iter()
+        .cloned()
+        .chain(
+            property
+                .receiver
+                .is_some()
+                .then_some(ResolvedParameterIdentity::ExtensionReceiver),
+        )
+        .collect();
+    let setter = property.is_var.then(|| {
+        let value = property
+            .setter_parameter_name
+            .as_deref()
+            .map_or(ResolvedParameterIdentity::PropertySetterValue, |name| {
+                ResolvedParameterIdentity::Source(name.into())
+            });
+        getter.iter().cloned().chain([value]).collect()
+    });
+    Ok(PropertyParameterIdentities {
+        contexts,
+        getter,
+        setter,
     })
 }

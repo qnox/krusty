@@ -2,13 +2,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::declaration_signatures::{sign_package_function, KlibLibraryError, SignedFunction};
+use super::declaration_signatures::{
+    sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
+};
 use crate::metadata::semantic::KotlinPackage;
 use crate::types::{existing_type_name_child, type_name_child, TypeName, Visibility};
 
 /// Signed declarations by package, plus every package namespace a qualifier walk may pass through.
 pub(super) struct PackageInventory {
     functions: HashMap<TypeName, Vec<SignedFunction>>,
+    properties: HashMap<TypeName, Vec<SignedProperty>>,
     /// Each declared package and all of its enclosing packages. The root package is not listed:
     /// it is not a child of any namespace.
     namespaces: HashSet<TypeName>,
@@ -20,6 +23,7 @@ impl PackageInventory {
     ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
             functions: HashMap::new(),
+            properties: HashMap::new(),
             namespaces: HashSet::new(),
         };
         // A public IdSignature is the serialized declaration identity used to join metadata to
@@ -41,6 +45,23 @@ impl PackageInventory {
                 signed
                     .into_iter()
                     .filter(|function| declared_signatures.insert(function.signature.clone())),
+            );
+            let signed = package
+                .properties
+                .into_iter()
+                // As for functions, a private top-level property has a file-local identity.
+                .filter(|property| property.visibility != Visibility::Private)
+                .map(|property| sign_package_property(&segments, property))
+                .collect::<Result<Vec<_>, _>>()?;
+            inventory.properties.entry(identity).or_default().extend(
+                signed
+                    .into_iter()
+                    // A companion extension property (`companion val C.name`) is named through its
+                    // classifier, not through the package, and its accessors take no receiver.
+                    // It is signed here so an unsignable one still rejects the set; it belongs to
+                    // its classifier's namespace, which this provider does not publish yet.
+                    .filter(|property| !property.declaration.is_static)
+                    .filter(|property| declared_signatures.insert(property.signature.clone())),
             );
         }
         Ok(inventory)
@@ -69,5 +90,18 @@ impl PackageInventory {
             .into_iter()
             .flatten()
             .filter(move |function| function.declaration.name == name)
+    }
+
+    /// The top-level properties `package` declares under `name`, in library order.
+    pub(super) fn properties<'a>(
+        &'a self,
+        package: TypeName,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a SignedProperty> {
+        self.properties
+            .get(&package)
+            .into_iter()
+            .flatten()
+            .filter(move |property| property.declaration.name == name)
     }
 }

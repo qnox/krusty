@@ -472,3 +472,5 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
          function contextual declares 1 context parameters with 0 roles among 1 parameters"
     );
 }
+
+mod properties;
