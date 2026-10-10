@@ -97,6 +97,7 @@ impl DependencyBodyUnit {
         let mut linker = Linker {
             functions: &mut self.functions,
             pending: &mut pending,
+            root: callable,
             sources,
         };
         let root = linker
@@ -127,6 +128,8 @@ impl DependencyBodyUnit {
 pub(super) struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDeclarationSignature, FunId>,
     pending: &'u mut VecDeque<PendingBody<'s>>,
+    /// The declaration this lowering was asked for, which its own recursive calls select.
+    root: KlibBodyCallable<'s>,
     sources: Sources<'s>,
 }
 
@@ -138,29 +141,34 @@ impl<'s> Linker<'_, 's> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Public(callee.clone());
+        // The active selection decides every call, including one of a function an earlier
+        // lowering already put in the unit.
+        let selection = if &signature == self.root.signature() {
+            Some(KlibCalleeFact::Selected(self.root))
+        } else {
+            self.sources.callees.get(&signature)
+        };
+        let callable = match selection {
+            None => {
+                return Err(KlibBodyDeclineReason::UnselectedCallee(Box::new(
+                    callee.clone(),
+                )))
+            }
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::AmbiguousCallee(Box::new(
+                    callee.clone(),
+                )))
+            }
+            Some(KlibCalleeFact::Selected(callable)) => callable,
+        };
         let function = match self.functions.get(&signature) {
             Some(function) => *function,
-            None => {
-                let callable = match self.sources.callees.get(&signature) {
-                    None => {
-                        return Err(KlibBodyDeclineReason::UnselectedCallee(Box::new(
-                            callee.clone(),
-                        )))
-                    }
-                    Some(KlibCalleeFact::Ambiguous) => {
-                        return Err(KlibBodyDeclineReason::AmbiguousCallee(Box::new(
-                            callee.clone(),
-                        )))
-                    }
-                    Some(KlibCalleeFact::Selected(callable)) => callable,
-                };
-                self.declare(ir, callable).map_err(|reason| {
-                    KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
-                        signature.clone(),
-                        reason,
-                    )))
-                })?
-            }
+            None => self.declare(ir, callable).map_err(|reason| {
+                KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
+                    signature.clone(),
+                    reason,
+                )))
+            })?,
         };
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {

@@ -728,6 +728,42 @@ fn a_callee_two_frozen_selections_describe_declines_by_name() {
     );
 }
 
+#[test]
+fn a_call_of_an_already_lowered_function_still_needs_its_frozen_selection() {
+    let shapes: [Shape; 3] = [
+        ("a", &[T::Int], T::Int),
+        ("b", &[T::Int], T::Int),
+        ("c", &[T::Int], T::Int),
+    ];
+    let demo = demo(&shapes, |name, body| {
+        let a = body.param(0);
+        let value = match name {
+            "b" => a,
+            _ => body.call("b", vec![a], T::Int),
+        };
+        Some(vec![body.ret(value)])
+    });
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "a", &["b"]).expect("lowers");
+    let functions = unit.ir().functions.len();
+    let expressions = unit.ir().exprs.len();
+    assert_eq!(
+        demo.lower(&mut unit, "c", &[])
+            .expect_err("`b` is not selected for this lowering")
+            .to_string(),
+        "the KLIB body of `demo.c` (it calls `demo.b`, which no selected declaration describes)"
+    );
+    assert_eq!(
+        demo.lower(&mut unit, "c", &["b", "b"])
+            .expect_err("`b` is ambiguous for this lowering")
+            .to_string(),
+        "the KLIB body of `demo.c` (it calls `demo.b`, which two selected declarations describe)"
+    );
+    assert_eq!(unit.ir().functions.len(), functions);
+    assert_eq!(unit.ir().exprs.len(), expressions);
+    validated(unit.ir());
+}
+
 // --- Equality and negation ----------------------------------------------------------------------
 
 /// `f(a, b) = a OP b`, with the built-in call `build` makes of the two parameter reads.
