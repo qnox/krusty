@@ -1581,6 +1581,8 @@ mod primitive_explicit_equals_e2e;
 mod primitive_hash_code_e2e;
 #[path = "property_accessor_annotation_e2e.rs"]
 mod property_accessor_annotation_e2e;
+#[path = "public_inline_property_read_e2e.rs"]
+mod public_inline_property_read_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]

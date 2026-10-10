@@ -6620,46 +6620,6 @@ impl<'a> Emitter<'a> {
         })
     }
 
-    /// Whether a property of `owner` may be reached as its raw backing FIELD from the class currently
-    /// being emitted. Only inside the declaring class (the field is private everywhere else) — and only
-    /// for a FINAL property. An `open`/`override` property is redeclared by subclasses, which replace its
-    /// ACCESSOR, not the base's own private storage: a `getfield` from a base method would read the
-    /// base's field and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` inside
-    /// the class for exactly that reason, so the accessor is the only correct realization here.
-    ///
-    /// Two exemptions, both because the accessor an `open` property would be reached through does not
-    /// exist:
-    ///
-    /// * a PRIVATE property has no synthesized accessor at all (kotlinc reads it directly in-class).
-    ///   `private open` is not valid Kotlin — kotlinc reports "'open' is incompatible with 'private'"
-    ///   — so this only decides what an input krusty accepts but kotlinc rejects compiles to, and the
-    ///   raw field is the realization that at least links.
-    /// * a `val` has no SETTER, so a `writable` access to one can only be the deferred initialization
-    ///   Kotlin permits in a constructor/`init` block, which kotlinc also emits as a `putfield`.
-    ///
-    /// A `@JvmField` property is reachable this way from ANY class: it has no accessor to call, and
-    /// its field carries the declaration's own visibility rather than Kotlin's default `private`.
-    fn direct_field_access(
-        &self,
-        class: &crate::ir::IrClass,
-        declared: Option<&crate::ir::IrProperty>,
-        writable: bool,
-    ) -> bool {
-        if declared.is_some_and(|p| is_jvm_field(class, &p.name)) {
-            return true;
-        }
-        // An explicit backing field is a different type from the property. The checker already
-        // chose a field read, and lowered it as one, when the receiver's static type is exactly
-        // this class. A property read that remains is the getter: a subclass value, a nested
-        // class, and every other receiver. Loading the private field here would skip that choice
-        // and hand back the carrier (`Integer.valueOf`) instead of the getter's public value.
-        if !writable && declared.is_some_and(|property| property.storage_ty.is_some()) {
-            return false;
-        }
-        class.fq_name_matches(&self.owner)
-            && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
-    }
-
     /// Whether emitting `e` introduces non-linear JVM control flow anywhere in its subtree. Operand
     /// sequences use this physical fact to keep an earlier value off the stack while nested branches,
     /// handlers, or inline splices execute. Stack-map frames themselves are computed from the final body.

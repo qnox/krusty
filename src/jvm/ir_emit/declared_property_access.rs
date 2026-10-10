@@ -6,6 +6,52 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// Whether a property of `owner` may be reached as its raw backing FIELD from the class currently
+    /// being emitted. Only inside the declaring class (the field is private everywhere else) — and only
+    /// for a FINAL property. An `open`/`override` property is redeclared by subclasses, which replace its
+    /// ACCESSOR, not the base's own private storage: a `getfield` from a base method would read the
+    /// base's field and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` inside
+    /// the class for exactly that reason, so the accessor is the only correct realization here.
+    ///
+    /// Two exemptions, both because the accessor an `open` property would be reached through does not
+    /// exist:
+    ///
+    /// * a PRIVATE property has no synthesized accessor at all (kotlinc reads it directly in-class).
+    ///   `private open` is not valid Kotlin — kotlinc reports "'open' is incompatible with 'private'"
+    ///   — so this only decides what an input krusty accepts but kotlinc rejects compiles to, and the
+    ///   raw field is the realization that at least links.
+    /// * a `val` has no SETTER, so a `writable` access to one can only be the deferred initialization
+    ///   Kotlin permits in a constructor/`init` block, which kotlinc also emits as a `putfield`.
+    ///
+    /// A `@JvmField` property is reachable this way from ANY class: it has no accessor to call, and
+    /// its field carries the declaration's own visibility rather than Kotlin's default `private`.
+    pub(super) fn direct_field_access(
+        &self,
+        class: &crate::ir::IrClass,
+        declared: Option<&crate::ir::IrProperty>,
+        writable: bool,
+    ) -> bool {
+        if declared.is_some_and(|p| is_jvm_field(class, &p.name)) {
+            return true;
+        }
+        // A body a caller may splice into another class cannot name this class's private field: a
+        // non-private inline function reads a non-private property through its getter, as kotlinc
+        // does in a public inline scope. A private property keeps its exported field accessor.
+        if !writable && self.export_private_calls && declared.is_some_and(|p| !p.is_private) {
+            return false;
+        }
+        // An explicit backing field is a different type from the property. The checker already
+        // chose a field read, and lowered it as one, when the receiver's static type is exactly
+        // this class. A property read that remains is the getter: a subclass value, a nested
+        // class, and every other receiver. Loading the private field here would skip that choice
+        // and hand back the carrier (`Integer.valueOf`) instead of the getter's public value.
+        if !writable && declared.is_some_and(|property| property.storage_ty.is_some()) {
+            return false;
+        }
+        class.fq_name_matches(&self.owner)
+            && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
+    }
+
     /// How to read property `name` of a class THIS compilation declares — there is no class file to ask,
     /// the IR is the declaration. Inside the declaring class the private backing field is loaded directly,
     /// which is what kotlinc emits there; from outside, the read goes through the accessor. `None` when
