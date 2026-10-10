@@ -4,11 +4,14 @@
 //! project as a whole is its message alone after its severity, and a conflict between values is
 //! its message alone.
 
-use std::fs;
 use std::path::Path;
 
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::yaml::Span;
+use crate::inventory;
+use crate::yaml::{Limits, Span};
+
+#[cfg(test)]
+use std::fs;
 
 /// The narrowest line-number gutter, so most boxes line up.
 const MIN_GUTTER_WIDTH: usize = 3;
@@ -86,7 +89,10 @@ pub fn render(diagnostic: &Diagnostic, root: Option<&Path>) -> String {
 
 /// The lines of `file` that `span` covers; `None` when they cannot be read.
 fn snippet(file: &Path, span: Span) -> Option<Vec<String>> {
-    let text = fs::read_to_string(file).ok()?;
+    // Rendering is still a project-file read. Keep it behind the same bounded, no-follow
+    // boundary as parsing so replacing the diagnosed path with a link cannot disclose or quote
+    // another file while the diagnostic is being printed.
+    let text = String::from_utf8(inventory::read_file(file, Limits::DEFAULT.bytes).ok()?).ok()?;
     let count = span.end.line.max(span.start.line) - span.start.line + 1;
     let lines: Vec<String> = text
         .lines()
@@ -194,6 +200,30 @@ mod tests {
         assert_eq!(
             render(&Diagnostic::conflict("Conflicting\n  - a"), None),
             "Conflicting\n  - a"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendering_does_not_follow_a_replaced_diagnostic_file() {
+        use std::os::unix::fs::symlink;
+
+        let target = written("symlink-target", "outside secret\n");
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-toolchain-report-symlink-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create the directory");
+        let file = directory.join("module.yaml");
+        let _ = fs::remove_file(&file);
+        symlink(&target, &file).expect("replace the diagnostic file with a link");
+
+        assert_eq!(
+            render(
+                &Diagnostic::error(&file, Some(span((1, 1), (1, 8))), "Broken"),
+                Some(&directory),
+            ),
+            "ERROR: Broken\n ╰→ module.yaml:1:1"
         );
     }
 }
