@@ -8,6 +8,8 @@
 //! Declarations are validated and signed once, when the provider is built. Conversion into
 //! selection candidates is lazy and memoized per lookup key.
 
+mod classifier_records;
+mod classifier_signatures;
 mod declaration_signatures;
 mod external_identities;
 mod inventory;

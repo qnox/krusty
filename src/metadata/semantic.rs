@@ -169,6 +169,7 @@ pub struct KotlinMember {
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
+/// One Kotlin function: a top-level one, or a member of the class that lists it.
 pub struct KotlinFunction {
     pub name: String,
     pub receiver: Option<KotlinType>,
@@ -179,6 +180,8 @@ pub struct KotlinFunction {
     pub param_defaults: Vec<bool>,
     pub vararg: Option<usize>,
     pub visibility: Visibility,
+    /// Always [`KotlinModality::Final`] for a top-level function.
+    pub modality: KotlinModality,
     pub is_inline: bool,
     pub has_reified_type_params: bool,
     pub is_suspend: bool,
@@ -206,8 +209,7 @@ pub struct KotlinPackage {
     pub properties: Vec<KotlinProperty>,
 }
 
-/// One top-level Kotlin property. Member properties remain [`KotlinMember`]s because they have no
-/// extension receiver or package namespace of their own.
+/// One Kotlin property: a top-level one, or a member of the class that lists it.
 pub struct KotlinProperty {
     pub name: String,
     pub receiver: Option<KotlinType>,
@@ -216,6 +218,8 @@ pub struct KotlinProperty {
     pub ty: KotlinType,
     pub formals: Vec<KotlinTypeParameter>,
     pub visibility: Visibility,
+    /// Always [`KotlinModality::Final`] for a top-level property.
+    pub modality: KotlinModality,
     /// The setter's own visibility (`var x: Int private set`); the property's visibility when
     /// metadata records no setter flags. Meaningful only for a `var`.
     pub setter_visibility: Visibility,
@@ -240,6 +244,8 @@ pub struct KotlinProperty {
 }
 
 pub struct KotlinConstructor {
+    /// The class's primary constructor rather than a secondary one.
+    pub is_primary: bool,
     pub params: Vec<KotlinType>,
     pub param_names: Vec<String>,
     pub param_defaults: Vec<bool>,
@@ -265,7 +271,15 @@ pub struct KotlinTypeParameter {
 pub struct KotlinClass {
     pub supertypes: Vec<String>,
     pub supertype_tys: Vec<KotlinType>,
+    /// Every function and property the class declares, in the condensed shape the JVM builtins
+    /// records consume.
     pub members: Vec<KotlinMember>,
+    /// The functions the class declares, as complete declarations in metadata order. These are
+    /// the same declarations as the function [`Self::members`]; a provider that publishes the class
+    /// normalizes and signs these.
+    pub functions: Vec<KotlinFunction>,
+    /// The properties the class declares, as complete declarations in metadata order.
+    pub properties: Vec<KotlinProperty>,
     pub constructors: Vec<KotlinConstructor>,
     pub companion_name: Option<String>,
     pub type_params: Vec<KotlinTypeParameter>,
@@ -280,6 +294,8 @@ pub struct KotlinClass {
     pub inline_class_property: Option<String>,
     pub modality: KotlinModality,
     pub is_nested: bool,
+    /// An `inner` class, which captures an instance of its enclosing class.
+    pub is_inner: bool,
     /// Original Kotlin metadata flags retained for adapters that must preserve an external ABI.
     pub metadata_flags: u64,
     /// The class's own annotations, with the arguments a declaration-level reader needs.

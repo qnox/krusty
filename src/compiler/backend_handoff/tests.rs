@@ -726,6 +726,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         param_defaults: vec![false],
         vararg: None,
         visibility: crate::types::Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         is_inline: false,
         has_reified_type_params: false,
         is_suspend: false,

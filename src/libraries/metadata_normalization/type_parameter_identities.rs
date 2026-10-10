@@ -9,7 +9,7 @@ use crate::metadata::semantic::{KotlinTypeParameter, KotlinTypeParameterId};
 /// A provider constructs this only after it has established the declaration's exact external
 /// identity, and retains it with that signed declaration. Written names remain diagnostic data;
 /// two declarations that both spell a parameter `T` therefore never share an inference variable.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct TypeParameterIdentities {
     by_id: HashMap<KotlinTypeParameterId, &'static str>,
     by_source: HashMap<String, &'static str>,
@@ -19,10 +19,27 @@ pub(crate) struct TypeParameterIdentities {
 impl TypeParameterIdentities {
     pub(crate) fn from_provider(
         formals: &[KotlinTypeParameter],
+        identity: impl FnMut(usize, &KotlinTypeParameter) -> &'static str,
+    ) -> Self {
+        Self::from_provider_with_enclosing(formals, None, identity)
+    }
+
+    /// Assign identities to one declaration's own formals while retaining the identities its
+    /// enclosing classifiers put in scope. A repeated metadata ID or source spelling is shadowed
+    /// by the inner declaration, exactly as the metadata scope is.
+    pub(crate) fn from_provider_with_enclosing(
+        formals: &[KotlinTypeParameter],
+        enclosing: Option<&Self>,
         mut identity: impl FnMut(usize, &KotlinTypeParameter) -> &'static str,
     ) -> Self {
-        let mut by_id = HashMap::with_capacity(formals.len());
-        let mut by_source = HashMap::with_capacity(formals.len());
+        let mut by_id = enclosing
+            .map(|identities| identities.by_id.clone())
+            .unwrap_or_default();
+        let mut by_source = enclosing
+            .map(|identities| identities.by_source.clone())
+            .unwrap_or_default();
+        by_id.reserve(formals.len());
+        by_source.reserve(formals.len());
         let mut identities = Vec::with_capacity(formals.len());
         for (ordinal, parameter) in formals.iter().enumerate() {
             let identity = identity(ordinal, parameter);

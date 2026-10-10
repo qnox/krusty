@@ -25,6 +25,7 @@ fn property(name: &str, receiver: Option<KotlinType>, ty: KotlinType) -> KotlinP
         ty,
         formals: Vec::new(),
         visibility: Visibility::Public,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         setter_visibility: Visibility::Public,
         setter_parameter_name: None,
         is_var: false,

@@ -3,14 +3,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use super::declaration_signatures::SignedProperty;
-use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use super::declaration_signatures::{SignedFunction, SignedProperty};
+use crate::fir::{ExternalCallableId, ExternalPropertyId, ResolvedParameterIdentity};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization, FnKind,
-    FunctionInfo, FunctionParameterIdentities, KlibDeclarationSignature, LibraryCallable,
-    PropertyInfo,
+    FunctionInfo, KlibDeclarationSignature, LibraryCallable, LibraryMember, PropertyInfo,
 };
 use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::types::{SemanticCallableOwner, TypeName};
 
 /// One identity per exact declaration signature. The signature, not a spelling or a parameter
 /// tuple, decides whether two candidates are the same declaration.
@@ -23,37 +23,31 @@ pub(super) struct ExternalIdentities {
 }
 
 impl ExternalIdentities {
-    /// Give a normalized top-level function the identity of its declaration, publishing the
-    /// declaration's realization the first time its signature is seen.
+    /// Give a normalized function the identity of its declaration, publishing the declaration's
+    /// realization, of shape `kind`, the first time its signature is seen.
     pub(super) fn assign_function(
         &self,
-        signature: &KlibPublicIdSignature,
-        parameters: &FunctionParameterIdentities,
+        signed: &SignedFunction,
+        kind: ExternalCallableKind,
         function: &mut FunctionInfo,
     ) {
-        let kind = match function.kind {
-            FnKind::TopLevel => ExternalCallableKind::TopLevel,
-            FnKind::Extension => ExternalCallableKind::Extension,
-            FnKind::Member => ExternalCallableKind::Member,
-        };
         self.assign_callable(
-            KlibDeclarationSignature::Public(signature.clone()),
+            KlibDeclarationSignature::Public(signed.signature.clone()),
             kind,
-            &parameters.physical,
+            &signed.parameters.physical,
             &mut function.callable,
         );
     }
 
-    /// Give a normalized top-level property and each of its accessors the identity of its
-    /// declaration. Each accessor realizes its own accessor signature; the property realization
-    /// joins the two accessor identities.
-    pub(super) fn assign_property(&self, signed: &SignedProperty, property: &mut PropertyInfo) {
-        // An accessor is a function of its property's shape: top-level, or an extension.
-        let kind = if property.receiver.is_some() {
-            ExternalCallableKind::Extension
-        } else {
-            ExternalCallableKind::TopLevel
-        };
+    /// Give a normalized property and each of its accessors the identity of its declaration. Each
+    /// accessor realizes its own accessor signature, as a function of shape `kind`; the property
+    /// realization joins the two accessor identities.
+    pub(super) fn assign_property(
+        &self,
+        signed: &SignedProperty,
+        kind: ExternalCallableKind,
+        property: &mut PropertyInfo,
+    ) {
         self.assign_callable(
             KlibDeclarationSignature::Accessor(signed.getter.clone()),
             kind,
@@ -82,6 +76,47 @@ impl ExternalIdentities {
         if let Some(setter) = &mut property.setter {
             setter.external_property_identity = Some(identity);
         }
+    }
+
+    /// Give a normalized constructor of `owner` the identity of its declaration.
+    pub(super) fn assign_constructor(
+        &self,
+        signature: &KlibPublicIdSignature,
+        parameters: &[ResolvedParameterIdentity],
+        owner: TypeName,
+        constructor: &mut LibraryMember,
+    ) {
+        let mut callable = LibraryCallable::constructor(owner, constructor);
+        callable.declaration_owner = Some(SemanticCallableOwner::Classifier(owner));
+        self.assign_callable(
+            KlibDeclarationSignature::Public(signature.clone()),
+            ExternalCallableKind::Constructor,
+            parameters,
+            &mut callable,
+        );
+        constructor.external_identity = callable.external_identity;
+    }
+
+    /// Give a member `owner` declares implicitly, and that is named through `owner` with no value
+    /// operand (an enum class's `values`, `valueOf`, or `entries` getter), the identity of its
+    /// declaration.
+    pub(super) fn assign_classifier_member(
+        &self,
+        signature: KlibDeclarationSignature,
+        parameters: &[ResolvedParameterIdentity],
+        owner: TypeName,
+        member: &mut LibraryMember,
+    ) {
+        let mut callable =
+            FunctionInfo::classifier_member(FnKind::TopLevel, owner, member.clone()).callable;
+        callable.declaration_owner = Some(SemanticCallableOwner::Classifier(owner));
+        self.assign_callable(
+            signature,
+            ExternalCallableKind::TopLevel,
+            parameters,
+            &mut callable,
+        );
+        member.external_identity = callable.external_identity;
     }
 
     fn intern_property(
@@ -125,7 +160,7 @@ impl ExternalIdentities {
         &self,
         signature: KlibDeclarationSignature,
         kind: ExternalCallableKind,
-        parameters: &[crate::fir::ResolvedParameterIdentity],
+        parameters: &[ResolvedParameterIdentity],
         callable: &mut LibraryCallable,
     ) {
         if let Some(identity) = self.by_signature.borrow().get(&signature).copied() {

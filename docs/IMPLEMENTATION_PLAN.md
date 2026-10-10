@@ -4599,8 +4599,19 @@ code is the one the code generator already names: provider-owned bodies through 
   no owner, descriptor or storage). Each accessor is an ordinary external callable whose
   realization carries its `KlibDeclarationSignature::Accessor`; the property's
   `ExternalPropertyRealization` joins the two accessor identities. A companion extension property
-  is signed but left to its classifier's namespace. Classes, members and the `SemanticPlatform`
-  hooks come next, then the Native lane switch.
+  is signed but left to its classifier's namespace. Non-private classes are published from their
+  metadata: lookup through the package namespace and, for a nested class, its owner's classifier
+  namespace; exact kind, modality, `fun`-interface and `inner` flags, own and captured type
+  parameters (bounds, variance), the direct supertypes metadata lists (core walks inheritance),
+  companion identity and enum entries. Constructors are ordinary callables (`<init>`, primary or
+  secondary), and members, member extensions and member properties are normalized through the
+  same `CallablePlacement`-driven model as package declarations; each realizes its exact public or
+  accessor signature, deduplicated by signature. `companion { … }` block members, companion
+  extensions and an enum's `values`/`valueOf` (and `entries`, only with `hasEnumEntries`) are
+  receiver-less candidates of the classifier's namespace naming it as `associated_classifier`.
+  Private classes, members and constructors are not published, although IR gives a private class
+  member or constructor (an enum's, an object's) a public signature.
+  The `SemanticPlatform` hooks come next, then the Native lane switch.
 - **Joining (next).** A selected dependency callable is joined to its decoded body through its
   exact public signature, never through a name or parameter tuple.
 - **Lowering (next).** The decoded body is lowered into checked common IR so the native generator
