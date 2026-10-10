@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
@@ -63,10 +63,13 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let mut diags = DiagSink::new();
     let mut features = krusty::features::LangFeatures::new();
     features.apply_source_directives(source);
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
-    );
     let backend = CraneliftBackend::new(target).verified();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
+    );
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
         &["Main".to_string()],

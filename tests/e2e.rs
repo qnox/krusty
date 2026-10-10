@@ -20,6 +20,8 @@ pub(crate) use common_core::server_pool::Pool as ServerPool;
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
+#[path = "common/reference_targets.rs"]
+mod reference_targets_support;
 
 mod common {
     pub use super::bytecode_comparison_support::*;
@@ -28,6 +30,7 @@ mod common {
     pub use super::inner_class_rows_support::{
         assert_same_inner_classes, compile_with_kotlinc, compile_with_kotlinc_for_target,
     };
+    pub use super::reference_targets_support::*;
 }
 
 #[path = "abstract_instantiation_check_e2e.rs"]
@@ -1629,6 +1632,8 @@ mod value_class_constructor_bodies_e2e;
 mod value_class_constructor_default_e2e;
 #[path = "value_class_constructor_reference_e2e.rs"]
 mod value_class_constructor_reference_e2e;
+#[path = "value_class_declaration_e2e.rs"]
+mod value_class_declaration_e2e;
 #[path = "value_class_delegated_result_e2e.rs"]
 mod value_class_delegated_result_e2e;
 #[path = "value_class_dependency_bridge_e2e.rs"]

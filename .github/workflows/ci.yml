@@ -196,6 +196,12 @@ jobs:
         with:
           path: target/cache/box-corpus
           key: klib-semantics-box-corpus-mock-jdk-${{ hashFiles('kotlin-versions') }}
+      # kotlinc-native fetches its toolchain dependencies (LLVM, sysroots) on first use.
+      - name: cache Kotlin/Native dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan/dependencies
+          key: klib-semantics-konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
       - name: restore recorded kotlinc-native bytes
         id: native-recordings
         uses: actions/cache/restore@v6

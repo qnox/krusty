@@ -3,6 +3,7 @@
 //! The conformance binary shares the lower-level harness in `common`, but must not compile these
 //! unrelated resolver/reference-toolchain helpers and then suppress their dead-code warnings.
 
+use krusty::compilation_target::CompilationTarget;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -213,7 +214,8 @@ fn rendered_diagnostics(output: &str, severity: &str) -> Vec<CompilerError> {
         .collect()
 }
 
-fn write_fixture_sources(work: &std::path::Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
+/// Write named sources under `work`, creating their directories, and return their paths.
+pub fn write_fixture_sources(work: &std::path::Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
     sources
         .iter()
         .map(|(name, source)| {
@@ -435,7 +437,7 @@ fn krusty_cli_diagnostics_in_process(
         .collect::<Vec<_>>();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &inputs,
-        PlatformProvider::from(libraries),
+        PlatformProvider::from(krusty::frontend::PlatformProvider::jvm(libraries)),
         &settings.features,
         "main",
         &mut diags,
@@ -568,6 +570,16 @@ pub fn rendered_error_blocks(output: &str, excerpted: bool) -> Vec<String> {
     error_blocks(output, excerpted)
 }
 
+/// kotlinc's exit status and stderr for named sources, recorded like every reference diagnostic
+/// run.
+pub fn reference_compiler_run(sources: &[(&str, &str)], extra_args: &[String]) -> (i32, String) {
+    let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let result = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
+    let _ = std::fs::remove_dir_all(work);
+    result
+}
+
 /// Krusty's error blocks with the standard language/API settings from the reference invocation.
 pub fn krusty_error_blocks_with_args(
     sources: &[(&str, &str)],
@@ -619,6 +631,12 @@ fn standard_version_args(arguments: &[String]) -> Vec<String> {
         }
     }
     selected
+}
+
+/// The error blocks of a reference compiler's stderr, in the shape [`reference_error_blocks`]
+/// returns: its trailing source-line and caret excerpt is not part of a message.
+pub fn reference_error_blocks_from(stderr: &str) -> Vec<String> {
+    error_blocks(stderr, true)
 }
 
 fn error_blocks(stderr: &str, excerpted: bool) -> Vec<String> {
@@ -718,7 +736,7 @@ pub fn front_end_diagnostics_inputs(
     let mut diagnostics = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         inputs,
-        common::with_native_plugins(platform),
+        common::with_native_plugins(CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -1132,6 +1150,16 @@ pub fn front_end_diagnostics_located(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
+    front_end_diagnostics_located_for(CompilationTarget::Jvm, src, cp_jars, jdk_modules)
+}
+
+/// [`front_end_diagnostics_located`] under `target`'s source rules.
+pub fn front_end_diagnostics_located_for(
+    target: krusty::compilation_target::CompilationTarget,
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
     let cp = common::cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
@@ -1140,7 +1168,7 @@ pub fn front_end_diagnostics_located(
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        common::with_native_plugins(platform),
+        common::with_native_plugins(target, platform),
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diags,

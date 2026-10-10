@@ -308,6 +308,7 @@ pub fn lower_file(
     }
     lowering.define_property_entry_points(file_init)?;
     lowering.define_constructor_entry_points(file_init)?;
+    lowering.define_value_box_entry_points()?;
     let defines_entry = selected.is_some();
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
@@ -1546,7 +1547,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => self.call(&callee, dispatch_receiver, &args),
+            } => self.call(id, &callee, dispatch_receiver, &args),
             IrExpr::TypeOp {
                 op,
                 arg,
@@ -1624,7 +1625,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
                 receiver,
                 args,
-            } => self.method_call(class, index, receiver, &args),
+            } => self.method_call(id, class, index, receiver, &args),
             IrExpr::GetField {
                 receiver,
                 class,
@@ -2267,9 +2268,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     self.file.ir.classes[*class as usize].fields[*index as usize].ty,
                 )
             }
+            IrExpr::EnclosingInstance { inner, .. } => {
+                let (class, field) = self.enclosing_field(*inner).ok()?;
+                self.file.ir.classes[class as usize].fields[field as usize].ty
+            }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
+            // What the checked accessor the access calls answers.
+            IrExpr::LocalDelegateAccess(access) => {
+                let plan = self
+                    .file
+                    .ir
+                    .local_delegate_plans
+                    .get(access.plan as usize)?;
+                match access.value {
+                    Some(_) => plan.setter.as_ref()?.result,
+                    None => plan.getter.result,
+                }
+            }
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),

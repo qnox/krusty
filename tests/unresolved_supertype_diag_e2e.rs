@@ -53,7 +53,7 @@ fn qualified_supertype_uses_the_failed_segment_span() {
     let mut diagnostics = DiagSink::new();
     analyze_source_set(
         &["class Bar : deep.pkg.Missing3\n"],
-        Box::new(EmptySymbolSource),
+        krusty::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &mut diagnostics,
     );
     let observed = diagnostics
