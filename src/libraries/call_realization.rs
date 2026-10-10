@@ -129,6 +129,7 @@ impl LibraryCallable {
             reflection_name: None,
             compiler_intrinsic: None,
             semantic_role: None,
+            overridden_declarations: Box::new([]),
             collection_barrier: None,
             plugin_expression: None,
             inline_body_plan: None,
