@@ -972,7 +972,7 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
             signature
                 .type_params
                 .iter()
-                .map(|parameter| parameter.name.clone())
+                .map(|parameter| (parameter.name.clone(), parameter.reified))
                 .collect()
         })
         .unwrap_or_default();
