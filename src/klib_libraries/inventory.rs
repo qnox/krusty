@@ -6,7 +6,7 @@ use super::classifier_signatures::{sign_package_classes, SignedClassifier};
 use super::declaration_signatures::{
     sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
 };
-use super::parameter_defaults::{ParameterDefaults, TopLevelDeclarations};
+use super::parameter_defaults::{DefaultSelection, ParameterDefaults};
 use crate::libraries::{declared_type_alias, AliasExpansion};
 use crate::metadata::klib_ir::KlibIrSignature;
 use crate::metadata::semantic::KotlinPackage;
@@ -84,28 +84,10 @@ impl PackageInventory {
                 .collect::<Result<Vec<_>, _>>()?;
             for function in signed {
                 if !declared_signatures.insert(function.signature.clone()) {
+                    inventory.replace_with_authoritative_function(identity, function);
                     continue;
                 }
-                if function.declaration.is_static {
-                    // A static top-level declaration is a companion extension; one without a
-                    // classifier receiver names nothing it could be called through.
-                    if let Some(classifier) = companion_receiver(&function.declaration.receiver) {
-                        inventory
-                            .companion_functions
-                            .entry(classifier)
-                            .or_default()
-                            .push(CompanionExtension {
-                                package: identity,
-                                signed: function,
-                            });
-                    }
-                    continue;
-                }
-                inventory
-                    .functions
-                    .entry(identity)
-                    .or_default()
-                    .push(function);
+                inventory.insert_function(identity, function);
             }
             let signed = package
                 .properties
@@ -154,10 +136,53 @@ impl PackageInventory {
         Ok(inventory)
     }
 
+    /// Publish a signed function in the namespace selected by its own metadata.
+    fn insert_function(&mut self, package: TypeName, function: SignedFunction) {
+        if function.declaration.is_static {
+            // A static top-level declaration is a companion extension; one without a classifier
+            // receiver names nothing it could be called through.
+            if let Some(classifier) = companion_receiver(&function.declaration.receiver) {
+                self.companion_functions
+                    .entry(classifier)
+                    .or_default()
+                    .push(CompanionExtension {
+                        package,
+                        signed: function,
+                    });
+            }
+            return;
+        }
+        self.functions.entry(package).or_default().push(function);
+    }
+
+    /// Replace a dependency-first duplicate with the compilation-designated stdlib declaration.
+    ///
+    /// The public signature is the shared serialized identity, but it omits result type and source
+    /// modifiers such as `operator`. Authority therefore belongs to the complete stdlib declaration,
+    /// not just a boolean copied onto whichever dependency metadata happened to be read first.
+    /// Removing from both publication stores also keeps the declaration in the namespace selected
+    /// by its authoritative placement metadata.
+    fn replace_with_authoritative_function(&mut self, package: TypeName, function: SignedFunction) {
+        if !function.compiler_builtin_owner {
+            return;
+        }
+        let signature = &function.signature;
+        self.functions
+            .values_mut()
+            .for_each(|functions| functions.retain(|prior| &prior.signature != signature));
+        self.functions.retain(|_, functions| !functions.is_empty());
+        self.companion_functions.values_mut().for_each(|functions| {
+            functions.retain(|prior| &prior.signed.signature != signature);
+        });
+        self.companion_functions
+            .retain(|_, functions| !functions.is_empty());
+        self.insert_function(package, function);
+    }
+
     /// The top-level declarations whose IR holds a parameter default that metadata says exists:
     /// a defaulted function, or a classifier with a defaulted constructor or member.
-    pub(super) fn defaulted_top_levels(&self) -> TopLevelDeclarations {
-        let mut wanted = TopLevelDeclarations::default();
+    pub(super) fn default_selection(&self) -> DefaultSelection {
+        let mut wanted = DefaultSelection::default();
         let functions = self.functions.values().flatten().chain(
             self.companion_functions
                 .values()
@@ -165,8 +190,11 @@ impl PackageInventory {
                 .map(|extension| &extension.signed),
         );
         for function in functions {
+            if function.compiler_builtin_owner {
+                wanted.select_authoritative_function(&function.signature);
+            }
             if function.declaration.param_defaults.contains(&true) {
-                wanted.insert(&function.signature);
+                wanted.insert_top_level(&function.signature);
             }
         }
         for classifier in self.classifiers.values() {
@@ -183,7 +211,7 @@ impl PackageInventory {
                 .map(|function| &function.signature);
             constructors
                 .chain(members)
-                .for_each(|signature| wanted.insert(signature));
+                .for_each(|signature| wanted.insert_top_level(signature));
         }
         wanted
     }

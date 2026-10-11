@@ -22,7 +22,7 @@ pub struct KlibLibraryInput {
     role: KlibLibraryRole,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum KlibLibraryRole {
     Dependency,
     PlatformStdlib,
@@ -49,6 +49,8 @@ impl KlibLibraryInput {
 /// Why the selected libraries could not be published.
 #[derive(Debug)]
 pub enum KlibLibrariesOpenError {
+    /// Compilation input assembly designated more than one archive as the platform stdlib.
+    MultiplePlatformStdlibs { first: PathBuf, second: PathBuf },
     /// The container itself is unreadable.
     Archive(KlibError),
     /// A metadata fragment of `library` does not decode.
@@ -69,6 +71,12 @@ pub enum KlibLibrariesOpenError {
 impl std::fmt::Display for KlibLibrariesOpenError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::MultiplePlatformStdlibs { first, second } => write!(
+                formatter,
+                "multiple platform stdlib KLIB inputs: {} and {}",
+                first.display(),
+                second.display()
+            ),
             Self::Archive(error) => error.fmt(formatter),
             Self::Fragment {
                 library,
@@ -94,6 +102,19 @@ impl std::error::Error for KlibLibrariesOpenError {}
 impl KlibLibraries {
     /// Publish every package fragment of the typed KLIB inputs, zipped or unpacked.
     pub fn open(libraries: &[KlibLibraryInput]) -> Result<Self, KlibLibrariesOpenError> {
+        let mut platform_stdlib = None;
+        for input in libraries {
+            if input.role != KlibLibraryRole::PlatformStdlib {
+                continue;
+            }
+            if let Some(first) = platform_stdlib {
+                return Err(KlibLibrariesOpenError::MultiplePlatformStdlibs {
+                    first,
+                    second: input.path.clone(),
+                });
+            }
+            platform_stdlib = Some(input.path.clone());
+        }
         let mut packages = Vec::new();
         let mut archives = Vec::with_capacity(libraries.len());
         for input in libraries {
@@ -117,7 +138,7 @@ impl KlibLibraries {
         let mut inventory = PackageInventory::from_packages(packages)
             .map_err(KlibLibrariesOpenError::Declaration)?;
         // Only a declaration metadata marks as defaulted has a default to read from the IR.
-        let wanted = inventory.defaulted_top_levels();
+        let wanted = inventory.default_selection();
         let mut defaults = ParameterDefaults::default();
         for (input, archive) in libraries.iter().zip(&archives) {
             let library = &input.path;
@@ -127,7 +148,11 @@ impl KlibLibraries {
                         library: library.to_path_buf(),
                         error,
                     })?;
-            defaults.add_library(&trees);
+            defaults.add_library(
+                &trees,
+                &wanted,
+                input.role == KlibLibraryRole::PlatformStdlib,
+            );
         }
         inventory.attach_defaults(&defaults);
         Ok(Self::over(std::rc::Rc::new(inventory)))
