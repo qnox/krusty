@@ -20,7 +20,9 @@ use super::*;
 use crate::klib::KlibArchive;
 use crate::libraries::TypeKind;
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrMember};
-use crate::metadata::klib_ir::{read_declaration_trees, KlibIrSignature};
+use crate::metadata::klib_ir::{
+    read_declaration_trees, read_declaration_trees_where, KlibIrSignature,
+};
 use crate::metadata::semantic::{parse_package_fragment_checked, KotlinPackage};
 use crate::types::Visibility;
 
@@ -151,10 +153,9 @@ fn sign_package(package_segments: &[String], package: &KotlinPackage, out: &mut 
             classes: &chain,
             ..around
         };
+        // A private member of a class keeps a public signature: unlike a private top-level
+        // declaration, it is not file-local.
         for member in &class.members {
-            if member.visibility == Visibility::Private {
-                continue;
-            }
             out.public.insert(member_signature(inside, member).unwrap());
             if member.is_property {
                 out.accessors.insert(
@@ -227,8 +228,8 @@ fn metadata_signs_every_declaration_exactly_as_the_serialized_ir() {
         "computed from metadata but not declared by IR"
     );
     assert_eq!(serialized, computed);
-    assert_eq!(serialized.public.len(), 39);
-    assert_eq!(serialized.accessors.len(), 12);
+    assert_eq!(serialized.public.len(), 72);
+    assert_eq!(serialized.accessors.len(), 20);
 
     // Renaming every type parameter leaves the member ids alone; only the paths differ.
     let member_id = |path: &str| {
@@ -288,4 +289,45 @@ fn metadata_marks_companion_block_members_and_companion_extensions_static() {
             "named",
         ]
     );
+}
+
+fn top_level_identity(arena: &KlibIrArena, member: &KlibIrMember) -> KlibIrSignature {
+    match member {
+        KlibIrMember::Function(function) => arena.function(*function).base.symbol.signature.clone(),
+        KlibIrMember::Property(property) => property.base.symbol.signature.clone(),
+        KlibIrMember::Class(class) => arena.class(*class).base.symbol.signature.clone(),
+        KlibIrMember::TypeAlias(alias) => alias.base.symbol.signature.clone(),
+        other => panic!("{other:?} is not a top-level declaration"),
+    }
+}
+
+#[test]
+fn a_filtered_decode_keeps_only_the_accepted_top_level_declarations() {
+    let archive = fixture();
+    let all = read_declaration_trees(&archive).expect("the fixture's IR decodes");
+    let identities: Vec<KlibIrSignature> = all
+        .trees()
+        .iter()
+        .map(|tree| top_level_identity(&tree.arena, &tree.declaration))
+        .collect();
+    let kept = identities
+        .iter()
+        .find(|identity| matches!(identity, KlibIrSignature::Public(_)))
+        .expect("the fixture declares a public top-level declaration")
+        .clone();
+
+    let mut offered = Vec::new();
+    let filtered = read_declaration_trees_where(&archive, |identity| {
+        offered.push(identity.clone());
+        *identity == kept
+    })
+    .expect("the fixture's IR decodes");
+
+    assert_eq!(offered, identities);
+    let trees: Vec<KlibIrSignature> = filtered
+        .trees()
+        .iter()
+        .map(|tree| top_level_identity(&tree.arena, &tree.declaration))
+        .collect();
+    assert_eq!(trees, vec![kept]);
 }

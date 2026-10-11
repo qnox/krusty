@@ -436,7 +436,7 @@ fn current_module_property_wins_over_an_equivalent_dependency_property() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features(
         &inputs,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -503,7 +503,7 @@ fn checked_prefix_reports_cross_file_conflicting_overloads_and_candidates() {
         &inputs,
         1,
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -557,7 +557,7 @@ fn conflicting_top_level_bodies_use_their_own_declared_return_types() {
         &inputs,
         inputs.len(),
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -597,7 +597,7 @@ fn backend_names_and_erasure_do_not_change_frontend_overload_identity() {
             &inputs,
             inputs.len(),
             inputs.len(),
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
             &LangFeatures::new(),
             &mut diagnostics,
         );
@@ -641,7 +641,7 @@ fn inferred_conflict_displays_only_source_signature_types() {
         &inputs,
         inputs.len(),
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -692,7 +692,7 @@ fn mixed_private_public_conflicts_retain_visible_representatives_in_either_order
             &inputs,
             inputs.len(),
             inputs.len(),
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
             &LangFeatures::new(),
             &mut diagnostics,
         );
@@ -741,7 +741,7 @@ fn conflicting_overload_diagnostics_sort_candidate_displays_stably() {
         &inputs,
         1,
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -784,7 +784,7 @@ fn conflict_recovery_uses_alias_and_qualified_scopes() {
         &inputs,
         1,
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -830,7 +830,7 @@ fn conflicting_overload_diagnostics_are_deterministic_and_bounded() {
         &inputs,
         1,
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -879,7 +879,7 @@ fn exhausted_conflict_display_budget_preserves_qualified_call_diagnostics() {
         &inputs,
         1,
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -908,7 +908,7 @@ fn unrelated_inferred_return_arity_diagnostic_keeps_return_type() {
         &inputs,
         inputs.len(),
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -933,7 +933,7 @@ fn cross_file_private_top_level_function_conflicts_with_public_but_does_not_esca
         &inputs,
         1,
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -970,7 +970,7 @@ fn cross_file_private_top_level_callable_reference_reports_visibility() {
         &inputs,
         inputs.len(),
         inputs.len(),
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -998,7 +998,7 @@ fn unavailable_context_does_not_hide_inapplicable_candidate_family() {
         &[SourceInput::kotlin(source)],
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1024,7 +1024,7 @@ fn script_analysis_respects_declaration_order() {
     )];
     analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diags,
     );
@@ -1037,7 +1037,7 @@ fn script_analysis_respects_declaration_order() {
     )];
     analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diags,
     );
@@ -1066,7 +1066,7 @@ fn script_declarations_do_not_enter_module_scope() {
     ];
     analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diags,
     );
@@ -1085,7 +1085,7 @@ fn script_analysis_rejects_jumps_without_an_enclosing_target() {
     )];
     analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diags,
     );
@@ -1124,7 +1124,7 @@ fn dependency_symbols_keep_compiled_declarations_and_add_missing_overloads() {
             ],
             1,
             1,
-            Box::new(ExistingLibrary),
+            crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
             &features,
             &mut diagnostics,
         );
@@ -1196,7 +1196,7 @@ fn dependency_callables_use_compiled_shapes_and_add_source_overloads() {
         &inputs,
         1,
         1,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1230,7 +1230,7 @@ fn declaration_only_sources_hide_internal_classifiers() {
         &inputs,
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1277,7 +1277,7 @@ fn declaration_only_extension_calls_resolve_and_type() {
         &inputs,
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1304,7 +1304,7 @@ fn modifier_prefixed_local_functions_parse_in_bodies() {
         &inputs,
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1326,7 +1326,7 @@ fn local_suspend_functions_reach_semantic_analysis() {
         &inputs,
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1352,7 +1352,7 @@ fn declaration_only_source_exposes_qualified_nested_enum_entry() {
         &inputs,
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1379,7 +1379,7 @@ fn declaration_only_source_hides_public_nested_enum_of_internal_class() {
         &inputs,
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1412,7 +1412,7 @@ fn declaration_only_source_hides_public_enum_below_internal_nested_class() {
         &inputs,
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1444,7 +1444,7 @@ fn declaration_only_internal_class_shadows_public_platform_type() {
         &inputs,
         1,
         1,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1485,7 +1485,7 @@ fn declaration_only_internal_nested_class_shadows_public_platform_path() {
         &inputs,
         1,
         1,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1546,7 +1546,7 @@ fn declaration_only_internal_ancestor_shadows_absent_platform_descendant() {
         &inputs,
         1,
         1,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1619,7 +1619,7 @@ fn declaration_only_public_ancestors_allow_absent_platform_descendant() {
         &inputs,
         1,
         1,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1641,7 +1641,7 @@ fn declaration_only_internal_class_shadows_platform_associated_property() {
         &inputs,
         1,
         1,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1683,7 +1683,7 @@ fn inferred_friend_sources_expose_internal_classifiers() {
         &inputs,
         1,
         2,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1709,7 +1709,7 @@ fn dependency_symbols_expose_inherited_nested_classifier_to_subclass() {
         ],
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &features,
         &mut diagnostics,
     );
@@ -1756,7 +1756,7 @@ fn dependency_symbols_preserve_protected_classifier_for_subclass_only() {
         ],
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1785,7 +1785,7 @@ fn dependency_symbols_do_not_globally_expose_protected_classifier() {
         ],
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1818,7 +1818,7 @@ fn dependency_symbols_do_not_expose_nested_classifier_outside_subclass() {
         ],
         1,
         1,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &features,
         &mut diagnostics,
     );
@@ -1854,7 +1854,7 @@ fn dependency_symbols_add_a_source_property_missing_from_the_public_api() {
         &inputs,
         1,
         1,
-        Box::new(ExistingLibrary),
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
         &features,
         &mut diagnostics,
     );
@@ -1875,7 +1875,7 @@ fn source_set_analysis_applies_multiplatform_actualization() {
     let mut diags = DiagSink::new();
     let analysis = analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diags,
     );
@@ -1904,7 +1904,7 @@ fn frontend_keeps_nullability_distinct_overloads_after_actualization() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -1930,7 +1930,7 @@ fn preexisting_warning_does_not_mark_a_source_as_unparseable() {
     let inputs = [SourceInput::kotlin("fun value(): Int = 1")];
     let analysis = analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diags,
     );
@@ -1966,7 +1966,16 @@ fn invalid_dependency_metadata_is_one_terminal_frontend_diagnostic() {
         .chain(malformed_type_parameter.into_iter().map(char::from))
         .collect::<String>();
     let mut invalid = ClassWriter::new("shadow/Chosen", "java/lang/Object");
-    invalid.set_kotlin_metadata(1, &[2, 2, 0], 0, &[d1], &[]);
+    invalid.set_kotlin_metadata(
+        1,
+        crate::jvm::classfile::MetadataStamp {
+            version: [2, 2, 0],
+            pre_release: false,
+        },
+        0,
+        &[d1],
+        &[],
+    );
     std::fs::write(earlier.join("Chosen.class"), invalid.finish())
         .expect("write invalid Kotlin class");
     std::fs::write(
@@ -1986,7 +1995,7 @@ fn invalid_dependency_metadata_is_one_terminal_frontend_diagnostic() {
     let mut diagnostics = DiagSink::new();
     analyze_source_set_with_features(
         &input,
-        Box::new(platform),
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
         &LangFeatures::new(),
         &mut diagnostics,
     );

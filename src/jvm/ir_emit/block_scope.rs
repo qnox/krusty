@@ -151,6 +151,7 @@ impl Emitter<'_> {
         let mut dead = false;
         let mut reserved_inline_stack = None;
         let mut anchored_lambda_result = false;
+        let mut deferred_invocation_result = None;
         if !self.try_emit_duplicated_safe_call(block, stmts, value, false, code) {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             for &statement in stmts {
@@ -224,6 +225,14 @@ impl Emitter<'_> {
                         self.anchor_spliced_lambda_result(block, code);
                         self.emit_value(value, code);
                         anchored_lambda_result = true;
+                    } else if self.ir.external_frame_closes.contains_key(&block) {
+                        if let Some(ret) =
+                            self.emit_invocation_before_result_adaptation(value, code)
+                        {
+                            deferred_invocation_result = Some((value, ret));
+                        } else {
+                            self.emit_value(value, code);
+                        }
                     } else {
                         self.emit_value(value, code);
                     }
@@ -247,6 +256,9 @@ impl Emitter<'_> {
         // A `return this` already anchored that line on the load.
         if !anchored_lambda_result {
             self.close_spliced_lambda_frame(block, false, code);
+        }
+        if let Some((invocation, ret)) = deferred_invocation_result {
+            self.finish_function_invocation_result(invocation, ret, code);
         }
         self.block_depth -= 1;
         self.restore_slot_scope(saved);

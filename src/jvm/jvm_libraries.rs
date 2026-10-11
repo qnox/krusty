@@ -24,8 +24,10 @@ mod provider_normalization_tests;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
+mod synthetic_properties;
 mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
+use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
 use crate::language_version::LanguageVersion;
@@ -49,7 +51,7 @@ use super::classpath::{
 use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
-use crate::jvm::names::{property_getter_name, type_descriptor};
+use crate::jvm::names::type_descriptor;
 use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
@@ -73,35 +75,6 @@ fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
 const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
 
-fn java_property_name(method: &str) -> Option<String> {
-    let stem = method.strip_prefix("get")?;
-    if !stem.is_ascii() {
-        let mut chars = stem.chars();
-        let first = chars.next()?;
-        if !first.is_uppercase() {
-            return None;
-        }
-        return Some(format!("{}{}", first.to_lowercase(), chars.as_str()));
-    }
-    let first = stem.as_bytes().first()?;
-    if !first.is_ascii_uppercase() {
-        return None;
-    }
-    let bytes = stem.as_bytes();
-    let lower = bytes.iter().position(u8::is_ascii_lowercase);
-    let prefix = match lower {
-        None => bytes.len(),
-        Some(0) => return None,
-        Some(1) => 1,
-        Some(index) => index - 1,
-    };
-    Some(format!(
-        "{}{}",
-        stem[..prefix].to_ascii_lowercase(),
-        &stem[prefix..]
-    ))
-}
-
 /// A platform backed by a JVM classpath (dirs + jars + the JDK jimage). The classpath is shared
 /// (`Rc`) with the JVM backend/emitter so the bytecode inliner reads inline-function bodies through
 /// the same lazily-populated caches — all within the `jvm` module, never through the `SymbolSource`
@@ -114,8 +87,8 @@ pub struct JvmLibraries {
     common_expectations: std::sync::Arc<super::common_metadata::CommonExpectationIndex>,
     optional_annotations: super::optional_annotations::OptionalAnnotationIndex,
     builtins_customizer: JvmBuiltInsCustomizer,
-    /// `-api-version` for this compilation. Classpath caches stay shared; availability is decided
-    /// here, per provider, when a `@SinceKotlin` callable is offered as a candidate.
+    /// `-api-version` for this compilation. It withholds `@SinceKotlin` callables newer than this
+    /// level; the shared classpath keeps one record cache per API version so views never mix.
     api_version: LanguageVersion,
     /// Classifiers whose `@SinceKotlin` callable of a given name this compilation withheld.
     /// Keyed by the declaration's receiver or owner, not by the shared classpath cache.
@@ -304,7 +277,7 @@ impl JvmLibraries {
             if let Some(physical) = &member.physical_name {
                 push(physical.clone());
             }
-            if let Some(property) = java_property_name(&member.name) {
+            if let Some(property) = accessor_property_name(&member.name) {
                 push(property);
             }
         }
@@ -1900,18 +1873,8 @@ impl JvmLibraries {
             let kotlin_supertypes_are_authoritative = metadata_class_signature.is_some();
             let mut supertypes = TypeNameList::new();
             if kotlin_scope_is_authoritative {
-                // `java/io/Serializable` survives the replacement. It is not a Kotlin type and so is
-                // absent from every `.kotlin_builtins` declaration, but kotlinc still reports a mapped
-                // builtin as implementing it whenever the Java class does — `JvmBuiltInsCustomizer`
-                // adds it back in `getSupertypes` (`isSerializableInJava`). Dropping it made
-                // `val v: java.io.Serializable = "abc"` an error against a kotlinc that accepts it.
-                // The mapped COLLECTIONS never noticed: `java/util/List` does not implement it, and a
-                // concrete `java.util` class that does (`ArrayList`) is not an authoritative name.
-                for s in ci.interfaces.iter_ids() {
-                    if s.matches("java/io/Serializable") {
-                        supertypes.push_name(s);
-                    }
-                }
+                // Nothing from the Java class: `java/io/Serializable`, the one JVM supertype kotlinc
+                // keeps on a mapped builtin, comes from `JvmBuiltInsCustomizer`, JDK or not.
             } else if let Some((_, _, declared)) = &metadata_class_signature {
                 // A function-type supertype (`KProperty0<V> : () -> V`) is an edge to the function
                 // classifier it instantiates, which declares the inherited `invoke`.
@@ -3202,6 +3165,7 @@ impl JvmLibraries {
         name: &str,
         mapped_members: &[MappedBuiltinMember],
         function_renames: &[MappedBuiltinMember],
+        accessors: &AccessorInventory,
     ) -> crate::libraries::Callables {
         let mut functions = self.member_functions_with_renames(recv, name, function_renames);
         // Exact declarations on this classifier. The resolver owns the one inheritance walk.
@@ -3703,9 +3667,11 @@ impl JvmLibraries {
             })
         });
         if !declares_instance_field {
-            for getter_name in self.physical_property_getter_names(name) {
+            // The getters come from this classifier's own method inventory: each one declares
+            // `name` by its spelling, and its arity and return type are checked below.
+            for getter_name in accessors.getters(name) {
                 for function in self
-                    .member_functions_with_renames(recv, &getter_name, function_renames)
+                    .member_functions_with_renames(recv, getter_name, function_renames)
                     .overloads
                 {
                     if !function.callable.params.is_empty()
@@ -3723,7 +3689,7 @@ impl JvmLibraries {
                         .map(|signature| signature.ret)
                         .unwrap_or_else(|| function.ret.apply(getter.ret));
                     getter.ret = ty;
-                    let setter_name = crate::names::property_setter_name(name);
+                    let setter_name = setter_name_for_getter(getter_name);
                     let setter = self
                         .member_functions_with_renames(recv, &setter_name, function_renames)
                         .overloads
@@ -3801,7 +3767,10 @@ impl JvmLibraries {
         if let Some(building) = self.building_types.borrow().get(&internal_name) {
             return Some(building.clone());
         }
-        if let Some(hit) = self.cp.cached_library_type_name(internal_name) {
+        if let Some(hit) = self
+            .cp
+            .cached_library_type_name(self.api_version, internal_name)
+        {
             return hit;
         }
         // Nested builtin classifiers are stored source-facing in `.kotlin_builtins` (`Outer.Inner`),
@@ -3818,7 +3787,7 @@ impl JvmLibraries {
                 std::sync::Arc::new(shape)
             });
             self.cp
-                .cache_library_type_name(internal_name, built.clone());
+                .cache_library_type_name(self.api_version, internal_name, built.clone());
             return built;
         }
         // A classpath `typealias` (`kotlin/collections/ArrayList` → `java/util/ArrayList`) has no class of
@@ -3855,12 +3824,24 @@ impl JvmLibraries {
                         .collect::<Vec<_>>();
                     let member_names =
                         self.member_scope_names(internal_name, &classifier, &mapped_members);
+                    let accessors = if classifier.is_kotlin {
+                        AccessorInventory::default()
+                    } else {
+                        AccessorInventory::from_methods(
+                            classifier
+                                .members
+                                .iter()
+                                .filter(|member| !member.is_member_extension())
+                                .map(|member| member.name.as_str()),
+                        )
+                    };
                     for name in member_names {
                         let declarations = self.declared_callables_for(
                             receiver,
                             &name,
                             &mapped_members,
                             &function_renames,
+                            &accessors,
                         );
                         crate::trace_compiler!(
                             "member_slots",
@@ -3902,7 +3883,7 @@ impl JvmLibraries {
         }
         .or_else(|| self.optional_annotations.classifier(internal_name));
         self.cp
-            .cache_library_type_name(internal_name, built.clone());
+            .cache_library_type_name(self.api_version, internal_name, built.clone());
         built
     }
 
@@ -3928,7 +3909,7 @@ impl JvmLibraries {
         name: &str,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         use crate::libraries::{Callables, ResolvedSymbols};
-        if let Some(cached) = self.cp.cached_symbols(namespace, name) {
+        if let Some(cached) = self.cp.cached_symbols(self.api_version, namespace, name) {
             return cached;
         }
         // A typealias is a declaration in the namespace, not a JVM nested class. Package aliases
@@ -4384,6 +4365,7 @@ impl JvmLibraries {
             .register_external_callables(callables, package.map(SemanticCallableOwner::Package));
         let importable_declaration = core.importable_declaration || static_field.is_some();
         self.cp.memoize_symbols(
+            self.api_version,
             namespace,
             name,
             ResolvedSymbols {
@@ -5044,28 +5026,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
-        // Contract erasure is a source-language decision, but the physical declaration owner is a
-        // JVM-library fact. Keep that fact here: target-neutral resolve code sees only the selected
-        // callable and never embeds or reports the runtime facade class name. The selected
-        // declaration must be the intrinsic itself, `kotlin.contracts.contract(builder:
-        // ContractBuilder.() -> Unit): Unit`, by its declaring package, name, and complete
-        // signature; an unrelated library callable never acquires intrinsic behavior because one
-        // component happens to match.
-        let builder = Ty::obj("kotlin/contracts/ContractBuilder");
-        let takes_builder = match callable.params.as_slice() {
-            [Ty::Fun(function)] => {
-                function.has_receiver
-                    && function.context_count == 0
-                    && !function.suspend
-                    && function.params == [builder]
-                    && function.ret == Ty::Unit
-            }
-            _ => false,
-        };
-        callable.name == "contract"
-            && callable.ret == Ty::Unit
-            && callable.owner.parent().is_some_and(is_contracts_package)
-            && takes_builder
+        // The physical declaration owner is a JVM-library fact: a classpath callable is owned by
+        // its file facade. Target-neutral code sees only the declaring package.
+        crate::contracts::is_contract_intrinsic(callable, self.top_level_callable_package(callable))
     }
 
     fn top_level_callable_package(&self, callable: &crate::libraries::LibraryCallable) -> TypeName {
@@ -5082,37 +5045,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         &self,
         callable: &crate::contracts::SelectedDslCallable<'_>,
     ) -> Option<crate::contracts::DslMember> {
-        use crate::contracts::DslMember;
-        if !callable.dispatch_member || callable.context_parameters != 0 {
-            return None;
-        }
-        let contracts = |name: &str| Ty::obj(&format!("kotlin/contracts/{name}"));
-        let member = if callable.owner.matches("kotlin/contracts/ContractBuilder") {
-            match (callable.name, callable.params) {
-                ("returns", []) => (DslMember::Returns, contracts("Returns")),
-                ("returns", [value]) if *value == Ty::nullable(Ty::obj("kotlin/Any")) => {
-                    (DslMember::ReturnsValue, contracts("Returns"))
-                }
-                ("returnsNotNull", []) => (DslMember::ReturnsNotNull, contracts("ReturnsNotNull")),
-                // `fun <R> callsInPlace(lambda: Function<R>, kind: InvocationKind)`: the lambda's
-                // `R` is the member's own type parameter, which selection may have specialized.
-                ("callsInPlace", [Ty::Obj(lambda, [_]), kind])
-                    if lambda.matches("kotlin/Function")
-                        && *kind == contracts("InvocationKind") =>
-                {
-                    (DslMember::CallsInPlace, contracts("CallsInPlace"))
-                }
-                _ => return None,
-            }
-        } else if callable.owner.matches("kotlin/contracts/SimpleEffect") {
-            match (callable.name, callable.params) {
-                ("implies", [Ty::Boolean]) => (DslMember::Implies, contracts("ConditionalEffect")),
-                _ => return None,
-            }
-        } else {
-            return None;
-        };
-        (callable.ret == member.1).then_some(member.0)
+        crate::contracts::dsl_member(callable)
     }
 
     fn implicit_common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
@@ -5275,31 +5208,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         PLATFORM_DEFAULT_IMPORT_PACKAGES
     }
 
-    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
-        // `property_getter_name` deliberately preserves an `isX` spelling. Keep that candidate:
-        // Java's `boolean isX()` is the getter for Kotlin's synthetic `isX` property, not evidence
-        // that no getter exists.
-        let mut candidates = vec![property_getter_name(property)];
-        // Kotlin maps `getID()` → `id` and `getURLPath()` → `urlPath` (decapitalize-smart:
-        // a LEADING UPPERCASE RUN lowercases as a block). Invert that: re-uppercase the
-        // property's leading lowercase run for the all-caps getter spelling.
-        let run = property
-            .chars()
-            .take_while(|c| c.is_ascii_lowercase())
-            .count();
-        if run > 1 || (run == property.len() && run >= 1) || (run == 1 && property.len() == 1) {
-            let smart = format!(
-                "get{}{}",
-                property[..run].to_ascii_uppercase(),
-                &property[run..]
-            );
-            if !candidates.contains(&smart) {
-                candidates.push(smart);
-            }
-        }
-        candidates
-    }
-
     fn inherited_accessor_properties(
         &self,
         source: &dyn crate::symbol_source::SymbolSource,
@@ -5317,10 +5225,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             return crate::libraries::PropertySet::default();
         }
 
+        let accessors = synthetic_properties::hierarchy_inventory(source, receiver);
         let mut overloads = Vec::new();
-        for getter_name in self.physical_property_getter_names(property) {
+        for getter_name in accessors.getters(property) {
             let getter_callables =
-                crate::symbol_resolver::members_in_hierarchy(source, receiver, &getter_name);
+                crate::symbol_resolver::members_in_hierarchy(source, receiver, getter_name);
             for function in getter_callables.functions().iter().cloned() {
                 if !function.semantic_params().is_empty() {
                     continue;
@@ -5335,16 +5244,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     continue;
                 }
                 getter.ret = ty;
-                let setter_name = crate::names::property_setter_name(property);
+                let setter_name = setter_name_for_getter(getter_name);
                 let setter_callables =
                     crate::symbol_resolver::members_in_hierarchy(source, receiver, &setter_name);
-                let setter = setter_callables.functions().iter().cloned().find(|setter| {
-                    // Same pairing as a setter declared on the receiver: one value parameter of
-                    // the getter's storage type. The Java method may return anything.
-                    setter.semantic_params().len() == 1
-                        && self.library_value_form(ty)
-                            == self.library_value_form(setter.semantic_params()[0])
-                });
+                let setter = setter_callables
+                    .functions()
+                    .iter()
+                    .find(|setter| {
+                        // Same pairing as a setter declared on the receiver: one value parameter
+                        // of the getter's storage type. The Java method may return anything.
+                        setter.semantic_params().len() == 1
+                            && self.library_value_form(ty)
+                                == self.library_value_form(setter.semantic_params()[0])
+                    })
+                    .cloned();
                 let getter_declaration = function.stable_declaration;
                 let setter_declaration =
                     setter.as_ref().and_then(|setter| setter.stable_declaration);
@@ -7124,9 +7037,4 @@ mod tests {
             None
         );
     }
-}
-
-/// `kotlin.contracts`, the package that declares the contract DSL.
-fn is_contracts_package(package: TypeName) -> bool {
-    package.matches("kotlin/contracts")
 }

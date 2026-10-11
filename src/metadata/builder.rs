@@ -236,6 +236,13 @@ fn effect_pb(
             returns,
             conclusion,
         } => write_returns_effect(&mut p, st, types, returns, Some(conclusion), tps),
+        // kotlinc writes no effect type for `<condition> holdsIn lambda`.
+        Effect::HoldsIn { condition, lambda } => {
+            p.repeated_message(2, &expression_param_ref_pb(*lambda)); // Effect.effect_constructor_argument
+            let cb = condition_pb(st, types, condition, tps);
+            p.field_message(3, &cb); // Effect.conclusion_of_conditional_effect
+            p.field_varint(5, 2); // Effect.condition_kind = HOLDSIN_CONDITION
+        }
     }
     p
 }
@@ -327,7 +334,10 @@ fn condition_expression(
             let id = st.type_id(&it).map_or_else(|| types.id(it), u64::from);
             p.field_varint(5, id); // Expression.is_instance_type_id
         }
-        Condition::BoolParam(param) => {
+        Condition::BoolParam { param, negated } => {
+            if *negated {
+                p.field_varint(1, 1); // flags: negated
+            }
             p.field_varint(2, param.to_wire());
         }
         Condition::Const(b) => {
@@ -1701,6 +1711,61 @@ mod tests {
             .expect("validate in package functions");
         assert!(mf.is_inline());
         assert_eq!(mf.contract.as_deref(), Some(&contract));
+    }
+
+    /// arrow-core 2.x's `getOrElse` shape: `callsInPlace(default, AT_MOST_ONCE)` and
+    /// `(this is Left) holdsIn default` on an extension, read back through the JVM reader.
+    #[test]
+    fn holds_in_contract_round_trips_through_metadata() {
+        use crate::contracts::{
+            Condition, ConditionType, Contract, Effect, InvocationKind, ParamRef,
+        };
+        let contract = Contract {
+            effects: vec![
+                Effect::CallsInPlace {
+                    param: ParamRef::Param(0),
+                    kind: InvocationKind::AtMostOnce,
+                },
+                Effect::HoldsIn {
+                    condition: Condition::IsType {
+                        param: ParamRef::Receiver,
+                        ty: ConditionType::Metadata(Ty::obj("kotlin/String")),
+                        negated: false,
+                    },
+                    lambda: ParamRef::Param(0),
+                },
+            ],
+        };
+        let (d1, d2) = build_package(
+            &[FnMeta {
+                receiver: Some(Ty::obj("kotlin/Any")),
+                jvm_desc: Some("(Ljava/lang/Object;Lkotlin/jvm/functions/Function0;)V".into()),
+                inline: true,
+                contract: Some(std::sync::Arc::new(contract.clone())),
+                ..FnMeta::plain(
+                    "whenString",
+                    vec![(
+                        "block".into(),
+                        Ty::obj_args("kotlin/Function0", &[Ty::Unit]),
+                    )],
+                    Ty::Unit,
+                )
+            }],
+            &[],
+            &[],
+            (None, &[]),
+            true,
+        );
+        let d1s: String = d1.iter().map(|&b| b as char).collect();
+        let meta =
+            crate::jvm::metadata::decode_metadata(&[d1s], &d2, Some(2), "dep/LibKt", None, &[])
+                .expect("decode generated metadata");
+        let function = meta
+            .package_functions
+            .iter()
+            .find(|f| f.kotlin_name == "whenString")
+            .expect("whenString in package functions");
+        assert_eq!(function.contract.as_deref(), Some(&contract));
     }
 
     #[test]

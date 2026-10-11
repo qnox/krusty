@@ -61,6 +61,19 @@ impl<'a> ModuleSymbols<'a> {
         })
     }
 
+    fn type_alias_at(
+        &self,
+        namespace: SymbolNamespace,
+        name: &str,
+    ) -> Option<crate::libraries::AliasExpansion> {
+        let identity = match namespace {
+            SymbolNamespace::Package(package) | SymbolNamespace::Classifier(package) => {
+                crate::types::existing_type_name_child(package, name)?
+            }
+        };
+        self.type_alias_binding(identity)
+    }
+
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
         self.syms
             .classes
@@ -1253,21 +1266,19 @@ impl SymbolSource for ModuleSymbols<'_> {
         // their declaring package (a same-file function has no recorded facade — it lives in the file's own
         // package, which the resolver queries as the same-package candidate fqn).
         let declaration = namespace.existing_classifier(name);
-        let alias_target =
-            declaration.and_then(|identity| self.syms.source_alias_fqns.get(&identity).copied());
-        let classifier_name = match alias_target {
-            Some(target) => Some(target),
-            None => declaration.filter(|&internal| self.classifier_record(internal).is_some()),
-        };
+        let type_alias = self.type_alias_at(namespace, name);
+        let classifier_name = type_alias
+            .as_ref()
+            .map(|alias| alias.target)
+            .or_else(|| declaration.filter(|&internal| self.classifier_record(internal).is_some()));
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
-        let classifier_declaration = classifier_name.and_then(|_| {
-            declaration.map(|identity| {
-                self.type_alias_binding(identity).map_or(
-                    crate::libraries::ClassifierDeclaration::Ordinary(identity),
-                    crate::libraries::ClassifierDeclaration::TypeAlias,
-                )
-            })
-        });
+        let classifier_declaration = type_alias
+            .map(crate::libraries::ClassifierDeclaration::TypeAlias)
+            .or_else(|| {
+                classifier_name.and_then(|_| {
+                    declaration.map(crate::libraries::ClassifierDeclaration::Ordinary)
+                })
+            });
         let name = name.to_string();
         let associated_owner = match namespace {
             SymbolNamespace::Classifier(owner) => Some(owner),

@@ -625,20 +625,15 @@ impl BodyLowering<'_> {
                             crate::types::Ty::Double => IrConst::Double(delta.into()),
                             _ => IrConst::Int(delta.into()),
                         }));
-                        let updated = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Add,
-                            lhs: operand,
-                            rhs: delta,
-                        });
-                        // The addition is the signed one Kotlin promotes the operand to; an
-                        // unsigned operand's addition has no signed type of its own to record.
-                        if let Some(sum) = match result.non_null() {
-                            Ty::Byte | Ty::Short | Ty::Char | Ty::Int => Some(Ty::Int),
-                            sum @ (Ty::Long | Ty::Float | Ty::Double) => Some(sum),
-                            _ => None,
-                        } {
-                            self.ir.logical_types.insert(updated, sum);
-                        }
+                        // The addition is the signed one Kotlin promotes the operand to, at the
+                        // carrier the delta above was built for; the coercion below narrows it
+                        // back to the operator's own result (`Char.inc(): Char`).
+                        let sum = match result.non_null() {
+                            Ty::Long | Ty::ULong => Ty::Long,
+                            sum @ (Ty::Float | Ty::Double) => sum,
+                            _ => Ty::Int,
+                        };
+                        let updated = self.ir.add_arithmetic(IrBinOp::Add, operand, delta, sum);
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: updated,
@@ -656,11 +651,12 @@ impl BodyLowering<'_> {
                                 IrConst::Int(-1)
                             },
                         ));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::BitXor,
-                            lhs: operand,
-                            rhs: all_bits,
-                        })
+                        self.ir.add_arithmetic(
+                            IrBinOp::BitXor,
+                            operand,
+                            all_bits,
+                            expression.ty.get(),
+                        )
                     }
                 }
             }
@@ -714,11 +710,14 @@ impl BodyLowering<'_> {
                     | FirBinaryOperation::ShiftRight
                     | FirBinaryOperation::UnsignedShiftRight => {
                         let rhs = self.expression(*rhs)?;
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: lower_binary_operation(*operation),
-                            lhs,
-                            rhs,
-                        })
+                        let op = lower_binary_operation(*operation);
+                        if op.yields_boolean() {
+                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+                        } else {
+                            // The checked type of the operator call is the selected operator's
+                            // declared result: `Int.plus(Long): Long`, `Char.minus(Char): Int`.
+                            self.ir.add_arithmetic(op, lhs, rhs, expression.ty.get())
+                        }
                     }
                 }
             }
@@ -1148,6 +1147,7 @@ impl BodyLowering<'_> {
                 deeply_exhaustive,
             } => {
                 let condition = self.expression(*condition)?;
+                self.ir.mark_early_inline_result_adaptation(condition);
                 let then_branch =
                     self.expression_with_conversion(*then_branch, *then_conversion)?;
                 let else_branch =

@@ -1,4 +1,5 @@
 use crate::backend::{Artifact, Backend};
+use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 
 #[derive(Default)]
@@ -12,6 +13,10 @@ impl JsBackend {
 
 impl Backend for JsBackend {
     type State = ();
+
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Js
+    }
 
     fn lower_ir_file(
         &self,
@@ -52,6 +57,7 @@ pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy
 #[cfg(test)]
 mod tests {
     use crate::backend::Artifact;
+    use crate::compilation_target::CompilationTarget;
     use crate::diag::DiagSink;
     use crate::libraries::EmptySymbolSource;
     use crate::source::SourceInput;
@@ -72,7 +78,10 @@ mod tests {
         }
         let analysis = crate::frontend::analyze_source_set_streaming_with_features(
             &inputs,
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::new(
+                CompilationTarget::Js,
+                Box::new(EmptySymbolSource),
+            ),
             &features,
             &mut diags,
         );

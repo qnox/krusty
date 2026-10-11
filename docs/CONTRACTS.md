@@ -55,7 +55,17 @@ instead of enforcing assign-once).
 
 There is **no conditional effect type**: field 3 being present (with field 5 absent, i.e. the
 default CONCLUSION_CONDITION = 0) turns the returns-effect into `<returns> implies <conclusion>`.
-RETURNS_CONDITION / HOLDS_IN forms are not modeled.
+HOLDSIN_CONDITION = 2 is `<conclusion> holdsIn <argument>` (`Effect::HoldsIn`): kotlinc writes no
+effect type, the lambda parameter as the only argument and the condition as field 3. kotlinc 2.4
+accepts `holdsIn` without an opt-in, and libraries publish it (arrow-core 2.x's `getOrElse`), so a
+reader that rejected it made the whole facade unloadable. The effect is decoded, normalized and
+re-emitted; a source `holdsIn` description is still rejected, and the condition does not yet
+narrow inside the lambda at a call site. RETURNS_CONDITION = 1 is not modeled and rejects.
+
+A member's contract can name its class's type parameters (arrow-core's `Either.isLeft()` concludes
+`this@Either is Left<A>`), so the JVM reader resolves a member contract's types with the class's
+type parameters in scope, then the function's own. Without them the type did not resolve, the
+contract was invalid metadata, and the class failed to load.
 
 **`InvocationKind` wire order is NOT the Kotlin declaration order** — verified against
 kotlin-stdlib's `run` (EXACTLY_ONCE): `AT_MOST_ONCE = 0 / EXACTLY_ONCE = 1 / AT_LEAST_ONCE = 2`.
@@ -123,3 +133,9 @@ encode→decode round trip is `contract_round_trips_through_metadata` in
 `src/metadata/builder.rs` (a `ConditionalReturns` contract through emission and back); the
 kinded `callsInPlace` forms round-trip through the same path, the kindless form degrades per
 §2.
+
+JVM classfiles and KLIB fragments share the wire-level effect/expression decoder. Each adapter
+supplies only its own type-table resolver. A KLIB provider publishes the resulting contract on the
+same `LibraryCallable` as the signed declaration; generic `is T` conclusions use that exact
+declaration's opaque type-parameter identity, not the written name `T`. Malformed or unsupported
+contract shapes reject metadata explicitly instead of being treated as an absent contract.

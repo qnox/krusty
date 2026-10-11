@@ -10,17 +10,23 @@
 //! or not the Kotlin type admits null. A non-null reference type is not defaultable, so a local of
 //! one would have to be proved assigned before every read; carrying every reference as nullable
 //! makes every local defaultable, and a non-null Kotlin type is still checked by the frontend.
+//! A class, interface, `Any` or type-parameter value is carried as `(ref null eq)`, which both an
+//! object and a `String` are; reading one as a narrower reference casts it (`objects`).
 //!
 //! **Declines.** A construct this generator has not been taught declines the whole file with a
 //! diagnostic naming it, as the native generator does. Nothing is emitted on a guess.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+mod objects;
+
+use crate::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use crate::types::{EqualityMode, Ty};
 
 use super::super::encode::{BlockType, Code, Function, Module, ValType};
+use super::super::objects::REFERENCE;
 use super::super::runtime::*;
+use super::classes::{FileClasses, RealizedProperties};
 
 pub(super) type Unsupported = String;
 
@@ -33,15 +39,13 @@ pub(super) struct LoweredFile {
     pub(super) initializer: Option<u32>,
 }
 
-/// Lower every function of `ir` into `module`.
+/// Lower every function and class of `ir` into `module`.
 pub(super) fn lower_file(
     ir: &IrFile,
+    properties: &RealizedProperties,
     module: &mut Module,
     runtime: &mut Runtime,
 ) -> Result<LoweredFile, Unsupported> {
-    if !ir.classes.is_empty() {
-        return Err("a class".to_string());
-    }
     let mut globals = Vec::with_capacity(ir.statics.len());
     for property in &ir.statics {
         if property.owner.is_some() {
@@ -56,9 +60,13 @@ pub(super) fn lower_file(
         globals.push(module.global(value));
     }
     let mut signatures = Vec::with_capacity(ir.functions.len());
-    for function in &ir.functions {
+    for (id, function) in ir.functions.iter().enumerate() {
+        if function.is_static && function.dispatch_receiver.is_some() {
+            return Err(format!("the static member function `{}`", function.name));
+        }
         if function.dispatch_receiver.is_some() {
-            return Err(format!("the member function `{}`", function.name));
+            signatures.push(super::classes::method_type(module, ir, id as FunId)?);
+            continue;
         }
         if function.body.is_none() {
             return Err(format!("the bodiless function `{}`", function.name));
@@ -75,43 +83,54 @@ pub(super) fn lower_file(
         .iter()
         .map(|_| module.declare())
         .collect::<Vec<_>>();
-    for (id, function) in ir.functions.iter().enumerate() {
-        let mut body = Body {
+    let classes = if ir.classes.is_empty() {
+        None
+    } else {
+        Some(super::classes::declare(
             ir,
-            module: &mut *module,
-            runtime: &mut *runtime,
-            functions: &indices,
-            globals: &globals,
-            code: Code::default(),
-            locals: Vec::new(),
-            next_local: function.params.len() as u32,
-            values: function
-                .params
-                .iter()
-                .enumerate()
-                .map(|(slot, ty)| (slot as u32, (slot as u32, *ty)))
-                .collect(),
-            unit_values: HashSet::new(),
-            declared: declared_variables(ir, function.body.expect("checked above")),
-            result: function.ret,
-            depth: 0,
-            loops: Vec::new(),
+            module,
+            &mut runtime.objects,
+            &indices,
+            properties,
+        )?)
+    };
+    let context = FileContext {
+        ir,
+        functions: &indices,
+        globals: &globals,
+        classes: classes.as_ref(),
+    };
+    for (id, function) in ir.functions.iter().enumerate() {
+        let Some(root) = function.body else {
+            // An abstract member: its slot holds the trap, and nothing calls it directly.
+            module.define(
+                indices[id],
+                Function {
+                    ty: signatures[id],
+                    locals: Vec::new(),
+                    code: {
+                        let mut code = Code::default();
+                        code.unreachable();
+                        code
+                    },
+                },
+            );
+            continue;
         };
-        let root = function.body.expect("checked above");
-        // A body whose value completes returns it by leaving it on the stack; one whose every
-        // path returns leaves the end unreachable, which `unreachable` states for the validator.
-        let falls_through = match body.type_of(root)? {
-            Some(ty) => carrier(ty)?.is_some(),
-            None => false,
-        };
-        match carrier(function.ret)? {
-            Some(_) if falls_through => body.value(root, function.ret)?,
-            Some(_) => {
-                body.statement(root)?;
-                body.code.unreachable();
-            }
-            None => body.statement(root)?,
+        let mut parameters = Vec::new();
+        if let Some(owner) = function.dispatch_receiver {
+            parameters.push(Ty::Obj(owner, &[]));
         }
+        parameters.extend(function.params.iter().copied());
+        let mut body = Body::new(
+            &context,
+            module,
+            runtime,
+            &parameters,
+            declared_variables(ir, root),
+            function.ret,
+        );
+        body.function_body(root, function.ret)?;
         let Body { code, locals, .. } = body;
         module.define(
             indices[id],
@@ -122,30 +141,24 @@ pub(super) fn lower_file(
             },
         );
     }
+    if let Some(classes) = &classes {
+        objects::define_class_functions(&context, classes, module, runtime)?;
+    }
     let initializer = if ir.statics.iter().any(|property| property.init.is_some()) {
         let index = module.declare();
         let ty = module.func_type(Vec::new(), Vec::new());
-        let mut body = Body {
-            ir,
-            module: &mut *module,
-            runtime: &mut *runtime,
-            functions: &indices,
-            globals: &globals,
-            code: Code::default(),
-            locals: Vec::new(),
-            next_local: 0,
-            values: HashMap::new(),
-            unit_values: HashSet::new(),
-            declared: ir
-                .statics
+        let mut body = Body::new(
+            &context,
+            module,
+            runtime,
+            &[],
+            ir.statics
                 .iter()
                 .filter_map(|property| property.init)
                 .flat_map(|init| declared_variables(ir, init))
                 .collect(),
-            result: Ty::Unit,
-            depth: 0,
-            loops: Vec::new(),
-        };
+            Ty::Unit,
+        );
         for (property, global) in ir.statics.iter().zip(&globals) {
             if let Some(init) = property.init {
                 body.value(init, property.ty)?;
@@ -162,6 +175,17 @@ pub(super) fn lower_file(
         functions: indices,
         initializer,
     })
+}
+
+/// What every body of one file reads: the file, and where its functions, properties and classes
+/// went in the module.
+struct FileContext<'a> {
+    ir: &'a IrFile,
+    /// The wasm function of each of the file's functions, by `FunId`.
+    functions: &'a [u32],
+    /// The global holding each of the file's top-level properties.
+    globals: &'a [u32],
+    classes: Option<&'a FileClasses>,
 }
 
 /// Every variable `root` declares, with its declared type.
@@ -188,13 +212,17 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         Ty::Double => ValType::F64,
         Ty::String | Ty::Null => STRING,
         Ty::Nullable(&Ty::String) => STRING,
+        // Every object, interface and `Any` value, and a type parameter's: a reference the
+        // frontend checked, cast to its class where one is read (see `super::super::objects`).
+        Ty::Obj(..) | Ty::TyParam(..) | Ty::DefinitelyNotNull(Ty::TyParam(..)) => REFERENCE,
+        Ty::Nullable(Ty::Obj(..) | Ty::TyParam(..)) => REFERENCE,
         other => return Err(format!("the type `{}`", describe(other))),
     }))
 }
 
 /// The string reference type. The runtime declares `$String` as type 1, after `$chars`; see
 /// [`Runtime::start`].
-const STRING: ValType = ValType::Ref {
+pub(super) const STRING: ValType = ValType::Ref {
     nullable: true,
     heap: super::super::encode::HeapType::Concrete(1),
 };
@@ -258,6 +286,7 @@ struct Body<'a> {
     functions: &'a [u32],
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
+    classes: Option<&'a FileClasses>,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -276,7 +305,58 @@ struct Body<'a> {
     loops: Vec<Loop>,
 }
 
-impl Body<'_> {
+impl<'a> Body<'a> {
+    /// A body whose values `0..parameters.len()` are its parameters, in its first locals.
+    fn new(
+        context: &FileContext<'a>,
+        module: &'a mut Module,
+        runtime: &'a mut Runtime,
+        parameters: &[Ty],
+        declared: HashMap<u32, Ty>,
+        result: Ty,
+    ) -> Self {
+        Self {
+            ir: context.ir,
+            module,
+            runtime,
+            functions: context.functions,
+            globals: context.globals,
+            classes: context.classes,
+            code: Code::default(),
+            locals: Vec::new(),
+            next_local: parameters.len() as u32,
+            values: parameters
+                .iter()
+                .enumerate()
+                .map(|(slot, ty)| (slot as u32, (slot as u32, *ty)))
+                .collect(),
+            unit_values: HashSet::new(),
+            declared,
+            result,
+            depth: 0,
+            loops: Vec::new(),
+        }
+    }
+
+    /// Emit a function's body, `root`, returning `ret`.
+    fn function_body(&mut self, root: u32, ret: Ty) -> Result<(), Unsupported> {
+        // A body whose value completes returns it by leaving it on the stack; one whose every
+        // path returns leaves the end unreachable, which `unreachable` states for the validator.
+        let falls_through = match self.type_of(root)? {
+            Some(ty) => carrier(ty)?.is_some(),
+            None => false,
+        };
+        match carrier(ret)? {
+            Some(_) if falls_through => self.value(root, ret),
+            Some(_) => {
+                self.statement(root)?;
+                self.code.unreachable();
+                Ok(())
+            }
+            None => self.statement(root),
+        }
+    }
+
     fn open(&mut self) -> u32 {
         self.depth += 1;
         self.depth - 1
@@ -315,6 +395,9 @@ impl Body<'_> {
             IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
             | IrExpr::SetStatic { .. }
+            | IrExpr::SetField { .. }
+            | IrExpr::PropertyWrite { .. }
+            | IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite { .. })
             | IrExpr::While { .. }
             | IrExpr::InlineFrameMarker
             | IrExpr::Block { value: None, .. } => Ty::Unit,
@@ -328,6 +411,16 @@ impl Body<'_> {
                         .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
                 },
             },
+            // A member access common lowering produced after checking has its declaration's type,
+            // which is what the instruction leaves on the stack; a use at a narrower type casts.
+            IrExpr::GetField { class, index, .. } if self.ir.checked_type(id).is_none() => {
+                self.ir.classes[*class as usize].fields[*index as usize].ty
+            }
+            IrExpr::MethodCall { class, index, .. } if self.ir.checked_type(id).is_none() => {
+                let function = self.ir.classes[*class as usize].methods[*index as usize];
+                self.ir.functions[function as usize].ret
+            }
+            IrExpr::PropertyRead { ty, .. } if self.ir.checked_type(id).is_none() => *ty,
             node => self
                 .ir
                 .checked_type(id)
@@ -388,6 +481,15 @@ impl Body<'_> {
                     self.code.op(extend);
                 }
                 None => {}
+            }
+            return Ok(());
+        }
+        if let (ValType::Ref { .. }, ValType::Ref { heap, .. }) = (source, target) {
+            // The frontend checked the value is of the target type: a `String` read as `Any`
+            // needs nothing, and one read back from an `Any` (a smart cast, a type parameter's
+            // value) is cast to the runtime's string.
+            if target != REFERENCE {
+                self.code.ref_cast(true, heap);
             }
             return Ok(());
         }
@@ -547,19 +649,47 @@ impl Body<'_> {
                 (None, [lhs, rhs]) | (Some(lhs), [rhs]) => self.compare(operand, *lhs, *rhs)?,
                 _ => return Err("`compareTo` with an unexpected operand shape".to_string()),
             },
-            IrExpr::Call { callee, .. } => {
-                return Err(format!("a call to {}", callee_kind(&callee)));
+            IrExpr::TypeOp {
+                op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
+                arg,
+                type_operand,
+            } if self.class_of_type(type_operand).is_some() => {
+                self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
             IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion | IrTypeOp::Cast,
+                op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
+                arg,
+                type_operand,
+            } => self.type_test(op, arg, type_operand)?,
+            IrExpr::TypeOp {
+                op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast),
                 arg,
                 type_operand,
             } => {
                 let source = self.carrier_of(arg)?;
+                // The checker widens a mixed operator's operand to the type the selected operator
+                // takes (`Int.plus(Long)` reads its receiver as a `Long`); only the instruction is
+                // this generator's. A source `as` never converts a number.
+                let widens = |target: ValType| {
+                    op == IrTypeOp::ImplicitCoercion
+                        && source
+                            .and_then(rank)
+                            .zip(rank(target))
+                            .is_some_and(|(from, to)| from < to)
+                };
                 match carrier(type_operand)? {
                     // A coercion to `Unit` discards the value.
                     None => self.statement(arg)?,
-                    Some(target) if source.is_some_and(|source| source != target) => {
+                    Some(target) if widens(target) => self.value(arg, type_operand)?,
+                    Some(target)
+                        if source.is_some_and(|source| {
+                            source != target
+                                && !matches!(
+                                    (source, target),
+                                    (ValType::Ref { .. }, ValType::Ref { .. })
+                                )
+                        }) =>
+                    {
                         return Err(format!("a coercion to `{}`", describe(type_operand)));
                     }
                     Some(_) => self.value(arg, type_operand)?,
@@ -568,10 +698,76 @@ impl Body<'_> {
             IrExpr::NotNullAssert { operand, .. } => {
                 // A failed assertion traps: there are no exceptions to throw yet.
                 self.expression(operand)?;
-                if self.carrier_of(operand)? == Some(STRING) {
+                if matches!(self.carrier_of(operand)?, Some(ValType::Ref { .. })) {
                     self.code.ref_as_non_null();
                 }
             }
+            IrExpr::New {
+                internal,
+                args,
+                ctor_params,
+                defaults,
+                ..
+            } => {
+                if !defaults.is_empty() {
+                    return Err("a constructor call with omitted arguments".to_string());
+                }
+                self.construction(internal, &args, ctor_params.as_deref())?
+            }
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => self.field_read(receiver, class, index)?,
+            IrExpr::SetField {
+                receiver,
+                class,
+                index,
+                value,
+            } => self.field_write(receiver, class, index, value)?,
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } => self.method_call(class, index, receiver, &args)?,
+            IrExpr::SingletonValue { classifier } => self.singleton(classifier)?,
+            IrExpr::PropertyRead {
+                receiver: Some(receiver),
+                ..
+            } => self.realized_property_read(id, receiver)?,
+            IrExpr::PropertyWrite {
+                receiver: Some(receiver),
+                value,
+                ..
+            } => self.realized_property_write(id, receiver, value)?,
+            IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyRead {
+                target,
+                dispatch_receiver,
+                extension_receiver: None,
+                context_arguments,
+                ..
+            }) if context_arguments.is_empty() => self.property_read(target, dispatch_receiver)?,
+            IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite {
+                target,
+                dispatch_receiver,
+                extension_receiver: None,
+                context_arguments,
+                value,
+                ..
+            }) if context_arguments.is_empty() => {
+                self.property_write(target, dispatch_receiver, value)?
+            }
+            IrExpr::Call {
+                callee: Callee::Local(function),
+                dispatch_receiver: Some(receiver),
+                args,
+            } => self.direct_member_call(function, receiver, &args)?,
+            IrExpr::Call {
+                callee: callee @ (Callee::Virtual { .. } | Callee::Super { .. }),
+                dispatch_receiver: Some(receiver),
+                args,
+            } => self.member_call(&callee, receiver, &args)?,
             IrExpr::BottomValue {
                 producer,
                 completion,
@@ -580,6 +776,9 @@ impl Body<'_> {
                 if completion.diverges_when_discarded() {
                     self.code.unreachable();
                 }
+            }
+            IrExpr::Call { callee, .. } => {
+                return Err(format!("a call to {}", callee_kind(&callee)));
             }
             other => return Err(describe_node(&other)),
         }
@@ -647,6 +846,9 @@ impl Body<'_> {
             Some(Ty::Long) => self.runtime.string_of_i64,
             Some(Ty::Char) => self.runtime.string_of_char,
             Some(Ty::Boolean) => self.runtime.string_of_boolean,
+            Some(ty) if self.class_of_type(ty).is_some() => {
+                return self.object_to_string(ty);
+            }
             Some(other) => {
                 return Err(format!(
                     "a string template part of type `{}`",
@@ -853,6 +1055,16 @@ impl Body<'_> {
                     _ => 0x61,
                 };
                 self.code.op(opcode);
+            }
+            (Some(ValType::Ref { .. }), Some(ValType::Ref { .. }))
+                if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) =>
+            {
+                self.expression(lhs)?;
+                self.expression(rhs)?;
+                self.code.ref_eq();
+            }
+            (Some(ValType::Ref { .. }), Some(ValType::Ref { .. })) => {
+                self.object_equality(lhs, rhs)?
             }
             _ => {
                 return Err("an equality between values of these types".into());

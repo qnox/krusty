@@ -87,7 +87,7 @@ pub(super) fn finish_lambda_class(
     if let Some(reflection) = &plan.reflection {
         cw.set_kotlin_metadata(
             3,
-            &opts.metadata_version(),
+            opts.metadata_stamp(),
             synthetic_class_xi(SYNTHETIC_LOCAL),
             &reflection.d1,
             &reflection.d2,

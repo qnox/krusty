@@ -7,6 +7,7 @@ pub use annotations::{AccessorMetadataAnnotations, MetadataAnnotations, NO_ANNOT
 pub mod builder;
 pub mod class_builder;
 pub(crate) mod class_declarations;
+pub(crate) mod contract_decoder;
 pub(crate) mod declaration_flags;
 pub(crate) mod declaration_records;
 pub(crate) mod decode;
@@ -35,6 +36,8 @@ pub(crate) mod function_flags {
     pub const VISIBILITY_MASK: u64 = 0b1110;
     pub const VISIBILITY_PRIVATE: u64 = 1 << 1;
     pub const IS_INLINE: u64 = 1 << 10;
+    /// An `external` declaration: its implementation is supplied by the target, never by a body.
+    pub const IS_EXTERNAL: u64 = 1 << 12;
     pub const IS_SUSPEND: u64 = 1 << 13;
     pub const IS_EXPECT: u64 = 1 << 14;
     /// Low bit of the 2-bit `ReturnValueStatus` field (bits 16-17), which follows

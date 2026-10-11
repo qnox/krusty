@@ -53,6 +53,7 @@ pub enum MetadataDecodeError {
     MalformedWire,
     MissingField(&'static str),
     InvalidVariance(u64),
+    InvalidContract,
 }
 
 impl From<ParameterDecodeError> for MetadataDecodeError {
@@ -2113,31 +2114,13 @@ fn decode_functions(
                         None,
                         function_type_table,
                     );
-                    let contract = pf.contract_body.as_deref().and_then(|body| {
-                        let tparams = type_parameter_context(
-                            &[],
-                            &[],
-                            &pf.type_params,
-                            records,
-                            d2,
-                            function_type_table,
-                        )
-                        .map(|c| c.names)
-                        .unwrap_or_default();
-                        // Function-level table wins if present; the container's otherwise.
-                        contract::decode_contract(body, records, d2, &tparams, function_type_table)
-                            .map(std::sync::Arc::new)
-                    });
-                    if pf.contract_body.is_some() {
-                        crate::trace_compiler!(
-                            "metadata_contracts",
-                            "contract function={} value_params={} context_params={} context_receivers={}",
-                            kotlin_name,
-                            pf.value_params.len(),
-                            pf.context_params.len(),
-                            pf.context_receiver_bodies.len() + pf.context_receiver_type_ids.len(),
-                        );
-                    }
+                    let contract = contract::decode_function_contract(
+                        &kotlin_name,
+                        &pf,
+                        (class_tparams, class_tparam_bounds),
+                        (records, d2),
+                        function_type_table,
+                    )?;
                     // `JvmMethodSignature.desc` is optional when the physical descriptor is the
                     // default derived from the protobuf types. Omission therefore does not mean
                     // that the callable lacks a JVM realization. Materialize the default here,
@@ -3084,7 +3067,10 @@ mod module_reader_tests {
         assert!(
             req.effects.contains(&Effect::ConditionalReturns {
                 returns: ReturnsValue::Any,
-                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: false,
+                },
             }),
             "require contract effects: {:?}",
             req.effects

@@ -33,7 +33,7 @@ fn fallback_diagnostics(checked: &str, dependency: &str) -> Vec<String> {
         &inputs,
         1,
         1,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &krusty::features::LangFeatures::new(),
         &mut diags,
     );

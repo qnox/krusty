@@ -10,7 +10,7 @@ fn source_set_records_anonymous_source_provenance_without_a_backend_name() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -54,7 +54,7 @@ fn stable_nested_classifier_provenance_keeps_exact_anonymous_ownership() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -124,7 +124,7 @@ fn an_initializer_object_records_the_instance_or_static_initialization_it_runs_i
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );

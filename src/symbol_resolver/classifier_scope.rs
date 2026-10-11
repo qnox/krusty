@@ -74,6 +74,35 @@ pub(crate) fn scoped_classifier_candidates_at_scope_level<S: SymbolSource + ?Siz
     candidates
 }
 
+/// Classifier facets of every explicit import under `name`. Callable/property-only imports do not
+/// participate. Repeated imports of the same declaration collapse, but two typealias declarations
+/// remain distinct even when they expand to the same classifier.
+pub(crate) fn explicit_classifier_candidates<S: SymbolSource + ?Sized>(
+    source: &S,
+    imports: &super::FunctionImportScope,
+    name: &str,
+) -> Vec<ScopedClassifier> {
+    let mut candidates: Vec<ScopedClassifier> = Vec::new();
+    for (owner, declared_name) in imports.explicit_targets(name) {
+        let record = source.symbols(owner, &declared_name);
+        let Some(classifier) = record.classifier_name else {
+            continue;
+        };
+        let alias = match &record.classifier_declaration {
+            Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => Some(alias.clone()),
+            Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
+        };
+        let alias_identity = alias.as_ref().map(|alias| alias.identity);
+        if !candidates.iter().any(|previous| {
+            previous.classifier == classifier
+                && previous.alias.as_ref().map(|alias| alias.identity) == alias_identity
+        }) {
+            candidates.push(ScopedClassifier { classifier, alias });
+        }
+    }
+    candidates
+}
+
 impl<T> CandidateSelection<T> {
     pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> CandidateSelection<U> {
         match self {
@@ -200,24 +229,9 @@ pub(super) fn select(
             scoped_classifier_candidates_at_scope_level(source, name, packages),
         ),
         Some(FunctionScopeRef::Imports(imports)) => {
-            if imports.explicit_is_ambiguous(name) {
-                return CandidateSelection::Ambiguous;
-            }
-            if let Some((owner, declared_name)) = imports.explicit_target(name) {
-                let record = source.symbols(owner, &declared_name);
-                if let Some(classifier) = record.classifier_name {
-                    return CandidateSelection::Selected(ScopedClassifier {
-                        classifier,
-                        alias: match &record.classifier_declaration {
-                            Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
-                                Some(alias.clone())
-                            }
-                            Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => {
-                                None
-                            }
-                        },
-                    });
-                }
+            match choose(explicit_classifier_candidates(source, imports, name)) {
+                CandidateSelection::None => {}
+                selected => return selected,
             }
             for level in imports.classifier_levels() {
                 match choose(scoped_classifier_candidates_at_import_level(

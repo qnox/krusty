@@ -41,3 +41,22 @@ fn thrown_builder_argument_infers_nothing() {
     assert_eq!(root.ty.get(), Ty::obj_args("Buildee", &[Ty::Nothing]));
     assert!(matches!(root.kind, FirExprKind::Call(_)));
 }
+
+#[test]
+fn nested_lambda_builder_result_keeps_value_evidence_in_receiver_position() {
+    let (body, _) = checked_function_body_with_platform(
+        "class Buildee<T> { fun yield(value: T): T? = null }\n\
+         fun <T> build(block: Buildee<T>.() -> Unit): Buildee<T> = Buildee<T>()\n\
+         fun <T> T.same(): T = this\n\
+         fun <R> runPlain(block: () -> R): R = block()\n\
+         fun foo() = build { runPlain { yield(1) } }.same()\n",
+        "foo",
+        jvm_stdlib_semantics(),
+    );
+
+    let root = body
+        .expr(root_expression(&body))
+        .expect("checked same() call");
+    assert_eq!(root.ty.get(), Ty::obj_args("Buildee", &[Ty::Int]));
+    assert!(matches!(root.kind, FirExprKind::Call(_)));
+}

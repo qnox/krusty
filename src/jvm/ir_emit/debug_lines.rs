@@ -420,6 +420,12 @@ impl Emitter<'_> {
         if !inlined {
             return;
         }
+        if self.ir.inline_result_adaptation_restores_caller(expression) {
+            // The real checkcast/unbox instruction already restored the caller line. Leave it in
+            // effect for a following store or conditional jump; writing it again at that consumer
+            // would add a LineNumberTable entry kotlinc does not emit.
+            return;
+        }
         match code.current_line() {
             Some(line) if self.inside_condition => code.inlined_line(line),
             _ => code.forget_line(),

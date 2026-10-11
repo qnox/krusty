@@ -78,7 +78,7 @@ fn named_local_object_is_rejected() {
     return \"OK\"\n\
 }\n";
     assert_eq!(
-        common::front_end_diagnostics(SRC, &[common::stdlib_jar()], None),
+        common::front_end_diagnostics(SRC, &[common::stdlib_jar()], Some(&common::jdk_modules())),
         ["named object 'Registry' cannot be local. Try to use an anonymous object instead."]
     );
 }

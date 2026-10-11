@@ -1,8 +1,9 @@
 //! JVM-only additions to Kotlin's builtin classifier model.
 //!
 //! These declarations are absent from the common `Array` source and are not backend guesses:
-//! kotlinc's `JvmBuiltInsCustomizer` adds `Cloneable`/`Serializable` as array supertypes and publishes
-//! a public, covariant `clone()` declaration on every array classifier. Keeping that transformation
+//! kotlinc's `JvmBuiltInsCustomizer` adds `Cloneable`/`Serializable` as array supertypes, adds
+//! `Serializable` to every mapped builtin whose Java class implements it, and publishes a public,
+//! covariant `clone()` declaration on every array classifier. Keeping that transformation
 //! here means every consumer sees one ordinary [`LibraryType`]; resolver and lowerer need no JVM or
 //! array-specific lookup path.
 
@@ -42,8 +43,23 @@ impl JvmBuiltInsCustomizer {
         }
         if Ty::obj_name(internal).is_array() {
             Self::install_array_platform_shape(internal, &mut classifier);
+        } else if crate::jvm::jvm_class_map::mapped_builtin_is_java_serializable(internal) {
+            Self::install_supertype(&mut classifier, type_name("java/io/Serializable"));
         }
         Some(classifier)
+    }
+
+    fn install_supertype(classifier: &mut LibraryType, name: TypeName) {
+        if !classifier.supertypes.contains_name(name) {
+            classifier.supertypes.push_name(name);
+        }
+        if !classifier
+            .supertype_templates
+            .iter()
+            .any(|ty| ty.obj_internal() == Some(name))
+        {
+            classifier.supertype_templates.push(Ty::obj_name(name));
+        }
     }
 
     /// JVM realization of an intrinsic builtin companion. The semantic companion identity comes
@@ -111,17 +127,7 @@ impl JvmBuiltInsCustomizer {
 
     fn install_array_platform_shape(internal: TypeName, classifier: &mut LibraryType) {
         for supertype in ["kotlin/Cloneable", "java/io/Serializable"] {
-            let name = type_name(supertype);
-            if !classifier.supertypes.contains_name(name) {
-                classifier.supertypes.push_name(name);
-            }
-            if !classifier
-                .supertype_templates
-                .iter()
-                .any(|ty| ty.obj_internal() == Some(name))
-            {
-                classifier.supertype_templates.push(Ty::obj_name(name));
-            }
+            Self::install_supertype(classifier, type_name(supertype));
         }
 
         let arguments = classifier
