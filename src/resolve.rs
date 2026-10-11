@@ -131,6 +131,7 @@ mod interface_delegation;
 mod intersection_receiver_selection;
 mod invoke_selection;
 mod lambda_call_shapes;
+mod operator_declarations;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
 use lexical_policies::LexicalPolicy;
@@ -151,6 +152,7 @@ mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
 use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
+use operator_declarations::OperatorDeclarationSite;
 mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
@@ -23575,7 +23577,7 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::ty_subst_keep_unbound(semantic, &semantic_erasure);
             (physical, semantic)
         };
-        self.check_operator_declaration(f, semantic_ret_ty);
+        self.check_operator_declaration(f, semantic_ret_ty, OperatorDeclarationSite::NonMember);
 
         let generic_sig = (!f.type_params.is_empty()).then(|| {
             let formal_bounds = f
@@ -47790,40 +47792,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_operator_declaration(&mut self, function: &FunDecl, ret: Ty) {
-        // A delegated-property convention is called from a GENERATED accessor, which has no scope
-        // to fill an implicit context from. The declaration is rejected here, so the property that
-        // uses it reports no applicable convention rather than reaching a call whose argument list
-        // cannot be mapped onto the declaration's slots.
-        if function.is_operator()
-            && crate::resolve::delegated_properties::DELEGATE_CONVENTION_NAMES
-                .contains(&function.name.as_str())
-            && !crate::resolve::delegated_properties::is_usable_delegate_convention(
-                true,
-                function.context_count,
-            )
-        {
-            self.diags.error(
-                function
-                    .context_span
-                    .expect("a function with context parameters must retain its clause span"),
-                "context parameters on delegation operators are unsupported.".to_string(),
-            );
-        }
-        if function.is_operator()
-            && function.name == "hasNext"
-            && !matches!(ret.canonical_semantic(), Ty::Boolean | Ty::Error)
-        {
-            self.diags.error(
-                function
-                    .operator_span
-                    .expect("an operator function must retain its modifier span"),
-                "'operator' modifier is not applicable to function: must return 'Boolean'."
-                    .to_string(),
-            );
-        }
-    }
-
     fn annotation_shape(&self, internal: TypeName) -> Option<AnnotationShape> {
         let classifier = self.resolver().classifier(internal)?;
         let application = classifier.annotation_application()?;
@@ -48575,7 +48543,7 @@ impl<'a> Checker<'a> {
             // to infer on their lexical rung below.
             && !self.has_finalized_signature(stable_declaration);
         if !self.signature_defaults_only && !infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(f, self.ret_ty, OperatorDeclarationSite::NonMember);
         }
         // Default arguments are evaluated in the caller's context. The extension receiver and
         // preceding value parameters are available, while later parameters are not.
@@ -48649,7 +48617,7 @@ impl<'a> Checker<'a> {
             }
         }
         if infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(f, self.ret_ty, OperatorDeclarationSite::NonMember);
         }
         self.report_inferred_nothing_return(f, self.ret_ty, false);
         if f.receiver.is_some() && companion_classifier.is_none() {
@@ -49808,6 +49776,7 @@ impl<'a> Checker<'a> {
         }
         // `abstract` modifier consistency (illegal in any class kind): an abstract member has no
         // body, and cannot also be `final` (kotlinc rejects each).
+        self.check_bodyless_operator_declarations(scope, cl, d);
         for m in &cl.methods {
             if m.is_abstract() && !matches!(m.body, FunBody::None) {
                 self.diags.error(
@@ -52928,6 +52897,15 @@ impl<'a> Checker<'a> {
             // Body-local members intentionally have no finalized entry and retain lexical
             // inference in this path.
             && !self.has_finalized_signature(stable_declaration);
+        // An enum entry's body is an anonymous object to kotlinc.
+        let anonymous_owner = match source_member {
+            Some(crate::libraries::SourceMember::EnumEntry { .. }) => true,
+            Some(crate::libraries::SourceMember::Class { file, owner, .. }) => {
+                file == self.file_index && self.file.is_anonymous_object_class(DeclId(owner))
+            }
+            _ => false,
+        };
+        let operator_site;
         {
             let parameter_types = match finalized_parameters
                 .as_deref()
@@ -53026,8 +53004,16 @@ impl<'a> Checker<'a> {
                     index < f.context_count,
                 );
             }
-            if !self.signature_defaults_only && !infer_ret {
-                self.check_operator_declaration(f, self.ret_ty);
+            operator_site = OperatorDeclarationSite::Member {
+                anonymous_owner,
+                overrides_any_equals: operator_declarations::overrides_any_equals(
+                    f,
+                    &parameter_types,
+                ),
+            };
+            // A member without a body has no body work; the class check covers it.
+            if !self.signature_defaults_only && !infer_ret && !matches!(f.body, FunBody::None) {
+                self.check_operator_declaration(f, self.ret_ty, operator_site);
             }
             if infer_ret {
                 if let FunBody::Expr(e) = &f.body {
@@ -53095,7 +53081,7 @@ impl<'a> Checker<'a> {
             }
         }
         if infer_ret {
-            self.check_operator_declaration(f, self.ret_ty);
+            self.check_operator_declaration(f, self.ret_ty, operator_site);
         }
         self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
         if f.receiver.is_some() {

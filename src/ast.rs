@@ -1916,6 +1916,9 @@ pub struct File {
     /// `+ForbidValueClassRecursionViaTypeParameters`: a value class whose underlying type reaches
     /// itself through a type parameter's bound is an error rather than a deprecation warning.
     pub forbid_value_class_recursion_via_type_parameters: bool,
+    /// `+ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: an `operator fun equals` in an enum
+    /// entry or anonymous object is an error rather than a deprecation warning.
+    pub forbid_operator_equals_in_enum_entries_and_anonymous_objects: bool,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,

@@ -129,6 +129,7 @@ const MODELED_FEATURES: &[&str] = &[
     "EnumEntries",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
+    "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
     "ForbidValueClassRecursionViaTypeParameters",
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",

@@ -12702,6 +12702,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     carrier for a class recursive through its type parameters is the boxed class itself, which
     krusty does not model: such a declaration compiles with the warning in kotlinc and stops in
     krusty's backend. (`tests/value_class_parameters_e2e.rs`.)
+  - `ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: `operator fun equals` must be a member
+    overriding `Any.equals`, reported at the `operator` keyword; one that does not override it in
+    an enum entry or an anonymous object is the warning `INAPPLICABLE_OPERATOR_MODIFIER_WARNING`
+    (`tests/operator_equals_declarations_e2e.rs`).
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
