@@ -90,34 +90,24 @@ impl BodyLowering<'_> {
                             if debug.end != 0 {
                                 self.ir.expr_end_lines.insert(lowered, debug.end);
                             }
-                            Ok((lowered, None))
+                            Ok(lowered)
                         }
-                        super::constant_evaluation::TemplateRun::Part(part) => Ok((
-                            self.expression_with_conversion(part.value, part.conversion)?,
-                            Some(self.converted_type(part.value, part.conversion)?),
-                        )),
+                        super::constant_evaluation::TemplateRun::Part(part) => {
+                            let lowered =
+                                self.expression_with_conversion(part.value, part.conversion)?;
+                            // A direct part can still be a checked conversion wrapper. Coroutine
+                            // hoisting snapshots every effectful part before a later suspension and
+                            // consumes this producer-owned type rather than rediscovering it.
+                            let ty = self.converted_type(part.value, part.conversion)?;
+                            self.ir.logical_types.insert(lowered, ty);
+                            Ok(lowered)
+                        }
                     })
                     .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
-                // Like a call's operands, a concatenation's parts evaluate into source-order locals
-                // once one of them suspends, so the suspension can split the body between them.
-                if parts.iter().any(|&(part, _)| self.operand_suspends(part)) {
-                    let mut statements = Vec::new();
-                    let parts = parts
-                        .into_iter()
-                        .map(|(part, ty)| match ty {
-                            Some(ty) => self.spill_call_operand(part, ty, &mut statements),
-                            None => part,
-                        })
-                        .collect();
-                    let value = self.ir.add_expr(IrExpr::StringConcat(parts));
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: statements,
-                        value: Some(value),
-                    })
-                } else {
-                    let parts = parts.into_iter().map(|(part, _)| part).collect();
-                    self.ir.add_expr(IrExpr::StringConcat(parts))
-                }
+                // Like a call's operands, a concatenation's parts stay direct when one of them
+                // suspends: kotlinc builds the `StringBuilder` and appends the earlier parts first,
+                // and the coroutine transformer saves the builder across the suspension.
+                self.ir.add_expr(IrExpr::StringConcat(parts))
             }
             _ if folded.is_some() => {
                 let folded = folded.expect("guarded by the arm");
