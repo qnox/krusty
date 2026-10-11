@@ -1,6 +1,7 @@
 //! A member or index `++`/`--` keeps kotlinc's shape: a postfix update stores the old value in a
 //! temporary and writes `temporary.inc()`, a prefix update writes `read.inc()` and reads again, and
-//! only an operand that is not a constant or an immutable value is bound once.
+//! only an operand that is not a constant or an immutable value is bound once. A compound index
+//! assignment binds its operands by the same rule, and a counted loop's variable is not immutable.
 
 use super::common;
 
@@ -59,10 +60,27 @@ fun cells(g: Grid, i: Int): Int {\n\
     val c = g[0]--\n\
     return a + b + c\n\
 }\n\
+\n\
+fun compound(g: IntArray, i: Int): Int {\n\
+    g[i + 1] += 2\n\
+    g[0] -= 1\n\
+    for (j in 0..1) g[j] += 3\n\
+    for (k in 0 until 2) g[k]++\n\
+    return g[i]\n\
+}\n\
+\n\
+fun lifted(g: IntArray, i: Int, c: Counter): Int {\n\
+    val f = {\n\
+        g[i] += 3\n\
+        c.count++\n\
+    }\n\
+    f()\n\
+    return g[i]\n\
+}\n\
 ";
 
 #[test]
-fn member_and_index_increments_are_byte_identical_to_kotlinc() {
+fn member_and_index_updates_are_byte_identical_to_kotlinc() {
     for class in ["store/AccessIncrementsKt", "store/Counter"] {
         common::byte_diff_against_kotlinc_cp(
             "AccessIncrements",

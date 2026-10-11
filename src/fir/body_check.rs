@@ -95,7 +95,7 @@ pub use driver::{
 };
 pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailure};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use receiver_provenance::ReceiverFrame;
 
@@ -494,6 +494,8 @@ struct BodyFirChecker<'a> {
     class_capture_values: Vec<(String, ClassCaptureBinding)>,
     class_delegates: HashMap<String, LocalDelegateBinding>,
     class_receivers: Vec<ClassCaptureBinding>,
+    /// Variables of counted loops: the JVM backend steps the variable itself, so it is not immutable.
+    counted_loop_variables: HashSet<LocalValueId>,
     /// Stable property whose accessor lexically contains this body, propagated through local-class
     /// body units by [`BodyCheckSession`]. This replaces an impossible parent walk: local classifier
     /// anchors are module identities and deliberately do not retain parser-body ownership.
@@ -940,6 +942,7 @@ impl BodyFirChecker<'_> {
             class_capture_values: class_context.capture_values,
             class_delegates: class_context.delegates,
             class_receivers: class_context.receivers,
+            counted_loop_variables: HashSet::new(),
             enclosing_property,
             session,
             return_target,
@@ -2928,39 +2931,8 @@ impl BodyFirChecker<'_> {
                 indices,
                 value,
             } => {
-                let mut operand_bindings = Vec::new();
-                if self.is_compound_index_assignment(*array, indices, *value) {
-                    let operands = std::iter::once(*array)
-                        .chain(indices.iter().copied())
-                        .collect::<Vec<_>>();
-                    for operand in operands {
-                        if self.expression_substitutions.contains_key(&operand) {
-                            continue;
-                        }
-                        let initializer = self.expression(operand)?;
-                        let ty = self.expression_type(operand)?;
-                        let target = self.allocate_local();
-                        let declaration = self.body.add_statement(FirStatement {
-                            origin,
-                            kind: FirStatementKind::Local {
-                                target,
-                                ty,
-                                mutable: false,
-                                lateinit: false,
-                                deferred: false,
-                                initializer: Some(initializer),
-                                conversion: None,
-                            },
-                        });
-                        let replacement = self.body.add_expr(FirExpr {
-                            origin,
-                            ty,
-                            kind: FirExprKind::ValueRead(target),
-                        });
-                        self.expression_substitutions.insert(operand, replacement);
-                        operand_bindings.push((operand, declaration));
-                    }
-                }
+                let operand_bindings =
+                    self.bind_compound_index_operands(*array, indices, *value, origin)?;
                 let receiver_ty = self.info.semantic_ty(*array).non_null();
                 let selected_convention = ["set", "put"].into_iter().find(|convention| {
                     self.info
@@ -3059,18 +3031,18 @@ impl BodyFirChecker<'_> {
                 for (operand, _) in &operand_bindings {
                     self.expression_substitutions.remove(operand);
                 }
-                let expression = if operand_bindings.is_empty() {
+                let declarations = operand_bindings
+                    .into_iter()
+                    .filter_map(|(_, declaration)| declaration)
+                    .collect::<Vec<_>>();
+                let expression = if declarations.is_empty() {
                     expression
                 } else {
                     self.body.add_expr(FirExpr {
                         origin,
                         ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
                         kind: FirExprKind::Block {
-                            statements: operand_bindings
-                                .into_iter()
-                                .map(|(_, declaration)| declaration)
-                                .collect::<Vec<_>>()
-                                .into_boxed_slice(),
+                            statements: declarations.into_boxed_slice(),
                             result: Some(expression),
                         },
                     })
@@ -3207,6 +3179,7 @@ impl BodyFirChecker<'_> {
                 let start = self.expression(range.start)?;
                 let end = self.expression(range.end)?;
                 let variable = self.loop_variable(statement, name);
+                self.counted_loop_variables.insert(variable);
                 let body = self.checked_loop_body(
                     target,
                     label,

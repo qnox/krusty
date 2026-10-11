@@ -16911,7 +16911,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the index operands go into temporaries first, but kotlinc's JVM optimization folds a temporary
   whose initializer is a constant or a read of an immutable value (a `val`, a parameter, the
   current `this`) back into its uses, so only an operand such as a call, a `var` or a nested access
-  takes a slot. The postfix temporary is unnamed, so it has no `LocalVariableTable` row, and its
+  takes a slot. A compound index assignment (`a[i] += x`) binds its operands by the same rule. A
+  counted loop's variable does not count as immutable: kotlinc's loop lowering makes it the
+  induction variable, so a temporary holding it survives. The postfix temporary is unnamed, so it has no `LocalVariableTable` row, and its
   `inc()` is computed into the write: an `Int` property never becomes `iinc`. The statement form
   keeps the same shape: the old value is still stored before the write, including for a property
   reached through an implicit receiver or a top-level property. Checked FIR rebuilds these blocks

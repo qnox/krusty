@@ -26,9 +26,8 @@ impl BodyFirChecker<'_> {
     ///
     /// The resolver has already removed package/classifier/`super` qualifiers from the operand
     /// list, leaving only runtime operands in source order. Each one that is not trivial is bound
-    /// once before the access and every shared AST occurrence reads that binding. A trivial
-    /// operand (a constant, a `val` or parameter, the current `this`) is read again at each use,
-    /// as kotlinc's JVM optimization folds a temporary holding one back into its uses.
+    /// once before the access and every shared AST occurrence reads that binding. A foldable
+    /// operand ([`Self::is_foldable_operand`]) is read again at each use instead.
     ///
     /// A postfix update keeps the old value in a temporary, writes `temporary.inc()` and yields
     /// the temporary; a prefix update writes `read.inc()` and yields a second read of the access.
@@ -58,7 +57,7 @@ impl BodyFirChecker<'_> {
                 continue;
             }
             let initializer = self.expression(operand)?;
-            if self.is_trivial_operand(operand, initializer) {
+            if self.is_foldable_operand(initializer) {
                 continue;
             }
             let ty = self.expression_type(operand)?;
@@ -80,27 +79,7 @@ impl BodyFirChecker<'_> {
         })
     }
 
-    /// Whether an access operand needs no temporary: kotlinc's JVM optimization replaces a
-    /// temporary initialized by a constant or by a read of an immutable value with that value.
-    fn is_trivial_operand(&self, operand: ExprId, checked: FirExprId) -> bool {
-        let kind = &self
-            .body
-            .expr(checked)
-            .expect("a checked operand is published")
-            .kind;
-        match kind {
-            FirExprKind::Constant(_) | FirExprKind::ImplicitReceiver { current: true, .. } => true,
-            FirExprKind::ValueRead(read) => matches!(
-                self.file.expr(operand),
-                Expr::Name(name) if self
-                    .local_binding(name)
-                    .is_some_and(|binding| binding.value == *read && !binding.mutable)
-            ),
-            _ => false,
-        }
-    }
-
-    fn bind_temporary(
+    pub(super) fn bind_temporary(
         &mut self,
         origin: OriginId,
         ty: ResolvedTy,
