@@ -10942,6 +10942,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class see the public type and call the getter. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus:
   six `properties/backingField/*ValueClassExplicitBackingField` tests.
+- **An untyped backing field initializer is resolved against the property type.** kotlinc's
+  `transformBackingField` gives the initializer of `val failed: List<F> field = mutableListOf()`
+  the property's return type as its expected type, then keeps the initializer's own resolved type
+  as the field type: `MutableList<F>`. Pass 1 publishes that storage type under the property's
+  stable declaration identity; Pass 2 checks the executable initializer under the public type and
+  consumes the published storage fact. This also prevents an inherited same-named property from
+  supplying the initializer's expectation. Tests: `tests/explicit_backing_field_e2e.rs`.
 - **A value class's erased bridge calls its interface entry by the entry's name.** A value class
   implementing `Comparable<Int>` has the static `compareTo-impl(II)I`, the instance entry
   `compareTo(I)I` on the box, and the erased `compareTo(Object)I` bridge, which unboxes the

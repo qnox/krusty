@@ -50514,97 +50514,14 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // An inferred explicit backing field has a semantic type distinct from the public
-            // property signature (`val p: I; field = V()`). Its initializer is executable body
-            // work, so Pass 1 intentionally retains only the pending storage marker. Check that
-            // initializer once in this selected class group before member bodies: owner-local reads
-            // in those bodies observe the narrower storage type, while callers still observe `I`.
-            // The checked type is also handed to FIR below; no lowering phase reopens this syntax.
-            {
-                let field_scope = scope.child(ScopeKind::Block);
-                let field_scope = &field_scope;
-                for property in &props {
-                    self.declare_scoped_property(field_scope, property, false);
-                }
-                let primary_parameter_types = current_owner
-                    .and(current_classifier.as_ref())
-                    .and_then(|class| class.constructors.first())
-                    .and_then(|constructor| constructor.params.get(..cl.props.len()))
-                    .map(|parameters| parameters.to_vec())
-                    .unwrap_or_else(|| {
-                        cl.props
-                            .iter()
-                            .map(|parameter| self.type_ref_ty(field_scope, &parameter.ty))
-                            .collect()
-                    });
-                self.declare_initializer_parameters(
-                    field_scope,
-                    &cl.props,
-                    primary_parameter_types,
-                );
-                for property in &cl.body_props {
-                    let Some(field) = property.explicit_backing_field.as_ref() else {
-                        continue;
-                    };
-                    let selected = self
-                        .selected_body_declarations
-                        .as_ref()
-                        .is_none_or(|selected| selected.contains(&property.span));
-                    if !selected {
-                        continue;
-                    }
-                    let property_suppression_depth = self.push_declaration_policies(
-                        field_scope,
-                        &property.annotations,
-                        &property.annotation_args,
-                    );
-                    let initializer_scope = field_scope.child(ScopeKind::Block);
-                    if body_local_class {
-                        self.declare_property_initializer_class_storage_capture(
-                            &initializer_scope,
-                            d,
-                            &property.name,
-                        );
-                    }
-                    let storage = match (&field.ty, property.init) {
-                        (Some(reference), _) => self.check_declaration_type(field_scope, reference),
-                        (None, Some(initializer)) => self.expr(&initializer_scope, initializer),
-                        (None, None) => Ty::Error,
-                    };
-                    if !storage.mentions_error() && !storage.mentions_pending() {
-                        self.explicit_backing_field_types
-                            .insert((property.span.lo, property.span.hi), storage);
-                        if let Some(scoped) = props
-                            .iter_mut()
-                            .find(|candidate| candidate.name == property.name)
-                        {
-                            let declared = scoped.ty;
-                            scoped.owner_storage_ty = Some(storage);
-                            self.declare_scoped_property(field_scope, scoped, true);
-                            if field.ty.is_none()
-                                && !crate::assignable::is_subtype(
-                                    &crate::assignable::TyCtx::new(),
-                                    self,
-                                    storage,
-                                    declared,
-                                )
-                            {
-                                self.diags.error(
-                                    property.span,
-                                    format!(
-                                        "backing field type of '{}' is '{}', which is not a subtype of its property type '{}'.",
-                                        property.name,
-                                        storage.source_name(),
-                                        declared.source_name(),
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    self.active_lexical_policies
-                        .truncate(property_suppression_depth);
-                }
-            }
+            self.check_explicit_backing_field_initializers(
+                scope,
+                cl,
+                d,
+                current_owner,
+                body_local_class,
+                &mut props,
+            );
             // Push only this declaration's semantic class chain. A local or anonymous declaration is
             // checked at its lexical construction site, so `this_labels` already contains its lexical
             // receivers. Reconstructing those labels from `lexical_class_context` would duplicate one
