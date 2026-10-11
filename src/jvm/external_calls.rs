@@ -719,6 +719,21 @@ pub(super) fn realize(
             let physical_call =
                 bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
             default_call_operands.record(physical_call, operand_plan);
+            default_call_operands.record_declaration(
+                physical_call,
+                crate::jvm::default_call_operands::DefaultedDeclaration {
+                    owner: callable.physical_owner,
+                    name: physical_name.clone(),
+                    descriptor: if callable.descriptor.is_empty() {
+                        crate::jvm::names::method_descriptor(
+                            &callable.physical_params,
+                            callable.physical_ret,
+                        )
+                    } else {
+                        callable.descriptor.clone()
+                    },
+                },
+            );
             continue;
         }
         let supplied = match &ir.exprs[index] {

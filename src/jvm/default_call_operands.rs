@@ -50,11 +50,28 @@ impl DefaultCallOperand {
             abi_suffix: true,
         }
     }
+
+    /// Whether this operand is a mask word or the marker that ends the call's operands.
+    pub(super) fn is_abi_suffix(&self) -> bool {
+        self.abi_suffix
+    }
+}
+
+/// The declaration whose omitted parameters a `$default` bridge call fills: its JVM owner, name and
+/// descriptor. kotlinc decides an inlined call's `@InlineOnly` handling on this declaration,
+/// never on its bridge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DefaultedDeclaration {
+    pub(super) owner: crate::types::TypeName,
+    pub(super) name: String,
+    pub(super) descriptor: String,
 }
 
 #[derive(Default)]
 pub(crate) struct DefaultCallOperands {
     entries: HashMap<ExprId, Vec<DefaultCallOperand>>,
+    /// The declaration behind each realized `$default` bridge call.
+    declarations: HashMap<ExprId, DefaultedDeclaration>,
     /// Exact physical argument occupied by the CPS continuation after suspend lowering. This is a
     /// backend representation fact: emission must not rediscover it from the argument's type,
     /// spelling, or position relative to a descriptor suffix.
@@ -85,6 +102,19 @@ impl DefaultCallOperands {
                     .zip(operands)
                     .all(|(planned, actual)| planned.expression == *actual)
         })
+    }
+
+    pub(super) fn record_declaration(&mut self, call: ExprId, declaration: DefaultedDeclaration) {
+        let previous = self.declarations.insert(call, declaration);
+        debug_assert!(
+            previous.is_none(),
+            "a default call is realized exactly once"
+        );
+    }
+
+    /// The declaration a default bridge call stands for.
+    pub(super) fn declaration(&self, call: ExprId) -> Option<&DefaultedDeclaration> {
+        self.declarations.get(&call)
     }
 
     pub(super) fn contains(&self, call: ExprId) -> bool {
@@ -195,6 +225,7 @@ impl DefaultCallOperands {
     ) -> bool {
         let source_plan = self.entries.get(&source).cloned();
         let continuation_position = self.continuation_positions.get(&source).copied();
+        let declaration = self.declarations.get(&source).cloned();
         if source_plan.is_none() && continuation_position.is_none() {
             return true;
         }
@@ -204,8 +235,12 @@ impl DefaultCallOperands {
             || continuation_position.is_some_and(|position| position >= operands.len())
             || self.entries.contains_key(&target)
             || self.continuation_positions.contains_key(&target)
+            || self.declarations.contains_key(&target)
         {
             return false;
+        }
+        if let Some(declaration) = declaration {
+            self.declarations.insert(target, declaration);
         }
         if let Some(mut target_plan) = source_plan {
             for (planned, replacement) in target_plan.iter_mut().zip(operands) {

@@ -126,12 +126,16 @@ impl Emitter<'_> {
                 }
                 // A generic call's erased result is discarded as it is. Reading it as the
                 // substituted type (a `checkcast`, an unboxing) exists only for a consumer, and
-                // kotlinc pops the erased value.
+                // kotlinc pops the erased value. A dependency call's realization records the same
+                // boundary on the call itself: its provider result, and the checked result the
+                // coercion reads it as.
                 IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
                     arg,
-                    ..
-                } if self.ir.declaration_result_coercions.contains(&expression) => {
+                    type_operand,
+                } if self.ir.declaration_result_coercions.contains(&expression)
+                    || self.ir.logical_types.get(arg) == Some(type_operand) =>
+                {
                     if let Some(&erased) = self.ir.physical_types.get(arg) {
                         self.emit_value(*arg, code);
                         discard(super::ir_ty_to_jvm(&erased), code);

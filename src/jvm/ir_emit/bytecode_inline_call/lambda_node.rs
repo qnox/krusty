@@ -6,7 +6,7 @@
 use super::lambda_route::{leaves_by_non_local_jump, SpliceReason};
 use super::*;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
-use crate::jvm::method_node::CodeAttribute;
+use crate::jvm::method_node::{CodeAttribute, LabelId};
 
 const GETSTATIC: u8 = 0xb2;
 const ARETURN: u8 = 0xb0;
@@ -802,7 +802,9 @@ impl Emitter<'_> {
 
 /// A `Unit` lambda: krusty's body yields `Unit.INSTANCE` for the `Object` `invoke` returns, where
 /// kotlinc's lambda returns `void` and the inliner loads `Unit.INSTANCE` after it. When every
-/// return is such a load, the lambda is made to return `void`.
+/// return is such a load, the lambda is made to return `void`. The load may precede the closing
+/// brace's line, which kotlinc places on the `void` return itself; a label no instruction jumps to
+/// carries only that line.
 fn return_unit_as_void(node: &mut MethodNode, return_type: String) -> String {
     if return_type != "Lkotlin/Unit;" {
         return return_type;
@@ -811,22 +813,41 @@ fn return_unit_as_void(node: &mut MethodNode, return_type: String) -> String {
         matches!(node, Node::Insn(Insn::Field { op: GETSTATIC, owner, name, desc })
             if owner == "kotlin/Unit" && name == "INSTANCE" && desc == "Lkotlin/Unit;")
     };
-    let returns: Vec<usize> = node
+    let targets: HashSet<LabelId> = node
         .nodes
         .iter()
-        .enumerate()
-        .filter(|(_, node)| matches!(node, Node::Insn(Insn::Op(ARETURN))))
-        .map(|(at, _)| at)
+        .filter_map(|entry| match entry {
+            Node::Insn(insn) => Some(insn.jump_targets()),
+            _ => None,
+        })
+        .flatten()
+        .chain(
+            node.try_catch_blocks
+                .iter()
+                .flat_map(|block| [block.start, block.end, block.handler]),
+        )
         .collect();
-    if returns
-        .iter()
-        .any(|&at| at == 0 || !loads_unit(&node.nodes[at - 1]))
-    {
-        return return_type;
+    let debug_only = |entry: &Node| match entry {
+        Node::Line { .. } => true,
+        Node::Label(label) => !targets.contains(label),
+        Node::Insn(_) => false,
+    };
+    let mut loads = Vec::new();
+    for (at, entry) in node.nodes.iter().enumerate() {
+        if !matches!(entry, Node::Insn(Insn::Op(ARETURN))) {
+            continue;
+        }
+        let load = node.nodes[..at]
+            .iter()
+            .rposition(|entry| !debug_only(entry));
+        match load {
+            Some(load) if loads_unit(&node.nodes[load]) => loads.push((load, at)),
+            _ => return return_type,
+        }
     }
-    for &at in returns.iter().rev() {
+    for &(load, at) in loads.iter().rev() {
         node.nodes[at] = Node::Insn(Insn::Op(RETURN));
-        node.nodes.remove(at - 1);
+        node.nodes.remove(load);
     }
     node.desc = format!(
         "{}V",
