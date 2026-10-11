@@ -1765,6 +1765,7 @@ mod tests {
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             line: 0,
             source_order: 0,
+            property_delegate: false,
         });
         ir.local_property_layouts.insert(
             property_id,

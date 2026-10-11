@@ -356,6 +356,9 @@ pub(crate) fn lower_companion_properties(
             accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: candidate.decl_line,
             source_order: candidate.source_order,
+            // kotlinc's hoisted field is a new declaration, not the delegate storage it moved:
+            // it keeps its generic `Signature`.
+            property_delegate: false,
         });
         // Deliberately NOT registered in `declared_class_statics`: that table feeds the owner's
         // `@Metadata` const-property records, and kotlinc's owner metadata has NO record for a

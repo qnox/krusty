@@ -91,6 +91,7 @@ pub(super) fn add_cached_descriptor(
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,
         source_order: u32::MAX,
+        property_delegate: false,
     });
     index
 }

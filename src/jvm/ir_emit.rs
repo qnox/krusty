@@ -2569,27 +2569,25 @@ fn emit_class(
         } else {
             declared_field_access(c, field_index, static_storage(ir, c))
         };
-        // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
-        // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
-        // like kotlinc; disjoint (a field is one or the other).
+        // A bare type parameter field (`val a: A`) signs `TA;`, a parameterized one its generic type;
+        // a property's `x$delegate` storage signs nothing (kotlinc's `PROPERTY_DELEGATE` origin).
         let type_parameter = ir
             .field_signatures(&fq_name)
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
-        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
+        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter)
+            .field
+            .filter(|_| !field.is_property_delegate());
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
-        // Coroutine continuation fields are compiler-generated storage rather than Kotlin
-        // properties, so they are visited eagerly and receive no nullability annotation. Declared
-        // properties, a data class's included, use the later field-table visit: their methods
-        // establish the preceding pool window and their backing fields carry Kotlin's nullability
-        // annotation.
+        // Coroutine continuation fields are compiler-generated storage, visited eagerly with no
+        // nullability annotation. Declared properties (a data class's too) use the later field-table
+        // visit, after their methods, and carry Kotlin's nullability annotation.
         if is_continuation && matches!(name.as_str(), "result" | "this$0" | "label") {
-            // kotlinc interns a continuation's SPILL field names with the field visit, but `result`,
-            // `this$0` and `label` first appear where they are USED — `this$0` in the constructor's
-            // `putfield`, the other two in `invokeSuspend`. Declaring them eagerly interned all three
-            // ahead of the constructor and shifted every later pool entry.
+            // kotlinc interns SPILL field names at the field visit, but `result`, `this$0` and `label`
+            // where they are USED (`this$0` in the constructor's `putfield`, the others in
+            // `invokeSuspend`); declaring them eagerly shifted every later pool entry.
             cw.add_field_late_sig(
                 acc,
                 &physical_name,
@@ -3728,7 +3726,9 @@ fn emit_enum_class(
             .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
             .flatten();
         let signature =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).field;
+            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())
+                .field
+                .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
             enum_field_acc(f),
             &f.name,
@@ -3758,7 +3758,7 @@ fn emit_enum_class(
             acc,
             &s.name,
             &ir_type_desc(&s.ty),
-            signatures.field.as_deref(),
+            signatures.field.as_deref().filter(|_| !s.property_delegate),
             None,
             ann,
         );

@@ -109,7 +109,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             acc,
             ir.static_field_jvm_name(static_index),
             &desc,
-            signatures.field.as_deref(),
+            signatures.field.as_deref().filter(|_| !s.property_delegate),
             cv,
             field_ann,
         );
@@ -491,7 +491,9 @@ pub(super) fn emit_class_static_fields(
                         "Lorg/jetbrains/annotations/NotNull;"
                     }
                 });
-        let signature = property_jvm_signatures(signature_formatter, &s.ty, None).field;
+        let signature = property_jvm_signatures(signature_formatter, &s.ty, None)
+            .field
+            .filter(|_| !s.property_delegate);
         cw.add_field_late_sig(
             acc,
             ir.static_field_jvm_name(static_index),
