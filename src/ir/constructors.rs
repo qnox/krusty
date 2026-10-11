@@ -149,6 +149,8 @@ impl super::IrClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum IrSecondaryConstructorRole {
     SerializationDeserialization,
+    /// kotlinc's no-arg plugin's zero-argument constructor.
+    NoArg,
 }
 
 /// The static `constructor-impl` the JVM value-class pass realizes a published secondary

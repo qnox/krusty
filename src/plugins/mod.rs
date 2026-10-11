@@ -20,6 +20,7 @@ pub mod cli;
 pub mod codegen_loop;
 pub mod deps;
 pub mod ksp;
+pub mod noarg;
 pub mod registry;
 pub mod serialization;
 
@@ -671,6 +672,14 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Annotations that give the classes they match a generated zero-argument constructor, as
+    /// kotlinc's no-arg plugin does. Classes match as for [`Self::open_by_default_annotations`].
+    /// The frontend decides which classes get one and reports the plugin's errors; lowering builds
+    /// the constructor from that decision.
+    fn no_arg_constructor_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -1082,6 +1091,14 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::no_arg_constructor_annotations`].
+    pub fn no_arg_constructor_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.no_arg_constructor_annotations().iter().copied())
+            .collect()
     }
 
     /// Every registered plugin's [`IrPlugin::open_by_default_annotations`].

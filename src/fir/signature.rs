@@ -26,6 +26,7 @@ pub use resolved_types::*;
 pub use selections::*;
 mod classifier_headers;
 mod declaration_metadata;
+pub use declaration_metadata::NoArgSuperConstructor;
 mod result_expectation;
 mod source_packages;
 
@@ -1426,6 +1427,8 @@ pub struct ResolvedModuleIndex {
     /// classifier. The callable was selected while the generated symbol table was authoritative;
     /// later consumers receive its owner and arity without recognizing a generated spelling.
     serialization_companion_accessors: HashMap<DeclarationId, (Box<str>, TypeName, usize)>,
+    /// The superclass constructor each class the no-arg plugin matched delegates to.
+    no_arg_constructors: HashMap<DeclarationId, NoArgSuperConstructor>,
     /// Primary constructor of the custom serializer CLASS a source classifier's
     /// `@Serializable(with = …)` names, selected and validated by the serialization frontend, with
     /// the generated accessor's operand ordinal passed to each constructor parameter.
@@ -1834,21 +1837,6 @@ impl ResolvedModuleIndex {
             );
         }
         order
-    }
-
-    /// The position `declaration`'s continuation class takes in its scope's generated-class
-    /// sequence, or `None` when the declaration is not a source `suspend` function.
-    pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {
-        self.continuation_ordinals.get(&declaration).copied()
-    }
-
-    pub fn publish_continuation_ordinal(&mut self, declaration: DeclarationId, ordinal: u32) {
-        assert!(
-            self.continuation_ordinals
-                .insert(declaration, ordinal)
-                .is_none_or(|existing| existing == ordinal),
-            "a suspend declaration holds exactly one continuation ordinal"
-        );
     }
 
     pub fn declaration_header(
@@ -2625,6 +2613,7 @@ impl ResolvedModuleIndex {
             && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
             && self.serialization_companion_accessors.is_empty()
+            && self.no_arg_constructors.is_empty()
             && self.serialization_custom_serializer_constructors.is_empty()
             && self
                 .serialization_type_use_serializer_constructors
@@ -3120,6 +3109,8 @@ impl ResolvedModuleIndex {
             + self.serialization_companion_accessors.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<(Box<str>, TypeName, usize)>())
+            + self.no_arg_constructors.len()
+                * std::mem::size_of::<(DeclarationId, NoArgSuperConstructor)>()
             + self
                 .serialization_companion_accessors
                 .values()

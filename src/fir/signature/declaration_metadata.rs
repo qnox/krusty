@@ -2,7 +2,60 @@
 
 use super::*;
 
+/// The superclass constructor a generated no-arg constructor (kotlinc's no-arg plugin) delegates
+/// to, selected by the frontend.
+///
+/// A selected constructor with parameters has a default for every one of them; the generated
+/// constructor calls it with all of them omitted, as kotlinc does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoArgSuperConstructor {
+    /// A source constructor of the superclass, by declaration.
+    Declared(DeclarationId),
+    /// A dependency superclass's constructor, with its parameter types.
+    External {
+        declaration: ExternalCallableId,
+        parameters: Vec<ResolvedTy>,
+    },
+    /// A constructor any subclass may call as `<init>()`: `Any`'s, or the no-arg constructor the
+    /// plugin generates for a matched superclass.
+    Unrestricted,
+}
+
 impl ResolvedModuleIndex {
+    /// The position `declaration`'s continuation class takes in its scope's generated-class
+    /// sequence, or `None` when the declaration is not a source `suspend` function.
+    pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {
+        self.continuation_ordinals.get(&declaration).copied()
+    }
+
+    pub fn publish_continuation_ordinal(&mut self, declaration: DeclarationId, ordinal: u32) {
+        assert!(
+            self.continuation_ordinals
+                .insert(declaration, ordinal)
+                .is_none_or(|existing| existing == ordinal),
+            "a suspend declaration holds exactly one continuation ordinal"
+        );
+    }
+
+    /// The superclass constructor `classifier`'s generated no-arg constructor delegates to, or
+    /// `None` when the no-arg plugin gives it none.
+    pub fn no_arg_constructor(&self, classifier: DeclarationId) -> Option<&NoArgSuperConstructor> {
+        self.no_arg_constructors.get(&classifier)
+    }
+
+    pub fn publish_no_arg_constructor(
+        &mut self,
+        classifier: DeclarationId,
+        superclass_constructor: NoArgSuperConstructor,
+    ) {
+        assert!(
+            self.no_arg_constructors
+                .insert(classifier, superclass_constructor)
+                .is_none(),
+            "a classifier holds at most one generated no-arg constructor"
+        );
+    }
+
     /// Every published type alias's expansion spelling, for the one stable-metadata step that
     /// seals its type-use annotations (see [`crate::spelling::TypeUseAnnotation`]).
     pub(crate) fn type_alias_spellings_mut(
