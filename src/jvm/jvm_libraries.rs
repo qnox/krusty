@@ -8,9 +8,13 @@ mod builtins_customizer;
 mod callable_availability;
 mod catalog_presence;
 mod classifier_facts;
+mod classpath_annotation_classes;
+use classpath_annotation_classes::{classpath_annotation_targets, java_annotation_parameter_list};
 #[cfg(test)]
 mod contract_dsl_tests;
 mod dependency_access_policy;
+mod dependency_deprecation;
+use dependency_deprecation::{ClassifierShape, PropertyDeclaration, PropertyDeprecations};
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -56,10 +60,9 @@ use super::metadata;
 use super::JavaNullability;
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{
-    AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
-    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind,
-    LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind, PropertyInfo,
-    PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    CallSig, EmptySymbolSource, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy,
+    GenericSig, InlineKind, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PropKind,
+    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
@@ -512,7 +515,7 @@ impl JvmLibraries {
             } else {
                 FnKind::TopLevel
             };
-            overloads.push(FunctionInfo {
+            let mut function = FunctionInfo {
                 ret: ret_metadata,
                 visibility: meta
                     .visibility
@@ -534,7 +537,9 @@ impl JvmLibraries {
                     return_value_status: None,
                 },
                 ..FunctionInfo::plain(kind, None, callable)
-            });
+            };
+            self.publish_function_deprecation(Some(&mut function), meta.deprecation.as_deref());
+            overloads.push(function);
             normalize_tail(cm, namespace, name, c.paired_common, &mut overloads);
         }
         for builtin in self.cp.builtin_package_functions(pkg, name) {
@@ -805,6 +810,7 @@ impl JvmLibraries {
                     callable,
                 )
             });
+            self.publish_function_deprecation(overloads.last_mut(), function.deprecation());
         }
         for property in super::metadata::class_properties(&class) {
             if property.name != name || !property.is_extension {
@@ -923,6 +929,7 @@ impl JvmLibraries {
                 producer: PropertyProducer::KotlinAccessor,
                 read_stability: crate::libraries::PropertyReadStability::Unstable,
             });
+            self.publish_kotlin_property_deprecation(props.last_mut(), property);
         }
     }
 
@@ -1695,8 +1702,18 @@ impl JvmLibraries {
                     member.call_sig.result_enhancement =
                         java_result_enhancement(internal_name, m.return_nullability);
                 }
-                if constructor_declaration.is_some() || (!has_kotlin_metadata && m.name == "<init>")
-                {
+                let is_constructor = constructor_declaration.is_some()
+                    || (!has_kotlin_metadata && m.name == "<init>");
+                // A constructor's deprecation also names its classifier; it is published with the
+                // classifier below, once the classifier's own shape is known.
+                if !is_constructor {
+                    member.deprecation = self.member_deprecation(
+                        &member,
+                        m.deprecation.as_deref(),
+                        !has_kotlin_metadata && m.is_static(),
+                    );
+                }
+                if is_constructor {
                     let signature = constructor_declaration.map(|declaration| &declaration.params);
                     if let (Some(gsig), Some(recv_fun)) = (
                         member.generic_sig.as_mut(),
@@ -2353,6 +2370,22 @@ impl JvmLibraries {
             if kind == crate::libraries::TypeKind::Annotation && !has_kotlin_metadata {
                 named_parameter_lists.push(java_annotation_parameter_list(&ci)?);
             }
+            let declared_supertypes = dependency_deprecation::declared_supertypes(&ci);
+            let deprecation = self.publish_classifier_deprecation(
+                &ci,
+                &ClassifierShape {
+                    name: internal_name,
+                    kind,
+                    is_fun_interface: ci.meta.is_fun_interface,
+                    is_companion: ci.meta.is_companion_object,
+                    type_parameters: &type_params,
+                    type_parameter_bounds: &type_param_bounds,
+                    type_parameter_variances: &type_param_variances,
+                    supertypes: &declared_supertypes,
+                },
+                &mut constructors,
+                constructor_outer,
+            );
             Some(LibraryType {
                 is_kotlin: has_kotlin_metadata,
                 access: if let Some(visibility) = ci.meta.class_visibility {
@@ -2429,6 +2462,7 @@ impl JvmLibraries {
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
                 annotation_element_defaults: ci.annotation_element_defaults.clone(),
+                deprecation,
             })
         }
     }
@@ -2900,74 +2934,6 @@ pub(super) fn declared_desc_to_ty(d: &str) -> Ty {
     }
 }
 
-/// Normalize a constructor-less annotation declaration into the common application shape while
-/// JVM descriptors and `AnnotationDefault` are still provider-owned facts. Core never reparses a
-/// descriptor or asks whether this classifier came from Java.
-fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) -> Option<ParamList> {
-    // Java exposes a class-valued annotation element as `Class<T>`, while Kotlin application syntax
-    // supplies a `KClass<T>`. Keep the generic argument decoded from the method's authoritative
-    // `Signature` attribute: dropping it would accept `String::class` for
-    // `Class<? extends Runnable>`. The physical descriptor remains provider-owned and unchanged.
-    let kotlin_class_element = |semantic: Ty| {
-        let arguments = match semantic.non_null() {
-            Ty::Obj(_, arguments) => arguments,
-            _ => &[],
-        };
-        Ty::obj_args_name(crate::types::type_name("kotlin/reflect/KClass"), arguments)
-    };
-    let mut elements = class
-        .methods
-        .iter()
-        .filter(|method| method.is_public() && !method.is_static() && method.name != "<init>")
-        .map(|method| {
-            let (parameters, ret) = crate::jvm::names::parse_method_descriptor(&method.descriptor)?;
-            if !parameters.is_empty() {
-                return None;
-            }
-            let erased = declared_desc_to_ty(ret);
-            let generic = method
-                .signature
-                .as_deref()
-                .and_then(parse_method_gsig)
-                .map(|signature| signature.ret);
-            let ty = match erased.array_elem() {
-                Some(erased_element) if erased_element.non_null() == Ty::obj("java/lang/Class") => {
-                    let element = generic.and_then(Ty::array_elem).unwrap_or(erased_element);
-                    Ty::array(kotlin_class_element(element))
-                }
-                None if erased.non_null() == Ty::obj("java/lang/Class") => {
-                    kotlin_class_element(generic.unwrap_or(erased))
-                }
-                Some(_) | None => erased,
-            };
-            (ty != Ty::Error).then(|| (method.name.clone(), ty, method.has_annotation_default))
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let value_index = elements.iter().position(|(name, _, _)| name == "value");
-    let value_vararg = value_index.is_some_and(|index| elements[index].1.array_elem().is_some());
-    if let Some(index) = value_index {
-        let value = elements.remove(index);
-        elements.insert(0, value);
-    }
-    let positional = match (value_index, value_vararg) {
-        (_, true) => AnnotationPositionalPolicy::ValueVararg,
-        (Some(_), false) => AnnotationPositionalPolicy::Value,
-        (None, false) => AnnotationPositionalPolicy::NamedOnly,
-    };
-    Some(ParamList {
-        visibility: Visibility::Public,
-        names: elements.iter().map(|(name, _, _)| name.clone()).collect(),
-        defaults: elements.iter().map(|(_, _, default)| *default).collect(),
-        types: elements.iter().map(|(_, ty, _)| *ty).collect(),
-        recv_fun: vec![false; elements.len()],
-        vararg: value_vararg.then_some(0),
-        annotation: Some(AnnotationParameterPolicy {
-            positional,
-            materialize_omitted_vararg: false,
-        }),
-    })
-}
-
 fn function_interface_signature(
     supertypes: &TypeNameList,
     members: &[LibraryMember],
@@ -3350,6 +3316,7 @@ impl JvmLibraries {
                         producer: PropertyProducer::KotlinAccessor,
                         read_stability: crate::libraries::PropertyReadStability::Unstable,
                     });
+                    self.publish_kotlin_property_deprecation(overloads.last_mut(), mp);
                     continue;
                 }
                 // On a `@JvmInline value class` every member is realized as a STATIC `-impl` whose
@@ -3513,8 +3480,9 @@ impl JvmLibraries {
                     setter_declaration: None,
                     source_member: None,
                     producer: PropertyProducer::KotlinAccessor,
-                    read_stability: self.module_read_stability(&mp, cn),
+                    read_stability: self.module_read_stability(mp, cn),
                 });
+                self.publish_kotlin_property_deprecation(overloads.last_mut(), mp);
             }
 
             // Classfile fields are not Kotlin declarations. Normalize every source-visible instance
@@ -3643,6 +3611,20 @@ impl JvmLibraries {
                     producer: PropertyProducer::Field,
                     read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
+                if let Some(published) = overloads.last_mut() {
+                    self.publish_property_deprecation(
+                        published,
+                        PropertyDeprecations {
+                            property: field.deprecation.as_deref(),
+                            ..PropertyDeprecations::default()
+                        },
+                        if ci.meta.is_present() {
+                            PropertyDeclaration::Kotlin
+                        } else {
+                            PropertyDeclaration::JavaField { is_static: false }
+                        },
+                    );
+                }
             }
         }
         if !overloads
@@ -4259,6 +4241,7 @@ impl JvmLibraries {
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
+                self.publish_function_deprecation(overloads.last_mut(), mf.deprecation());
                 let common = &self.common_expectations;
                 normalize_tail(common, namespace, name, paired, &mut overloads);
             }
@@ -4806,6 +4789,7 @@ impl JvmLibraries {
                         );
                         let callable = LibraryCallable {
                             annotations: m.annotations.clone(),
+                            deprecation: m.deprecation.clone(),
                             reflection_name: Some(m.name.clone()),
                             physical_name: m.physical_name.clone(),
                             inline: m.inline,
@@ -5454,34 +5438,6 @@ impl JvmLibraries {
             format!("({primitive}{primitive})I"),
         ))
     }
-}
-
-/// Where an application of this classpath annotation, written with no use-site prefix, may land.
-///
-/// A KOTLIN annotation carries `@kotlin.annotation.Target(allowedTargets = …)` — the only form that
-/// can name `PROPERTY` — and declaring none means "applicable everywhere". A JAVA `@interface`
-/// carries `@java.lang.annotation.Target(ElementType…)`, and Java has no property: kotlinc places a
-/// bare Java annotation written on a Kotlin property on its parameter or backing field instead.
-fn classpath_annotation_targets(
-    ci: &crate::jvm::classreader::ClassInfo,
-) -> crate::types::AnnotationTargets {
-    if !ci.kotlin_targets.is_empty() {
-        return crate::types::AnnotationTargets::kotlin(ci.kotlin_targets.iter().filter_map(
-            |entry| {
-                // The class reader kept only `kotlin.annotation.AnnotationTarget` elements.
-                crate::types::KotlinTarget::of_entry(
-                    crate::types::type_name("kotlin/annotation/AnnotationTarget"),
-                    entry,
-                )
-            },
-        ));
-    }
-    // A Kotlin annotation is identified by its own `@Metadata`; without a declared `@Target` it is
-    // applicable everywhere.
-    if ci.meta.class_kind.is_some() {
-        return crate::types::AnnotationTargets::DEFAULT;
-    }
-    crate::types::AnnotationTargets::java(&ci.java_targets)
 }
 
 #[cfg(test)]

@@ -13809,11 +13809,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `companion object Companion : I`, `class G<in T, out R : Any> : Any`. The checked annotations of
   top-level functions and properties, body properties, accessors and constructors are folded and
   published on their stable declarations in Pass 1, like those of classifiers and methods. Not yet
-  modeled: dependency (Kotlin metadata and Java) deprecation, `@DeprecatedSinceKotlin`, imports,
-  `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases, enum entries,
-  operator conventions, `this(...)` delegation, annotation uses, the deprecation of an
-  `expect` header itself, and the `actual` of a primary constructor in its rendering.
+  modeled: imports, `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases,
+  enum entries, operator conventions, `this(...)` delegation, annotation uses, the deprecation of
+  an `expect` header itself, and the `actual` of a primary constructor in its rendering.
   Test: `tests/deprecation_usage_e2e.rs`.
+- **Deprecated dependency declarations.** The same report applies to a classpath declaration.
+  A Kotlin one states `@kotlin.Deprecated` on the realizing method, field or class, or on the
+  property's `$annotations` method and accessors; the class reader keeps the application typed and
+  the metadata reader stamps it on the declaration by exact name and descriptor. A Java method,
+  field, constructor or class states it with the `Deprecated` attribute (or
+  `@java.lang.Deprecated`) and always warns `Deprecated in Java.`. An explicit
+  `@java.lang.Deprecated` on a metadata-bearing Kotlin declaration remains semantic but reports no
+  Java-origin sentence; a typed `@kotlin.Deprecated` on the same declaration takes precedence.
+  `@kotlin.DeprecatedSinceKotlin` replaces the written
+  level: `HIDDEN` once the API version reaches `hiddenSince`, otherwise `ERROR` from `errorSince`,
+  `WARNING` from `warningSince`, and no report before it (`"a".toUpperCase()` is an error at API
+  2.1 and later, a warning at 2.0). The provider publishes the level in effect together with the
+  symbol rendered from the declaration (`static fun old(): Unit`, `field field: Int`,
+  `constructor(): JOld.Nested`, `class JDep : Any`), so the checker reads one fact for every
+  origin; a member property renders without its dispatch receiver. A static call through a
+  deprecated class reports at the qualifier too. Not yet modeled: members decoded from
+  `.kotlin_builtins` (`Char.toInt()`), whose annotations keep no arguments; Java static field reads;
+  top-level `const` properties; Java platform-type and substituted renderings; companion-block
+  properties; and `hiddenSince` removing the candidate.
+  Test: `tests/deprecation_classpath_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
   `JvmPropertySignature` and interns none of the field's strings: `interface Holder { val count:
