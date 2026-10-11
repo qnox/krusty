@@ -61815,6 +61815,9 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), expected)
             }
         });
+        if let Some(receiver) = receiver {
+            self.check_parenthesized_package_qualifier(scope, receiver);
+        }
         let previous_callable_reference = self.active_callable_reference.replace(e);
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
         self.active_callable_reference = previous_callable_reference;

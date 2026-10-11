@@ -1093,6 +1093,14 @@ pub(super) fn compact(file: &mut File) {
                 .map(|new| (new, remap_annotations(annotations)))
         })
         .collect();
+    file.parenthesized_expression_spans = std::mem::take(&mut file.parenthesized_expression_spans)
+        .into_iter()
+        .filter_map(|(old, span)| expressions.get(&old).map(|new| (*new, span)))
+        .collect();
+    file.qualifier_type_argument_spans = std::mem::take(&mut file.qualifier_type_argument_spans)
+        .into_iter()
+        .filter_map(|(old, span)| expressions.get(&old).map(|new| (*new, span)))
+        .collect();
     file.expression_annotations = std::mem::take(&mut file.expression_annotations)
         .into_iter()
         .filter_map(|(old, annotations)| {

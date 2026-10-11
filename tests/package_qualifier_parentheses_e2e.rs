@@ -182,3 +182,48 @@ fun test() {
         &[],
     );
 }
+
+const CALLABLE_REFERENCES: &str = "\
+package p1.p2.p3
+
+class Foo {
+    fun m() {}
+}
+
+fun test() {
+    val a = (p1.p2.p3).Foo::class
+    val b = (p1.p2).p3.Foo::m
+    val c = p1<Int>.p2.p3.Foo::class
+}
+";
+
+/// The receiver of a callable reference or class literal is a package qualifier like any other.
+#[test]
+fn callable_reference_package_qualifiers_are_a_deprecation_warning() {
+    let suffix = "This will become an error in language version 2.5. See \
+                  https://youtrack.jetbrains.com/issue/KTLC-396.";
+    assert_matches_kotlinc(
+        CALLABLE_REFERENCES,
+        &[],
+        &[],
+        &[
+            format!("8:13: {MESSAGE} {suffix}"),
+            format!("9:13: {MESSAGE} {suffix}"),
+            format!("10:15: type arguments are not allowed for packages. {suffix}"),
+        ],
+    );
+}
+
+#[test]
+fn forbidden_callable_reference_package_qualifiers_are_reported() {
+    assert_matches_kotlinc(
+        CALLABLE_REFERENCES,
+        &[FORBID],
+        &[
+            format!("8:13: {MESSAGE}"),
+            format!("9:13: {MESSAGE}"),
+            "10:13: unresolved reference 'p1'.".to_string(),
+        ],
+        &[],
+    );
+}
