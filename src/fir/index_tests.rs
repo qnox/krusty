@@ -416,7 +416,11 @@ fn property_override_edges_are_exact_pending_free_pass_one_facts() {
         crate::types::Ty::nullable(crate::types::Ty::String)
     );
     assert_eq!(edge.implementation_type, edge.applied_type);
-    assert!(edge.overridden_mutable && edge.implementation_mutable);
+    assert_eq!(
+        edge.overridden_setter_value,
+        Some(crate::fir::ResolvedParameterIdentity::PropertySetterValue)
+    );
+    assert!(edge.implementation_mutable);
     assert!(
         index.property_overrides(classifier("Visible")).is_empty(),
         "same spelling without an override relation must not become a backend bridge candidate"
