@@ -100,7 +100,12 @@ impl Emitter<'_> {
         }
         // The lambda locals end at this `nop`. It returns to the inline body's line, and that
         // local-end label is what keeps it when the following instruction is the next debug point.
-        if !self.ir.callable_scopes.contains(&block) && !close_lambda_before_locals {
+        // A statement `Unit` lambda already closed on its brace `nop`; the inline body's line
+        // still follows its locals, where that body discards the `Unit` result. A copied body's
+        // terminal `Unit` that keeps its own mapped line has already written this `nop`.
+        let unit_wrote_body_line = emit_after_frame_close
+            .is_some_and(|unit| self.has_retained_mapped_inline_unit_line(unit));
+        if !self.ir.callable_scopes.contains(&block) && !unit_wrote_body_line {
             self.close_spliced_lambda_frame(block, false, code);
         }
         if let Some(discarded) = discard_after_close {

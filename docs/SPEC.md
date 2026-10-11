@@ -5606,6 +5606,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A setter's `<set-?>` local name is part of the setter's constant-pool range, so a rewrite of the
   next method lays that method's entries out after it, as kotlinc interns them.
   Tests: `tests/inline_scope_function_bytes_e2e.rs`.
+- **A statement `Unit` lambda returns to the call's line on a `nop` after its locals end.** For a
+  statement such as `run { a(); b() }` or `with(x) { a(); b() }`, kotlinc marks the lambda's `}` on
+  a `nop` while the lambda locals are open, and then, once they end, marks the inline call's line
+  again on a second `nop` (the inline body's own code after the invocation, whose `Unit` result
+  the statement discards). `RedundantNopsCleanup` keeps it because nothing else is on that line
+  before the next statement. The value-position and non-`Unit` closes already wrote this `nop`; a
+  statement whose `Unit` value follows the lambda's brace now does too, unless a copied body's
+  terminal `Unit` keeps its own mapped line and so writes that `nop` itself.
+  Tests: `tests/inline_scope_function_bytes_e2e.rs`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's
