@@ -42,15 +42,15 @@
 mod fingerprint;
 
 pub use fingerprint::class_dump_inputs;
-pub(crate) use fingerprint::fingerprint_parts;
-use fingerprint::{
-    basename, classpath_content_fingerprint, fnv64, legacy_classpath_fingerprint,
-    normalize_invocation_flag,
-};
+use fingerprint::{basename, fnv64, legacy_classpath_fingerprint, normalize_invocation_flag};
 #[cfg(test)]
 use fingerprint::{
     class_dump_inputs_with_platform, classpath_content_fingerprint_with_platform, hash_tree,
-    normalize_args, selected_content_hash_count,
+    immutable_classpath_content_fingerprint_with_platform, normalize_args,
+    selected_content_hash_count,
+};
+pub(crate) use fingerprint::{
+    classpath_content_fingerprint, fingerprint_parts, immutable_classpath_content_fingerprint,
 };
 
 use std::cell::Cell;

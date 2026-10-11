@@ -1263,6 +1263,38 @@ fn selected_toolchain_entries_have_content_derived_stable_identities() {
 }
 
 #[test]
+fn immutable_reference_dependencies_are_content_hashed_once_per_process() {
+    let root = temp_root("immutable-reference-inputs");
+    let kotlinc_lib = root.join("kotlinc/lib");
+    let jdk = root.join("jdk");
+    let modules = jdk.join("lib/modules");
+    let dependency = root.join("support.jar");
+    std::fs::create_dir_all(&kotlinc_lib).unwrap();
+    std::fs::create_dir_all(modules.parent().unwrap()).unwrap();
+    std::fs::write(kotlinc_lib.join("kotlin-compiler.jar"), b"compiler").unwrap();
+    std::fs::write(jdk.join("release"), b"JAVA_VERSION=\"21.0.1\"\n").unwrap();
+    std::fs::write(&modules, b"modules").unwrap();
+    std::fs::write(&dependency, b"immutable support classes").unwrap();
+
+    let fingerprint = || {
+        immutable_classpath_content_fingerprint_with_platform(
+            std::slice::from_ref(&dependency),
+            Some(&kotlinc_lib),
+            Some(&modules),
+        )
+        .unwrap()
+    };
+    assert_eq!(fingerprint(), fingerprint());
+    assert_eq!(
+        selected_content_hash_count(&dependency),
+        1,
+        "every case sharing an immutable support jar reuses its content identity"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn empty_classpath_replay_is_scoped_to_exact_selected_toolchain_bytes() {
     struct Install {
         root: PathBuf,

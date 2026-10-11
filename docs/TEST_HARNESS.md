@@ -259,7 +259,16 @@ modification time of its `lib/modules` image, so retargeting or upgrading a JDK 
 still recompiles. Set `KRUSTY_SECOND_JAVA_HOME` to a JDK of another feature release to make
 `a_changed_producing_jdk_misses_the_reference_cache_across_processes` also check the cross-JDK miss.
 Recording each of those compiles into the archive as well rewrote the whole archive per store and
-pushed a cold scored run past its deadline.
+pushed a cold scored run past its deadline. In CI each JVM conformance row restores that directory
+from its base commit's GHA cache (`box-reference-classes-<version>-…`), and master saves it under
+its own commit, so a pull request pays kotlinc only for cases whose inputs it changed. The outer key
+hashes the inventory owner, shared case planning, kotlinc server/Javac driver, and the content-
+identity implementation, so a producer change starts a fresh cache even though a hit does not run
+that producer. Each entry additionally uses the recorded-byte archive's process-memoized content
+identity for the complete selected kotlinc installation, the exact JDK selected to run kotlinc and
+javac (`KRUSTY_REF_JAVA_HOME` before `JAVA_HOME`), the mock JDK when selected, and every explicit
+classpath dependency. Those immutable inputs are hashed once per process. Replacing a distribution
+or support jar in place across runs cannot replay its old bytes.
 
 A live kotlinc invocation writes one line straight to the test process's stderr (libtest's capture
 does not hide it), and a passing replay writes nothing:

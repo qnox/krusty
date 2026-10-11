@@ -653,6 +653,30 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
         "recorded kotlinc bytes must be isolated by matrix version"
     );
+    let box_reference_producer_hash = "${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}";
+    let restore_reference_key = [
+        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-",
+        box_reference_producer_hash,
+        "-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha",
+    ]
+    .concat();
+    let save_reference_key = [
+        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-",
+        box_reference_producer_hash,
+        "-${{ github.sha }}\n",
+    ]
+    .concat();
+    for needle in [
+        "      - name: restore kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm'\n",
+        restore_reference_key.as_str(),
+        "      - name: save kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'\n",
+        save_reference_key.as_str(),
+    ] {
+        assert!(
+            workflow.contains(needle),
+            "each JVM row replays its version's kotlinc box references, and only master saves them ({needle})"
+        );
+    }
     let box_step = &workflow[workflow
         .find("      - name: run box conformance ${{ matrix.version }}\n")
         .expect("workflow has a JVM box conformance step")

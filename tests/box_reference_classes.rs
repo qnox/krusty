@@ -200,7 +200,18 @@ fn cache_key(
             )
         })
         .collect();
-    let (compiler_id, compiler_len) = compiler_identity();
+    // The reference server loads the whole selected kotlinc distribution, not only
+    // kotlin-compiler.jar. The same content identity used by recorded-byte archives also covers
+    // every explicit dependency and the selected/mock JDK image, and memoizes ambient toolchain
+    // trees once per process.
+    let mut content_paths = cp_jars.to_vec();
+    if let Some(jdk_root) = jdk.classpath_root() {
+        content_paths.push(jdk_root.to_path_buf());
+    }
+    let producing_jdk_modules = producing_jdk_modules()?;
+    let toolchain_classpath =
+        byte_dump::immutable_classpath_content_fingerprint(&content_paths, &producing_jdk_modules)?;
+    let compiler_id = byte_dump::published_compiler_id();
     let producing_jdk = producing_jdk_identity()?;
     Ok(ReferenceCacheInputs {
         src,
@@ -211,7 +222,7 @@ fn cache_key(
         unit_arguments: &unit_arguments,
         unit_language_settings: &unit_language_settings,
         compiler_id: compiler_id.as_deref(),
-        compiler_len,
+        toolchain_classpath: &toolchain_classpath,
         producing_jdk,
     }
     .fingerprint())
@@ -230,6 +241,20 @@ fn producing_jdk_identity() -> Result<&'static [u8], String> {
         })
         .as_deref()
         .map_err(Clone::clone)
+}
+
+/// Exact modules image of the JDK that runs kotlinc and javac. This deliberately shares
+/// [`common::selected_java_home`]'s `KRUSTY_REF_JAVA_HOME`-before-`JAVA_HOME` precedence instead of
+/// consulting the compiler-under-test's independently selected frontend toolchain.
+fn producing_jdk_modules() -> Result<PathBuf, String> {
+    let home = common::selected_java_home().ok_or_else(|| {
+        "no reference JDK is selected: set KRUSTY_REF_JAVA_HOME or JAVA_HOME".to_string()
+    })?;
+    let modules = Path::new(&home).join("lib").join("modules");
+    modules
+        .is_file()
+        .then_some(modules.clone())
+        .ok_or_else(|| format!("reference JDK has no modules image: {}", modules.display()))
 }
 
 /// The on-disk directory of one reference inventory cache entry.
@@ -376,7 +401,10 @@ pub struct ReferenceCacheInputs<'a> {
         Option<krusty::language_version::LanguageVersion>,
     )],
     pub compiler_id: Option<&'a str>,
-    pub compiler_len: u64,
+    /// Content-derived identity of the full selected kotlinc/JDK installation and every explicit
+    /// dependency. [`byte_dump::classpath_content_fingerprint`] memoizes ambient installation
+    /// trees, so a corpus run does not rehash the distribution for each case.
+    pub toolchain_classpath: &'a str,
     /// The JDK the reference kotlinc and javac run on, from
     /// [`common::producing_jdk::jdk_identity`].
     pub producing_jdk: &'a [u8],
@@ -429,12 +457,11 @@ impl ReferenceCacheInputs<'_> {
             parts.push(module.as_bytes());
             parts.push(settings);
         }
-        // The exact compiler identity isolates one release/RC's bytes from another's; the jar length
-        // guards a same-identity rebuild. An unpublished compiler never reaches the cache, but still
-        // contributes a stable key so an in-run second lookup matches.
+        // The release label is useful in cache inspection; exact content, including in-place
+        // changes under that same label, is owned by `toolchain_classpath`. An unpublished compiler
+        // never reaches the persistent cache, but still contributes a stable in-run key.
         parts.push(self.compiler_id.unwrap_or("").as_bytes());
-        let compiler_len = self.compiler_len.to_le_bytes();
-        parts.push(&compiler_len);
+        parts.push(self.toolchain_classpath.as_bytes());
         parts.push(self.producing_jdk);
         byte_dump::fingerprint_parts(&parts)
     }
@@ -465,14 +492,6 @@ fn reference_jvm_properties(units: &[PlannedUnit]) -> Vec<String> {
     } else {
         Vec::new()
     }
-}
-
-fn compiler_identity() -> (Option<String>, u64) {
-    let identity = byte_dump::published_compiler_id();
-    let len = common::kotlin_compiler_jar()
-        .and_then(|jar| std::fs::metadata(jar).ok())
-        .map_or(0, |metadata| metadata.len());
-    (identity, len)
 }
 
 /// One reference compilation unit of a case, in build order: its module identity, sources, the
@@ -947,7 +966,7 @@ mod tests {
             unit_arguments,
             unit_language_settings: &[(MAIN_MODULE, None, None)],
             compiler_id: Some("2.4.20"),
-            compiler_len: 100,
+            toolchain_classpath: "kotlinc:dist-a\njdk:jdk-a\nfile:classpath-a",
             producing_jdk: b"JAVA_VERSION=\"21.0.12\"",
         }
     }
@@ -976,7 +995,7 @@ mod tests {
             }
             .fingerprint()
         );
-        // A changed source, classpath, or jar length each changes the key.
+        // A changed source, classpath spelling, or any toolchain/classpath bytes changes the key.
         assert_ne!(
             base.fingerprint(),
             ReferenceCacheInputs {
@@ -993,7 +1012,7 @@ mod tests {
         assert_ne!(
             base.fingerprint(),
             ReferenceCacheInputs {
-                compiler_len: 101,
+                toolchain_classpath: "kotlinc:dist-b\njdk:jdk-a\nfile:classpath-a",
                 ..base
             }
             .fingerprint()
