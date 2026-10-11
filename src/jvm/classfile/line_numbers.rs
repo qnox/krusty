@@ -95,6 +95,16 @@ impl ClassWriter {
         } else {
             Vec::new()
         };
+        let latest = self
+            .methods
+            .last()
+            .is_some_and(|method| method.name == n && method.desc == d);
+        if needs_lvt && latest {
+            // The local names belong to the method just added, as kotlinc's writer interns them
+            // with its body. A later method's rewrite must not lay its own entries out ahead of
+            // them: a top-level setter's `<set-?>` stays between the setter and the next method.
+            self.include_latest_method_pool();
+        }
         if let Some(method) = self
             .methods
             .iter_mut()

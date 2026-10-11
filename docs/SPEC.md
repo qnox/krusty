@@ -5575,6 +5575,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/inlined_lambda_stack_spill_e2e.rs`,
   `inliner::tests::a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack`,
   `frame_types::tests::an_inline_call_bracket_saves_the_stack_and_puts_it_back_under_the_result`.
+- **An inlined body opens with a `nop` on the call's line.** kotlinc's `InlineCodegen` starts every
+  inlined body with a `nop` ("to keep linenumber info") after the call's operands and before the
+  body's first frame marker; `RedundantNopsCleanup` keeps it only when the call line has no other
+  instruction. A library inline call lowered from its declaration plan does the same, so
+  `fun g(): Int = run { 1 }` is `nop; iconst_0; istore_0; iconst_1; nop; ireturn` with the call
+  line on the first `nop`, while `value.let { ... }` loses it to the receiver load on that line.
+  A setter's `<set-?>` local name is part of the setter's constant-pool range, so a rewrite of the
+  next method lays that method's entries out after it, as kotlinc interns them.
+  Tests: `tests/inline_scope_function_bytes_e2e.rs`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's

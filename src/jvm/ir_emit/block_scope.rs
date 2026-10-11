@@ -68,15 +68,12 @@ impl Emitter<'_> {
             }
         } else {
             self.block_depth -= 1;
-            self.emit_open_block(
-                stmts,
-                value,
-                terminal_target,
-                delays_stack_normalization,
-                inline_stack_height,
-                true,
-                code,
-            )
+            let entry = InlineBodyEntry {
+                normalize_at_lambda_frame: delays_stack_normalization,
+                stack_height: inline_stack_height,
+                opening: self.external_inline_body_opening(block, &stmts),
+            };
+            self.emit_open_block(stmts, value, terminal_target, entry, true, code)
         };
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
@@ -154,7 +151,9 @@ impl Emitter<'_> {
         let mut deferred_invocation_result = None;
         if !self.try_emit_duplicated_safe_call(block, stmts, value, false, code) {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
+            let opening = self.external_inline_body_opening(block, stmts);
             for &statement in stmts {
+                self.open_external_inline_body(opening, statement, code);
                 // The lambda-frame line owns any caller-stack stores that FixStack inserts at the
                 // opening marker. Emit the line first so those stores, not only the marker local
                 // that follows them, start the mapped inline interval.
@@ -351,6 +350,52 @@ impl Emitter<'_> {
         code.nop();
     }
 
+    /// kotlinc's `InlineCodegen` starts every inlined body with a `nop` on the call's line, after
+    /// the call's operands and before the body's first frame marker. The redundant-`nop` sweep
+    /// keeps it only when that line has no other instruction: `run { 1 }` keeps it, while
+    /// `value.let { ... }` loses it to the receiver load already on that line.
+    fn external_inline_body_opening(&self, block: u32, stmts: &[u32]) -> Option<InlineBodyOpening> {
+        if !self.ir.external_inline_expansions.contains(&block) {
+            return None;
+        }
+        let line = self
+            .ir
+            .expr_source_lines
+            .get(&block)
+            .copied()
+            .filter(|line| *line != 0)?;
+        let marker = stmts.iter().copied().find(|&statement| {
+            matches!(
+                self.ir.debug_local_provenance(statement),
+                Some(
+                    IrDebugLocalProvenance::FunctionFrameMarker
+                        | IrDebugLocalProvenance::LambdaFrameMarker { .. }
+                )
+            )
+        })?;
+        Some(InlineBodyOpening {
+            block,
+            marker,
+            line,
+        })
+    }
+
+    fn open_external_inline_body(
+        &mut self,
+        opening: Option<InlineBodyOpening>,
+        statement: u32,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(opening) = opening.filter(|opening| opening.marker == statement) else {
+            return;
+        };
+        if code.is_dead() {
+            return;
+        }
+        self.mark_expression_line(opening.block, opening.line, code);
+        code.nop();
+    }
+
     fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {
         stmts.iter().any(|&statement| {
             matches!(
@@ -490,8 +535,7 @@ impl Emitter<'_> {
         stmts: Vec<u32>,
         value: Option<u32>,
         terminal_target: Option<Label>,
-        normalize_at_lambda_frame: bool,
-        inline_stack_height: i32,
+        entry: InlineBodyEntry,
         close_statement_lambda: bool,
         code: &mut CodeBuilder,
     ) -> EmittedBlock {
@@ -512,7 +556,11 @@ impl Emitter<'_> {
                     )
                 })
         });
-        let mut normalize_at_lambda_frame = normalize_at_lambda_frame;
+        let InlineBodyEntry {
+            mut normalize_at_lambda_frame,
+            stack_height: inline_stack_height,
+            opening,
+        } = entry;
         let mut reserved_inline_stack = None;
         // The trailing read is thrown away. Record it before the statements, so a break inside
         // them can see that the landing label will not consume the result.
@@ -527,6 +575,7 @@ impl Emitter<'_> {
             self.discarded_inline_results.insert(index);
         }
         for (index, statement) in stmts.into_iter().enumerate() {
+            self.open_external_inline_body(opening, statement, code);
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
             self.mark_statement_line(statement, code);
@@ -730,6 +779,25 @@ impl Emitter<'_> {
 pub(super) struct SlotScope {
     slots: HashMap<u32, (u16, Ty)>,
     frame: Mark,
+}
+
+/// How a block that may be an external inline expansion enters its inlined body.
+#[derive(Clone, Copy, Default)]
+pub(super) struct InlineBodyEntry {
+    /// Preserve the caller stack at the lambda frame marker rather than at the block boundary.
+    pub(super) normalize_at_lambda_frame: bool,
+    /// The caller's operand stack height when the block began.
+    pub(super) stack_height: i32,
+    opening: Option<InlineBodyOpening>,
+}
+
+/// The first frame marker of an external inline expansion and the call line its opening `nop`
+/// carries.
+#[derive(Clone, Copy)]
+struct InlineBodyOpening {
+    block: u32,
+    marker: u32,
+    line: u32,
 }
 
 pub(super) struct EmittedBlock {

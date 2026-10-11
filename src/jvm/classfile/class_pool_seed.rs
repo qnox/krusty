@@ -95,7 +95,7 @@ impl ClassWriter {
     ///
     /// [`Self::add_method_sig`] records the pool size before a constructor's local-variable strings
     /// are seeded. The following method must not inherit that gap.
-    fn include_latest_method_pool(&mut self) {
+    pub(super) fn include_latest_method_pool(&mut self) {
         let end = self.cp.slot_count();
         if let Some(source) = self
             .methods
