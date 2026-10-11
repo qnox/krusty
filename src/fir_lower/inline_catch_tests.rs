@@ -59,7 +59,7 @@ fn inline_default_catches_use_each_calls_reified_type() {
             catches
                 .iter()
                 .copied()
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<crate::fx_hash::HashSet<_>>()
                 .len(),
             catches.len(),
             "each catch binding needs its own slot: {default_catches:?}"

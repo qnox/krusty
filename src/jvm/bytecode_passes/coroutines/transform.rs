@@ -2,7 +2,7 @@
 //! named-function mode (`isForNamedFunction = true`). The suspend-lambda mode is in
 //! `lambda_mode`.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::super::analysis::{computed_max_stack, node_opcode, ControlFlowGraph};
 use super::super::descriptors;
@@ -173,7 +173,7 @@ fn check_monitors(
         return Ok(());
     }
     let graph = ControlFlowGraph::build(&snapshot, true);
-    let mut depth: HashMap<usize, i32> = HashMap::new();
+    let mut depth: HashMap<usize, i32> = HashMap::default();
     let mut stack = vec![(0usize, 0i32)];
     while let Some((index, level)) = stack.pop() {
         if depth.contains_key(&index) {

@@ -10,7 +10,7 @@
 //! side. Agreement also maps each serialized parameter symbol to the value index the body reads it
 //! by.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::decline::KlibBodyDeclineReason;
 use super::klib_types::semantic_type;
@@ -135,7 +135,7 @@ pub(super) fn function_header(
         )?,
         Some(selected) => cross_check(selected, function, &params, ret, identities)?,
     };
-    let mut values = HashMap::new();
+    let mut values = HashMap::default();
     for (index, ((role, parameter), identity)) in serialized.iter().zip(&identities).enumerate() {
         let stable_read = parameter_role(*role, identity).ok_or_else(|| {
             mismatch(format!(

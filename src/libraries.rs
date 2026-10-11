@@ -47,6 +47,7 @@ pub use platform_contract::{
 pub use property_producer::PropertyProducer;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 
+use crate::fx_hash::{HashMap, HashSet};
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TypeName, TypeNameList};
@@ -71,7 +72,6 @@ pub(crate) use metadata_normalization::{
     PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
 };
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
 
 /// Declaration-level classifier access. Unlike [`Visibility`], this preserves JVM package-private
 /// metadata; accessibility itself is computed by the resolver from this fact and its use context.
@@ -2534,13 +2534,13 @@ impl LibraryType {
             supertypes: TypeNameList::new(),
             supertype_templates: Vec::new(),
             constructors: Vec::new(),
-            hidden_member_properties: HashSet::new(),
-            hidden_deprecated_callables: HashSet::new(),
-            declared_callables: HashMap::new(),
+            hidden_member_properties: HashSet::default(),
+            hidden_deprecated_callables: HashSet::default(),
+            declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
-            constants: HashMap::new(),
+            constants: HashMap::default(),
             sam_eligible: false,
             callable_signature: None,
             callable_signatures: Vec::new(),
@@ -2729,8 +2729,8 @@ mod tests {
         map_call_args, AnnotationApplication, AnnotationParameterPolicy,
         AnnotationPositionalPolicy, CallSig, InlineKind, ParamList, TypeKind, Visibility,
     };
+    use crate::fx_hash::HashSet;
     use crate::types::Ty;
-    use std::collections::HashSet;
 
     #[test]
     fn empty_platform_publishes_the_implicit_enum_supertype_declaration() {
@@ -2825,13 +2825,13 @@ mod tests {
             supertypes: crate::types::TypeNameList::new(),
             supertype_templates: Vec::new(),
             constructors: vec![],
-            hidden_member_properties: HashSet::new(),
-            hidden_deprecated_callables: HashSet::new(),
-            declared_callables: std::collections::HashMap::new(),
+            hidden_member_properties: HashSet::default(),
+            hidden_deprecated_callables: HashSet::default(),
+            declared_callables: crate::fx_hash::HashMap::default(),
             declared_callable_order: Vec::new(),
             members: vec![],
             companion: vec![],
-            constants: std::collections::HashMap::new(),
+            constants: crate::fx_hash::HashMap::default(),
             sam_eligible: false,
             callable_signature: None,
             callable_signatures: Vec::new(),

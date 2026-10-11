@@ -1898,7 +1898,7 @@ fn retained_inline_local_delegate_materializes_its_inline_convention_dependency(
         .foreign_inline_templates
         .iter()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     assert_eq!(template_functions.len(), 3);
     let mut template_names = template_functions
         .iter()
@@ -1914,7 +1914,7 @@ fn retained_inline_local_delegate_materializes_its_inline_convention_dependency(
         .checked_callable_functions
         .iter()
         .filter_map(|(&target, function)| template_functions.contains(function).then_some(target))
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     assert_eq!(template_targets.len(), 3);
     assert!(ir.exprs.iter().all(|expression| !matches!(
         expression,
@@ -2310,7 +2310,7 @@ fn inner_secondary_constructor_carries_its_checked_enclosing_prefix() {
     assert_eq!(constructor.params, [Ty::obj("kotlin/Any")]);
     let body = constructor.body.expect("secondary constructor body");
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut stores_value_from_slot_two = false;
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -2684,7 +2684,7 @@ fn expression_subtree_contains(
         ir: &IrFile,
         expression: crate::ir::ExprId,
         predicate: &impl Fn(crate::ir::ExprId, &IrExpr) -> bool,
-        seen: &mut std::collections::HashSet<crate::ir::ExprId>,
+        seen: &mut crate::fx_hash::HashSet<crate::ir::ExprId>,
     ) -> bool {
         if !seen.insert(expression) {
             return false;
@@ -2701,7 +2701,7 @@ fn expression_subtree_contains(
         found
     }
 
-    visit(ir, root, predicate, &mut std::collections::HashSet::new())
+    visit(ir, root, predicate, &mut crate::fx_hash::HashSet::default())
 }
 
 #[test]

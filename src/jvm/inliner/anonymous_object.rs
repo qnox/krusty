@@ -20,7 +20,7 @@ mod lambda_inlining;
 use lambda_inlining::FieldLambda;
 mod type_remapper;
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::rc::Rc;
 
 use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
@@ -424,7 +424,7 @@ fn plan_lambdas<'a>(
     if regeneration.lambdas.is_empty() {
         return Ok(Vec::new());
     }
-    let mut taken: HashMap<String, usize> = HashMap::new();
+    let mut taken: HashMap<String, usize> = HashMap::default();
     for field in &regeneration.original.fields {
         *taken.entry(field.name.clone()).or_default() += 1;
     }
@@ -635,7 +635,7 @@ fn copy_body(
     let mut body = body.clone();
     remapper.remap_method(&mut body)?;
     // One `SourceMapCopier` per method: a line maps once and keeps that mapping.
-    let mut mapped: HashMap<u16, u16> = HashMap::new();
+    let mut mapped: HashMap<u16, u16> = HashMap::default();
     for entry in &mut body.nodes {
         if let Node::Line { line, .. } = entry {
             *line = match mapped.get(line) {

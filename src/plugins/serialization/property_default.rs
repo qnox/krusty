@@ -106,7 +106,7 @@ pub(super) fn default_in_frame(
     let mut reads = Vec::new();
     let mut receivers = Vec::new();
     let mut locals = Vec::new();
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::fx_hash::HashSet::default();
     let mut pending = vec![copy];
     while let Some(expression) = pending.pop() {
         if !visited.insert(expression) {

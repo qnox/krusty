@@ -5,7 +5,7 @@
 //! constructor parameters as `kotlin.jvm.internal.Ref` holders without making that JVM choice part
 //! of frontend semantics.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
@@ -65,7 +65,7 @@ pub(super) fn holder_ty(elem: &Ty) -> Ty {
 /// Replace only backend declaration slots. The marker map remains logical so metadata, diagnostics,
 /// and non-JVM backends never observe `Ref$*Ref` as the captured source value's type.
 pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
-    let mut physical = HashMap::<ClassId, Vec<(usize, Ty)>>::new();
+    let mut physical = HashMap::<ClassId, Vec<(usize, Ty)>>::default();
     for (&(class, field), _) in &ir.shared_class_capture_fields {
         let field = field as usize;
         let element = ir.classes[class as usize].fields[field].ty;
@@ -148,7 +148,7 @@ pub(crate) fn restore_erased_escaping_capture_holders(ir: &mut IrFile) {
 }
 
 fn restore_body(ir: &mut IrFile, body: ExprId) {
-    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::new();
+    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::default();
     let mut captured: Vec<(u32, u32, u32, Ty)> = Vec::new();
     let mut reads: Vec<(ExprId, ExprId, Ty)> = Vec::new();
     let mut writes: Vec<(ExprId, ExprId, Ty)> = Vec::new();
@@ -165,14 +165,14 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
     // parameter is the holder that edge requires. The semantic type recorded when the capture
     // was built is not that holder: value-class lowering may already have specialized both the
     // cell and the parameter to `IntRef` while the record still names the value class.
-    let mut captures_by_slot: HashMap<u32, Vec<(u32, u32, Ty)>> = HashMap::new();
+    let mut captures_by_slot: HashMap<u32, Vec<(u32, u32, Ty)>> = HashMap::default();
     for (slot, function, ordinal, required) in captured {
         captures_by_slot
             .entry(slot)
             .or_default()
             .push((function, ordinal, required));
     }
-    let mut erased_of = HashMap::new();
+    let mut erased_of = HashMap::default();
     let mut retargeted = Vec::new();
     for (slot, edges) in captures_by_slot {
         let Some((specialized, _)) = declared.get(&slot) else {
@@ -388,7 +388,7 @@ fn collect_body(
     writes: &mut Vec<(ExprId, ExprId, Ty)>,
 ) {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(id) = pending.pop() {
         if !seen.insert(id) {
             continue;

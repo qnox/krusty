@@ -9,7 +9,7 @@
 //! signs every library declaration, from the declaration's shape, so a body's call is joined to
 //! an entry by exact signature only.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::IrBinOp;
 use crate::metadata::id_signature::{
@@ -74,7 +74,7 @@ impl IrBuiltinOperators {
             classes: &[],
             native_interop_library: false,
         };
-        let mut operators = HashMap::new();
+        let mut operators = HashMap::default();
         let mut declare = |container, name, params: Vec<&KotlinType>, operator| {
             let shape = CallableShape {
                 name,
@@ -95,7 +95,7 @@ impl IrBuiltinOperators {
             for (name, operator) in RELATIONS {
                 let relation = BuiltinRelation {
                     operator,
-                    operand: semantic_ty(&operand, &HashMap::new()),
+                    operand: semantic_ty(&operand, &HashMap::default()),
                 };
                 declare(
                     builtins,
@@ -115,7 +115,7 @@ impl IrBuiltinOperators {
         );
         for operand in FLOATING_POINT {
             let declared = nullable(operand);
-            let operand = semantic_ty(&KotlinType::class(operand), &HashMap::new());
+            let operand = semantic_ty(&KotlinType::class(operand), &HashMap::default());
             declare(
                 builtins,
                 "ieee754equals",

@@ -215,8 +215,8 @@ impl BodyFirChecker<'_> {
             index: self.index,
             origins: self.origins,
             body,
-            scopes: vec![HashMap::new()],
-            delegate_scopes: vec![HashMap::new()],
+            scopes: vec![HashMap::default()],
+            delegate_scopes: vec![HashMap::default()],
             outer_values,
             outer_delegates,
             class_values,
@@ -254,8 +254,8 @@ impl BodyFirChecker<'_> {
             } else {
                 Vec::new()
             },
-            local_callable_scopes: vec![HashMap::new()],
-            expression_substitutions: HashMap::new(),
+            local_callable_scopes: vec![HashMap::default()],
+            expression_substitutions: HashMap::default(),
             lambda_binding_name: None,
             outer_callables,
             streamed_outer_callables: self.streamed_outer_callables.clone(),

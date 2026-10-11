@@ -12,8 +12,8 @@ use super::super::opcodes::*;
 use super::fast_analyzer::AnalyzerError;
 use super::frame::{At, Interpreter, Value};
 use super::opcode;
+use crate::fx_hash::{FxBuildHasher, FxHasher};
 use crate::jvm::method_node::{Constant, Insn};
-use crate::name_tree::{FxBuildHasher, FxHasher};
 
 const OBJECT: &str = "Ljava/lang/Object;";
 const DESCRIPTOR_SHARDS: usize = 64;

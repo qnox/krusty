@@ -5,7 +5,7 @@
 //! types to the compiler's semantic [`Ty`](crate::types::Ty). Target adapters may add physical
 //! realization facts after this boundary; they must not decode the declaration a second way.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::libraries::TypeKind;
 use crate::metadata::decode::{
@@ -744,7 +744,7 @@ mod tests {
                 suspend: false,
             },
         };
-        let Ty::Fun(signature) = semantic_ty(&extension, &HashMap::new()) else {
+        let Ty::Fun(signature) = semantic_ty(&extension, &HashMap::default()) else {
             panic!("function classifier must become a semantic function type");
         };
         assert_eq!(signature.params.as_slice(), &[Ty::String, Ty::Int]);
@@ -778,7 +778,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let Ty::Fun(signature) = semantic_ty(&suspend, &HashMap::new()) else {
+        let Ty::Fun(signature) = semantic_ty(&suspend, &HashMap::default()) else {
             panic!("suspend classifier must become a semantic function type");
         };
         assert_eq!(signature.params.as_slice(), &[Ty::Int]);
@@ -790,7 +790,7 @@ mod tests {
     fn type_parameter_bounds_are_selected_by_identity_not_spelling() {
         let outer = KotlinTypeParameterId(1);
         let inner = KotlinTypeParameterId(2);
-        let bounds = HashMap::from([(outer, Ty::String), (inner, Ty::obj("kotlin/Number"))]);
+        let bounds = HashMap::from_iter([(outer, Ty::String), (inner, Ty::obj("kotlin/Number"))]);
         let parameter = |id| KotlinType::Param {
             name: "T".to_owned(),
             id,
@@ -834,14 +834,15 @@ mod tests {
             },
         ];
 
-        let source = semantic_bounds(&parameters, &HashMap::new());
+        let source = semantic_bounds(&parameters, &HashMap::default());
         assert_eq!(
             source[&second],
             Ty::ty_param("A", Ty::nullable(Ty::obj("kotlin/Any")))
         );
 
-        let identities = HashMap::from([(first, "opaque-A"), (second, "opaque-B")]);
-        let provider = semantic_bounds_with_identities(&parameters, &HashMap::new(), &identities);
+        let identities = HashMap::from_iter([(first, "opaque-A"), (second, "opaque-B")]);
+        let provider =
+            semantic_bounds_with_identities(&parameters, &HashMap::default(), &identities);
         assert_eq!(
             provider[&second],
             Ty::ty_param("opaque-A", Ty::nullable(Ty::obj("kotlin/Any")))

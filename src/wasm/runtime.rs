@@ -16,7 +16,7 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
@@ -98,7 +98,7 @@ impl Runtime {
             i32_div: module.declare(),
             i64_div: module.declare(),
             objects: ObjectRoot::declare(module, ValType::nullable(string)),
-            constants: HashMap::new(),
+            constants: HashMap::default(),
         };
         runtime.define_string_equals(module);
         runtime.define_string_concat(module);

@@ -97,7 +97,7 @@ impl Checker<'_> {
     /// non-null value: whether the value itself may be null is [`Self::invoke_receiver_admits_null`].
     pub(super) fn nominal_function_types(&self, scope: &CheckerScope<'_>, nominal: Ty) -> Vec<Ty> {
         let mut functions = self.stable_classifier_callable_signatures(nominal);
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = crate::fx_hash::HashSet::default();
         self.collect_bound_function_types(scope, nominal.non_null(), &mut visited, &mut functions);
         functions
     }
@@ -106,7 +106,7 @@ impl Checker<'_> {
         &self,
         scope: &CheckerScope<'_>,
         parameter: Ty,
-        visited: &mut std::collections::HashSet<&'static str>,
+        visited: &mut crate::fx_hash::HashSet<&'static str>,
         functions: &mut Vec<Ty>,
     ) {
         let Some(name) = parameter.ty_param_name() else {
@@ -177,7 +177,7 @@ impl Checker<'_> {
     /// (`where T : Base, T : (Int) -> Int` invokes `t` as its `(Int) -> Int` bound).
     fn invoke_projects_type_parameter(&self, receiver: Ty, function: Ty) -> bool {
         let mut first_bound = receiver.non_null();
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = crate::fx_hash::HashSet::default();
         while let Ty::TyParam(name, bound) = first_bound {
             if !visited.insert(name) {
                 return false;
@@ -218,14 +218,14 @@ impl Checker<'_> {
     /// through bounds that are type parameters (`<U : (() -> Unit)?, T : U>`). A flexible platform
     /// type stays callable, as kotlinc allows.
     pub(super) fn invoke_receiver_admits_null(&self, scope: &CheckerScope<'_>, ty: Ty) -> bool {
-        self.receiver_admits_null_through_bounds(scope, ty, &mut std::collections::HashSet::new())
+        self.receiver_admits_null_through_bounds(scope, ty, &mut crate::fx_hash::HashSet::default())
     }
 
     fn receiver_admits_null_through_bounds(
         &self,
         scope: &CheckerScope<'_>,
         ty: Ty,
-        visited: &mut std::collections::HashSet<&'static str>,
+        visited: &mut crate::fx_hash::HashSet<&'static str>,
     ) -> bool {
         match ty {
             Ty::Nullable(_) | Ty::Null => true,

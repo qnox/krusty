@@ -20,7 +20,7 @@
 //! outside it, so the file declines with a diagnostic instead of emitting something unverified.
 
 use super::value_classes::NativeValueClasses;
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::backend::class_tables::{self, ClassTable, Representation};
 use crate::ir::{ClassId, FunId, IrClass, IrFile};

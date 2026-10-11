@@ -10,8 +10,8 @@
 //! which local each construction initializes, and the node that reads each use of that local.
 
 use super::*;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{ClassId, ExprId, IrCheckedOperation};
-use std::collections::{HashMap, HashSet};
 
 /// Where a construction puts its object.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,11 +30,11 @@ impl BodyLowering<'_, '_, '_> {
         let ir = self.file.ir;
         // Each local's declarations, its uses with the node that reads them, and whether anything
         // assigns it.
-        let mut declarations: HashMap<u32, Vec<Option<ExprId>>> = HashMap::new();
-        let mut uses: HashMap<u32, Vec<(ExprId, ExprId)>> = HashMap::new();
-        let mut assigned: HashSet<u32> = HashSet::new();
+        let mut declarations: HashMap<u32, Vec<Option<ExprId>>> = HashMap::default();
+        let mut uses: HashMap<u32, Vec<(ExprId, ExprId)>> = HashMap::default();
+        let mut assigned: HashSet<u32> = HashSet::default();
         let mut pending = vec![body];
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while let Some(parent) = pending.pop() {
             if !seen.insert(parent) {
                 continue;
@@ -55,7 +55,7 @@ impl BodyLowering<'_, '_, '_> {
                 pending.push(child);
             });
         }
-        let mut constructions = HashMap::new();
+        let mut constructions = HashMap::default();
         for (slot, inits) in declarations {
             let [Some(construction)] = inits[..] else {
                 continue;

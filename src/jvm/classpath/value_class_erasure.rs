@@ -65,7 +65,7 @@ pub(super) fn metadata_value_class_bound_carrier(
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> Option<Ty> {
     let mut current = ty;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let class_bound = loop {
         let Ty::TyParam(name, _) = current.non_null() else {
             break current;
@@ -173,7 +173,7 @@ fn underlying_carries_null(
     name: TypeName,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> bool {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut classifier = name;
     while seen.insert(classifier) {
         let Some(underlying) = value_underlying(classifier) else {

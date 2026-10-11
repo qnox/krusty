@@ -1,7 +1,7 @@
 //! Reverse lookup from stable declarations to source callable signatures.
 
+use crate::fx_hash::HashMap;
 use std::cell::{Ref, RefCell};
-use std::collections::HashMap;
 
 use crate::fir::DeclarationId;
 use crate::types::{Ty, TypeName};
@@ -32,7 +32,7 @@ impl StableFunctionIndex {
         table: &SymbolTable,
     ) -> Ref<'a, HashMap<DeclarationId, StableFunctionSite>> {
         if self.sites.borrow().is_none() {
-            let mut sites = HashMap::new();
+            let mut sites = HashMap::default();
             let mut record = |declaration, site| {
                 sites.entry(declaration).or_insert(site);
             };

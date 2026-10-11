@@ -4201,7 +4201,7 @@ fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
         identities
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<crate::fx_hash::HashSet<_>>()
             .len(),
         identities.len(),
         "entries/iterator/hasNext/next/factory/capacity/append remain exact declarations"

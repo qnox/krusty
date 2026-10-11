@@ -7,9 +7,9 @@
 
 use super::{record_value_boundary, BoxOp, CarrierUnboxes, FieldGetters, ReprInputs, Under};
 use crate::backend::BackendClassifierSource;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::{Ty, TypeName};
-use std::collections::{HashMap, HashSet};
 
 /// The declarations whose returns cross this boundary, with the pre-erasure facts the
 /// representation of each returned value is read from.
@@ -41,7 +41,7 @@ pub(super) fn value_class_reference_supertypes(
         .filter_map(|classifier| classifiers.classifier(*classifier))
         .flat_map(|facts| facts.supertypes.to_vec())
         .collect::<Vec<_>>();
-    let mut supertypes = HashSet::new();
+    let mut supertypes = HashSet::default();
     while let Some(classifier) = pending.pop() {
         if !supertypes.insert(classifier) {
             continue;

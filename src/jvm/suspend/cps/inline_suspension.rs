@@ -18,10 +18,10 @@
 //! that would otherwise be emitted with no continuation to pass.
 
 use super::super::is_suspension_point;
+use crate::fx_hash::HashSet;
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::placed_lambda_captures::is_placed_capture;
 use crate::libraries::InlineKind;
-use std::collections::HashSet;
 
 /// Whether `expression` is a call whose callee the JVM backend may splice here.
 ///
@@ -80,7 +80,7 @@ pub(crate) fn frame_suspensions(
 /// pass can represent.
 pub(crate) fn spliced_return_crosses_finally(ir: &IrFile, body: ExprId) -> bool {
     let mut stack = vec![(body, false, false, false)];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some((at, inlined, spliceable, crosses_finally)) = stack.pop() {
         if !seen.insert((at, inlined, spliceable, crosses_finally)) {
             continue;
@@ -149,7 +149,7 @@ pub(crate) fn suspends_in_a_value_try(
     suspend_set: &HashSet<u32>,
 ) -> bool {
     let mut stack = vec![(body, false)];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some((at, spliced)) = stack.pop() {
         if !seen.insert((at, spliced)) {
             continue;
@@ -189,7 +189,7 @@ pub(crate) fn suspends_in_a_value_try(
 /// Whether `body` holds a `try` with a `finally`, closure boundaries included.
 fn holds_a_finally(ir: &IrFile, body: ExprId) -> bool {
     let mut stack = vec![body];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(at) = stack.pop() {
         if !seen.insert(at) {
             continue;
@@ -220,7 +220,7 @@ fn tail_value(ir: &IrFile, body: ExprId) -> Option<ExprId> {
 /// suspends" for deciding whether a shape is safe to claim.
 fn holds_a_suspension(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> bool {
     let mut stack = vec![body];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(at) = stack.pop() {
         if !seen.insert(at) {
             continue;
@@ -245,7 +245,7 @@ pub(crate) fn spliced_suspension_lambda_impls(
     suspend_set: &HashSet<u32>,
 ) -> Vec<u32> {
     let mut impls = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     collect_impls(ir, body, suspend_set, &mut seen, &mut impls);
     impls
 }
@@ -325,7 +325,7 @@ impl<'a> SuspensionSearch<'a> {
             ir,
             suspend_set,
             every,
-            seen: HashSet::new(),
+            seen: HashSet::default(),
             found: Vec::new(),
         }
     }
@@ -429,7 +429,7 @@ mod tests {
             stmts: vec![point],
             value: None,
         });
-        assert!(spliced_inline_suspensions(&ir, body, &HashSet::new()).is_empty());
+        assert!(spliced_inline_suspensions(&ir, body, &HashSet::default()).is_empty());
     }
 
     #[test]
@@ -443,7 +443,7 @@ mod tests {
             value: None,
         });
         assert_eq!(
-            spliced_inline_suspensions(&ir, body, &HashSet::new()),
+            spliced_inline_suspensions(&ir, body, &HashSet::default()),
             [point]
         );
     }
@@ -463,7 +463,7 @@ mod tests {
                 stmts: vec![call],
                 value: None,
             });
-            let found = spliced_inline_suspensions(&ir, body, &HashSet::new());
+            let found = spliced_inline_suspensions(&ir, body, &HashSet::default());
             assert!(
                 !found.contains(&capture),
                 "a capture is evaluated by this frame and is already visible to the IR machine"
@@ -487,7 +487,7 @@ mod tests {
             value: None,
         });
         assert_eq!(
-            spliced_inline_suspensions(&ir, body, &HashSet::new()),
+            spliced_inline_suspensions(&ir, body, &HashSet::default()),
             [inner_point]
         );
     }

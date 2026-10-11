@@ -180,7 +180,7 @@ pub(crate) fn specialized_super_descriptor(
     declaration: crate::fir::ResolvedFunctionOverrideTarget,
     jvm_default: JvmDefaultMode,
 ) -> Option<String> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut current = owner;
     while seen.insert(current) {
         let class = ir.classes.iter().find(|class| class.fq_name == current)?;

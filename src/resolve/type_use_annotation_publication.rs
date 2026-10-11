@@ -17,7 +17,7 @@ pub(crate) fn publish_checked_type_use_annotations(
     table: &mut SymbolTable,
     diags: &mut DiagSink,
 ) {
-    let mut checked = CheckedTypeUseAnnotations::new();
+    let mut checked = CheckedTypeUseAnnotations::default();
     for (file_index, file) in files.iter().enumerate() {
         let file_index = file_index as u32;
         let applications = file
@@ -39,8 +39,8 @@ pub(crate) fn publish_checked_type_use_annotations(
             .decls
             .iter()
             .map(|&declaration| declaration_span(file, declaration))
-            .collect::<std::collections::HashSet<_>>();
-        let no_bodies = std::collections::HashSet::new();
+            .collect::<crate::fx_hash::HashSet<_>>();
+        let no_bodies = crate::fx_hash::HashSet::default();
         diags.set_file(file_index);
         let info = diags.with_authoritative_ranges(&owned_ranges, |diags| {
             check_file_at_impl_mode_with_index(

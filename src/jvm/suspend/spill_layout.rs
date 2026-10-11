@@ -1,6 +1,6 @@
 //! JVM continuation spill-field grouping, physical field indices, and encounter order.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{is_suspension_point, object_ty};
 pub(super) use crate::backend::coroutines::is_rematerialized_null;
@@ -51,7 +51,7 @@ pub(super) fn rematerialized_nulls(list: &[(u32, Ty)]) -> Vec<u32> {
 
 /// Annotate each scope-list entry with its representation kind and position within that kind.
 pub(super) fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
-    let mut counts = HashMap::<char, u32>::new();
+    let mut counts = HashMap::<char, u32>::default();
     list.iter()
         .filter(|(_, ty)| !is_rematerialized_null(ty))
         .map(|&(local, ty)| {
@@ -102,7 +102,7 @@ pub(super) fn suspension_points_in_order(
     }
 
     let mut out = Vec::new();
-    walk(ir, body, suspend_set, &mut HashSet::new(), &mut out);
+    walk(ir, body, suspend_set, &mut HashSet::default(), &mut out);
     out
 }
 
@@ -116,7 +116,7 @@ pub(super) struct SpillLayout {
 
 impl SpillLayout {
     pub(super) fn add_list(&mut self, list: &[(u32, Ty)]) {
-        let mut counts = HashMap::<char, u32>::new();
+        let mut counts = HashMap::<char, u32>::default();
         for (_, ty) in list {
             if is_rematerialized_null(ty) {
                 continue;
@@ -196,7 +196,7 @@ mod tests {
         });
 
         assert_eq!(
-            suspension_points_in_order(&ir, body, &HashSet::new()),
+            suspension_points_in_order(&ir, body, &HashSet::default()),
             [first, second],
         );
     }

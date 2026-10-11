@@ -96,15 +96,15 @@ fn check_active_diagnostic_unit(
                 .is_some_and(|anchor| anchor.owner.is_none())
         })
         .map(|(_, span)| *span)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let selected_bodies = declarations
         .iter()
         .map(|(_, span)| *span)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let selected_stable_bodies = declarations
         .iter()
         .map(|(declaration, _)| *declaration)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     drop(crate::resolve::check_selected_declarations_in_pass_two(
         active_file,
         raw_source as u32,

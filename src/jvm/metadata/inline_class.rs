@@ -91,7 +91,7 @@ pub(super) fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
                         ctx,
                         type_table,
                         id,
-                        &mut std::collections::HashSet::new(),
+                        &mut crate::fx_hash::HashSet::default(),
                     )
                 });
             (
@@ -190,7 +190,7 @@ fn type_parameter_admits_null(
     ctx: &MetaCtx,
     type_table: Option<&[u8]>,
     id: u64,
-    visiting: &mut std::collections::HashSet<u64>,
+    visiting: &mut crate::fx_hash::HashSet<u64>,
 ) -> bool {
     if !visiting.insert(id) {
         return false;

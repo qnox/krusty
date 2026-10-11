@@ -13,7 +13,7 @@
 //! `*TypeAliasesKt` `@Metadata` and are read from the classpath by `classpath::scan_types`). They
 //! are intrinsic to the compiler, so they are seeded unconditionally.
 
-use crate::name_tree::FxHashMap;
+use crate::fx_hash::HashMap as FxHashMap;
 use crate::types::{CollectionKind, MappedCollection, TypeName};
 
 /// JVM realization of a semantic intrinsic companion. Kotlinc's `CompanionObjectMapping` consists

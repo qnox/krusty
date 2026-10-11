@@ -127,7 +127,7 @@ fn reports(
     // Classifiers occupy a single-symbol namespace: two distinct explicit imports under one
     // visible name are conflicting imports. Callable/property facets deliberately do not enter
     // this set; Kotlin unions those declarations and overload/value selection decides later.
-    let mut classifiers_by_name = HashMap::<String, Vec<(TypeName, Option<TypeName>)>>::new();
+    let mut classifiers_by_name = HashMap::<String, Vec<(TypeName, Option<TypeName>)>>::default();
     for import in &file.import_paths {
         let Some((visible, owner, declared_name)) = explicit_import_target(import, &source) else {
             continue;

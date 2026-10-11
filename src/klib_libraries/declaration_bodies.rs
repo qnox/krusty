@@ -5,7 +5,7 @@
 //! parameter tuple. Each identity belongs to exactly one library: two libraries that both define
 //! one signature leave no single body to join, so the set is rejected when it is built.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::libraries::KlibDeclarationSignature;
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrFunction};
@@ -54,7 +54,7 @@ impl KlibDeclarationBodies {
     pub fn from_libraries(
         libraries: Vec<KlibIrModuleTrees>,
     ) -> Result<Self, KlibDeclarationBodiesError> {
-        let mut owners = HashMap::new();
+        let mut owners = HashMap::default();
         for (library, trees) in libraries.iter().enumerate() {
             for signature in trees.function_signatures() {
                 if let Some(previous) = owners.insert(signature.clone(), library) {

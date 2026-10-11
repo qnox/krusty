@@ -7,7 +7,7 @@
 //! constructor declares the captured fields afresh and stores every one of them first, then runs
 //! what is left of the original body.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
@@ -56,7 +56,7 @@ pub(super) fn extract(
     let arguments =
         argument_descriptors(call_desc).ok_or(unsupported("a malformed constructor descriptor"))?;
     // The parameter that starts at each slot.
-    let mut parameters: HashMap<u16, &str> = HashMap::new();
+    let mut parameters: HashMap<u16, &str> = HashMap::default();
     let mut slot = 1u16;
     for argument in &arguments {
         parameters.insert(slot, argument);

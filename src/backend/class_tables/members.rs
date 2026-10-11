@@ -1,7 +1,7 @@
 //! Which member a method or property accessor is, and what it overrides, read off the checked
 //! override edges common lowering recorded — never matched by name.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
 use crate::ir::{ClassId, FunId, IrClass, IrFile};
@@ -247,7 +247,7 @@ pub(crate) fn overridden_functions(
     ir: &IrFile,
     class: &IrClass,
 ) -> Result<HashMap<FunId, Vec<FunId>>, Unsupported> {
-    let mut map: HashMap<FunId, Vec<FunId>> = HashMap::new();
+    let mut map: HashMap<FunId, Vec<FunId>> = HashMap::default();
     let Some(overrides) = ir.function_overrides.get(&class.fq_name_id()) else {
         return Ok(map);
     };
@@ -309,7 +309,7 @@ pub(crate) fn overridden_properties(
     id: ClassId,
     class: &IrClass,
 ) -> Result<PropertyOverrideSlots, Unsupported> {
-    let mut map: PropertyOverrideSlots = HashMap::new();
+    let mut map: PropertyOverrideSlots = HashMap::default();
     let Some(overrides) = ir.property_overrides.get(&class.fq_name_id()) else {
         return Ok(map);
     };

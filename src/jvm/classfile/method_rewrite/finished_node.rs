@@ -9,7 +9,8 @@
 //! the offset's label. The method's implicit `return` gets a label of its own, last at its offset,
 //! so that where it lands can be read off the rewritten body.
 
-use std::collections::{BTreeMap, HashMap};
+use crate::fx_hash::HashMap;
+use std::collections::BTreeMap;
 
 use super::super::constant_pool_queries::PoolLookup;
 use super::super::{ClassWriter, MethodInfo};
@@ -139,7 +140,7 @@ fn builder_labels(
     code_len: usize,
 ) -> BTreeMap<usize, Vec<Node>> {
     let builder = &source.builder;
-    let mut linked: HashMap<usize, u32> = HashMap::new();
+    let mut linked: HashMap<usize, u32> = HashMap::default();
     for &(operand, label) in &builder.fixups {
         if label.builder != builder.id {
             continue;
@@ -149,7 +150,7 @@ fn builder_labels(
         }
     }
     // Where each label the reader placed stands.
-    let mut label_offsets: HashMap<LabelId, usize> = HashMap::new();
+    let mut label_offsets: HashMap<LabelId, usize> = HashMap::default();
     let mut index = 0;
     for entry in &node.nodes {
         match entry {

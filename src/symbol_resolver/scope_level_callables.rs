@@ -28,7 +28,7 @@ impl CallableImport {
 pub(crate) struct FunctionImportScope {
     /// Every explicit import of a visible name, in import order. Callables imported under one name
     /// from several owners are all candidates at the explicit level, as in kotlinc.
-    explicit: std::collections::HashMap<String, Vec<CallableImport>>,
+    explicit: crate::fx_hash::HashMap<String, Vec<CallableImport>>,
     /// Callable precedence: own package, explicit stars, Kotlin default stars, platform defaults.
     levels: [Vec<TypeName>; 4],
     /// Classifier precedence. Builtin classifiers outrank explicit stars; see
@@ -42,7 +42,7 @@ impl FunctionImportScope {
         levels: [Vec<TypeName>; 4],
     ) -> Self {
         let classifier_levels = classifier_scope::classifier_precedence_levels(&levels);
-        let mut explicit = std::collections::HashMap::<String, Vec<CallableImport>>::new();
+        let mut explicit = crate::fx_hash::HashMap::<String, Vec<CallableImport>>::default();
         for (name, import) in explicit_imports {
             let imports = explicit.entry(name).or_default();
             imports.retain(|existing| {

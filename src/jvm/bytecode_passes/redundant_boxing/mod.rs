@@ -18,7 +18,7 @@ pub(crate) use values::progression_iterator;
 /// The value classes a class's code may box: internal name → the descriptor of the unboxed value
 /// its `box-impl` takes (kotlinc's `unboxedTypeOfInlineClass`).
 #[derive(Default)]
-pub(crate) struct ValueClassDescriptors(pub(crate) std::collections::HashMap<String, String>);
+pub(crate) struct ValueClassDescriptors(pub(crate) crate::fx_hash::HashMap<String, String>);
 
 impl ValueClasses for ValueClassDescriptors {
     fn underlying_type(&self, internal_name: &str) -> Option<String> {

@@ -60,8 +60,8 @@ fn report_platform_declaration_clashes(
 ) -> bool {
     let mut clashes = Vec::new();
     for class in &ir.classes {
-        let mut groups: std::collections::HashMap<(String, String), Vec<u32>> =
-            std::collections::HashMap::new();
+        let mut groups: crate::fx_hash::HashMap<(String, String), Vec<u32>> =
+            crate::fx_hash::HashMap::default();
         for &method in &class.methods {
             let Some(&offset) = ir.fn_signature_offsets.get(&method) else {
                 continue;
@@ -96,7 +96,7 @@ fn report_platform_declaration_clashes(
 }
 
 fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), String> {
-    let mut descriptors = std::collections::HashSet::new();
+    let mut descriptors = crate::fx_hash::HashSet::default();
     if class.has_primary_ctor {
         descriptors.insert(crate::jvm::names::method_descriptor(
             &crate::jvm::ir_emit::class_ctor_jvm_tys(class),

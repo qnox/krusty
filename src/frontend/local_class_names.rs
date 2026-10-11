@@ -23,7 +23,7 @@
 //! - Temporaries (`for` iterators, destructuring containers, a local delegate's storage) contribute
 //!   nothing.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{
     AnonymousEnclosingFunction, ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId,
@@ -93,7 +93,7 @@ impl SettledGeneratedClassNames {
 /// resolved.
 pub(crate) fn settle_generated_class_names(
     file: &File,
-    converted: &std::collections::HashSet<ExprId>,
+    converted: &crate::fx_hash::HashSet<ExprId>,
 ) -> SettledGeneratedClassNames {
     if converted.is_empty() {
         return SettledGeneratedClassNames::default();
@@ -192,7 +192,7 @@ struct Inventor<'a> {
     names: InventedLocalNames,
     expression_depth: u32,
     /// The function values resolution converted, once it has run.
-    converted: Option<&'a std::collections::HashSet<ExprId>>,
+    converted: Option<&'a crate::fx_hash::HashSet<ExprId>>,
     /// Conversions numbered so far in each enclosing callable, innermost last.
     conversion_scopes: Vec<u32>,
 }
@@ -206,7 +206,7 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
 fn walk<'a>(
     file: &'a File,
     counters: &'a mut HashMap<Vec<String>, u32>,
-    converted: Option<&'a std::collections::HashSet<ExprId>>,
+    converted: Option<&'a crate::fx_hash::HashSet<ExprId>>,
 ) -> InventedLocalNames {
     let mut inventor = Inventor {
         file,
@@ -222,7 +222,7 @@ fn walk<'a>(
         .anonymous_object_classes
         .values()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let class_chain = |declaration: DeclId, class: &ClassDecl| Chain {
         owner: Some(declaration),
         counter_owner: format!("class:{}", class.name),
@@ -232,7 +232,7 @@ fn walk<'a>(
     };
     // A `companion { … }` member is hoisted to file level, but the classifier that declared its
     // block stays its lexical owner: what its body declares is named in that class's chain.
-    let mut block_chains = HashMap::new();
+    let mut block_chains = HashMap::default();
     for &declaration in &file.decls {
         if let Decl::Class(class) = file.decl(declaration) {
             for member in &class.companion_block_members {

@@ -424,10 +424,9 @@ pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
         | (directive(src, "WITH_REFLECT") as u8) << 2
         | (directive(src, "STDLIB_JDK8") as u8) << 3
         | (directive(src, "WITH_COROUTINES") as u8) << 4;
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u8, Vec<PathBuf>>>,
-    > = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<crate::fx_hash::HashMap<u8, Vec<PathBuf>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(crate::fx_hash::HashMap::default()));
     if let Some(v) = cache.lock().unwrap().get(&sig) {
         return v.clone();
     }

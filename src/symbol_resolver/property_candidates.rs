@@ -8,7 +8,7 @@ pub(super) fn specialize_property(
     receiver: Ty,
 ) -> PropertyInfo {
     let generic = property.getter.generic_sig.clone();
-    let mut binds = GSigBinds::new();
+    let mut binds = GSigBinds::default();
     if let Some(declared_receiver) = property.receiver {
         unify_ty_from_symbols(source, declared_receiver, receiver, &mut binds);
     }

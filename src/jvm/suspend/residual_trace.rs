@@ -1,6 +1,6 @@
 //! Suspend-flattener diagnostics for residual expression trees.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::{for_each_child, ExprId, IrFile};
 
@@ -45,5 +45,5 @@ pub(super) fn trace_residual_parents(ir: &IrFile, expression: ExprId) {
             }
         }
     }
-    walk(ir, expression, 0, &mut HashSet::new());
+    walk(ir, expression, 0, &mut HashSet::default());
 }

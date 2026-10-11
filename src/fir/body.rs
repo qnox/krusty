@@ -5,7 +5,7 @@ use super::local_delegated_properties::{
     FirLocalDelegateDispatchParameter, FirLocalDelegatePlan, LocalDelegateBinding,
     LocalDelegatedPropertyId,
 };
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 mod context_parameters;
 pub(super) mod value_parameters;
@@ -1873,11 +1873,11 @@ impl FirBody {
             vararg_parameter: None,
             source_lambda: None,
             direct_suspension: false,
-            debug_value_names: HashMap::new(),
-            destructuring_loop_containers: HashSet::new(),
+            debug_value_names: HashMap::default(),
+            destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
-            generated_class_provenance: HashMap::new(),
-            constant_reads: HashSet::new(),
+            generated_class_provenance: HashMap::default(),
+            constant_reads: HashSet::default(),
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
@@ -1901,7 +1901,7 @@ impl FirBody {
             local_value_count: 0,
             local_callable_count: 0,
             inline_nested_declaration_bodies: Vec::new(),
-            class_body_contexts: HashMap::new(),
+            class_body_contexts: HashMap::default(),
         }
     }
 
@@ -2236,7 +2236,7 @@ impl FirBody {
             }
         }
 
-        let mut shared = std::collections::HashSet::new();
+        let mut shared = crate::fx_hash::HashSet::default();
         shared.extend(
             self.statements
                 .iter()
@@ -2277,7 +2277,7 @@ impl FirBody {
     fn collect_shared_captures_targeting_ancestor(
         &self,
         ancestor_depth: u32,
-        shared: &mut std::collections::HashSet<LocalValueId>,
+        shared: &mut crate::fx_hash::HashSet<LocalValueId>,
     ) {
         shared.extend(self.captures.iter().filter_map(|capture| {
             (capture.enclosing_depth == ancestor_depth && capture.shared_cell)
@@ -2302,7 +2302,7 @@ impl FirBody {
     fn upgrade_captures_targeting_ancestor(
         &mut self,
         ancestor_depth: u32,
-        shared: &std::collections::HashSet<LocalValueId>,
+        shared: &crate::fx_hash::HashSet<LocalValueId>,
     ) {
         for capture in &mut self.captures {
             if capture.enclosing_depth == ancestor_depth
@@ -2456,7 +2456,7 @@ impl FirBody {
     }
 
     fn local_callable_capture_scope(&self) -> LocalCallableCaptureScope {
-        let mut scope = HashMap::new();
+        let mut scope = HashMap::default();
         for statement in &self.statements {
             let FirStatementKind::LocalFunction { callable, body, .. } = &statement.kind else {
                 continue;
@@ -2635,7 +2635,7 @@ impl FirBody {
 
     pub(crate) fn collect_inline_local_declarations(
         &self,
-        declarations: &mut std::collections::HashSet<DeclarationId>,
+        declarations: &mut crate::fx_hash::HashSet<DeclarationId>,
     ) {
         for statement in &self.statements {
             match &statement.kind {
@@ -2666,7 +2666,7 @@ impl FirBody {
 
     pub(crate) fn collect_referenced_module_callables(
         &self,
-        callables: &mut std::collections::HashSet<CallableId>,
+        callables: &mut crate::fx_hash::HashSet<CallableId>,
     ) {
         // A local delegated-property convention is a selected semantic call even though its use
         // is represented by `LocalDelegateAccess`, not by an expression-level `FirCall`. Retained

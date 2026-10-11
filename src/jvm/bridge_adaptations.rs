@@ -5,7 +5,7 @@
 //! plan, so the value-class pass records it here, keyed by the bridge's stable owner and ordinal,
 //! and JVM bridge emission consumes it. [`crate::ir::Bridge`] carries none of it.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::types::TypeName;
 

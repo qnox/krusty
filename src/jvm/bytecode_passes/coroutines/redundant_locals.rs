@@ -3,7 +3,8 @@
 //! `GETSTATIC kotlin/Unit.INSTANCE` whose only uses are a `pop` or a store into a slot no local
 //! variable names — so that such a `Unit` is never spilled.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use crate::fx_hash::HashSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::analysis::{
     analyze, is_meaningful, node_opcode, AnalyzerError, At, BasicInterpreter, BasicValue,

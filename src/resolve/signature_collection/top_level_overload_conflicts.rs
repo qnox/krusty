@@ -13,7 +13,7 @@ fn report_conflicting_top_level_overloads(
     pending: &HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
     reserved_message_bytes: usize,
     diags: &mut DiagSink,
-) -> std::collections::HashSet<TopLevelFunctionConflictKey> {
+) -> crate::fx_hash::HashSet<TopLevelFunctionConflictKey> {
     let conflicting_keys = groups
         .groups
         .iter()
@@ -54,7 +54,7 @@ fn report_conflicting_top_level_overloads(
             candidate.file != current.file || candidate.declaration != current.declaration
         });
         let mut displays = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut display_bytes = 0usize;
         for candidate in first_public
             .into_iter()

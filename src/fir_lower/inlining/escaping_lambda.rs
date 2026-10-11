@@ -7,7 +7,7 @@
 //! stays erased on the shared implementation. The declaration's implementation stays in place for
 //! the inline method's own fallback body.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrCheckedSubstitution, IrExpr};
 use crate::types::{ty_subst_keep_unbound, Ty};
@@ -26,8 +26,8 @@ pub(super) fn specialize(
     inline_callee: crate::fir::CallableId,
     inline_callee_source_name: &str,
 ) {
-    let mut replacements = HashMap::<u32, u32>::new();
-    let mut decisions = HashMap::<u32, bool>::new();
+    let mut replacements = HashMap::<u32, u32>::default();
+    let mut decisions = HashMap::<u32, bool>::default();
     let mut state = Specialization {
         replacements: &mut replacements,
         decisions: &mut decisions,
@@ -91,8 +91,8 @@ struct Specialization<'a> {
 
 fn retarget_lambdas(ir: &mut crate::ir::IrFile, root: ExprId, replacements: &HashMap<u32, u32>) {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
-    let mut plans = HashSet::new();
+    let mut seen = HashSet::default();
+    let mut plans = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -160,8 +160,8 @@ fn specialized_lambda_function(
         function,
         reified_bindings,
         state.decisions,
-        &mut HashSet::new(),
-        &mut HashSet::new(),
+        &mut HashSet::default(),
+        &mut HashSet::default(),
     );
     let captures_anonymous = function_mentions_anonymous_class(ir, function);
     if !uses_reified && !captures_anonymous {
@@ -337,7 +337,7 @@ fn dag_uses_binding(
     plans: &mut HashSet<u32>,
 ) -> bool {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -397,8 +397,8 @@ fn remap_implementation_provenance(
     replacements: &HashMap<u32, u32>,
 ) {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
-    let mut plans = HashSet::new();
+    let mut seen = HashSet::default();
+    let mut plans = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -469,8 +469,8 @@ fn remap_provenance(
 
 fn lambda_implementations(ir: &crate::ir::IrFile, root: ExprId) -> Vec<(ExprId, u32)> {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
-    let mut plans = HashSet::new();
+    let mut seen = HashSet::default();
+    let mut plans = HashSet::default();
     let mut implementations = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -490,11 +490,11 @@ fn plan_lambda_implementations(
     roots: impl IntoIterator<Item = ExprId>,
 ) -> Vec<(ExprId, u32)> {
     let mut pending = Vec::new();
-    let mut plans = HashSet::new();
+    let mut plans = HashSet::default();
     for root in roots {
         enqueue_local_delegate_plan_bodies(ir, root, &mut pending, &mut plans);
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut implementations = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {

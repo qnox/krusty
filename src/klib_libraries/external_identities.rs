@@ -1,7 +1,7 @@
 //! Provider identities of published declarations, interned by their exact `IdSignature`.
 
+use crate::fx_hash::HashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use super::declaration_signatures::{SignedFunction, SignedProperty};
 use crate::fir::{ExternalCallableId, ExternalPropertyId, ResolvedParameterIdentity};

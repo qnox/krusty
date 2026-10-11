@@ -19,7 +19,7 @@
 //! ordinary class, interface or `object`, a supertype declared in another file, and an override
 //! whose signature needs a bridge.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::backend::class_tables::{
     self, AnyMember, ClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
@@ -423,7 +423,7 @@ fn slot_types(
     let mut types: Vec<Vec<Option<u32>>> = vec![Vec::new(); ir.classes.len()];
     for &id in &tables.order {
         let table = tables.table(id);
-        let mut keys: HashMap<u32, &SlotKey> = HashMap::new();
+        let mut keys: HashMap<u32, &SlotKey> = HashMap::default();
         for (key, slot) in &table.slots {
             keys.entry(*slot)
                 .and_modify(|known| {

@@ -297,10 +297,10 @@ pub struct ClassTail<'a> {
     pub primary_ctor_annotations: &'a crate::metadata::MetadataAnnotations,
     /// The file's local classifiers (declared in executable code or nested in one). The string
     /// table names each by its raw internal name, marked local, wherever it appears.
-    pub local_classifiers: &'a std::collections::HashSet<TypeName>,
+    pub local_classifiers: &'a crate::fx_hash::HashSet<TypeName>,
     /// The local classifiers whose ids keep their `pkg/Outer.Inner` spelling (enum entry bodies),
     /// together with the classes nested in them.
-    pub enum_entry_bodies: &'a std::collections::HashSet<TypeName>,
+    pub enum_entry_bodies: &'a crate::fx_hash::HashSet<TypeName>,
     /// Whether the class is an `enum class`, whose implicit `Enum<E>` supertype metadata omits.
     pub is_enum: bool,
     /// kotlinc's `LanguageFeature.AnnotationsInMetadata` (since 2.4): `false` keeps every
@@ -310,7 +310,7 @@ pub struct ClassTail<'a> {
     pub annotations_in_metadata: bool,
 }
 
-static NO_LOCAL_CLASSIFIERS: std::sync::LazyLock<std::collections::HashSet<TypeName>> =
+static NO_LOCAL_CLASSIFIERS: std::sync::LazyLock<crate::fx_hash::HashSet<TypeName>> =
     std::sync::LazyLock::new(Default::default);
 
 impl Default for ClassTail<'_> {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{Expr, ExprId, File, Stmt, StmtId};
 use crate::resolve::{

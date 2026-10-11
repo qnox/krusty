@@ -1,6 +1,6 @@
 //! The merged declaration inventory of a set of KLIB libraries.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::classifier_signatures::{sign_package_classes, SignedClassifier};
 use super::declaration_signatures::{
@@ -40,19 +40,19 @@ impl PackageInventory {
         packages: Vec<(Vec<String>, KotlinPackage, bool)>,
     ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
-            functions: HashMap::new(),
-            properties: HashMap::new(),
-            classifiers: HashMap::new(),
-            type_aliases: HashMap::new(),
-            companion_functions: HashMap::new(),
-            companion_properties: HashMap::new(),
-            namespaces: HashSet::new(),
+            functions: HashMap::default(),
+            properties: HashMap::default(),
+            classifiers: HashMap::default(),
+            type_aliases: HashMap::default(),
+            companion_functions: HashMap::default(),
+            companion_properties: HashMap::default(),
+            namespaces: HashSet::default(),
         };
         // A public IdSignature is the serialized declaration identity used to join metadata to
         // one IR body. Split package fragments, or repeated libraries in the input graph, may
         // publish the same declaration more than once; they must not become duplicate overload
         // candidates carrying one ExternalCallableId.
-        let mut declared_signatures = HashSet::new();
+        let mut declared_signatures = HashSet::default();
         for (segments, package, compiler_builtin_owner) in packages {
             let identity = inventory.declare_package(&segments);
             for alias in package

@@ -20,7 +20,7 @@ pub(super) fn demanded_source_result(
     explicit_type_arguments: &[Ty],
     expected: Option<Ty>,
 ) -> Ty {
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     if let Some(generic) = callable.generic_sig.as_ref() {
         bindings.extend(
             generic
@@ -76,7 +76,7 @@ pub(super) fn demanded_source_result(
             source,
             generic,
             explicit_type_arguments,
-            &GSigBinds::new(),
+            &GSigBinds::default(),
             &mut bindings,
             inferred.bindings,
         );

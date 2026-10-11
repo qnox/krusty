@@ -17,7 +17,7 @@
 
 use super::call_constraints::{GenericBoundViolation, InferredCallBindings};
 use super::{GenericSig, Ty};
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 /// The identity translation shared by every constraint phase of one call. Declaration formals
 /// that are also visible in the caller receive call-owned identities; all other formals retain
@@ -234,7 +234,7 @@ mod tests {
 
         assert_eq!(
             inferred.bindings,
-            GSigBinds::from([("demo:Cell:E".to_string(), enclosing)])
+            GSigBinds::from_iter([("demo:Cell:E".to_string(), enclosing)])
         );
         assert_eq!(
             inferred.lower_inputs.get("demo:Cell:E"),
@@ -254,7 +254,7 @@ mod tests {
             .is_empty());
         assert_eq!(
             solve(&signature, Ty::String, false).bindings,
-            GSigBinds::from([("demo:Cell:E".to_string(), Ty::String)])
+            GSigBinds::from_iter([("demo:Cell:E".to_string(), Ty::String)])
         );
     }
 
@@ -291,7 +291,7 @@ mod tests {
         ));
         assert_eq!(
             inferred.bindings,
-            GSigBinds::from([
+            GSigBinds::from_iter([
                 ("demo:Couple:A".to_string(), first),
                 ("demo:Couple:B".to_string(), Ty::String),
             ])

@@ -8,9 +8,9 @@
 //! `val tmp: Money` reads as its carrier and hides the box a generic slot needs.
 
 use super::collect_reachable;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::types::Ty;
-use std::collections::{HashMap, HashSet};
 
 pub(super) type SlotTypes = HashMap<u32, Ty>;
 
@@ -25,7 +25,7 @@ pub(super) fn slot_map(
         .enumerate()
         .map(|(index, ty)| (1 + index as u32, *ty))
         .collect();
-    let mut reach = HashSet::new();
+    let mut reach = HashSet::default();
     for root in roots {
         collect_reachable(exprs, root, &mut reach);
     }

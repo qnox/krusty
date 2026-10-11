@@ -74,7 +74,7 @@ type OverrideSlot = ((String, Vec<Ty>), Vec<CollectedDeclaration>);
 struct SamCaptureSpecialization<'a> {
     logical: &'a GSigBinds,
     capture_read: &'a GSigBinds,
-    occurrence_bounds: &'a std::collections::HashMap<String, Ty>,
+    occurrence_bounds: &'a crate::fx_hash::HashMap<String, Ty>,
 }
 
 pub(crate) fn semantic_sam_signature(
@@ -391,7 +391,7 @@ fn contravariant_capture_read(mut argument: Ty) -> Ty {
 
 fn sam_substitute(
     declared: Ty,
-    occurrence_bounds: &std::collections::HashMap<String, Ty>,
+    occurrence_bounds: &crate::fx_hash::HashMap<String, Ty>,
     bindings: &GSigBinds,
 ) -> Ty {
     let platform_inner = match declared {

@@ -13,10 +13,7 @@ use super::ClassWriter;
 /// This is deliberately not a JVM descriptor parser. It preserves the literal predicate used by
 /// `InnerClasses` retention, including runs that begin at an `L` inside another name and text that
 /// is not itself a valid descriptor.
-pub(super) fn record_mentioned_names(
-    value: &str,
-    names: &mut crate::name_tree::FxHashMap<String, ()>,
-) {
+pub(super) fn record_mentioned_names(value: &str, names: &mut crate::fx_hash::HashMap<String, ()>) {
     for (index, byte) in value.as_bytes().iter().enumerate() {
         if *byte != b'L' {
             continue;
@@ -144,7 +141,7 @@ pub(super) type MentionSizes = (usize, usize, usize, Option<u16>, usize);
 pub(super) struct DescriptorMentionCache {
     sizes: MentionSizes,
     /// Every name the retention predicate treats as mentioned.
-    names: crate::name_tree::FxHashMap<String, ()>,
+    names: crate::fx_hash::HashMap<String, ()>,
     /// The classes the descriptors and signatures name, sorted, for the `InnerClasses` resolver.
     classes: Vec<String>,
 }
@@ -223,7 +220,7 @@ impl ClassWriter {
                 return read(cached);
             }
         }
-        let mut names = crate::name_tree::FxHashMap::default();
+        let mut names = crate::fx_hash::HashMap::default();
         let mut classes = std::collections::BTreeSet::new();
         for index in self
             .fields
@@ -279,7 +276,7 @@ mod mentioned_name_tests {
     use super::{record_mentioned_names, record_signature_classes};
 
     fn mentioned(values: &[&str]) -> Vec<String> {
-        let mut names = crate::name_tree::FxHashMap::default();
+        let mut names = crate::fx_hash::HashMap::default();
         for value in values {
             record_mentioned_names(value, &mut names);
         }

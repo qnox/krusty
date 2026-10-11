@@ -38,7 +38,7 @@ pub(super) fn record(
     let omitted = omitted
         .iter()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let edges = match ir.expr(call) {
         IrExpr::Call { args, .. } => (0..declaration_parameters.len() as u32)
             .filter(|parameter| !omitted.contains(parameter))

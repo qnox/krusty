@@ -5,7 +5,7 @@
 //! so an origin cannot name the property. The checker allocates one identity from the owning
 //! body's declaration when it checks the property, and every convention reference copies it.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::{
     BodyOwnerId, DelegateStorage, FirCapturedReceiver, FirDelegateCall, FirExprId, FirLiftingSite,

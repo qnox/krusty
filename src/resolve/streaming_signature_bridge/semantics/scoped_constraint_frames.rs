@@ -71,7 +71,7 @@ impl ProductionSignatureSemantics<'_> {
             .borrow_mut()
             .entry(declaration)
             .or_default()
-            .push(crate::symbol_resolver::GSigBinds::new());
+            .push(crate::symbol_resolver::GSigBinds::default());
     }
 
     pub(super) fn pop_scoped_constraint_frame(&self, declaration: crate::fir::DeclarationId) {

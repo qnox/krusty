@@ -11,7 +11,7 @@
 //! Like kotlinc, the pass keeps every cast of a method with a reified-operation marker, whose
 //! casts the inliner still rewrites, and every cast to a multi-dimensional array type.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::analysis::{
     analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, Interpreter,
@@ -115,7 +115,7 @@ impl Interpreter for CastInterpreter {
 fn aload_adjustments(method: &MethodNode) -> Option<HashMap<usize, BasicValue>> {
     let live = dead_code::live_instructions(method, false)?;
     let positions = LabelPositions::of(method);
-    let mut adjusted = HashMap::new();
+    let mut adjusted = HashMap::default();
     for local in &method.local_variables {
         let range = positions.at(local.start)..positions.at(local.end);
         for (at, (node, live)) in method.nodes.iter().zip(&live).enumerate() {

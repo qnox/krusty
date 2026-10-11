@@ -1307,7 +1307,7 @@ impl BodyLowering<'_> {
     fn module_substitution_bindings(
         &self,
         substitutions: &[FirTypeSubstitution],
-    ) -> std::collections::HashMap<String, crate::types::Ty> {
+    ) -> crate::fx_hash::HashMap<String, crate::types::Ty> {
         substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {

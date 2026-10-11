@@ -1542,7 +1542,7 @@ impl BodyLowering<'_> {
                     .map(|name| (name.to_owned(), substitution.value.get())),
                 crate::fir::FirTypeParameterRef::External { .. } => None,
             })
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fx_hash::HashMap<_, _>>();
 
         let dispatch_receiver = match dispatch_receiver {
             Some(receiver) if direct => {
@@ -2246,7 +2246,7 @@ pub(super) fn rehome_inline_body_values(
         formal_slots: &[u32],
         local_base: u32,
         local_count: &mut u32,
-        visited: &mut std::collections::HashSet<ExprId>,
+        visited: &mut crate::fx_hash::HashSet<ExprId>,
     ) -> Option<()> {
         if !visited.insert(expression) {
             return Some(());
@@ -2298,7 +2298,7 @@ pub(super) fn rehome_inline_body_values(
         formal_slots,
         local_base,
         &mut local_count,
-        &mut std::collections::HashSet::new(),
+        &mut crate::fx_hash::HashSet::default(),
     )?;
     Some(local_count)
 }

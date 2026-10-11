@@ -1,9 +1,9 @@
 //! Source and resume-line ownership for JVM coroutine `DebugMetadata`.
 
 use super::{collect_suspension_points, is_suspension_point};
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
 use crate::libraries::InlineKind;
-use std::collections::{HashMap, HashSet};
 
 /// Capture each suspension point's source line and the line where execution resumes.
 pub(super) fn capture_suspension_lines(
@@ -12,7 +12,7 @@ pub(super) fn capture_suspension_lines(
     suspend_functions: &HashSet<u32>,
     final_resume_line: Option<u32>,
 ) -> HashMap<ExprId, (u32, u32)> {
-    let mut result = HashMap::new();
+    let mut result = HashMap::default();
     collect_suspension_lines(ir, body, suspend_functions, final_resume_line, &mut result);
     // An expression-bodied suspension consumed immediately by an inline lambda call resumes in
     // the inlined SMAP region rather than on the suspension's own source line. A concrete successor
@@ -61,7 +61,7 @@ fn execution_start_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
 
 fn nearest_expression_source_line(ir: &IrFile, root: ExprId) -> Option<u32> {
     let mut stack = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut best = None;
     while let Some(expression) = stack.pop() {
         if !seen.insert(expression) {
@@ -259,7 +259,7 @@ fn collect_suspension_lines(
             collect_suspension_lines(ir, *value, suspend_functions, Some(u32::MAX), out);
         }
         IrExpr::Return(Some(value)) => {
-            let mut calls = HashSet::new();
+            let mut calls = HashSet::default();
             collect_suspension_points(ir, *value, suspend_functions, &mut calls);
             for call in calls {
                 if resumes_into_inline_call(ir, *value, call) {

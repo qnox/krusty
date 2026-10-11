@@ -235,8 +235,8 @@ impl ProtectedMemberAccessBridge {
 }
 
 pub(super) struct MemberAccessBridges {
-    pub private: std::collections::HashSet<u32>,
-    pub protected: std::collections::HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
+    pub private: crate::fx_hash::HashSet<u32>,
+    pub protected: crate::fx_hash::HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
 }
 
 fn protected_bridge_owner(
@@ -278,7 +278,7 @@ fn enclosing_protected_subclass(
     target: crate::types::TypeName,
 ) -> Option<crate::types::TypeName> {
     let mut pending = std::collections::VecDeque::from([caller]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     seen.insert(caller);
     while let Some(current) = pending.pop_front() {
         for next in enclosing_classes(ir, current) {
@@ -337,7 +337,7 @@ pub(super) fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<c
 
 fn extends_target(ir: &IrFile, class: crate::ir::ClassId, target: crate::types::TypeName) -> bool {
     let mut current = class;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while seen.insert(current) {
         let Some(declared) = ir.classes.get(current as usize) else {
             return false;
@@ -395,13 +395,13 @@ pub(super) fn cross_owner_member_calls(
     private_interface_bodies_are_members: bool,
 ) -> MemberAccessBridges {
     let exporting = static_accessors::inline_functions_exporting_private_access(ir);
-    let mut private = std::collections::HashSet::new();
-    let mut protected = std::collections::HashMap::new();
+    let mut private = crate::fx_hash::HashSet::default();
+    let mut protected = crate::fx_hash::HashMap::default();
     let mut scan = |owner: &str,
                     caller: Option<crate::ir::ClassId>,
                     roots: Vec<crate::ir::ExprId>,
                     export_private: bool| {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut stack = roots;
         while let Some(expression) = stack.pop() {
             if !seen.insert(expression) {

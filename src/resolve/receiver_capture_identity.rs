@@ -6,8 +6,8 @@
 //! label must not. A lambda role uses its source span rather than an arena-local AST id, so retained
 //! syntax can be reparsed without changing the identity. This table assigns one id per role.
 
+use crate::fx_hash::HashMap;
 use crate::{diag::Span, types::TypeName};
-use std::collections::HashMap;
 pub(super) type ReceiverLabel = (
     String,
     crate::types::Ty,

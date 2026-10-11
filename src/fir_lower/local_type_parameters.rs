@@ -17,9 +17,9 @@ use crate::fir::{
     BodyLocalCallableDeclarationId, FirBody, FirExprId, FirExprKind, FirStatementId,
     FirStatementKind,
 };
+use crate::fx_hash::HashMap;
 use crate::ir::{IrGenericSig, IrTypeParameter};
 use crate::types::Ty;
-use std::collections::HashMap;
 
 /// The type parameters `body` captures, each as the type that names it, in the order its closure
 /// first sees them. `published` gives the closure of a local function declared outside `body`.
@@ -27,7 +27,7 @@ pub(super) fn captured_type_parameters(
     body: &FirBody,
     published: &dyn Fn(BodyLocalCallableDeclarationId) -> Option<Box<[Ty]>>,
 ) -> Box<[Ty]> {
-    collect_closure(body, published, &mut HashMap::new()).into_boxed_slice()
+    collect_closure(body, published, &mut HashMap::default()).into_boxed_slice()
 }
 
 fn collect_closure(

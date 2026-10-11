@@ -238,19 +238,19 @@ impl StreamedPassState {
 /// until those defaults become checked FIR; compact-header exclusion keeps it out of signatures.
 struct ActualizedHeaders {
     /// Top-level `expect` declarations an `actual` replaced. Their subtrees are excluded.
-    matched: std::collections::HashSet<crate::fir::DeclarationId>,
+    matched: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// The `actual` declarations that actualized something.
-    targets: std::collections::HashSet<crate::fir::DeclarationId>,
+    targets: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// Expect-owned defaults, as stable provider→target work.
     defaults: Vec<crate::fir::DefaultArgumentProvider>,
     /// Implementations that did not write `actual`.
     unmarked: Vec<crate::fir::DeclarationId>,
     /// `expect` declarations an implementation was written for and none matched.
-    incompatible: std::collections::HashSet<crate::fir::DeclarationId>,
+    incompatible: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// Matched classifiers and the `expect` members they never implemented.
     unactualized_members: Vec<crate::fir::UnactualizedMembers>,
     /// `actual` members rejected only for spelling their type parameters differently.
-    incompatible_members: std::collections::HashSet<crate::fir::DeclarationId>,
+    incompatible_members: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 }
 
 fn actualize_headers_and_collect_inherited_defaults(
@@ -372,8 +372,8 @@ fn actualize_headers_and_collect_inherited_defaults(
 #[allow(clippy::too_many_arguments)]
 fn report_unmatched_expect_roots(
     headers: &crate::fir::StreamedHeaderModule,
-    matched: &std::collections::HashSet<crate::fir::DeclarationId>,
-    incompatible: &std::collections::HashSet<crate::fir::DeclarationId>,
+    matched: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    incompatible: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &FrontendSymbols,
     module_name: &str,
     silent: bool,
@@ -458,7 +458,7 @@ fn signature_default_work(
     let inherited_declarations = inherited
         .iter()
         .flat_map(|work| [work.provider, work.target])
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let mut work = headers
         .stubs
         .iter()
@@ -526,7 +526,7 @@ fn inherit_override_default_work(
         .cloned()
         .collect::<Vec<_>>();
     loop {
-        let mut providers = std::collections::HashMap::<_, Vec<_>>::new();
+        let mut providers = crate::fx_hash::HashMap::<_, Vec<_>>::default();
         for item in work.iter().cloned() {
             providers.entry(item.target).or_default().push(item);
         }
@@ -1178,7 +1178,7 @@ where
     let expected_members = if multiplatform {
         no_expect_for_actual::expected_members(&files, &pass1_headers)
     } else {
-        std::collections::HashMap::new()
+        crate::fx_hash::HashMap::default()
     };
     let source_classifiers = pass1_headers.source_classifier_names();
     let platform_sources = sources
@@ -1305,11 +1305,11 @@ where
     } else {
         (
             signature_default_work(&pass1_headers, &[]),
-            std::collections::HashSet::new(),
-            std::collections::HashSet::new(),
-            std::collections::HashSet::new(),
+            crate::fx_hash::HashSet::default(),
+            crate::fx_hash::HashSet::default(),
+            crate::fx_hash::HashSet::default(),
             Vec::new(),
-            std::collections::HashSet::new(),
+            crate::fx_hash::HashSet::default(),
         )
     };
     let platform = if inferred_count < files.len() {
@@ -1634,7 +1634,7 @@ fn check_source_set_skipping_with_index(
     files: &[File],
     symbols: &mut FrontendSymbols,
     index: &crate::fir::ResolvedModuleIndex,
-    anonymous_captures: &[std::collections::HashMap<
+    anonymous_captures: &[crate::fx_hash::HashMap<
         crate::ast::DeclId,
         Vec<crate::resolve::AnonymousObjectCapture>,
     >],
@@ -1722,7 +1722,7 @@ pub fn record_local_class_name_provenance(file: &mut crate::ast::File) {
 /// local-class names and its lifted local-callable names each number one sequence per file.
 #[derive(Default)]
 struct LocalNameCounters {
-    classes: std::collections::HashMap<Vec<String>, u32>,
+    classes: crate::fx_hash::HashMap<Vec<String>, u32>,
     lifted: local_function_names::LiftingCounters,
 }
 

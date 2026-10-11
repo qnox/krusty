@@ -2,7 +2,7 @@
 //! transformation attaches to it (`SuspensionPoint` and `collectSuspensionPoints` in kotlinc's
 //! `CoroutineTransformerMethodVisitor.kt`).
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use super::super::analysis::ControlFlowGraph;
 use super::super::insn_list::{EditableMethod, InsnList, NodeId};
@@ -107,7 +107,7 @@ pub(crate) fn collect_suspension_points(method: &mut EditableMethod) -> Vec<Susp
         if !is_before(start) {
             continue;
         }
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         let mut ends = Vec::new();
         if collect_ends(
             start,

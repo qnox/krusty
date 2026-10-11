@@ -837,17 +837,17 @@ pub(super) fn realize(
                 .copied()
                 .map(|function| (function, class.fq_name_id()))
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     // An adapter several reference nodes share (an inline splice copies the node, not its
     // adapter) stays one static method every carrier calls; only a sole reference owns it.
-    let mut adapter_uses = std::collections::HashMap::<crate::ir::FunId, usize>::new();
+    let mut adapter_uses = crate::fx_hash::HashMap::<crate::ir::FunId, usize>::default();
     for expression in &ir.exprs {
         if let IrExpr::CallableReference(reference) = expression {
             *adapter_uses.entry(reference.adapter).or_default() += 1;
         }
     }
     let expression_count = ir.exprs.len();
-    let mut carrier_adapters = std::collections::HashSet::new();
+    let mut carrier_adapters = crate::fx_hash::HashSet::default();
     for raw in 0..expression_count {
         let adapter = match &ir.exprs[raw] {
             IrExpr::CallableReference(reference) => reference.adapter,

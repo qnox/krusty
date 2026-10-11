@@ -55,7 +55,7 @@ fn declared_parameter_index(
 pub(super) fn predeclare_interface_delegation_fields(
     index: &ResolvedModuleIndex,
     source: crate::fir::SourceFileId,
-    inline_payload_declarations: &std::collections::HashSet<DeclarationId>,
+    inline_payload_declarations: &crate::fx_hash::HashSet<DeclarationId>,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     for declaration in super::declarations_for_lowering(index, source, inline_payload_declarations)

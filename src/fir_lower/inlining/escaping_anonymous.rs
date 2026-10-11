@@ -12,7 +12,7 @@
 //! inlined into the copy's methods and dropped from its constructor. A lambda that itself captures
 //! values stays a constructor argument of the copy.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, FunId, IrExpr};
 use crate::types::{ty_subst_keep_unbound, Ty, TypeName};
@@ -46,9 +46,9 @@ pub(super) fn specialize(
         reified_bindings,
         site,
     };
-    let mut seen = HashSet::new();
-    let mut renames = HashMap::new();
-    let mut detached_impls = HashSet::new();
+    let mut seen = HashSet::default();
+    let mut renames = HashMap::default();
+    let mut detached_impls = HashSet::default();
     let roots = roots.into_iter().collect::<Vec<_>>();
     let owned = roots.iter().copied().collect::<HashSet<_>>();
     for root in &roots {
@@ -171,7 +171,7 @@ fn remap_reachable_implementations(
 
 fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId, owned: &HashSet<ExprId>) {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut uses = Vec::new();
     while let Some(expression) = pending.pop() {
         if !owned.contains(&expression) || !seen.insert(expression) {
@@ -322,8 +322,12 @@ fn specialized_class(
     if !anonymous {
         return Ok(None);
     }
-    let uses_reified =
-        class_uses_binding(ir, source, expansion.reified_bindings, &mut HashSet::new());
+    let uses_reified = class_uses_binding(
+        ir,
+        source,
+        expansion.reified_bindings,
+        &mut HashSet::default(),
+    );
     let lambdas = inline_lambda_arguments(ir, source, order);
     if !uses_reified && lambdas.is_empty() {
         return Ok(None);
@@ -368,7 +372,7 @@ fn specialized_class(
             ir,
             method,
             shape,
-            &HashMap::new(),
+            &HashMap::default(),
         ));
     }
     let cloned = source_methods
@@ -473,7 +477,7 @@ fn specialized_class(
 
 fn expression_ids(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -652,7 +656,7 @@ fn publish_property_members(
 pub(super) fn publish_accessors(
     ir: &mut crate::ir::IrFile,
 ) -> Result<(), super::super::FirLoweringFailure> {
-    let mut done = HashSet::<ClassId>::new();
+    let mut done = HashSet::<ClassId>::default();
     loop {
         let mut pending = ir
             .specialized_anonymous_classes
@@ -866,7 +870,7 @@ fn specialization_descends_from(
     ancestor: ClassId,
     construction: ExprId,
 ) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while seen.insert(class) {
         let Some(specialization) = ir.specialized_anonymous_classes.get(&class) else {
             return false;
@@ -900,8 +904,8 @@ fn retarget_copied_property_calls(
         .collect::<Vec<_>>();
     roots.extend(ir.classes[copy_id as usize].init_body);
     let mut pending = roots;
-    let mut seen = HashSet::new();
-    let mut seen_functions = HashSet::new();
+    let mut seen = HashSet::default();
+    let mut seen_functions = HashSet::default();
     let mut operations = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -1166,7 +1170,7 @@ fn cloned_lineage_method(
 ) -> Result<FunId, super::super::FirLoweringFailure> {
     let mut current = source;
     let mut steps = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while current != declaring_class {
         if !seen.insert(current) {
             return Err(malformed(source_name));
@@ -1190,7 +1194,7 @@ fn cloned_lineage_method(
 fn specialization_lineage(ir: &crate::ir::IrFile, from: ClassId) -> Vec<(ClassId, TypeName)> {
     let mut lineage = Vec::new();
     let mut current = from;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while seen.insert(current) {
         let Some(class) = ir.classes.get(current as usize) else {
             break;
@@ -1232,7 +1236,7 @@ fn clone_member_function(
     // bridge where kotlinc keeps the erased accessor.
     shape.dispatch_receiver = Some(dispatch_receiver);
     Ok((
-        crate::ir::clone_class_method(ir, method, shape, &HashMap::new()),
+        crate::ir::clone_class_method(ir, method, shape, &HashMap::default()),
         copied,
     ))
 }
@@ -1557,7 +1561,7 @@ fn consume_trivially_spliceable_lambdas(
 
 fn body_uses_values(ir: &crate::ir::IrFile, root: ExprId) -> bool {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -1589,10 +1593,10 @@ fn inline_lambda_into_field_invokes(
     roots.extend(ir.classes[class as usize].init_body);
     roots.extend(pending_property_roots.iter().copied());
     let mut pending = roots;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut invocations = Vec::new();
-    let mut field_reads = HashSet::new();
-    let mut invoked_reads = HashSet::new();
+    let mut field_reads = HashSet::default();
+    let mut invoked_reads = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -1667,7 +1671,7 @@ fn capture_field_remains(
     roots.extend(ir.classes[class as usize].init_body);
     roots.extend(pending_property_roots.iter().copied());
     let mut pending = roots;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -1778,7 +1782,7 @@ fn shift_capture_reads(
     roots.extend(ir.classes[class as usize].init_body);
     roots.extend(pending_property_roots.iter().copied());
     let mut pending = roots;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -1801,7 +1805,7 @@ fn shift_capture_reads(
 }
 
 fn shift_capture_map<V: Clone>(
-    map: &mut std::collections::HashMap<(ClassId, u32), V>,
+    map: &mut crate::fx_hash::HashMap<(ClassId, u32), V>,
     class: ClassId,
     removed: u32,
 ) {
@@ -1872,7 +1876,7 @@ fn dag_uses_binding(
     classes: &mut HashSet<ClassId>,
 ) -> bool {
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;

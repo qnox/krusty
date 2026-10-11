@@ -9,7 +9,7 @@ use crate::ast::{ClassKind, File};
 /// visible, we move a supertype that names a concrete file class into `base_class` for such classes.
 pub(super) fn fixup_parenless_base_classes(file: &mut File) {
     use crate::ast::{CtorDelegation, Decl};
-    let base_candidates: std::collections::HashSet<String> = file
+    let base_candidates: crate::fx_hash::HashSet<String> = file
         .decl_arena
         .iter()
         .filter_map(|d| match d {

@@ -2,9 +2,9 @@
 //! declared slot, field and return types the frontend fixed. Boxing a value class picks
 //! `box-impl` or its null-guarded form from these facts.
 
+use crate::fx_hash::HashMap;
 use crate::ir::{Callee, ExprId, IrExpr};
 use crate::types::Ty;
-use std::collections::HashMap;
 
 /// Whether the value the expr at `id` produces is statically NON-NULL — so boxing it (`box-impl`) can't
 /// hit the value class's non-null ctor check. A construction/`!!`/non-nullable slot or return qualifies.

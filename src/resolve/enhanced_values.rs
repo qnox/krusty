@@ -16,9 +16,9 @@
 
 use super::{Checker, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor};
 use crate::ast::{Expr, ExprId};
+use crate::fx_hash::HashMap;
 use crate::libraries::{GenericSig, ResultEnhancement, TypeEnhancement};
 use crate::types::{Ty, TypeName};
-use std::collections::HashMap;
 
 /// The checker's record of marked values that a later check reads back through a local.
 #[derive(Default)]
@@ -69,7 +69,7 @@ impl Checker<'_> {
 
     /// The calls whose value is itself marked, for checks that read a branch's value after
     /// checking.
-    pub(super) fn enhanced_value_heads(&self) -> std::collections::HashSet<ExprId> {
+    pub(super) fn enhanced_value_heads(&self) -> crate::fx_hash::HashSet<ExprId> {
         self.resolved_calls
             .keys()
             .copied()
@@ -126,7 +126,7 @@ impl Checker<'_> {
                     return TypeEnhancement::NONE;
                 };
                 let formals = classifier.type_params();
-                let mut bindings = HashMap::new();
+                let mut bindings = HashMap::default();
                 bind_type_parameters(
                     self,
                     formals,
@@ -155,7 +155,7 @@ impl Checker<'_> {
         let Some(arguments) = self.resolved_call_arg_slots.get(&e) else {
             return TypeEnhancement::NONE;
         };
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         bind_callable_parameters(self, signature, None, arguments, &mut bindings);
         TypeEnhancement::NONE.substitute(signature.ret, &|name| bindings.get(name).cloned())
     }
@@ -207,7 +207,7 @@ impl Checker<'_> {
         };
         let (enhanced, head) = enhanced;
         let marks = enhanced.marks.with_head(head);
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         // A specialized member's result no longer names its classifier's type parameters; the
         // result its declaring classifier states does.
         let declared = match (&enhanced.declared, &receiver) {
@@ -352,7 +352,7 @@ fn bind_type_parameters(
     if formals.is_empty() {
         return;
     }
-    let mut constraints: HashMap<String, Vec<TypeEnhancement>> = HashMap::new();
+    let mut constraints: HashMap<String, Vec<TypeEnhancement>> = HashMap::default();
     if let Some((declared, (actual, marks))) = receiver {
         constrain(checker, formals, declared, *actual, marks, &mut constraints);
     }

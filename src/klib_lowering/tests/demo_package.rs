@@ -3,7 +3,7 @@
 //! for them, with a tree builder for those bodies and the checked FIR lowering of equivalent
 //! source to compare with.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::super::*;
 use super::{
@@ -84,7 +84,7 @@ impl T {
     }
 
     pub(super) fn semantic(self) -> Ty {
-        semantic_ty(&self.kotlin(), &HashMap::new())
+        semantic_ty(&self.kotlin(), &HashMap::default())
     }
 
     pub(super) fn klib(self) -> KlibIrType {

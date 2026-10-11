@@ -5,7 +5,8 @@
 //! declaration identity. The resulting plans remain backend facts; common IR never carries owners,
 //! descriptors, classfile signatures, or runtime type checks.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::fx_hash::{HashMap, HashSet};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::ir::{IrClass, IrFile};
@@ -153,7 +154,7 @@ fn synthesize(
     }
 
     let mut found = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for node in java_superclass_chain(classpath, start) {
         for method in &node.info.methods {
             if !is_instance_api(method) {
@@ -224,7 +225,7 @@ fn direct_supertype(class: &IrClass) -> Option<Ty> {
 /// reconstructed here.
 fn applied_collection_face(classpath: &Classpath, start: Ty) -> Option<Ty> {
     let mut pending = VecDeque::from([start]);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(applied) = pending.pop_front() {
         let owner = applied.non_null().obj_internal()?;
         let jvm_owner = crate::jvm::jvm_class_map::to_jvm_type_name(owner);
@@ -306,8 +307,8 @@ fn applied_supertypes(info: &ClassInfo, applied: Ty) -> Vec<Ty> {
 fn builtin_bridge_members(classpath: &Classpath, start: Ty) -> Vec<BridgeMember> {
     let mut members = Vec::new();
     let mut pending = VecDeque::from([start]);
-    let mut seen_classes = HashSet::new();
-    let mut seen_members = HashSet::new();
+    let mut seen_classes = HashSet::default();
+    let mut seen_members = HashSet::default();
     while let Some(applied) = pending.pop_front() {
         let Some(owner) = applied.non_null().obj_internal() else {
             continue;

@@ -699,7 +699,7 @@ pub(super) fn define_class_functions(
         if let Some(constructor) = form.constructor {
             let mut parameters = vec![Ty::Obj(class.fq_name, &[])];
             parameters.extend(class.ctor_args.iter().map(|arg| arg.ty));
-            let mut declared = std::collections::HashMap::new();
+            let mut declared = crate::fx_hash::HashMap::default();
             for &root in class
                 .super_arg_prelude
                 .iter()
@@ -718,7 +718,7 @@ pub(super) fn define_class_functions(
             let mut parameters = vec![Ty::Obj(class.fq_name, &[])];
             parameters.extend(secondary.prefix_params.iter().copied());
             parameters.extend(secondary.params.iter().copied());
-            let mut declared = std::collections::HashMap::new();
+            let mut declared = crate::fx_hash::HashMap::default();
             for &root in secondary
                 .delegate_prelude
                 .iter()
@@ -747,7 +747,7 @@ pub(super) fn define_class_functions(
                 module,
                 runtime,
                 &[],
-                std::collections::HashMap::new(),
+                crate::fx_hash::HashMap::default(),
                 Ty::Unit,
             );
             body.code

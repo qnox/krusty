@@ -5,7 +5,7 @@
 //! `IrFile::intrinsic_suspension_points`. Lambda bodies are never part of the enclosing body's
 //! suspension analysis: they run in their own function.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
 use crate::types::Ty;

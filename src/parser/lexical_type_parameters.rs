@@ -26,7 +26,7 @@ impl LexicalTypeParameters {
     }
 
     pub(super) fn names(&self) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut visible = self
             .names
             .iter()

@@ -339,7 +339,7 @@ pub fn lower_analyzed_to_common_ir(
 #[derive(Debug)]
 struct BodyCheckGroup {
     root: crate::fir::DeclarationId,
-    bodies: std::collections::HashSet<crate::fir::DeclarationId>,
+    bodies: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     work: Vec<crate::fir::BodyWorkItem>,
     /// Local and anonymous classifiers declared inside this group's bodies. Checking those bodies
     /// checks them, so their declaration metadata is handed off with this group's result.
@@ -368,7 +368,7 @@ fn body_check_groups(
                     root,
                     BodyCheckGroup {
                         root,
-                        bodies: std::collections::HashSet::new(),
+                        bodies: crate::fx_hash::HashSet::default(),
                         work: Vec::new(),
                         local_classifiers: Vec::new(),
                     },
@@ -499,7 +499,7 @@ fn active_body_check_groups(
         }
         groups.push(BodyCheckGroup {
             root: declaration,
-            bodies: std::collections::HashSet::new(),
+            bodies: crate::fx_hash::HashSet::default(),
             work: Vec::new(),
             local_classifiers: Vec::new(),
         });
@@ -526,7 +526,8 @@ fn check_body_group(
     diags: &mut DiagSink,
 ) -> Option<crate::resolve::TypeInfo> {
     let diagnostics_start = diags.diags.len();
-    let selected_roots = std::collections::HashSet::from([active.span(active_file, group.root)?]);
+    let selected_roots =
+        crate::fx_hash::HashSet::from_iter([active.span(active_file, group.root)?]);
     let body_spans = group
         .bodies
         .iter()
@@ -555,7 +556,7 @@ fn check_body_group(
     // proving that every stable body declaration has an active parser binding.
     let mut selected_bodies = body_spans
         .into_iter()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     if selected_bodies.len() != group.bodies.len() {
         crate::trace_compiler!(
             "fir",
@@ -995,8 +996,8 @@ pub fn check_frontend_only(
                         return;
                     }
                 };
-                let selected_spans = std::collections::HashSet::new();
-                let selected_bodies = std::collections::HashSet::new();
+                let selected_spans = crate::fx_hash::HashSet::default();
+                let selected_bodies = crate::fx_hash::HashSet::default();
                 drop(crate::resolve::check_selected_declarations_in_pass_two(
                     &active_file,
                     raw_source as u32,

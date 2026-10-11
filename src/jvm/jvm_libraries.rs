@@ -94,11 +94,11 @@ pub struct JvmLibraries {
     /// Classifiers whose `@SinceKotlin` callable of a given name this compilation withheld.
     /// Keyed by the declaration's receiver or owner, not by the shared classpath cache.
     api_withheld:
-        std::cell::RefCell<std::collections::HashMap<TypeName, std::collections::HashSet<String>>>,
+        std::cell::RefCell<crate::fx_hash::HashMap<TypeName, crate::fx_hash::HashSet<String>>>,
     /// Classifier currently having its exact declaration map materialized. This is construction state,
     /// not a lookup fallback: recursive metadata reads observe the same immutable raw signature.
     building_types:
-        std::cell::RefCell<std::collections::HashMap<TypeName, std::sync::Arc<LibraryType>>>,
+        std::cell::RefCell<crate::fx_hash::HashMap<TypeName, std::sync::Arc<LibraryType>>>,
 }
 
 /// Kotlin's JVM delegation filter, applied at the provider boundary: an implemented Java method
@@ -221,7 +221,7 @@ impl JvmLibraries {
                     .iter()
                     .cloned()
                     .zip(arguments)
-                    .collect::<std::collections::HashMap<_, _>>();
+                    .collect::<crate::fx_hash::HashMap<_, _>>();
                 ty_subst_keep_unbound(signature, &bindings)
             }
             Ty::Fun(signature) => Ty::fun_with_shape(
@@ -984,14 +984,14 @@ impl JvmLibraries {
     fn metadata_static_companion_consts_for_class(
         &self,
         ci: &crate::jvm::classreader::ClassInfo,
-    ) -> std::collections::HashMap<String, LibraryConst> {
+    ) -> crate::fx_hash::HashMap<String, LibraryConst> {
         let Some(companion) = self
             .cp
             .find_nested_class(ci.this_class, crate::names::COMPANION_OBJECT_NAME)
         else {
-            return std::collections::HashMap::new();
+            return crate::fx_hash::HashMap::default();
         };
-        let prop_rets: std::collections::HashMap<_, _> =
+        let prop_rets: crate::fx_hash::HashMap<_, _> =
             super::metadata::class_properties(&companion)
                 .iter()
                 .filter_map(|p| p.ret_class.map(|ret| (p.name.clone(), ret)))
@@ -1007,7 +1007,7 @@ impl JvmLibraries {
         &self,
         semantic: TypeName,
         ci: &crate::jvm::classreader::ClassInfo,
-    ) -> std::collections::HashMap<String, LibraryConst> {
+    ) -> crate::fx_hash::HashMap<String, LibraryConst> {
         if let Some(owner) = semantic.nested_owner() {
             if self
                 .cp
@@ -1027,7 +1027,7 @@ impl JvmLibraries {
                 }
             }
         }
-        let declared: std::collections::HashMap<_, _> = super::metadata::class_properties(ci)
+        let declared: crate::fx_hash::HashMap<_, _> = super::metadata::class_properties(ci)
             .iter()
             .filter(|property| property.is_const)
             .filter_map(|property| {
@@ -1052,7 +1052,7 @@ impl JvmLibraries {
     /// member set and Kotlin inheritance come from `.kotlin_builtins`.
     fn mapped_collection_members(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
         let mut mappings = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut pending = std::collections::VecDeque::new();
         pending.push_back(super::jvm_class_map::to_jvm_type_name(internal));
         while let Some(owner) = pending.pop_front() {
@@ -1146,12 +1146,12 @@ impl JvmLibraries {
         &self,
         receiver: Ty,
         target_internal: TypeName,
-    ) -> std::collections::HashMap<String, Ty> {
+    ) -> crate::fx_hash::HashMap<String, Ty> {
         let Ty::Obj(start, start_args) = receiver else {
-            return std::collections::HashMap::new();
+            return crate::fx_hash::HashMap::default();
         };
         let target = super::jvm_class_map::to_jvm_type_name(target_internal);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut q = std::collections::VecDeque::new();
         q.push_back((
             super::jvm_class_map::to_jvm_type_name(start),
@@ -1178,7 +1178,7 @@ impl JvmLibraries {
                 continue;
             }
             let formals = formals.unwrap_or_default();
-            let binds: std::collections::HashMap<String, Ty> =
+            let binds: crate::fx_hash::HashMap<String, Ty> =
                 formals.iter().cloned().zip(targs.iter().copied()).collect();
             if internal == target {
                 return binds;
@@ -1203,7 +1203,7 @@ impl JvmLibraries {
                 (None, None) => {}
             }
         }
-        std::collections::HashMap::new()
+        crate::fx_hash::HashMap::default()
     }
 
     /// Class bindings excluding method parameters that shadow them.
@@ -1212,7 +1212,7 @@ impl JvmLibraries {
         receiver: Ty,
         target_internal: TypeName,
         method_formals: &[String],
-    ) -> std::collections::HashMap<String, Ty> {
+    ) -> crate::fx_hash::HashMap<String, Ty> {
         let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
         for formal in method_formals {
             bindings.remove(formal);
@@ -2393,7 +2393,7 @@ impl JvmLibraries {
                 constructors,
                 hidden_member_properties,
                 hidden_deprecated_callables,
-                declared_callables: std::collections::HashMap::new(),
+                declared_callables: crate::fx_hash::HashMap::default(),
                 declared_callable_order: Vec::new(),
                 members,
                 companion,
@@ -2680,7 +2680,7 @@ pub(in crate::jvm) fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
                     .unwrap_or_else(|| Ty::platform_nullable(Ty::obj("kotlin/Any"))),
             )
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     for bounds in &mut formal_bounds {
         for bound in bounds {
             *bound = crate::types::ty_with_param_bounds(*bound, &inline_bounds);
@@ -3047,7 +3047,7 @@ pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
 /// MutableMap`) and its `java/util/Map` realization compare equal.
 fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -> bool {
     let target = super::jvm_class_map::to_jvm_type_name(target);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut q = std::collections::VecDeque::new();
     q.push_back(super::jvm_class_map::to_jvm_type_name(internal));
     while let Some(name) = q.pop_front() {
@@ -4042,7 +4042,7 @@ impl JvmLibraries {
                 let receiver = raw_receiver
                     .map(|r| match r {
                         Ty::TyParam(..) => r,
-                        _ => ty_subst(r, &std::collections::HashMap::new()),
+                        _ => ty_subst(r, &crate::fx_hash::HashMap::default()),
                     })
                     .or_else(|| mf.receiver_class.map(kotlin_type_name_to_ty))
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
@@ -4430,7 +4430,7 @@ impl JvmLibraries {
                 .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
         };
         let mut owner = Some(callable.owner);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(current) = owner {
             if !seen.insert(current) {
                 break;
@@ -4968,7 +4968,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         let source_classifiers = source_classifiers
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let resolves = |candidate: &str| {
             crate::types::existing_type_name(candidate)
                 .is_some_and(|name| source_classifiers.contains(&name))
@@ -6401,7 +6401,7 @@ mod tests {
         };
 
         assert_eq!(
-            suspend_return_from_gsig(&signature, &std::collections::HashMap::new()),
+            suspend_return_from_gsig(&signature, &crate::fx_hash::HashMap::default()),
             Some(Ty::Unit)
         );
     }

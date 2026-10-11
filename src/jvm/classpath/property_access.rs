@@ -65,7 +65,7 @@ pub(super) fn inherited_property_access(
     declared_access: fn(&ClassInfo, &str) -> Option<super::super::inline::PropertyAccess>,
 ) -> Option<super::super::inline::PropertyAccess> {
     let mut queue = std::collections::VecDeque::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     queue.push_back(super::super::jvm_class_map::to_jvm_type_name(owner));
     while let Some(current) = queue.pop_front() {
         if !seen.insert(current) {

@@ -14,7 +14,7 @@ use crate::types::TypeName;
 /// fact; walking retained `inline_body` edges follows only templates that execute in this frame.
 pub(super) fn non_local_inline_return_values(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
     let mut values = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut pending = vec![(body, false)];
     while let Some((expression, in_inline_body)) = pending.pop() {
         if !seen.insert((expression, in_inline_body)) {

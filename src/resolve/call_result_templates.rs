@@ -198,7 +198,7 @@ impl Checker<'_> {
         }
         let provisional = crate::symbol_resolver::ty_subst(
             signature.ret,
-            &crate::symbol_resolver::GSigBinds::new(),
+            &crate::symbol_resolver::GSigBinds::default(),
         );
         (matches!(actual, Ty::Error) || ty_mentions_param(actual, &open_formals))
             .then_some(signature)

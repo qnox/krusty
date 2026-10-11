@@ -128,7 +128,7 @@ impl Emitter<'_> {
             }
             let mut lambdas = Vec::new();
             let mut captured = Vec::new();
-            let mut lambda_bindings = HashMap::new();
+            let mut lambda_bindings = HashMap::default();
             for (index, &argument) in args.iter().enumerate() {
                 if !lambda_arguments.contains(&argument) {
                     continue;

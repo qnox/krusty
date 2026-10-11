@@ -10,7 +10,7 @@
 //! call. A call whose body invokes a literal lambda takes the route [`LambdaCallRoute`] planned for
 //! it before emission; the byte splice is never a fallback for either.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::*;
 
@@ -577,7 +577,7 @@ impl Emitter<'_> {
             return None;
         };
         let parameters =
-            self.call_parameters(&supplies, &physical, args, &HashMap::new(), Vec::new());
+            self.call_parameters(&supplies, &physical, args, &HashMap::default(), Vec::new());
         let base = self.inline_splice_base(self.frame.size());
         // The body's lines are mapped once the arguments are evaluated, like kotlinc's, so that
         // the source map numbers them after any call inlined into an argument; this first pass only
@@ -656,7 +656,7 @@ impl Emitter<'_> {
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
-        let mut lambda_bindings = HashMap::new();
+        let mut lambda_bindings = HashMap::default();
         let checkpoint = self.cw.checkpoint();
         for (index, &argument) in args.iter().enumerate() {
             if !self.is_inlined_literal(
@@ -786,7 +786,7 @@ impl Emitter<'_> {
         let origins = self.default_operand_origins(call_expression, args, false);
         let mut inside_run = false;
         let mut leases = Vec::new();
-        let mut in_place = HashMap::new();
+        let mut in_place = HashMap::default();
         for (index, _) in args.iter().enumerate() {
             // A parameter the body never reads is still evaluated, in order, then dropped. It
             // takes no temporary: the next parameter keeps the slot kotlinc gives it.
@@ -866,9 +866,9 @@ impl Emitter<'_> {
             inline_only: target.inline_only,
             call_line,
             claimable,
-            visited: HashMap::new(),
+            visited: HashMap::default(),
             lambda_lines: &lambda_lines,
-            lambda_visited: HashMap::new(),
+            lambda_visited: HashMap::default(),
         };
         let mut objects =
             lines

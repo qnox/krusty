@@ -16,7 +16,7 @@
 //! lives in its `$suspendImpl` and the super call is `invokespecial`. Other interface bodies, and
 //! spliced inline bodies, keep the IR machine.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use super::cps::{spliced_inline_suspensions, TransformedMachine, TransformedSuspension};
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};

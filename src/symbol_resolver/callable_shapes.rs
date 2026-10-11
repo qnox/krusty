@@ -12,7 +12,7 @@ use super::*;
 /// select from the complete set rather than accepting whichever hierarchy edge is visited first.
 pub(crate) fn classifier_callable_signatures(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     let mut queue = std::collections::VecDeque::from([ty]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut signatures = Vec::new();
     while let Some(current) = queue.pop_front() {
         if matches!(current.non_null(), Ty::Fun(_)) {

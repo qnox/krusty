@@ -18,7 +18,7 @@ pub(super) fn bind_parser_identity(
     );
 }
 
-pub(super) fn companion_declarations(file: &File) -> std::collections::HashSet<DeclId> {
+pub(super) fn companion_declarations(file: &File) -> crate::fx_hash::HashSet<DeclId> {
     file.decls
         .iter()
         .filter_map(|declaration| match file.decl(*declaration) {
@@ -77,8 +77,8 @@ pub(super) fn nested_classifier_owners(
     file: &File,
     source: SourceFileId,
     ids: &mut DeclarationIds,
-) -> std::collections::HashMap<DeclId, DeclarationId> {
-    let mut owners = std::collections::HashMap::new();
+) -> crate::fx_hash::HashMap<DeclId, DeclarationId> {
+    let mut owners = crate::fx_hash::HashMap::default();
     let mut local_declarations = file
         .local_class_decls
         .values()
@@ -93,7 +93,7 @@ pub(super) fn nested_classifier_owners(
         Decl::Fun(_) | Decl::Property(_) => (usize::MAX, u32::MAX),
     });
     local_declarations.dedup();
-    let mut stable_local = std::collections::HashMap::new();
+    let mut stable_local = crate::fx_hash::HashMap::default();
     for declaration in local_declarations.iter().copied() {
         let Decl::Class(class) = file.decl(declaration) else {
             continue;
@@ -171,7 +171,7 @@ pub(super) fn nested_classifier_owners(
         ),
         Decl::Fun(_) | Decl::Property(_) => unreachable!("filtered to classifiers"),
     });
-    let mut stable = std::collections::HashMap::new();
+    let mut stable = crate::fx_hash::HashMap::default();
     for declaration in declarations.iter().copied() {
         let Decl::Class(class) = file.decl(declaration) else {
             unreachable!("filtered to classifiers")

@@ -4,7 +4,7 @@
 //! and nested annotation instances become closed values here, after every file's default fragment
 //! has been checked and before a later file's construction is lowered.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{
     CallableId, DefaultArgumentStore, FirBody, FirCallArgument, FirConstant, FirConstructorTarget,
@@ -21,8 +21,8 @@ pub(crate) fn publish_checked_annotation_defaults(
     let mut folder = Folder {
         index,
         store,
-        memo: HashMap::new(),
-        visiting: HashSet::new(),
+        memo: HashMap::default(),
+        visiting: HashSet::default(),
     };
     let folded = callables
         .iter()

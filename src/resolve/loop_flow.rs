@@ -1,7 +1,7 @@
 //! Loop back-edge invalidation and the nested-write scan it shares with capture analysis.
 
+use crate::fx_hash::HashSet;
 use std::cell::RefCell;
-use std::collections::HashSet;
 
 use crate::ast::{Expr, ExprId, File, Stmt, StmtId};
 
@@ -59,7 +59,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         parts: &[ExprId],
     ) {
-        let mut written = HashSet::new();
+        let mut written = HashSet::default();
         for &part in parts {
             collect_all_reassigned(self.file, part, &mut written);
         }

@@ -37,11 +37,11 @@ pub(super) fn disambiguated(anonymous: Vec<Option<Ty>>) -> Vec<Option<String>> {
         .into_iter()
         .map(|ty| ty.map(label))
         .collect::<Vec<_>>();
-    let mut totals = std::collections::HashMap::<&str, usize>::new();
+    let mut totals = crate::fx_hash::HashMap::<&str, usize>::default();
     for base in bases.iter().flatten() {
         *totals.entry(base).or_default() += 1;
     }
-    let mut seen = std::collections::HashMap::<&str, usize>::new();
+    let mut seen = crate::fx_hash::HashMap::<&str, usize>::default();
     bases
         .iter()
         .map(|base| {

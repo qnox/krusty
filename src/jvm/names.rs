@@ -115,7 +115,7 @@ pub fn classfile_internal_name(internal: &str) -> String {
 /// [`classfile_internal_name`].
 pub(super) fn classfile_internal_name_of(internal: TypeName) -> &'static str {
     thread_local! {
-        static INTERNED: std::cell::RefCell<std::collections::HashMap<TypeName, &'static str>> =
+        static INTERNED: std::cell::RefCell<crate::fx_hash::HashMap<TypeName, &'static str>> =
             std::cell::RefCell::default();
     }
     if let Some(physical) = INTERNED.with(|known| known.borrow().get(&internal).copied()) {

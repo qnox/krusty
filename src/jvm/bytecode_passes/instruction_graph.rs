@@ -10,7 +10,7 @@
 //! edge that leaves the storing instruction: the handler sees the locals as they stood before it
 //! as well as after.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 
@@ -34,7 +34,7 @@ impl<'a> InstructionGraph<'a> {
     /// that covers no instruction adds no edge.
     pub(crate) fn build(method: &'a MethodNode) -> Option<InstructionGraph<'a>> {
         let mut positions = Vec::new();
-        let mut label_at = HashMap::new();
+        let mut label_at = HashMap::default();
         let mut pending = Vec::new();
         for (at, node) in method.nodes.iter().enumerate() {
             match node {

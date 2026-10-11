@@ -181,9 +181,9 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         ir: &'a IrFile,
         frame: &'a Frame,
         unit: bool,
-        paths: std::collections::HashMap<ExprId, u8>,
+        paths: crate::fx_hash::HashMap<ExprId, u8>,
         found: Vec<TailCall>,
-        seen: std::collections::HashSet<ExprId>,
+        seen: crate::fx_hash::HashSet<ExprId>,
         /// The source line of the innermost node visited that has one.
         line: Option<u32>,
     }
@@ -332,7 +332,7 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         unit,
         paths: root_path_counts(ir, roots),
         found: Vec::new(),
-        seen: std::collections::HashSet::new(),
+        seen: crate::fx_hash::HashSet::default(),
         line: None,
     };
     for (index, &root) in roots.iter().enumerate() {
@@ -366,9 +366,9 @@ fn collect_this_slots(ir: &IrFile, roots: &[ExprId], frame: &mut Frame) {
         return;
     }
     let mut bindings: Vec<(u32, ExprId)> = Vec::new();
-    let mut assigned: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut assigned: crate::fx_hash::HashSet<u32> = crate::fx_hash::HashSet::default();
     let mut pending: Vec<ExprId> = roots.to_vec();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -408,11 +408,11 @@ fn collect_this_slots(ir: &IrFile, roots: &[ExprId], frame: &mut Frame) {
 
 /// The compiler temporaries the body never reassigns — an argument the call lowering held to keep
 /// source evaluation order among them. A read of one is already its own snapshot.
-fn fixed_temporaries(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashSet<u32> {
-    let mut declared = std::collections::HashSet::new();
-    let mut assigned = std::collections::HashSet::new();
+fn fixed_temporaries(ir: &IrFile, roots: &[ExprId]) -> crate::fx_hash::HashSet<u32> {
+    let mut declared = crate::fx_hash::HashSet::default();
+    let mut assigned = crate::fx_hash::HashSet::default();
     let mut pending: Vec<ExprId> = roots.to_vec();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -442,11 +442,11 @@ fn fixed_temporaries(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashSet
 fn fixed_temporary_inits(
     ir: &IrFile,
     roots: &[ExprId],
-    fixed: &std::collections::HashSet<u32>,
-) -> std::collections::HashMap<u32, ExprId> {
-    let mut inits = std::collections::HashMap::new();
+    fixed: &crate::fx_hash::HashSet<u32>,
+) -> crate::fx_hash::HashMap<u32, ExprId> {
+    let mut inits = crate::fx_hash::HashMap::default();
     let mut pending: Vec<ExprId> = roots.to_vec();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -472,7 +472,7 @@ fn first_free_slot(ir: &IrFile, roots: &[ExprId], frame: &Frame) -> u32 {
     let parameters_end = frame.parameter_slot(frame.capture_prefix + frame.count);
     let mut free = parameters_end;
     let mut pending: Vec<ExprId> = roots.to_vec();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -501,15 +501,15 @@ fn first_free_slot(ir: &IrFile, roots: &[ExprId], frame: &Frame) -> u32 {
 /// contents and a lambda's inline body. Sharing propagates through descendants: if two paths reach a
 /// block, they also reach the return stored inside that block even though the return has only one
 /// direct parent node. Counts are capped at two because the rewrite needs only a uniqueness proof.
-fn root_path_counts(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashMap<ExprId, u8> {
-    let mut paths: std::collections::HashMap<ExprId, u8> = std::collections::HashMap::new();
+fn root_path_counts(ir: &IrFile, roots: &[ExprId]) -> crate::fx_hash::HashMap<ExprId, u8> {
+    let mut paths: crate::fx_hash::HashMap<ExprId, u8> = crate::fx_hash::HashMap::default();
     // A root is owned by the body itself, which is an edge like any other.
     for &root in roots {
         let count = paths.entry(root).or_default();
         *count = count.saturating_add(1).min(2);
     }
     let mut pending: Vec<ExprId> = roots.to_vec();
-    let mut expanded = std::collections::HashSet::new();
+    let mut expanded = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         // A node declares its children once however many edges reach it; expanding it twice would
         // count the same edges again rather than find new ones.
@@ -532,7 +532,7 @@ fn root_path_counts(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashMap<
         .iter()
         .filter_map(|(&expression, &count)| (count > 1).then_some(expression))
         .collect::<Vec<_>>();
-    let mut propagated = std::collections::HashSet::new();
+    let mut propagated = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !propagated.insert(expression) {
             continue;
@@ -575,7 +575,7 @@ pub(super) struct Frame {
     receiver: Option<u32>,
     /// Slots that hold this frame's own instance — `receiver` plus the generated temporaries a call
     /// spills it into. Empty for a static frame. Filled by [`finish_tailrec_body`].
-    this_slots: std::collections::HashSet<u32>,
+    this_slots: crate::fx_hash::HashSet<u32>,
     /// Arguments a self-call passes AHEAD of the logical parameters: a LOCAL function's captures,
     /// which lifting added to its declaration and therefore to every call to it. The loop must
     /// leave those slots exactly as they are — a self-call re-reads the frame's own capture
@@ -586,12 +586,12 @@ pub(super) struct Frame {
     /// above every slot the body already uses.
     next_slot: std::cell::Cell<u32>,
     /// See [`fixed_temporaries`]. Filled by [`finish_tailrec_body`].
-    fixed_temporaries: std::collections::HashSet<u32>,
+    fixed_temporaries: crate::fx_hash::HashSet<u32>,
     /// The initializer behind each slot of [`Self::fixed_temporaries`] — the value the call
     /// lowering spilled there. A self-call's operands are READS of these slots, so only through
     /// this map can the sweep see what a step would actually re-evaluate. Filled by
     /// [`finish_tailrec_body`].
-    spill_inits: std::collections::HashMap<u32, ExprId>,
+    spill_inits: crate::fx_hash::HashMap<u32, ExprId>,
 }
 
 impl Frame {
@@ -610,8 +610,8 @@ impl Frame {
             this_slots: slots.dispatch_receiver.into_iter().collect(),
             capture_prefix: 0,
             next_slot: std::cell::Cell::new(0),
-            fixed_temporaries: std::collections::HashSet::new(),
-            spill_inits: std::collections::HashMap::new(),
+            fixed_temporaries: crate::fx_hash::HashSet::default(),
+            spill_inits: crate::fx_hash::HashMap::default(),
         }
     }
 
@@ -780,10 +780,10 @@ fn stepped_evaluation_suspends(ir: &IrFile, call: ExprId, frame: &Frame) -> bool
 fn evaluation_suspends(
     ir: &IrFile,
     root: ExprId,
-    spill_inits: &std::collections::HashMap<u32, ExprId>,
+    spill_inits: &crate::fx_hash::HashMap<u32, ExprId>,
 ) -> bool {
     let mut pending = vec![root];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -856,7 +856,7 @@ fn for_each_frame_child(ir: &IrFile, expression: ExprId, f: &mut impl FnMut(Expr
 
 fn reads_value(ir: &IrFile, root: ExprId, matches: &dyn Fn(u32) -> bool) -> bool {
     let mut pending = vec![root];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -1098,7 +1098,7 @@ fn step_assignments(
         new_values: &[(usize, NewValue)],
     ) {
         let mut pending = vec![root];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -1330,7 +1330,7 @@ mod tests {
 
         assert!(steps(&ir), "the coerced self call is the loop step");
         let mut reachable = vec![body];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(expression) = reachable.pop() {
             if seen.insert(expression) {
                 crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
@@ -1381,7 +1381,7 @@ mod tests {
 
         assert!(steps(&ir), "the asserted self call is the loop step");
         let mut reachable = vec![body];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(expression) = reachable.pop() {
             if seen.insert(expression) {
                 crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
@@ -1952,7 +1952,7 @@ mod tests {
 
         assert_eq!(
             fixed_temporaries(&ir, &roots),
-            std::collections::HashSet::from([1])
+            crate::fx_hash::HashSet::from_iter([1])
         );
         assert_eq!(first_free_slot(&ir, &roots, &frame), 2);
     }

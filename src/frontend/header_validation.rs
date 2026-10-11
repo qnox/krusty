@@ -20,7 +20,7 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
             Decl::Fun(function) => validate_function(function, false, diagnostics),
             Decl::Property(_) => {}
             Decl::Class(class) => {
-                let mut constructor_parameters = std::collections::HashSet::new();
+                let mut constructor_parameters = crate::fx_hash::HashSet::default();
                 for parameter in &class.props {
                     if !constructor_parameters.insert(parameter.name.as_str()) {
                         diagnostics.error(

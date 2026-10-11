@@ -1,6 +1,6 @@
 use super::*;
+use crate::fx_hash::HashMap;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
@@ -1135,7 +1135,7 @@ fn header_finalization_drops_lookup_state_and_publishes_stable_anchors() {
     let anchor = headers.declarations.anchor(declaration).unwrap();
     let signatures = finalize_signatures(
         [declaration],
-        HashMap::from([(
+        HashMap::from_iter([(
             declaration,
             SignatureState::Resolved(ResolvedSignature::new([], Ty::Int).unwrap()),
         )]),
@@ -2130,7 +2130,7 @@ fn finalization_consumes_lazy_state_and_requires_every_signature() {
     let a = DeclarationId::from_raw(0);
     let b = DeclarationId::from_raw(1);
     let signature = ResolvedSignature::new([Ty::Int], Ty::String).unwrap();
-    let states = HashMap::from([
+    let states = HashMap::from_iter([
         (a, SignatureState::Resolved(signature.clone())),
         (b, SignatureState::Computing),
     ]);
@@ -2143,7 +2143,7 @@ fn finalization_consumes_lazy_state_and_requires_every_signature() {
 
     let index = finalize_signatures(
         [a],
-        HashMap::from([(a, SignatureState::Resolved(signature.clone()))]),
+        HashMap::from_iter([(a, SignatureState::Resolved(signature.clone()))]),
     )
     .unwrap();
     assert_eq!(index.signature(a), Some(&signature));

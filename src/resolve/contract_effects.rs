@@ -239,7 +239,7 @@ impl Checker<'_> {
         if formals.is_empty() {
             return ty;
         }
-        let mut binds: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+        let mut binds: crate::fx_hash::HashMap<String, Ty> = crate::fx_hash::HashMap::default();
         if let Some(targs) = self.resolved_call_type_args.get(&call) {
             for (name, t) in formals.iter().zip(targs.iter()) {
                 if let Some(t) = t {

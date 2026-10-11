@@ -144,7 +144,7 @@ mod tests {
         let machines = architectures
             .iter()
             .map(|arch| arch.elf_machine())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         assert_eq!(machines.len(), architectures.len());
     }
 }

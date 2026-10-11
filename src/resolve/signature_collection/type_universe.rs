@@ -10,19 +10,19 @@ use super::*;
 use crate::spelling::Spelled;
 
 struct BootstrapSymbolSource<'a> {
-    declarations: &'a std::collections::HashSet<TypeName>,
-    aliases: &'a std::collections::HashSet<TypeName>,
-    enclosing_names: &'a std::collections::HashSet<TypeName>,
+    declarations: &'a crate::fx_hash::HashSet<TypeName>,
+    aliases: &'a crate::fx_hash::HashSet<TypeName>,
+    enclosing_names: &'a crate::fx_hash::HashSet<TypeName>,
     libraries: &'a dyn SymbolSource,
 }
 
 /// Every name enclosing a source declaration or alias, indexed once for package probes while the
 /// source type universe is built.
 fn bootstrap_enclosing_names(
-    declarations: &std::collections::HashSet<TypeName>,
-    aliases: &std::collections::HashSet<TypeName>,
-) -> std::collections::HashSet<TypeName> {
-    let mut enclosing = std::collections::HashSet::new();
+    declarations: &crate::fx_hash::HashSet<TypeName>,
+    aliases: &crate::fx_hash::HashSet<TypeName>,
+) -> crate::fx_hash::HashSet<TypeName> {
+    let mut enclosing = crate::fx_hash::HashSet::default();
     for declaration in declarations.iter().chain(aliases) {
         let mut owner = declaration.parent();
         // A name already present brought its own ancestors with it.
@@ -97,10 +97,10 @@ pub(in crate::resolve) struct SourceTypeUniverse {
     pub(in crate::resolve) file_class_names: Vec<ClassNames>,
     /// Classifier identities this module declares. A source declaration shadows a classpath type
     /// of the same simple name, so only a duplicate among these is a conflict.
-    pub(in crate::resolve) user_defined: std::collections::HashSet<TypeName>,
+    pub(in crate::resolve) user_defined: crate::fx_hash::HashSet<TypeName>,
     /// Identities this module declares as a base class, for classifying a parenless supertype
     /// before `ModuleSymbols` can exist.
-    pub(in crate::resolve) user_base_classes: std::collections::HashSet<TypeName>,
+    pub(in crate::resolve) user_base_classes: crate::fx_hash::HashSet<TypeName>,
 }
 
 pub(in crate::resolve) fn source_type_universe(
@@ -203,24 +203,24 @@ pub(in crate::resolve) fn source_type_universe(
     // — kotlinc semantics — never to an arbitrary classpath class. A classpath `typealias`
     // (`ArrayList` → `java/util/ArrayList`) resolves through the same probe: `resolve_type` returns the
     // alias's target.
-    let mut class_names = ClassNames::new(std::rc::Rc::new(HashMap::new()));
+    let mut class_names = ClassNames::new(std::rc::Rc::new(HashMap::default()));
     // A user-declared top-level class *shadows* any classpath/JDK type of the same simple name
     // (legal Kotlin — the JDK one would need an explicit import). Only a duplicate among the
     // user's own declarations is a conflict, so track which names the user has defined. The dedup
     // key is the package-qualified *internal* name, not the simple name: two classes sharing a
     // simple name in different packages (e.g. a test's root-package `EmptyContinuation` and the
     // injected `helpers.EmptyContinuation`) are distinct declarations, not a conflict.
-    let mut user_defined: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
+    let mut user_defined: crate::fx_hash::HashSet<TypeName> = crate::fx_hash::HashSet::default();
     // Bootstrap class/interface identity for the same all-files pass. `ModuleSymbols` cannot exist
     // until this table is complete, but a parenless supertype still needs semantic classification:
     // another-file source base and a classpath base must produce the same `super_internal` shape.
-    let mut user_base_classes: std::collections::HashSet<TypeName> =
-        std::collections::HashSet::new();
-    let mut source_aliases: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
+    let mut user_base_classes: crate::fx_hash::HashSet<TypeName> =
+        crate::fx_hash::HashSet::default();
+    let mut source_aliases: crate::fx_hash::HashSet<TypeName> = crate::fx_hash::HashSet::default();
     // Class-target aliases also participate in the temporary classifier name map. Structural
     // aliases do not, but both sets participate in the same scope selection below.
-    let mut classifier_aliases: std::collections::HashSet<TypeName> =
-        std::collections::HashSet::new();
+    let mut classifier_aliases: crate::fx_hash::HashSet<TypeName> =
+        crate::fx_hash::HashSet::default();
     if let Some(headers) = compact_headers {
         for stub in headers
             .stubs
@@ -290,13 +290,13 @@ pub(in crate::resolve) fn source_type_universe(
     // default-import / imported / same-package class, verified to exist via `resolve_type`. Runs BEFORE
     // alias expansion so a user `typealias A = Foo` (Foo a classpath type) finds `Foo` already resolved.
     let imports_by_file = {
-        let mut consensus: HashMap<String, Option<TypeName>> = HashMap::new();
+        let mut consensus: HashMap<String, Option<TypeName>> = HashMap::default();
         // A classpath `typealias` resolves to its TARGET classifier above. When the target takes a
         // different argument list than the alias declares (`Lens<S, A>` = `PLens<S, S, A, A>`), a use
         // site must substitute into the alias's expansion instead of pasting its arguments onto the
         // target — so record the template under the spelling that named the alias.
         let mut expansion_consensus: HashMap<String, Option<crate::libraries::AliasExpansion>> =
-            HashMap::new();
+            HashMap::default();
         let source_count = compact_headers.map_or(files.len(), |headers| headers.sources.len());
         let mut imports_by_file = Vec::with_capacity(source_count);
         let enclosing_names = bootstrap_enclosing_names(&user_defined, &source_aliases);
@@ -336,15 +336,15 @@ pub(in crate::resolve) fn source_type_universe(
                 kotlin_defaults,
                 platform_defaults,
             ]);
-            let mut file_imports = HashMap::new();
+            let mut file_imports = HashMap::default();
             let mut file_expansions: HashMap<String, crate::libraries::AliasExpansion> =
-                HashMap::new();
-            let mut file_source_aliases = HashMap::new();
-            let mut file_unresolved = HashMap::new();
-            let mut file_ambiguous = std::collections::HashSet::new();
+                HashMap::default();
+            let mut file_source_aliases = HashMap::default();
+            let mut file_unresolved = HashMap::default();
+            let mut file_ambiguous = crate::fx_hash::HashSet::default();
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
             // it) plus the explicit-import names themselves.
-            let mut names = std::collections::HashSet::new();
+            let mut names = crate::fx_hash::HashSet::default();
             if let Some(headers) = compact_headers {
                 collect_streamed_header_type_names(
                     headers,
@@ -551,7 +551,7 @@ pub(in crate::resolve) fn source_type_universe(
     // `typealias A = Primitive` → A maps to `"__ty/<PrimName>"` (decoded in ty_of_ref).
     // `typealias A = java.lang.Foo` → A resolves to the JVM internal name `java/lang/Foo`.
     // Multiple passes handle chains: A = B, B = C.
-    let mut alias_map: HashMap<String, String> = HashMap::new();
+    let mut alias_map: HashMap<String, String> = HashMap::default();
     // The declaring package is known HERE and nowhere downstream — `alias_map` is spelling-keyed —
     // so the alias's qualified identity is captured alongside, for `Type.abbreviated_type`.
     let mut source_alias_identities: Vec<(String, TypeName)> = Vec::new();

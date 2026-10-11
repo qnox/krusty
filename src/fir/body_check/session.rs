@@ -1,6 +1,6 @@
 //! The checked context one source unit's body callbacks share.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{
     ActiveSourceDeclarations, BodyLocalCallableDeclarationId, ClassBodyContext, DeclarationId,

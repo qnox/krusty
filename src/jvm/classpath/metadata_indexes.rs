@@ -7,10 +7,10 @@
 use super::{
     descriptor_parts, enter_directory, push_id_dedup, Entry, EntryExt, JarPackages, TypeIndex,
 };
+use crate::fx_hash::{HashMap, HashSet};
 use crate::jvm::classreader::{parse_class, ClassInfo, ReadError};
 use crate::name_tree::{NameId, NameTree};
 use crate::types::{type_name, TypeName};
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -90,8 +90,8 @@ fn collect_class_bytes(
             )
         })
         .collect();
-    let mut toplevel_names = HashSet::new();
-    let mut ext_names = HashSet::new();
+    let mut toplevel_names = HashSet::default();
+    let mut ext_names = HashSet::default();
     for function in crate::jvm::metadata::package_functions(&class)
         .iter()
         .chain(crate::jvm::metadata::class_functions(&class).iter())
@@ -120,7 +120,7 @@ fn collect_dir(
     names: &mut NameTree,
     all: &mut HashMap<NameId, ClassLite>,
 ) -> Result<(), ClassMetadataLoadError> {
-    let mut ancestors = HashSet::new();
+    let mut ancestors = HashSet::default();
     collect_dir_visited(directory, directory, names, all, &mut ancestors)
 }
 
@@ -203,7 +203,7 @@ pub(super) fn build_entry_ext(
     packages: &JarPackages,
 ) -> Result<EntryExt, ClassMetadataLoadError> {
     let mut names = NameTree::default();
-    let mut all: HashMap<NameId, ClassLite> = HashMap::new();
+    let mut all: HashMap<NameId, ClassLite> = HashMap::default();
     match entry {
         Entry::Dir(directory) => collect_dir(directory, &mut names, &mut all)?,
         Entry::Jar(jar) => collect_jar(jar, packages, &mut names, &mut all)?,
@@ -219,7 +219,7 @@ pub(super) fn build_entry_ext(
     for (&root, root_class) in &all {
         let mut root_id = None;
         let mut current = Some(root);
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         while let Some(class_name) = current {
             if !visited.insert(class_name) {
                 break;
@@ -344,7 +344,7 @@ pub(super) fn build_entry_package_types(
 }
 
 fn scan_types_dir(directory: &Path, index: &mut TypeIndex) -> Result<(), ClassMetadataLoadError> {
-    let mut ancestors = HashSet::new();
+    let mut ancestors = HashSet::default();
     scan_types_dir_rooted(directory, directory, index, &mut ancestors)
 }
 

@@ -18,7 +18,7 @@ pub(super) fn finalize_defaults(ir: &mut IrFile) -> Result<(), FirFileLoweringFa
                 .cloned()
                 .map(|defaults| (construction.interface, defaults))
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
 
     for construction in ir.annotation_constructions.values_mut() {
         if let Some(defaults) = declaration_defaults.get(&construction.interface) {

@@ -40,8 +40,8 @@ pub(crate) struct DependencyProperty {
 /// site, and a site this cannot supply for is absent and declines by name as before.
 pub(crate) fn realize_properties(
     ir: &mut IrFile,
-) -> std::collections::HashMap<ExprId, DependencyProperty> {
-    let mut realized = std::collections::HashMap::new();
+) -> crate::fx_hash::HashMap<ExprId, DependencyProperty> {
+    let mut realized = crate::fx_hash::HashMap::default();
     for index in 0..ir.exprs.len() {
         let Ok(plan) = property_plan(ir, index as ExprId) else {
             continue;

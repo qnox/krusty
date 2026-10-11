@@ -33,7 +33,7 @@ fn constructed_anonymous_classes(ir: &crate::ir::IrFile, function: u32) -> Vec<u
         .unwrap_or_else(|| panic!("{function} has a body"));
     let mut found = Vec::new();
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -61,7 +61,7 @@ fn anonymous_type_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<TypeNa
         .unwrap_or_else(|| panic!("{function} has a body"));
     let mut found = Vec::new();
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -132,12 +132,12 @@ fn an_inlined_crossinline_object_is_a_distinct_class_at_each_call() {
     let copy_names = copies
         .iter()
         .map(|class| ir.classes[*class as usize].fq_name)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     assert_eq!(
         arguments
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>(),
+            .collect::<crate::fx_hash::HashSet<_>>(),
         copy_names
     );
     assert!(!ir.reified_anonymous_declarations.contains(&declaration));

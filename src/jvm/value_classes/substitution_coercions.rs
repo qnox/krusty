@@ -6,8 +6,8 @@
 //! identity: its null-safe unbox and null-safe box each keep `null` as it is.
 
 use super::BoxOp;
+use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
-use std::collections::HashSet;
 
 /// Drop each `unbox-impl` of a coercion's operand that the coercion's consumer immediately boxes
 /// back into the same value class, together with that `box-impl`, and make the coercion the
@@ -18,7 +18,7 @@ pub(super) fn drop_rebox_round_trips(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut Ir
         .copied()
         .filter(|(_, op)| matches!(op, BoxOp::Unbox(_) | BoxOp::UnboxNull(_)))
         .collect();
-    let mut identities = HashSet::new();
+    let mut identities = HashSet::default();
     for &(coercion, op) in ops.iter() {
         let (BoxOp::Box(value_class) | BoxOp::BoxNull(value_class)) = op else {
             continue;

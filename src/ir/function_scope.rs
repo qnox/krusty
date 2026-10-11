@@ -11,7 +11,7 @@ pub struct IrFunctionScope {
     /// reified placeholders in this emitted method. Kept on the lexical function scope so nested
     /// inline expansion saves/restores the fact with its owner instead of a parallel current-state
     /// field recovering parameters from source spelling.
-    pub emitted_reified_parameters: std::collections::HashSet<String>,
+    pub emitted_reified_parameters: crate::fx_hash::HashSet<String>,
 }
 
 impl IrFunctionScope {
@@ -33,7 +33,7 @@ impl IrFunctionScope {
 
     pub fn with_emitted_reified_parameters(
         mut self,
-        parameters: std::collections::HashSet<String>,
+        parameters: crate::fx_hash::HashSet<String>,
     ) -> Self {
         self.emitted_reified_parameters = parameters;
         self

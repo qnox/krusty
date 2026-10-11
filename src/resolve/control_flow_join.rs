@@ -6,7 +6,7 @@
 //! `return`, `break`, `continue`, or `Nothing` edge does not finish, so it is not part of the
 //! join. Edges that disagree leave the declared type.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ast::{BinOp, Expr, ExprId};
 use crate::types::Ty;
@@ -33,7 +33,7 @@ pub(super) struct LocalFlowExit {
 impl Checker<'_> {
     /// Stable local `var`s visible here, nearest binding of each name only.
     pub(super) fn stable_local_vars(&self, scope: &CheckerScope<'_>) -> Vec<StableLocal> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut locals = Vec::new();
         scope.visit_bindings(Ns::Value, |name, binding| {
             if !seen.insert(name.to_string()) {

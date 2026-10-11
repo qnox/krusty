@@ -34,7 +34,7 @@ fn class_literals(ir: &crate::ir::IrFile, class: u32) -> Vec<Ty> {
             continue;
         };
         let mut pending = vec![body];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -57,7 +57,7 @@ fn constructed_class(ir: &crate::ir::IrFile, function: u32) -> u32 {
         .body
         .unwrap_or_else(|| panic!("{function} has a body"));
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -79,7 +79,7 @@ fn construction_params(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
         .body
         .unwrap_or_else(|| panic!("{function} has a body"));
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -304,7 +304,7 @@ fn reified_substitution_values(ir: &crate::ir::IrFile, class: u32) -> Vec<Ty> {
             .filter_map(|property| property.initializer),
     );
     let mut pending = roots;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut values = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -399,7 +399,7 @@ fn method_calls(ir: &crate::ir::IrFile, function: u32) -> Vec<u32> {
         return Vec::new();
     };
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut calls = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {

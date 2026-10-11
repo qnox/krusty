@@ -66,12 +66,12 @@ pub struct CodegenModule {
     /// The file that declared `main`, so a second one is an error rather than two entry points.
     entry_file: Option<String>,
     /// The prebuilt runtime's defined symbols, read by the first file that needs them.
-    runtime_symbols: Option<std::collections::HashSet<String>>,
+    runtime_symbols: Option<crate::fx_hash::HashSet<String>>,
     /// Public ABI lines, in file order and source order within a file.
     abi: Vec<super::c_abi::Record>,
     /// Export spellings already claimed by earlier files. The C spelling is intentionally
     /// human-readable and therefore lossy; a collision is refused rather than emitted twice.
-    abi_symbols: std::collections::HashSet<String>,
+    abi_symbols: crate::fx_hash::HashSet<String>,
 }
 
 impl Backend for CraneliftBackend {

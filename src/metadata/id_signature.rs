@@ -377,7 +377,7 @@ pub fn decode_public_id_signature(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use crate::fx_hash::HashSet;
 
     use super::*;
 
@@ -460,7 +460,7 @@ mod tests {
             .expect("public second signature");
 
         assert_ne!(first, second);
-        assert_eq!(HashSet::from([first, second]).len(), 2);
+        assert_eq!(HashSet::from_iter([first, second]).len(), 2);
     }
 
     #[test]

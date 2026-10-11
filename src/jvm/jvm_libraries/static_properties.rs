@@ -25,7 +25,7 @@ impl JvmLibraries {
     pub(super) fn const_fields<F>(
         fields: &[crate::jvm::classreader::FieldSig],
         mut ty: F,
-    ) -> std::collections::HashMap<String, LibraryConst>
+    ) -> crate::fx_hash::HashMap<String, LibraryConst>
     where
         F: FnMut(&crate::jvm::classreader::FieldSig) -> Option<Ty>,
     {
@@ -152,7 +152,7 @@ impl JvmLibraries {
         name: &str,
     ) -> Option<JvmStaticField> {
         let mut stack = vec![internal];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(cur) = stack.pop() {
             if !seen.insert(cur) {
                 continue;

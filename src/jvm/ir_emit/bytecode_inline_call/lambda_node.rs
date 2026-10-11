@@ -457,7 +457,7 @@ impl Emitter<'_> {
     ) -> Result<bool, &'static str> {
         let (lambda, _) = self.literal_lambda(argument)?;
         let mut pending = vec![lambda.inline_body];
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;

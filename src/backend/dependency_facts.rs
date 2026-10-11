@@ -13,8 +13,8 @@ mod references;
 #[cfg(test)]
 pub(crate) use references::referenced_dependencies;
 
+use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;

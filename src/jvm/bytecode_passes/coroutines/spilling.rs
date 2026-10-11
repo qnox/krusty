@@ -383,7 +383,7 @@ fn variables_to_clean_up(
         .enumerate()
         .map(|(index, point)| {
             // `findSuspensionPointPredecessors`: walk back to the nearest point ends.
-            let mut visited = std::collections::HashSet::new();
+            let mut visited = crate::fx_hash::HashSet::default();
             let mut stack = vec![method.insns.index_of(point.begin)];
             let mut predecessors = Vec::new();
             while let Some(node) = stack.pop() {

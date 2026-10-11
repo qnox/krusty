@@ -1,6 +1,6 @@
 //! Declaration-owned identities of type parameters decoded from dependency metadata.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::metadata::semantic::{KotlinTypeParameter, KotlinTypeParameterId};
 

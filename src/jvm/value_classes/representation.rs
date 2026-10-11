@@ -54,7 +54,7 @@ pub(super) fn declared_underlyings(ir: &IrFile) -> crate::value_classes::Underly
 fn parameter_bound_underlying(declared: Ty) -> Ty {
     let mut nullable = declared.is_nullable();
     let mut current = declared.non_null();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Ty::TyParam(name, bound) = current {
         assert!(
             seen.insert(name),
@@ -224,7 +224,7 @@ mod tests {
     fn an_unsigned_array_publishes_its_carrier_and_keeps_two_classfile_names() {
         let array = crate::types::type_name("kotlin/UIntArray");
         let carrier = Ty::obj("kotlin/IntArray");
-        let mut under = crate::value_classes::UnderlyingTypes::new();
+        let mut under = crate::value_classes::UnderlyingTypes::default();
         under.insert(array, carrier);
         assert_eq!(carrier_slot(Ty::obj_name(array), &under), Some(carrier));
         assert_eq!(

@@ -95,7 +95,7 @@ pub use driver::{
 };
 pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailure};
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use receiver_provenance::ReceiverFrame;
 
@@ -524,7 +524,7 @@ struct BodyFirChecker<'a> {
     /// Callables whose declaration lives in an enclosing independently streamed body. Nested
     /// lambdas/local functions retain this set so their references publish explicit closure
     /// operands instead of mistaking a streaming boundary for an ordinary nested-body scope.
-    streamed_outer_callables: std::collections::HashSet<BodyLocalCallableDeclarationId>,
+    streamed_outer_callables: crate::fx_hash::HashSet<BodyLocalCallableDeclarationId>,
     nested_body_depth: u32,
     expression_depth: u32,
     owned_receiver_count: u32,
@@ -932,10 +932,10 @@ impl BodyFirChecker<'_> {
             index,
             origins,
             body,
-            scopes: vec![HashMap::new()],
-            delegate_scopes: vec![HashMap::new()],
-            outer_values: HashMap::new(),
-            outer_delegates: HashMap::new(),
+            scopes: vec![HashMap::default()],
+            delegate_scopes: vec![HashMap::default()],
+            outer_values: HashMap::default(),
+            outer_delegates: HashMap::default(),
             class_values: class_context.values,
             class_capture_values: class_context.capture_values,
             class_delegates: class_context.delegates,
@@ -944,11 +944,11 @@ impl BodyFirChecker<'_> {
             session,
             return_target,
             lambda_return_source: None,
-            outer_lambda_return_depths: HashMap::new(),
+            outer_lambda_return_depths: HashMap::default(),
             function_return_depth: 0,
             loops: Vec::new(),
-            local_callable_scopes: vec![HashMap::new()],
-            expression_substitutions: HashMap::new(),
+            local_callable_scopes: vec![HashMap::default()],
+            expression_substitutions: HashMap::default(),
             lambda_binding_name: None,
             outer_callables: class_context.callables,
             streamed_outer_callables,
@@ -1104,8 +1104,8 @@ impl BodyFirChecker<'_> {
         body: ExprId,
     ) -> Result<FirExprId, BodyCheckFailure> {
         self.loops.push((label.clone(), 0, target));
-        self.scopes.push(HashMap::new());
-        self.delegate_scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
+        self.delegate_scopes.push(HashMap::default());
         if let Some((name, value)) = binding {
             self.scopes
                 .last_mut()
@@ -1127,9 +1127,9 @@ impl BodyFirChecker<'_> {
         condition: ExprId,
     ) -> Result<(FirExprId, FirExprId), BodyCheckFailure> {
         self.loops.push((label.clone(), 0, target));
-        self.scopes.push(HashMap::new());
-        self.delegate_scopes.push(HashMap::new());
-        self.local_callable_scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
+        self.delegate_scopes.push(HashMap::default());
+        self.local_callable_scopes.push(HashMap::default());
         let result = (|| {
             let checked_body = match self.file.expr(body).clone() {
                 Expr::Block { stmts, trailing } => {

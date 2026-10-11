@@ -5,7 +5,7 @@
 //! authoritative. This boundary combines those two stores before plugins run; plugins never retry
 //! resolution or query a classpath themselves.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::libraries::SemanticPlatform;
 use crate::plugins::FrontendSelectedCall;
@@ -25,7 +25,7 @@ pub(super) struct ClassifierAnnotationInputs<'a> {
 /// recursively so `Container<Dependency>` makes both identities available without a
 /// classpath-wide scan.
 pub(super) fn named_classifiers(calls: &[FrontendSelectedCall]) -> HashSet<TypeName> {
-    let mut named = HashSet::new();
+    let mut named = HashSet::default();
     let mut pending = calls
         .iter()
         .flat_map(|call| {

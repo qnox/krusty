@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
-use crate::name_tree::FxHashMap;
+use crate::fx_hash::HashMap as FxHashMap;
 use crate::types::{Ty, TypeName, Visibility};
 
 use super::header::{
@@ -1225,7 +1225,7 @@ impl SignatureSolver {
             .required
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         for constraint in self.graph.constraints() {
             if matches!(
                 self.states.get(&constraint.declaration),
@@ -1382,7 +1382,7 @@ pub struct ResolvedModuleIndex {
     /// namespaces the source module contributes. Derived from `source_packages` as each identity
     /// is published, so a package-child probe is one lookup instead of a walk of every source
     /// unit's package chain (which made qualified-name resolution quadratic in the module).
-    source_package_namespaces: std::collections::HashSet<TypeName>,
+    source_package_namespaces: crate::fx_hash::HashSet<TypeName>,
     /// Stable declaration-stream ordinal computed while Pass-1 anchors are live. This is used for
     /// deterministic declaration/metadata ordering and Pass-2 rebinding, never for executable
     /// class initialization (which has its own semantic ordinal in the declaration header).
@@ -1444,9 +1444,9 @@ pub struct ResolvedModuleIndex {
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
-    invisible_reference_suppressions: std::collections::HashSet<DeclarationId>,
-    invisible_member_suppressions: std::collections::HashSet<DeclarationId>,
-    optional_declaration_usage_suppressions: std::collections::HashSet<DeclarationId>,
+    invisible_reference_suppressions: crate::fx_hash::HashSet<DeclarationId>,
+    invisible_member_suppressions: crate::fx_hash::HashSet<DeclarationId>,
+    optional_declaration_usage_suppressions: crate::fx_hash::HashSet<DeclarationId>,
     /// The lexical policies each source's file annotations open, resolved once in Pass 1 from the
     /// checked applications. Bounded Pass-2 units do not retain the file annotations' syntax.
     file_lexical_policies: HashMap<SourceFileId, Box<[crate::lexical_policy::LexicalPolicy]>>,
@@ -1478,7 +1478,7 @@ pub struct ResolvedModuleIndex {
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
     /// Callables with a function-typed value parameter or extension receiver (checker-classified).
-    pub(super) function_typed_parameter_callables: std::collections::HashSet<CallableId>,
+    pub(super) function_typed_parameter_callables: crate::fx_hash::HashSet<CallableId>,
     type_aliases: HashMap<DeclarationId, ResolvedTypeAliasHeader>,
     signatures: HashMap<DeclarationId, ResolvedSignature>,
     /// Pass-1-resolved contract effects keyed by their stable callable declaration. The wrapper
@@ -1500,10 +1500,10 @@ pub struct ResolvedModuleIndex {
     /// classifier hierarchy. The motivating case is a data-class `toString`/`hashCode`/`equals`
     /// whose nearest inherited declaration is final: the stable inventory still owns the generated
     /// coordinate, but it is not a semantic declaration and must never enter lookup or lowering.
-    suppressed_generated_callables: std::collections::HashSet<DeclarationId>,
+    suppressed_generated_callables: crate::fx_hash::HashSet<DeclarationId>,
     /// Callable headers retained only while an invalid/locally deferred declaration has no
     /// signature. Pass-2 local publication may replace one with its finalized checked header.
-    diagnostic_callables: std::collections::HashSet<CallableId>,
+    diagnostic_callables: crate::fx_hash::HashSet<CallableId>,
     classifier_type_arguments: HashMap<DeclarationId, Box<[TypeParameterId]>>,
     classifier_own_type_parameter_counts: HashMap<DeclarationId, u32>,
     pub(super) callable_parameters: HashMap<CallableId, Box<[super::ResolvedValueParameterHeader]>>,
@@ -2507,7 +2507,7 @@ impl ResolvedModuleIndex {
             self.source_inventory.is_empty(),
             "source declaration inventory may be published only once"
         );
-        let mut grouped = HashMap::<SourceFileId, Vec<DeclarationId>>::new();
+        let mut grouped = HashMap::<SourceFileId, Vec<DeclarationId>>::default();
         for &declaration in inventory {
             let source = declarations
                 .anchor(declaration)

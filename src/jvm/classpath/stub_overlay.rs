@@ -1,6 +1,6 @@
 //! The in-memory overlay of declaration classes a compilation serves above its classpath entries.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::{Classpath, SymbolNamespace};
 use crate::jvm::classreader::{parse_class, ClassInfo};
@@ -42,7 +42,7 @@ impl Drop for StubOverlayGuard {
 impl Classpath {
     /// Replace the in-memory class overlay and invalidate dependent lookups.
     pub fn set_stub_overlay(&self, classes: Vec<(String, Vec<u8>)>) {
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         for (_, bytes) in classes {
             if let Ok(ci) = parse_class(&bytes) {
                 map.entry(ci.this_class)
@@ -55,7 +55,7 @@ impl Classpath {
             .keys()
             .copied()
             .chain(map.keys().copied())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         *self.stub_overlay.borrow_mut() = map;
         self.decode_overlay_inner_classes();
         self.invalidate_overlay_memos(affected);
@@ -67,7 +67,7 @@ impl Classpath {
         self: &std::rc::Rc<Self>,
         classes: Vec<(String, Vec<u8>)>,
     ) -> StubOverlayGuard {
-        let mut parsed = HashMap::new();
+        let mut parsed = HashMap::default();
         for (_, bytes) in classes {
             if let Ok(class) = parse_class(&bytes) {
                 parsed
@@ -105,8 +105,8 @@ impl Classpath {
             }
         }
         let mut symbols = self.symbols_memo.borrow_mut();
-        let mut packages = std::collections::HashSet::new();
-        let mut classifier_namespaces = std::collections::HashSet::new();
+        let mut packages = crate::fx_hash::HashSet::default();
+        let mut classifier_namespaces = crate::fx_hash::HashSet::default();
         for classifier in classifiers {
             let mut outermost = classifier;
             classifier_namespaces.insert(classifier);

@@ -1,6 +1,6 @@
 //! Stable type-parameter identities and their source spellings.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -18,7 +18,7 @@ pub(crate) fn metadata_type_parameter(source: &str) -> &'static str {
     let semantic = intern(&format!("\0metadata-tp:{ordinal}"));
     let source = intern(source);
     TYPE_PARAMETER_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap()
         .insert(semantic, source);
@@ -40,7 +40,7 @@ pub(crate) fn declaration_type_parameter(
     ));
     let source = intern(source);
     TYPE_PARAMETER_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap()
         .insert(semantic, source);
@@ -54,7 +54,7 @@ pub(crate) fn declaration_type_parameter(
 pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
     let fresh = intern(&format!("\0call:{declared}"));
     let mut sources = TYPE_PARAMETER_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap();
     let source = sources.get(declared).copied().unwrap_or(declared);
@@ -76,7 +76,7 @@ pub(crate) fn postponed_call_type_variable(
         "\0postponed-call:{compilation}:{file}:{expression}:{declared}"
     ));
     let mut sources = TYPE_PARAMETER_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap();
     let source = sources.get(declared).copied().unwrap_or(declared);
@@ -100,7 +100,7 @@ pub(crate) fn constructor_type_parameter(
         owner.name_id().0
     ));
     TYPE_PARAMETER_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap()
         .insert(semantic, source);
@@ -111,7 +111,7 @@ pub(crate) fn constructor_type_parameter(
 /// metadata show the written name even though inference uses the full identity.
 pub(crate) fn type_parameter_source_name(name: &str) -> &str {
     TYPE_PARAMETER_SOURCES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap()
         .get(name)

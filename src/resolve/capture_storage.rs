@@ -57,8 +57,8 @@ impl CapturedBinding {
 pub(super) fn anonymous_body_bound_value_names(
     file: &File,
     declaration: DeclId,
-) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
+) -> crate::fx_hash::HashSet<String> {
+    let mut names = crate::fx_hash::HashSet::default();
     let Decl::Class(class) = file.decl(declaration) else {
         return names;
     };
@@ -202,7 +202,7 @@ pub(super) fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Ve
         .base_args
         .iter()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let mut expressions = class_capture_expressions(class)
         .into_iter()
         .filter(|expression| !forwarded.contains(expression))
@@ -376,13 +376,13 @@ impl Checker<'_> {
     ) -> LocalClassCaptures {
         let anonymous_object = self.file.is_anonymous_object_class(declaration);
         let mut result = LocalClassCaptures::default();
-        let mut outer: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut outer: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
         scope.visit_bindings(Ns::Value, |name, _| {
             outer.insert(name.to_string());
         });
         // A local FUNCTION carries captures of its own; reaching one from a local class would have
         // to compose the two, which is not modelled.
-        let mut unsupported: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unsupported: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
         scope.visit_bindings(Ns::Function, |name, _| {
             unsupported.insert(name.to_string());
         });
@@ -439,7 +439,7 @@ impl Checker<'_> {
                 })
             });
         }
-        let mut through_outer: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut through_outer: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
         if let Some(internal) = enclosing_instance.and_then(Ty::obj_internal) {
             if let Some(class) = self.resolver().classifier(internal) {
                 through_outer.extend(class.declared_callables.keys().cloned());
@@ -518,7 +518,7 @@ impl Checker<'_> {
         let mut needs_outer = false;
         let mut record_construction_uses =
             |body: ExprId,
-             visible: &std::collections::HashSet<String>,
+             visible: &crate::fx_hash::HashSet<String>,
              anonymous_super_argument: bool| {
                 let body = if anonymous_super_argument {
                     // The forwarded expression runs outside this constructor. A bare captured name
@@ -569,14 +569,14 @@ impl Checker<'_> {
             .anonymous_object_classes
             .keys()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         for &body in &construction_bodies {
             record_construction_uses(
                 body,
                 &everything,
                 anonymous_object && cl.base_args.contains(&body),
             );
-            let mut constructions = std::collections::HashSet::new();
+            let mut constructions = crate::fx_hash::HashSet::default();
             record_expression_targets(self.file, &anonymous_targets, [body], &mut constructions);
             for construction in constructions {
                 let Some(&anonymous) = self.file.anonymous_object_classes.get(&construction) else {
@@ -658,7 +658,7 @@ impl Checker<'_> {
         }
         // A mutable enclosing local written from any parser-hoisted class body is shared storage,
         // even when the outer function's direct AST walk cannot reach that member expression.
-        let mut class_reassigned = std::collections::HashSet::new();
+        let mut class_reassigned = crate::fx_hash::HashSet::default();
         for body in local_class_capture_expressions(cl) {
             collect_all_reassigned(self.file, body, &mut class_reassigned);
         }
@@ -936,10 +936,10 @@ impl Checker<'_> {
     /// capture. After a constructor property is stored, that property hides the parameter.
     pub(super) fn capturable_local_names(
         scope: &CheckerScope<'_>,
-        own_parameters: &std::collections::HashSet<String>,
-    ) -> std::collections::HashSet<String> {
-        let mut seen = std::collections::HashSet::new();
-        let mut names = std::collections::HashSet::new();
+        own_parameters: &crate::fx_hash::HashSet<String>,
+    ) -> crate::fx_hash::HashSet<String> {
+        let mut seen = crate::fx_hash::HashSet::default();
+        let mut names = crate::fx_hash::HashSet::default();
         scope.visit_bindings(Ns::Value, |name, binding| {
             if !seen.insert(name.to_string()) {
                 return;

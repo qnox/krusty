@@ -3,8 +3,8 @@
 //! references, so later phases never reopen a provider or read a fact off a name.
 
 use super::{Callee, IrExpr, IrFile};
+use crate::fx_hash::HashSet;
 use crate::types::{Ty, TypeName};
-use std::collections::HashSet;
 
 /// Push every classifier identity carried by `ty`, including nested generic/projection/function
 /// positions. Source spellings never participate in this inventory.
@@ -33,7 +33,7 @@ pub(crate) fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
 
 pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for function in &ir.functions {
         for parameter in &function.params {
             collect_classifier_names(*parameter, &mut out);

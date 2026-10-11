@@ -16,7 +16,7 @@
 //! **Declines.** A construct this generator has not been taught declines the whole file with a
 //! diagnostic naming it, as the native generator does. Nothing is emitted on a guess.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 mod intrinsic_operations;
 mod objects;
@@ -343,7 +343,7 @@ impl<'a> Body<'a> {
                 .enumerate()
                 .map(|(slot, ty)| (slot as u32, (slot as u32, *ty)))
                 .collect(),
-            unit_values: HashSet::new(),
+            unit_values: HashSet::default(),
             declared,
             result,
             depth: 0,

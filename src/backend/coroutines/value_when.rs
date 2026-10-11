@@ -1,7 +1,7 @@
 //! Value-position `when` normalization: bind a conditional whose branch values suspend to a
 //! fresh local assigned in each branch, so each branch's suspension sits at a statement.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
@@ -63,7 +63,7 @@ pub(crate) fn desugar_value_when(
 pub(super) fn owned_nested_blocks(ir: &IrFile, root: ExprId) -> Vec<ExprId> {
     let mut blocks = Vec::new();
     let mut pending = Vec::new();
-    let mut seen = HashSet::from([root]);
+    let mut seen = HashSet::from_iter([root]);
     for_each_child(&ir.exprs, root, &mut |child| pending.push(child));
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {

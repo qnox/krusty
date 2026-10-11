@@ -14,8 +14,8 @@
 //! `ReceiverMro`), each of which re-implemented one slice — usually erased (dropping type
 //! arguments and nullability) and without a type-variable context.
 
+use crate::fx_hash::HashMap;
 use crate::types::{Ty, TypeName};
-use std::collections::HashMap;
 
 /// The class-hierarchy oracle the assignability relation walks. Direct supertypes retain their applied
 /// type arguments: `Child<String> : Producer<String>` must not collapse to the bare name `Producer`
@@ -523,7 +523,7 @@ fn normalized_type_argument(cx: &TyCtx, ty: Ty) -> Ty {
 /// observe the class relationship while silently discarding the supertype template.
 pub(crate) fn applied_supertype(oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> Option<Ty> {
     let target = sup.kotlin_class_internal()?;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     // A FUNCTION TYPE has no class identity of its own — `(P) -> R` names no classifier — but it
     // has supertypes: the oracle answers `kotlin.Function<R>` for it, which is Kotlin's own
     // hierarchy. So the walk starts from `sub` whether or not `sub` can name itself, and only the

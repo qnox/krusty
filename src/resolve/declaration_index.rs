@@ -21,7 +21,7 @@ use super::{
     SymbolTable,
 };
 use crate::fir::DeclarationId;
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 /// What one resolved source declaration is.
 pub enum ResolvedSourceDeclaration<'symbols> {
@@ -48,8 +48,8 @@ impl<'symbols> ResolvedSourceDeclarations<'symbols> {
     /// Walk each published table once and index it by the identity its records already carry.
     pub(crate) fn publish(symbols: &'symbols SymbolTable) -> Self {
         let mut index = Self {
-            by_identity: HashMap::new(),
-            conflicted: HashSet::new(),
+            by_identity: HashMap::default(),
+            conflicted: HashSet::default(),
         };
         for signature in symbols.funs.values().flatten().chain(
             symbols

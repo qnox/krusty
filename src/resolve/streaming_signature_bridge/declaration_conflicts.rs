@@ -89,7 +89,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
     }
 
     let mut groups = TopLevelFunctionConflictGroups::default();
-    let mut pending = HashMap::new();
+    let mut pending = HashMap::default();
     let mut reserved_diagnostic_bytes = 0usize;
     let mut retained_display_bytes = 0usize;
     for entry in &entries {

@@ -23,7 +23,7 @@
 //! It runs AFTER `lower_suspend`: the body it moves is the finished state machine, or the body
 //! the coroutine transformer takes once the class is written.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{Callee, IrClass, IrExpr, IrFile, IrFunction};
 use crate::types::Ty;

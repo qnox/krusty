@@ -7,7 +7,7 @@
 //! anonymous object the call regenerates takes the next number under it (`…$<callee>$1`); the
 //! objects that object regenerates in turn are numbered under its own name.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 /// kotlinc's `SPECIAL_TRANSFORMATION_NAME`.
 const SPECIAL_TRANSFORMATION_NAME: &str = "$special";
@@ -27,7 +27,7 @@ impl NameGenerator {
         NameGenerator {
             class,
             next_lambda_index: 1,
-            children: HashMap::new(),
+            children: HashMap::default(),
         }
     }
 

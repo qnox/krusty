@@ -65,14 +65,14 @@ impl Parser<'_> {
         declaration_start: u32,
     ) -> (
         Vec<String>,
-        std::collections::HashSet<String>,
-        std::collections::HashSet<String>,
+        crate::fx_hash::HashSet<String>,
+        crate::fx_hash::HashSet<String>,
         Vec<(String, TypeRef)>,
         Vec<crate::types::TypeVariance>,
     ) {
         let mut names = Vec::new();
-        let mut non_null = std::collections::HashSet::new();
-        let mut reified = std::collections::HashSet::new();
+        let mut non_null = crate::fx_hash::HashSet::default();
+        let mut reified = crate::fx_hash::HashSet::default();
         let mut bounds = Vec::new();
         let mut variances = Vec::new();
         self.type_parameter_spans.clear();

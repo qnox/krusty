@@ -164,7 +164,7 @@ impl ProductionSignatureSemantics<'_> {
             .get(&constraint_owner)
             .and_then(|stack| stack.get(constraint_index))
             .map(|inputs| {
-                let mut formals = std::collections::HashSet::new();
+                let mut formals = crate::fx_hash::HashSet::default();
                 for input in inputs {
                     super::postponed_calls::collect_type_parameters(*input, &mut formals);
                 }
@@ -248,7 +248,7 @@ impl ProductionSignatureSemantics<'_> {
                 callable.source_file == Some(source.0)
                     && callable.source_decl == Some(DeclId(source.1))
             })?;
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_inferred_ty(
             callable.source_receiver?,
             receiver,
@@ -426,8 +426,8 @@ impl ProductionSignatureSemantics<'_> {
             .borrow()
             .is_none();
         if missing {
-            let mut parameters = std::collections::HashMap::new();
-            let record = |parameters: &mut std::collections::HashMap<
+            let mut parameters = crate::fx_hash::HashMap::default();
+            let record = |parameters: &mut crate::fx_hash::HashMap<
                 crate::fir::DeclarationId,
                 super::DeclarationTypeParameters,
             >,
@@ -1043,7 +1043,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             lexical
                 .lexical_tparam_identities()
                 .into_iter()
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<crate::fx_hash::HashSet<_>>()
         })?;
         crate::fir::ResolvedTy::new(denotable_signature_result(result.get(), &denotable))
             .map_err(|_| Self::failure())
@@ -1069,7 +1069,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .and_then(|anchor| anchor.owner);
         }
         owners.reverse();
-        let mut lexical = std::collections::HashMap::<&str, Ty>::new();
+        let mut lexical = crate::fx_hash::HashMap::<&str, Ty>::default();
         for owner in owners {
             let semantic = self
                 .callable_signature(owner)
@@ -3333,7 +3333,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 )
             },
         );
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         if selected.kind == crate::libraries::FnKind::Member {
             let owner = selected.callable.owner_type();
             if let Some((_, applied, _)) = self

@@ -1,8 +1,8 @@
 //! Declaration facts used to realize reflective type descriptions.
 
 use super::{IrExpr, IrFile, IrGenericSig, IrModuleSource, IrTypeParameter};
+use crate::fx_hash::HashMap;
 use crate::types::{Ty, TypeName};
-use std::collections::HashMap;
 
 /// Whether a lambda class is a source Kotlin function or a compiler-synthesized adapter.
 ///

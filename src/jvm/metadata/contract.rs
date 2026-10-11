@@ -57,7 +57,7 @@ pub(super) fn decode_contract(
                 records,
                 d2,
                 type_parameters,
-                &HashMap::new(),
+                &HashMap::default(),
                 table_nullable,
                 0,
             )

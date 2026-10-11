@@ -10,7 +10,7 @@
 //! The model in [`super::tree`] states what a tree keeps: every declaration and expression fact
 //! except source coordinates.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::ops::RangeInclusive;
 
 use crate::klib::KlibArchive;
@@ -82,7 +82,7 @@ impl KlibIrModuleTrees {
     pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {
         let mut module = Self {
             trees,
-            functions: HashMap::new(),
+            functions: HashMap::default(),
         };
         module.index()?;
         Ok(module)
@@ -348,7 +348,7 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
         Self {
             file,
             arena: KlibIrArena::default(),
-            types: HashMap::new(),
+            types: HashMap::default(),
             depth: 0,
         }
     }
@@ -1685,7 +1685,7 @@ mod tests {
     fn every_pre_2_4_operation_maps_to_a_distinct_current_one() {
         let mapped = (1..=39)
             .map(|legacy| current_operation(legacy).unwrap())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         assert_eq!(mapped.len(), 39);
         assert!(mapped.iter().all(|number| (5..=43).contains(number)));
         assert_eq!(current_operation(0), None);

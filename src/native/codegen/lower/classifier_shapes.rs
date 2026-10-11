@@ -208,7 +208,7 @@ pub(super) fn mapped_collection(
     }
 
     let mut pending = vec![internal];
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::fx_hash::HashSet::default();
     let mut selected = None;
     while let Some(classifier) = pending.pop() {
         if !visited.insert(classifier) {
@@ -445,7 +445,7 @@ pub(super) fn runtime_interface_descriptors(
     }
 
     let mut pending = roots.into_iter().collect::<Vec<_>>();
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::fx_hash::HashSet::default();
     let mut markers = Vec::new();
     while let Some(classifier) = pending.pop() {
         if !visited.insert(classifier) {

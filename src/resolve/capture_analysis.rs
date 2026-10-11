@@ -1,6 +1,6 @@
 //! Lexical name-use analysis for closure and local-declaration capture planning.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, Stmt, StmtId,

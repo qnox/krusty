@@ -8,6 +8,7 @@
 //! lowerer can pick the same-file / cross-file / library emit form from resolution alone.
 
 use crate::frontend::{FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, Signature};
+use crate::fx_hash::HashMap;
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig,
     InlineKind, LibraryCallable, LibraryMember, LibraryType, Origin, ParamList, PropKind,
@@ -17,7 +18,6 @@ use crate::symbol_source::{SymbolNamespace, SymbolSource};
 #[cfg(test)]
 use crate::types::Visibility;
 use crate::types::{stored_value_ty, type_name, Ty, TypeName};
-use std::collections::HashMap;
 
 /// The current module's declarations as a [`SymbolSource`]. Borrows the frontend symbols; cheap.
 pub struct ModuleSymbols<'a> {
@@ -450,7 +450,7 @@ impl<'a> ModuleSymbols<'a> {
             constructors,
             hidden_member_properties: Default::default(),
             hidden_deprecated_callables: Default::default(),
-            declared_callables: HashMap::new(),
+            declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members,
             companion,
@@ -595,7 +595,7 @@ impl<'a> ModuleSymbols<'a> {
     /// over the Kotlin extension, or bind an inherited classpath member the lowerer can't emit.
     pub fn instance_members(&self, rt: Ty, name: &str) -> Vec<LibraryMember> {
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         if let Some(i) = rt.non_null().obj_internal() {
             self.collect_member_libs(i, name, &mut out, &mut seen);
         }
@@ -626,7 +626,7 @@ impl<'a> ModuleSymbols<'a> {
         internal: TypeName,
         name: &str,
         out: &mut Vec<LibraryMember>,
-        seen: &mut std::collections::HashSet<TypeName>,
+        seen: &mut crate::fx_hash::HashSet<TypeName>,
     ) {
         if !seen.insert(internal) {
             return;
@@ -1633,8 +1633,8 @@ impl SymbolSource for ModuleSymbols<'_> {
 mod tests {
     use super::*;
     use crate::frontend::{FrontendClassFlags, FrontendExtPropSig};
+    use crate::fx_hash::{HashMap, HashSet};
     use crate::resolve::{CtorDefaultValue, SigFlags};
-    use std::collections::{HashMap, HashSet};
 
     fn sig(params: Vec<Ty>, ret: Ty) -> Signature {
         Signature {
@@ -1690,11 +1690,11 @@ mod tests {
             annotation_class_arguments: vec![],
             generated_nested_classifiers: vec![],
             props: vec![],
-            declared_props: HashMap::new(),
-            contextual_props: HashMap::new(),
-            constants: HashMap::new(),
-            member_ext_props: HashMap::new(),
-            member_ext_funs: HashMap::new(),
+            declared_props: HashMap::default(),
+            contextual_props: HashMap::default(),
+            constants: HashMap::default(),
+            member_ext_props: HashMap::default(),
+            member_ext_funs: HashMap::default(),
             has_primary_ctor: true,
             primary_constructor_declaration: None,
             primary_constructor_annotations: vec![],
@@ -1703,13 +1703,13 @@ mod tests {
             ctor_param_names: vec![],
             ctor_implicit_integer_coercion: vec![],
             ctor_vararg: None,
-            methods: HashMap::new(),
+            methods: HashMap::default(),
             declared_callable_order: Vec::new(),
             source_methods: Vec::new(),
             flags: FrontendClassFlags::default(),
             inner_of: None,
             companion_internal: None,
-            lateinit_props: HashSet::new(),
+            lateinit_props: HashSet::default(),
             interfaces: crate::types::TypeNameList::new(),
             interface_type_args: Vec::new(),
             delegated_interfaces: Vec::new(),
@@ -1729,12 +1729,12 @@ mod tests {
             type_parameter_extra_bounds: Vec::new(),
             captured_type_parameters: crate::types::TypeParameters::default(),
             metadata_captured_type_parameters: Vec::new(),
-            generic_props: HashMap::new(),
-            nullable_tparam_props: HashMap::new(),
-            generic_property_shapes: HashMap::new(),
+            generic_props: HashMap::default(),
+            nullable_tparam_props: HashMap::default(),
+            generic_property_shapes: HashMap::default(),
             value_field: None,
             full_value: false,
-            generic_methods: HashMap::new(),
+            generic_methods: HashMap::default(),
         }
     }
 

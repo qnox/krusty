@@ -221,8 +221,8 @@ fn one_delegation_forwarder_records_each_independent_interface_obligation() {
         edges
             .iter()
             .map(|edge| edge.overridden)
-            .collect::<std::collections::HashSet<_>>(),
-        std::collections::HashSet::from([
+            .collect::<crate::fx_hash::HashSet<_>>(),
+        crate::fx_hash::HashSet::from_iter([
             ResolvedFunctionOverrideTarget::Module(a),
             ResolvedFunctionOverrideTarget::Module(b),
         ])

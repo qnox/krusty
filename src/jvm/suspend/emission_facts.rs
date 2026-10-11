@@ -16,7 +16,7 @@ pub struct ContinuationMetadata {
     pub enclosing_descriptor: String,
 }
 
-pub type ContinuationMetadataMap = std::collections::HashMap<String, ContinuationMetadata>;
+pub type ContinuationMetadataMap = crate::fx_hash::HashMap<String, ContinuationMetadata>;
 
 /// What a JVM return node makes of the suspend result it returns when that result is not
 /// `COROUTINE_SUSPENDED`, which it returns as is.
@@ -39,7 +39,7 @@ pub(crate) enum SuspendedResultReturn {
 
 /// The return nodes that reshape a suspend result, and how.
 pub(crate) type SuspendedResultReturns =
-    std::collections::HashMap<crate::ir::ExprId, SuspendedResultReturn>;
+    crate::fx_hash::HashMap<crate::ir::ExprId, SuspendedResultReturn>;
 
 /// The continuation passed to an unintercepted intrinsic suspension point, which its debug probe
 /// reports.
@@ -54,7 +54,7 @@ pub(crate) enum ProbedContinuation {
 /// The continuation each unintercepted intrinsic suspension point probes. The CPS pass owns this
 /// physical choice; common IR retains only the semantic point kind.
 pub(crate) type IntrinsicProbeContinuations =
-    std::collections::HashMap<crate::ir::ExprId, ProbedContinuation>;
+    crate::fx_hash::HashMap<crate::ir::ExprId, ProbedContinuation>;
 
 /// What building a file's machines records for their emission.
 pub(super) struct MachineOutputs<'b> {
@@ -73,5 +73,5 @@ pub(super) struct MachineSubject<'a> {
     pub(super) body: crate::ir::ExprId,
     pub(super) unit_ret: bool,
     pub(super) captured_scopes: Option<super::SuspensionScopes>,
-    pub(super) suspension_lines: &'a std::collections::HashMap<crate::ir::ExprId, (u32, u32)>,
+    pub(super) suspension_lines: &'a crate::fx_hash::HashMap<crate::ir::ExprId, (u32, u32)>,
 }

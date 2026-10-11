@@ -21,7 +21,7 @@ impl CallConstraints<'_> {
         if !self.type_args.is_empty() {
             return bindings;
         }
-        let mut seeded = crate::symbol_resolver::GSigBinds::new();
+        let mut seeded = crate::symbol_resolver::GSigBinds::default();
         if let Some(declared) = signature.receiver {
             // An extension receiver is matched through the applied supertype graph. `List<*>`
             // therefore constrains the `T` in `Iterable<T>` to its readable projection, exactly as

@@ -6,7 +6,8 @@
 //! following that uninitialized value through the body's frames: constructions nest and interleave,
 //! so neither instruction order nor the class name can pair them.
 
-use std::collections::{BTreeSet, HashMap};
+use crate::fx_hash::HashMap;
+use std::collections::BTreeSet;
 
 use crate::jvm::bytecode_passes::analysis::{
     analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, Interpreter,
@@ -96,7 +97,7 @@ pub(super) fn regenerate_objects(
     let mut remapper = TypeRemapper::default();
     let mut pending = Vec::new();
     // The copy and its constructor descriptor, by the index of the `new` that made it.
-    let mut copies: HashMap<usize, (String, String)> = HashMap::new();
+    let mut copies: HashMap<usize, (String, String)> = HashMap::default();
     // An object regenerated later in this body can capture one regenerated earlier. Its fields,
     // constructor, and methods must name the earlier copy, not the dependency class.
     let mut prior_classes = Vec::new();
@@ -380,10 +381,10 @@ fn pair_constructions(
 ) -> Result<Constructions, InlineError> {
     let unpaired = || InlineError::UnpairedAnonymousObject;
     let mut constructions = Constructions {
-        by_new: HashMap::new(),
-        by_constructor: HashMap::new(),
-        descriptors: HashMap::new(),
-        lambdas: HashMap::new(),
+        by_new: HashMap::default(),
+        by_constructor: HashMap::default(),
+        descriptors: HashMap::default(),
+        lambdas: HashMap::default(),
     };
     let constructs = node.instructions().any(|insn| {
         matches!(insn, Insn::Type { op: NEW, class } if classes.is_anonymous_object(class))

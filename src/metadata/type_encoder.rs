@@ -4,8 +4,8 @@
 //! contracts, and type aliases. Keep that schema here; the surrounding declaration builders only
 //! decide which field contains the encoded type.
 
+use crate::fx_hash::HashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -78,10 +78,10 @@ pub(crate) struct StringTable<'a> {
     record_starts: Vec<u32>,
     /// Classifiers declared in executable code (or nested in one): named by their raw internal
     /// name, marked local, wherever a class id is interned.
-    local_classifiers: std::collections::HashSet<TypeName>,
+    local_classifiers: crate::fx_hash::HashSet<TypeName>,
     /// The local classifiers kotlinc gives no raw-name replacement: enum entry bodies, whose ids
     /// keep their `pkg/Enum.ENTRY` spelling.
-    enum_entry_bodies: std::collections::HashSet<TypeName>,
+    enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
     /// Explicit declaration approximation for non-denotable intersection types. Metadata has no
     /// classifier context of its own, so a target that emits intersections must supply the checked
     /// semantic lookup at the serialization boundary; absence is an error, never invariant fallback.
@@ -124,8 +124,8 @@ enum QualifiedNameKind {
 
 impl<'a> StringTable<'a> {
     pub(crate) fn with_local_classifiers(
-        local_classifiers: &std::collections::HashSet<TypeName>,
-        enum_entry_bodies: &std::collections::HashSet<TypeName>,
+        local_classifiers: &crate::fx_hash::HashSet<TypeName>,
+        enum_entry_bodies: &crate::fx_hash::HashSet<TypeName>,
         intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     ) -> Self {
         StringTable {

@@ -242,7 +242,7 @@ impl<'a> FileLowering<'a> {
     pub(super) fn declare_property_references(&mut self) -> Result<(), Unsupported> {
         self.declare_dependency_property_references()?;
         let mut emitted: HashMap<(crate::fir::PropertyId, bool, bool), ReferenceItems> =
-            HashMap::new();
+            HashMap::default();
         for index in 0..self.ir.exprs.len() {
             let Some((property, bound, mutable)) = reference_site(&self.ir.exprs[index]) else {
                 continue;
@@ -286,7 +286,7 @@ impl<'a> FileLowering<'a> {
     /// share the declaration marker used by equality.
     fn declare_dependency_property_references(&mut self) -> Result<(), Unsupported> {
         let mut emitted: HashMap<(crate::fir::ExternalPropertyId, bool, bool), ReferenceItems> =
-            HashMap::new();
+            HashMap::default();
         for index in 0..self.ir.exprs.len() {
             let index = index as u32;
             let Some(realized) = self.dependency_properties.get(&index) else {
@@ -357,7 +357,7 @@ impl<'a> FileLowering<'a> {
     /// equal, while unrelated same-named locals remain distinct.
     pub(super) fn declare_local_property_references(&mut self) -> Result<(), Unsupported> {
         let mut emitted: HashMap<crate::fir::LocalDelegatedPropertyId, ReferenceItems> =
-            HashMap::new();
+            HashMap::default();
         for index in 0..self.ir.exprs.len() {
             let IrExpr::LocalPropertyReference(reference) = &self.ir.exprs[index] else {
                 continue;

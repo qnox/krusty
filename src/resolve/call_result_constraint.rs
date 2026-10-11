@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn an_error_input_cannot_contextualize_a_bottom_result() {
         let signature = bottom_signature();
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         bindings.insert("T".to_string(), Ty::Nothing);
         assert!(
             !super::bottom_approximation_preserves_inputs(
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn a_matching_input_keeps_the_expected_result() {
         let signature = bottom_signature();
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         bindings.insert("T".to_string(), Ty::Nothing);
         assert!(super::bottom_approximation_preserves_inputs(
             &signature,

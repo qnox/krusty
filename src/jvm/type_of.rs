@@ -13,7 +13,7 @@
 //! splicer each encode them into their own instruction representation, so both sites build exactly
 //! the same sequence.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::{FunId, IrFile, IrTypeParameter};
 use crate::types::{Ty, TypeName, TypeVariance};
@@ -119,7 +119,7 @@ pub(super) struct TypeParameters<'a> {
 
 impl<'a> TypeParameters<'a> {
     pub(super) fn new(ir: &'a IrFile, facade: &'a str) -> Self {
-        let mut declarations = HashMap::new();
+        let mut declarations = HashMap::default();
         for (&function, signature) in &ir.signatures {
             for parameter in &signature.type_params {
                 declarations.insert(
@@ -203,7 +203,7 @@ pub(super) fn generate(
         parameters,
         out,
         recursive_bounds,
-        stored: HashMap::new(),
+        stored: HashMap::default(),
         next_temp: 0,
     }
     .type_of(ty, false)
@@ -610,7 +610,7 @@ pub(super) fn encode(
     cw: &mut super::classfile::ClassWriter,
     local_base: u16,
 ) -> u16 {
-    let mut slots = HashMap::<u32, u16>::new();
+    let mut slots = HashMap::<u32, u16>::default();
     let mut next = local_base;
     for instruction in instructions {
         match instruction {

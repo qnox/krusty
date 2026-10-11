@@ -803,7 +803,7 @@ fn private_default_published_by_inline(ir: &IrFile, target: u32) -> bool {
                 .then_some(function)
         })
         .collect::<Vec<_>>();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(function) = pending.pop() {
         if !seen.insert(function) {
             continue;

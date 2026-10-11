@@ -6,9 +6,9 @@
 //! neither looks up a callable nor infers semantics from an owner/member name.
 
 use super::{desc, erase, repr_of_ty, Repr, Under};
+use crate::fx_hash::HashMap;
 use crate::ir::{Callee, ExprId, IrFile};
 use crate::types::{Ty, TypeName};
-use std::collections::HashMap;
 
 /// The per-expression type facts lowering hands the representation analysis. They always travel
 /// together, and none alone can classify a value-class result: `logical` says WHICH value class a
@@ -153,11 +153,11 @@ mod tests {
     fn a_missing_descriptor_selects_the_carrier_only_when_that_result_was_recorded() {
         let value_class = crate::types::type_name("kotlin/UIntArray");
         let carrier = Ty::obj("kotlin/IntArray");
-        let mut under = Under::new();
+        let mut under = Under::default();
         under.insert(value_class, carrier);
-        let mut logical = HashMap::new();
+        let mut logical = HashMap::default();
         logical.insert(0, Ty::obj_name(value_class));
-        let declared = HashMap::new();
+        let declared = HashMap::default();
         let callee = Callee::Intrinsic {
             operation: IrIntrinsic::PrimitiveArrayNew { element: Ty::UInt },
             ret: Ty::obj_name(value_class),
@@ -168,12 +168,12 @@ mod tests {
             property_declarations: &declared,
             statics: &[],
         };
-        let absent = HashMap::new();
+        let absent = HashMap::default();
         assert!(matches!(
             representation(0, &callee, &under, types, &absent),
             Repr::Boxed(classifier) if classifier == value_class
         ));
-        let mut recorded = HashMap::new();
+        let mut recorded = HashMap::default();
         recorded.insert(0, carrier);
         assert!(matches!(
             representation(0, &callee, &under, types, &recorded),

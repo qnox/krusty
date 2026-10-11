@@ -32,7 +32,7 @@ pub(super) fn argument_ordinals(
             "omitted parameter {parameter} is outside 0..{parameter_count}"
         ));
     }
-    let omitted: std::collections::HashSet<u32> = omitted.iter().copied().collect();
+    let omitted: crate::fx_hash::HashSet<u32> = omitted.iter().copied().collect();
     Ok((0..u32::try_from(parameter_count).unwrap_or(u32::MAX))
         .filter(|parameter| !omitted.contains(parameter))
         .collect())

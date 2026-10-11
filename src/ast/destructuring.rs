@@ -2,7 +2,7 @@
 
 use super::{StmtId, TypeRef};
 use crate::diag::Span;
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 /// Whether a name-based entry names its property by the entry itself or by an explicit rename.
 ///

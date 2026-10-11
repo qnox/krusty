@@ -960,7 +960,7 @@ fn local_class_member_keeps_the_enclosing_body_local_callable_identity() {
     let selected_bodies = ordinary
         .iter()
         .map(|work| work.declaration)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     crate::resolve::publish_checked_local_signatures_in_active_root(
         &analysis.files[0],
         &active,

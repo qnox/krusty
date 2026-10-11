@@ -6,11 +6,11 @@
 
 use super::representation::{carrier_slot, primitive_array_value_class};
 use super::Under;
+use crate::fx_hash::HashSet;
 use crate::ir::{
     Callee, ExprId, IrExpr, IrFile, IrTypeOp, IrValueClassTypeOperation, IrValueClassTypeRole,
 };
 use crate::types::Ty;
-use std::collections::HashSet;
 
 /// Record a generated value-class unbox call whose receiver is a type operation. Other receiver
 /// shapes need no preservation during type erasure and therefore create no type-operation edge.
@@ -138,7 +138,7 @@ mod tests {
     fn a_recorded_unbox_edge_distinguishes_an_ordinary_same_spelling_call() {
         let array = crate::types::type_name("kotlin/UIntArray");
         let carrier = Ty::obj("kotlin/IntArray");
-        let mut under = Under::new();
+        let mut under = Under::default();
         under.insert(array, carrier);
         let mut ir = IrFile::default();
         let arg = ir.add_expr(IrExpr::GetValue(0));
@@ -201,7 +201,7 @@ mod tests {
     fn replacing_a_recorded_unbox_call_drops_its_type_operation_edge() {
         let array = crate::types::type_name("kotlin/UIntArray");
         let carrier = Ty::obj("kotlin/IntArray");
-        let mut under = Under::new();
+        let mut under = Under::default();
         under.insert(array, carrier);
         let mut ir = IrFile::default();
         let arg = ir.add_expr(IrExpr::GetValue(0));

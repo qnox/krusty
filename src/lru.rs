@@ -4,7 +4,7 @@
 //!
 //! A bounded min-heap avoids scanning the full map when an entry must be evicted.
 
-use crate::name_tree::FxBuildHasher;
+use crate::fx_hash::FxBuildHasher;
 use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;

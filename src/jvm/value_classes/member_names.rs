@@ -6,14 +6,14 @@
 //! spelling here from the declared signature, so the declaration and its uses cannot disagree.
 
 use super::Under;
+use crate::fx_hash::HashSet;
 use crate::types::{Ty, TypeName};
-use std::collections::HashSet;
 
 /// kotlinc's `erasedUpperBound`: the classifier a type stands for once erased. A type parameter
 /// stands for whatever its bound erases to, whatever the nullability along the way.
 fn erased_upper_bound(t: &Ty) -> Option<TypeName> {
     let mut current = t.non_null();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         match current {
             Ty::Obj(fq_name, _) => return Some(fq_name),
@@ -32,7 +32,7 @@ pub(super) fn value_class_bound_occurrence(t: Ty, under: &Under) -> Ty {
         return t;
     }
     let mut bound = t.non_null();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Ty::TyParam(name, next) = bound {
         if !seen.insert(name) {
             return t;
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn module_call_replaces_only_value_class_bounded_type_parameters() {
-        let mut under = Under::new();
+        let mut under = Under::default();
         under.insert(type_name("kotlin/UInt"), Ty::Int);
         let parameters = [
             Ty::ty_param("U", Ty::UInt),

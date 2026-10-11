@@ -6,10 +6,10 @@
 use crate::ast::{ExprId, ForRange, StmtId};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::fx_hash::HashMap;
 use crate::libraries::TypeEnhancement;
 use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
-use std::collections::HashMap;
 
 use super::{
     operator_calls::{range_operator, SelectedBuiltinOperatorAccess},

@@ -9,9 +9,9 @@
 //! committing a backend representation.
 
 use super::default_parameter_representation::primitive_wrapper;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty};
-use std::collections::{HashMap, HashSet};
 
 fn declared_primary_bound(parameter: &IrTypeParameter) -> Option<Ty> {
     parameter
@@ -139,14 +139,14 @@ pub(super) fn parameter_erasures_with(
     parameters: &[IrTypeParameter],
     referenced: &[IrTypeParameter],
 ) -> HashMap<String, Ty> {
-    let mut erasures = HashMap::new();
+    let mut erasures = HashMap::default();
     for parameter in parameters {
         resolve_primary_bound(
             &parameter.semantic_name,
             parameters,
             referenced,
             &mut erasures,
-            &mut HashSet::new(),
+            &mut HashSet::default(),
         );
     }
     erasures

@@ -132,7 +132,7 @@ pub(super) struct SpecializedGenericCallableReference {
 fn alpha_equivalent_type(
     left: Ty,
     right: Ty,
-    formals: &std::collections::HashMap<String, String>,
+    formals: &crate::fx_hash::HashMap<String, String>,
 ) -> bool {
     if left == right {
         return true;
@@ -184,22 +184,22 @@ fn receiver_validated_projected_formals(
     generic: &crate::libraries::GenericSig,
     declared_receiver: Ty,
     actual_receiver: Ty,
-) -> std::collections::HashSet<String> {
+) -> crate::fx_hash::HashSet<String> {
     let (Ty::Obj(declared_owner, declared_arguments), Ty::Obj(actual_owner, actual_arguments)) =
         (declared_receiver.non_null(), actual_receiver.non_null())
     else {
-        return std::collections::HashSet::new();
+        return crate::fx_hash::HashSet::default();
     };
     if declared_owner != actual_owner || declared_arguments.len() != actual_arguments.len() {
-        return std::collections::HashSet::new();
+        return crate::fx_hash::HashSet::default();
     }
     let Some(classifier) = source.classifier(declared_owner) else {
-        return std::collections::HashSet::new();
+        return crate::fx_hash::HashSet::default();
     };
     if classifier.type_params.len() != declared_arguments.len() {
-        return std::collections::HashSet::new();
+        return crate::fx_hash::HashSet::default();
     }
-    let mut alpha = std::collections::HashMap::new();
+    let mut alpha = crate::fx_hash::HashMap::default();
     for (&declared, classifier_formal) in declared_arguments.iter().zip(&classifier.type_params) {
         let declared = declared.projection_inner().unwrap_or(declared);
         if let Ty::TyParam(method_formal, _) = declared {
@@ -208,7 +208,7 @@ fn receiver_validated_projected_formals(
             }
         }
     }
-    let mut validated = std::collections::HashSet::new();
+    let mut validated = crate::fx_hash::HashSet::default();
     for (index, (&declared, &actual)) in declared_arguments.iter().zip(actual_arguments).enumerate()
     {
         if actual.projection_inner().is_none() {
@@ -264,9 +264,9 @@ pub(super) fn specialize_generic_signature(
     expected_ret: Option<Ty>,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
 ) -> Result<SpecializedGenericCallableReference, CallableRefSpecialization> {
-    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+    let mut bindings = crate::symbol_resolver::GSigBinds::default();
     if let (Some(declared), Some(actual)) = (generic.receiver, extension_receiver) {
-        let mut inferred = crate::symbol_resolver::GSigBinds::new();
+        let mut inferred = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_ty_from_symbols(source, declared, actual, &mut inferred);
         crate::symbol_resolver::merge_generic_bindings(generic, 0, &mut bindings, inferred);
     }
@@ -321,7 +321,7 @@ pub(super) fn specialize_generic_signature(
         (Some(declared), Some(actual)) => {
             receiver_validated_projected_formals(source, generic, declared, actual)
         }
-        _ => std::collections::HashSet::new(),
+        _ => crate::fx_hash::HashSet::default(),
     };
     let mut validation_bindings = bindings.clone();
     for formal in receiver_validated {
@@ -442,7 +442,7 @@ pub(super) fn is_compatible(
     if (suspend && !expected.suspend) || params.len() != expected.params.len() {
         return false;
     }
-    let mut result_bindings = crate::symbol_resolver::GSigBinds::new();
+    let mut result_bindings = crate::symbol_resolver::GSigBinds::default();
     crate::symbol_resolver::unify_inferred_ty(expected.ret, ret, &mut result_bindings);
     let expected_ret =
         crate::symbol_resolver::ty_subst_keep_unbound(expected.ret, &result_bindings);
@@ -476,7 +476,7 @@ pub(super) fn realize_expected_shape(
     // from the enclosing call solver. Materialize every occurrence independently; the ordinary
     // variance-aware call constraints then combine the resulting input uppers and result lowers.
     let specialize_occurrence = |shape: Ty, actual: Ty| {
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_inferred_ty(shape, actual, &mut bindings);
         crate::symbol_resolver::ty_subst_keep_unbound(shape, &bindings)
     };

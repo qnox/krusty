@@ -4,7 +4,7 @@
 //! narrowings of every binding the body writes. Writes are recorded by resolved binding identity
 //! while the body is checked, never by spelling: a same-named inner declaration is another value.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::types::Ty;
 
@@ -43,7 +43,7 @@ impl Checker<'_> {
         &mut self,
         check_body: impl FnOnce(&mut Self) -> Ty,
     ) -> (Ty, HashSet<BindingIdentity>) {
-        self.try_body_writes.push(HashSet::new());
+        self.try_body_writes.push(HashSet::default());
         let ty = check_body(self);
         let written = self
             .try_body_writes

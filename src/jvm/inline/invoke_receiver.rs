@@ -1,6 +1,6 @@
 //! Stack ownership between a substituted lambda's receiver load and `FunctionN.invoke`.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::jvm::classreader::C;
 

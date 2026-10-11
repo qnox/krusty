@@ -5,7 +5,7 @@
 //! applies the checker's type substitutions, rebases body-local values, and turns inline-function
 //! returns into an expression-local loop exit.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{
     CallableId, FirPropertyReferenceTarget, FirPropertyTarget, FirReferenceAdaptation,
@@ -656,9 +656,9 @@ impl BodyLowering<'_> {
 
         // A lambda's `inline_body` has its own value numbering and return target. It is cloned for
         // later HOF splicing, but must not be rewritten as part of the enclosing inline function.
-        let mut protected = HashSet::new();
+        let mut protected = HashSet::default();
         let mut pending = vec![template];
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -713,7 +713,7 @@ impl BodyLowering<'_> {
         // Copies whose `GetValue` of an inline parameter was replaced by that parameter's lambda.
         // A capture temporary initialized from one of these is the lambda, even though the
         // invocation still reads the temporary.
-        let mut substituted_inline_lambdas = HashSet::new();
+        let mut substituted_inline_lambdas = HashSet::default();
 
         // Clone order, not map order: rewriting the copies allocates locals and records returns,
         // and both orders reach the emitted code.
@@ -2165,9 +2165,14 @@ mod expansion_mode_tests {
 
         assert_eq!(
             bindings,
-            [("T".into(), Ty::String), ("R".into(), Ty::Int)].into()
+            [("T".into(), Ty::String), ("R".into(), Ty::Int)]
+                .into_iter()
+                .collect()
         );
-        assert_eq!(reified_bindings, [("R".into(), Ty::Int)].into());
+        assert_eq!(
+            reified_bindings,
+            [("R".into(), Ty::Int)].into_iter().collect()
+        );
     }
 
     #[test]

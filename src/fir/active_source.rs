@@ -91,13 +91,13 @@ pub(crate) enum ActiveSourceBindingError {
 pub(crate) struct ActiveSourceDeclarations {
     /// Parser binding of each stable declaration this unit published. Keyed by identity so binding
     /// a file does not allocate a slot for every declaration in the module.
-    declarations: std::collections::HashMap<DeclarationId, ActiveDeclarationRef>,
+    declarations: crate::fx_hash::HashMap<DeclarationId, ActiveDeclarationRef>,
     /// Reverse binding for the parser declaration inventory extracted from the one live unit.
     /// These are arena-local IDs and the table is dropped together with that unit.
     parser_declarations: Vec<Option<DeclarationId>>,
     /// Parser binding to the stable identities that carry it, in declaration-id order. Lookups
     /// answer from the bindings this unit published, not from a scan of the module.
-    by_binding: std::collections::HashMap<ActiveDeclarationRef, Vec<DeclarationId>>,
+    by_binding: crate::fx_hash::HashMap<ActiveDeclarationRef, Vec<DeclarationId>>,
 }
 
 fn alias_default_binding(
@@ -203,7 +203,7 @@ impl ActiveSourceCursor {
                     .declaration_anchor(*declaration)
                     .is_some_and(|anchor| anchor.owner.is_none())
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let active = ActiveSourceDeclarations::bind_selected(
             file,
             source,
@@ -258,9 +258,9 @@ impl ActiveSourceDeclarations {
         file: &File,
         source: SourceFileId,
         index: &ResolvedModuleIndex,
-        roots: &std::collections::HashSet<DeclarationId>,
-        bodies: &std::collections::HashSet<DeclarationId>,
-        parser_classifier_identities: &std::collections::HashMap<DeclId, crate::types::TypeName>,
+        roots: &crate::fx_hash::HashSet<DeclarationId>,
+        bodies: &crate::fx_hash::HashSet<DeclarationId>,
+        parser_classifier_identities: &crate::fx_hash::HashMap<DeclId, crate::types::TypeName>,
     ) -> Result<Self, ActiveSourceBindingError> {
         let stable = index
             .source_inventory(source)
@@ -276,7 +276,7 @@ impl ActiveSourceDeclarations {
             .iter()
             .chain(bodies)
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         // A retained executable fragment owns every local declaration nested in that fragment.
         // The checker may enter an anonymous/local classifier while checking an inline body or a
         // default expression and must then publish its inferred members against their stable
@@ -343,9 +343,9 @@ impl ActiveSourceDeclarations {
         file: &File,
         source: SourceFileId,
         index: &ResolvedModuleIndex,
-        roots: &std::collections::HashSet<DeclarationId>,
-        providers: &std::collections::HashSet<DeclarationId>,
-        parser_classifier_identities: &std::collections::HashMap<DeclId, crate::types::TypeName>,
+        roots: &crate::fx_hash::HashSet<DeclarationId>,
+        providers: &crate::fx_hash::HashSet<DeclarationId>,
+        parser_classifier_identities: &crate::fx_hash::HashMap<DeclId, crate::types::TypeName>,
         mappings: &[super::DefaultArgumentProvider],
     ) -> Result<Self, ActiveSourceBindingError> {
         let mut active = Self::bind_retained_fragments(
@@ -396,11 +396,11 @@ impl ActiveSourceDeclarations {
         source: SourceFileId,
         index: &ResolvedModuleIndex,
         stable: &[DeclarationId],
-        unit_roots: Option<&std::collections::HashSet<DeclarationId>>,
-        root_bodies: Option<&std::collections::HashSet<DeclarationId>>,
-        selected: Option<&std::collections::HashSet<DeclarationId>>,
+        unit_roots: Option<&crate::fx_hash::HashSet<DeclarationId>>,
+        root_bodies: Option<&crate::fx_hash::HashSet<DeclarationId>>,
+        selected: Option<&crate::fx_hash::HashSet<DeclarationId>>,
         parser_classifier_identities: Option<
-            &std::collections::HashMap<DeclId, crate::types::TypeName>,
+            &crate::fx_hash::HashMap<DeclId, crate::types::TypeName>,
         >,
     ) -> Result<Self, ActiveSourceBindingError> {
         let mut parser_ids = DeclarationIds::default();
@@ -609,9 +609,9 @@ impl ActiveSourceDeclarations {
         }
 
         let parser_declarations = parser_to_stable.clone();
-        let mut declarations = std::collections::HashMap::new();
-        let mut by_binding: std::collections::HashMap<ActiveDeclarationRef, Vec<DeclarationId>> =
-            std::collections::HashMap::new();
+        let mut declarations = crate::fx_hash::HashMap::default();
+        let mut by_binding: crate::fx_hash::HashMap<ActiveDeclarationRef, Vec<DeclarationId>> =
+            crate::fx_hash::HashMap::default();
         for (raw, stable) in parser_to_stable.into_iter().enumerate() {
             let Some(stable) = stable else {
                 continue;
@@ -667,7 +667,7 @@ impl ActiveSourceDeclarations {
             extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names);
         let retained_by_inline_owner = |declaration: DeclarationId| {
             let mut current = Some(declaration);
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             while let Some(candidate) = current {
                 if !seen.insert(candidate) {
                     return false;
@@ -1079,8 +1079,8 @@ fn bind_retained_parser_declarations(
     parser_ids: &DeclarationIds,
     parser_names: &LookupNames,
     parser_stubs: &[super::DeclarationStub],
-    selected: &std::collections::HashSet<DeclarationId>,
-    parser_classifier_identities: &std::collections::HashMap<DeclId, crate::types::TypeName>,
+    selected: &crate::fx_hash::HashSet<DeclarationId>,
+    parser_classifier_identities: &crate::fx_hash::HashMap<DeclId, crate::types::TypeName>,
 ) -> Result<Vec<Option<DeclarationId>>, ActiveSourceBindingError> {
     let mut parser_to_stable = vec![None; parser_ids.len()];
     // Selected stable declarations of this source, bucketed by the structural key a parser stub
@@ -1088,8 +1088,8 @@ fn bind_retained_parser_declarations(
     // candidate, and asked the whole binding vector whether each was already bound — cubic in
     // the file. The buckets and the bound set make each stub's search proportional to its
     // structural siblings.
-    let mut structural: std::collections::HashMap<(DeclarationKind, u32), Vec<DeclarationId>> =
-        std::collections::HashMap::new();
+    let mut structural: crate::fx_hash::HashMap<(DeclarationKind, u32), Vec<DeclarationId>> =
+        crate::fx_hash::HashMap::default();
     for candidate in stable.iter().copied() {
         if !selected.contains(&candidate) {
             continue;
@@ -1105,7 +1105,7 @@ fn bind_retained_parser_declarations(
             .or_default()
             .push(candidate);
     }
-    let mut bound = std::collections::HashSet::new();
+    let mut bound = crate::fx_hash::HashSet::default();
     loop {
         let before = parser_to_stable.iter().flatten().count();
         for parser in parser_stubs {
@@ -1213,10 +1213,10 @@ fn bind_auxiliary_parser_declarations(
     // declarations only: scanning the whole module for every unbound parser node, and asking the
     // binding vector whether each was already taken, was quadratic in the module. A file whose
     // only executable fragments are parameter defaults paid that cost once per file.
-    let mut by_structure: std::collections::HashMap<
+    let mut by_structure: crate::fx_hash::HashMap<
         (Option<DeclarationId>, DeclarationKind, u32),
         Vec<DeclarationId>,
-    > = std::collections::HashMap::new();
+    > = crate::fx_hash::HashMap::default();
     for stable in index.declarations_in_source(source).iter().copied() {
         if index.declaration_header(stable).is_some() {
             continue;
@@ -1229,7 +1229,7 @@ fn bind_auxiliary_parser_declarations(
             .or_default()
             .push(stable);
     }
-    let mut bound: std::collections::HashSet<DeclarationId> =
+    let mut bound: crate::fx_hash::HashSet<DeclarationId> =
         parser_to_stable.iter().flatten().copied().collect();
     loop {
         let mut changed = false;

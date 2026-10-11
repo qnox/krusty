@@ -149,7 +149,7 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::MissingStableCallTarget,
             )
         })?;
-        let mut substitutions = HashMap::new();
+        let mut substitutions = HashMap::default();
         for (ordinal, value) in self
             .info
             .resolved_call_type_args

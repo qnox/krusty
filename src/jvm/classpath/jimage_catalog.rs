@@ -4,7 +4,7 @@
 //! the same `NameId` in both views. The completed index owns that tree through an `Arc`; no source
 //! spelling is promoted to process-lifetime storage independently of the cached index.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -62,7 +62,7 @@ impl JimageIndex {
 /// for every compiler worker while the index and its shared name tree remain under one owner.
 fn global_cache() -> &'static Mutex<HashMap<EntryKey, Arc<JimageIndex>>> {
     static CACHE: OnceLock<Mutex<HashMap<EntryKey, Arc<JimageIndex>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| Mutex::new(HashMap::default()))
 }
 
 pub(super) fn cached_jimage_index(path: &Path) -> Option<Arc<JimageIndex>> {

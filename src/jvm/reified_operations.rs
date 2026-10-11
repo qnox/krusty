@@ -6,7 +6,7 @@
 //! substitution into either the concrete JVM classifier or the host reified parameter consumed by
 //! the bytecode splicer.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::reified_arguments::ReifiedArgument;
 use crate::ir::{ExprId, FunId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
@@ -69,7 +69,7 @@ pub(super) fn splice_type_map(
     render: &dyn Fn(Ty) -> String,
 ) -> HashMap<String, ReifiedArgument> {
     let Some(substitutions) = ir.reified_call_subst.get(&expression) else {
-        return HashMap::new();
+        return HashMap::default();
     };
     let forwarded = |ty: Ty| {
         let Ty::TyParam(identity, _) = ty.non_null() else {
@@ -144,7 +144,7 @@ pub(super) fn splice_arguments(
     render: &dyn Fn(Ty) -> String,
 ) -> super::reified_arguments::ReifiedArguments {
     let classes = splice_type_map(ir, expression, render);
-    let mut type_of = HashMap::new();
+    let mut type_of = HashMap::default();
     if let Some(substitutions) = ir.reified_call_subst.get(&expression) {
         let parameters = super::type_of::TypeParameters::new(ir, facade);
         for (name, ty) in substitutions {
@@ -167,7 +167,7 @@ fn collect_reified_parameters(ir: &IrFile) -> HashMap<String, ReifiedParameter> 
         .iter()
         .map(|(&function, signature)| (function, signature.type_params.clone()))
         .collect::<Vec<_>>();
-    let mut parameters = HashMap::new();
+    let mut parameters = HashMap::default();
     for (function, type_params) in signatures {
         let enclosing = super::generic_erasure::bound_type_parameters(ir, function);
         for (identity, parameter) in reified_parameters(&type_params, &enclosing) {
@@ -238,7 +238,7 @@ fn record_reified_catches(
     functions: &HashSet<FunId>,
 ) {
     ir.reified_catch_markers.clear();
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     for root in marker_roots(ir, functions) {
         let mut pending = vec![root];
         while let Some(expression) = pending.pop() {
@@ -277,7 +277,7 @@ fn realize_expression_dag(
     parameters: &HashMap<String, ReifiedParameter>,
 ) {
     let mut pending = vec![root];
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !visited.insert(expression) {
             continue;
@@ -380,7 +380,7 @@ mod tests {
 
         assert_eq!(
             splice_type_map(&ir, expression, &|_| String::new()),
-            HashMap::from([
+            HashMap::from_iter([
                 (
                     "T".to_owned(),
                     ReifiedArgument::Class {
@@ -420,7 +420,7 @@ mod tests {
 
         assert_eq!(
             splice_type_map(&ir, expression, &|_| String::new()),
-            HashMap::from([
+            HashMap::from_iter([
                 (
                     "R".to_owned(),
                     ReifiedArgument::Forwarded {

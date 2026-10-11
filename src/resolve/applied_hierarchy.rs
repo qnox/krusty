@@ -1,7 +1,7 @@
 //! A source classifier's applied supertype hierarchy: its direct parents in declaration order,
 //! with the class's type arguments substituted, and the walks over them.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::{ClassSig, SymbolTable};
 use crate::types::{Ty, TypeName};
@@ -52,7 +52,7 @@ impl SymbolTable {
             return Vec::new();
         };
         let mut pending = vec![(internal, root, 0)];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut hierarchy = Vec::new();
         while let Some((owner, applied, depth)) = pending.pop() {
             if !seen.insert(owner) {
@@ -76,7 +76,7 @@ impl SymbolTable {
             return Vec::new();
         };
         let mut pending = std::collections::VecDeque::from([(internal, root, 0)]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut hierarchy = Vec::new();
         while let Some((owner, applied, depth)) = pending.pop_front() {
             if !seen.insert(owner) {

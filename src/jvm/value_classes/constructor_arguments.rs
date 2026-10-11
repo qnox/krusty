@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn only_the_exact_normalized_carrier_proves_a_generated_argument_is_unboxed() {
         let value_class = type_name("sample/Label");
-        let declarations = super::super::Under::from([(value_class, Ty::String)]);
+        let declarations = super::super::Under::from_iter([(value_class, Ty::String)]);
         assert!(recorded_carrier(
             Some(Ty::String),
             Ty::obj_name(value_class),
@@ -123,7 +123,7 @@ mod tests {
 
         let nullable_carrier_class = type_name("sample/Stamp");
         let declarations =
-            super::super::Under::from([(nullable_carrier_class, Ty::nullable(Ty::String))]);
+            super::super::Under::from_iter([(nullable_carrier_class, Ty::nullable(Ty::String))]);
         assert!(recorded_carrier(
             Some(Ty::nullable(Ty::String)),
             Ty::obj_name(nullable_carrier_class),

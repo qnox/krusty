@@ -9,7 +9,7 @@
 //! reference interned while copying is recorded as copied; one the class's own code interns is
 //! recorded as mapped.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use super::{ClassWriter, Const, ConstPool};
 
@@ -124,8 +124,8 @@ impl ClassWriter {
     /// The `NameAndType` entries only copied member references use: their descriptors were never
     /// mapped for this class.
     pub(super) fn copied_only_name_and_types(&self) -> HashSet<u16> {
-        let mut copied = HashSet::new();
-        let mut used = HashSet::new();
+        let mut copied = HashSet::default();
+        let mut used = HashSet::default();
         for slot in 1..=self.cp.slot_entries.len() {
             let index = u16::try_from(slot).expect("a constant pool index fits in u16");
             let Some(

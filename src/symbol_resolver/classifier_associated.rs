@@ -198,7 +198,7 @@ impl SymbolResolver<'_> {
 
     /// `classifier` and its supertypes, breadth first, each with its supertype distance.
     fn static_scope_classifiers(&self, classifier: TypeName) -> Vec<(TypeName, u32)> {
-        let mut seen = std::collections::HashSet::from([classifier]);
+        let mut seen = crate::fx_hash::HashSet::from_iter([classifier]);
         let mut classifiers = vec![(classifier, 0)];
         let mut frontier = vec![Ty::obj_name(classifier)];
         let mut rank = 1;

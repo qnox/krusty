@@ -12,7 +12,7 @@
 //! first; that copy is the same lambda. A named source binding stays a value: kotlinc
 //! rejects `val y = x` on an inline parameter.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ExprId, IrCallableReferenceTarget, IrExpr};
 use crate::types::Ty;
@@ -82,7 +82,7 @@ impl BodyLowering<'_> {
         include_forwarded_lambda_slots(self.ir, copies, &mut copied);
         let spliceable = spliceable_invocations(self.ir, copies, &copied);
         let blocked = blocked_slots(self.ir, copies, &copied, &spliceable);
-        let mut dropping = HashSet::new();
+        let mut dropping = HashSet::default();
         for (slot, carrier) in &copied {
             if blocked.contains(slot) {
                 continue;
@@ -192,7 +192,7 @@ fn copied_lambda_slots(
     copies: &[(ExprId, ExprId)],
     substituted_lambdas: &HashSet<ExprId>,
 ) -> HashMap<u32, ConvertedCarrier> {
-    let mut copied = HashMap::new();
+    let mut copied = HashMap::default();
     for &(_, copy) in copies {
         let IrExpr::Variable {
             index,
@@ -277,7 +277,7 @@ fn converted_slots(
     ir: &crate::ir::IrFile,
     copies: &[(ExprId, ExprId)],
 ) -> HashMap<u32, ConvertedCarrier> {
-    let mut converted = HashMap::new();
+    let mut converted = HashMap::default();
     for &(_, copy) in copies {
         let IrExpr::Variable {
             index,
@@ -363,7 +363,7 @@ fn blocked_slots(
         .iter()
         .map(|invoke| (invoke.func, invoke.invocation))
         .collect::<HashSet<_>>();
-    let mut parents = HashMap::<ExprId, Vec<ExprId>>::new();
+    let mut parents = HashMap::<ExprId, Vec<ExprId>>::default();
     for &(_, parent) in copies {
         crate::ir::for_each_child(&ir.exprs, parent, &mut |child| {
             parents.entry(child).or_default().push(parent);
@@ -380,7 +380,7 @@ fn blocked_slots(
             } if *init == read && converted.contains_key(&index)
         )
     };
-    let mut blocked = HashSet::new();
+    let mut blocked = HashSet::default();
     for &(_, copy) in copies {
         let (slot, read) = match ir.expr(copy) {
             IrExpr::GetValue(slot) => (*slot, true),
@@ -434,7 +434,7 @@ fn blocked_slots(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use crate::fx_hash::HashMap;
 
     use crate::ir::{IrCallableReferenceTarget, IrConst, IrExpr};
 
@@ -457,7 +457,7 @@ mod tests {
             ir: &crate::ir::IrFile,
             expression: crate::ir::ExprId,
             predicate: &impl Fn(&IrExpr) -> bool,
-            seen: &mut std::collections::HashSet<crate::ir::ExprId>,
+            seen: &mut crate::fx_hash::HashSet<crate::ir::ExprId>,
         ) -> bool {
             if !seen.insert(expression) {
                 return false;
@@ -473,7 +473,7 @@ mod tests {
             });
             found
         }
-        visit(ir, root, predicate, &mut std::collections::HashSet::new())
+        visit(ir, root, predicate, &mut crate::fx_hash::HashSet::default())
     }
 
     fn lower(source: &str, stem: &str) -> crate::ir::IrFile {
@@ -505,7 +505,7 @@ mod tests {
             named: true,
         });
         let copies = [(0, temporary), (0, named)];
-        let substituted = std::collections::HashSet::from([lambda]);
+        let substituted = crate::fx_hash::HashSet::from_iter([lambda]);
 
         let slots = copied_lambda_slots(&ir, &copies, &substituted);
 
@@ -535,7 +535,7 @@ mod tests {
             stmts: vec![variable, invocation],
             value: Some(read),
         });
-        let converted = HashMap::from([(
+        let converted = HashMap::from_iter([(
             7,
             ConvertedCarrier {
                 variable,
@@ -552,7 +552,7 @@ mod tests {
 
         assert_eq!(
             blocked_slots(&ir, &copies, &converted, &spliceable),
-            std::collections::HashSet::from([7])
+            crate::fx_hash::HashSet::from_iter([7])
         );
     }
 
@@ -585,7 +585,7 @@ mod tests {
             value: None,
         });
         let copies = (0..=root).map(|id| (id, id)).collect::<Vec<_>>();
-        let mut slots = HashMap::from([(
+        let mut slots = HashMap::from_iter([(
             3,
             ConvertedCarrier {
                 variable: carrier,
@@ -629,7 +629,7 @@ mod tests {
             value: Some(read),
         });
         let copies = (0..=root).map(|id| (id, id)).collect::<Vec<_>>();
-        let converted = HashMap::from([
+        let converted = HashMap::from_iter([
             (
                 3,
                 ConvertedCarrier {
@@ -649,7 +649,7 @@ mod tests {
         ]);
         assert_eq!(
             blocked_slots(&ir, &copies, &converted, &[]),
-            std::collections::HashSet::from([3, 8])
+            crate::fx_hash::HashSet::from_iter([3, 8])
         );
     }
 

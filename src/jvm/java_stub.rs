@@ -23,11 +23,11 @@ use super::classfile::{
     ClassWriter, CodeBuilder, InnerClassSpec, ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL,
     ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SUPER,
 };
+use crate::fx_hash::{HashMap, HashSet};
 use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx,
     JavaConstant, Member, RawDecl, SrcType, STUB_DEFAULT,
 };
-use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 use crate::java_source::parse_source_file;
@@ -70,7 +70,7 @@ pub fn stub_classes(
     // This parser-owned graph is the only authority for lexical nesting and the type parameters
     // visible through it. Walking encoded names by splitting `$` would make a legal `$` inside an
     // identifier look like an enclosing declaration.
-    let mut declarations_by_internal = HashMap::new();
+    let mut declarations_by_internal = HashMap::default();
     for declaration in parsed.iter().flat_map(|(_, declarations)| declarations) {
         // Emission keeps the first declaration for a duplicate internal name. Lexical-owner and
         // type-variable lookup must consult that same declaration rather than a later duplicate.
@@ -84,7 +84,7 @@ pub fn stub_classes(
     let resolve_all = |cand: &str| source_declarations.contains(cand) || resolve(cand);
 
     let mut out = Vec::new();
-    let mut emitted: HashSet<&str> = HashSet::new();
+    let mut emitted: HashSet<&str> = HashSet::default();
     for (ctx, decls) in &parsed {
         for raw in decls {
             if (raw.outer_internal.is_some() && raw.access & ACC_PRIVATE != 0)

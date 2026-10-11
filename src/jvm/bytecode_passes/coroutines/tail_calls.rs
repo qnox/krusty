@@ -2,7 +2,7 @@
 //! tail call needs no state machine — it returns whatever its callee returned, `COROUTINE_SUSPENDED`
 //! included.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use super::super::analysis::{
     analyze, is_meaningful, node_opcode, opcode, AnalyzerError, At, BasicInterpreter, BasicValue,
@@ -183,7 +183,7 @@ fn skip_until_meaningful(
     skip_suspend_markers: bool,
 ) -> Option<NodeId> {
     let mut cursor = start;
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     while let Some(id) = cursor {
         if !visited.insert(id) {
             return None;
@@ -318,7 +318,7 @@ pub(crate) fn all_suspension_points_are_tail_calls(
         None => true,
     };
     let successors_are_safe_or_returns = |start: usize, unit_call: bool| {
-        let mut visited = HashSet::from([start]);
+        let mut visited = HashSet::from_iter([start]);
         let mut stack = vec![start];
         while let Some(index) = stack.pop() {
             let node = &snapshot.nodes[index];

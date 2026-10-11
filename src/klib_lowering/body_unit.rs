@@ -8,7 +8,8 @@
 //! and a call cycle links back to the function it already declared. If any reached body declines,
 //! the unit is left exactly as it was.
 
-use std::collections::{HashMap, VecDeque};
+use crate::fx_hash::HashMap;
+use std::collections::VecDeque;
 
 use super::body_lowering::{BodyLowering, LinkedCallee, LoweredFunction};
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
@@ -33,7 +34,7 @@ impl Default for DependencyBodyUnit {
     fn default() -> Self {
         Self {
             ir: IrFile::default(),
-            functions: HashMap::new(),
+            functions: HashMap::default(),
             builtins: IrBuiltinOperators::new(),
         }
     }

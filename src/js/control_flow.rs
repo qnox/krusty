@@ -5,7 +5,7 @@
 //! checked control flow (notably the inclusive-end overflow guard). Move such updates into the loop
 //! body and execute them before every continue targeting that exact stable loop label.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::{IrExpr, IrFile};
 

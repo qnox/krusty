@@ -5,7 +5,7 @@
 //! invokes the pinned ordinary compiler on the same prepared source set. Only its normal compilation
 //! rejection can remove the case from the positive JVM-acceptance denominator.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -215,7 +215,7 @@ pub fn reference_jvm_acceptance(
             inject_support_module(&mut modules, coroutine_helpers);
         }
         let units = module_units(&modules);
-        let mut outputs = HashMap::<String, PathBuf>::new();
+        let mut outputs = HashMap::<String, PathBuf>::default();
         for unit in units {
             let mut unit_classpath = classpath.to_vec();
             let mut friends = Vec::new();

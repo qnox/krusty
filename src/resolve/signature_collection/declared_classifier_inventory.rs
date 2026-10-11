@@ -35,7 +35,7 @@ pub(in crate::resolve) fn declared_classifier_inventory(
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     compact_local_contexts: Option<&[PassOneLocalClassContext]>,
     file_class_names: &[ClassNames],
-    user_defined: &std::collections::HashSet<TypeName>,
+    user_defined: &crate::fx_hash::HashSet<TypeName>,
 ) -> DeclaredClassifierInventory {
     // Inspection-only lexical views remain parser-keyed. Production keeps the stable Pass-1
     // context directly and never reconstructs a `DeclId` from a source range.
@@ -88,7 +88,7 @@ pub(in crate::resolve) fn declared_classifier_inventory(
                 .collect()
         },
     );
-    let mut source_direct_supertypes: HashMap<TypeName, Vec<TypeName>> = HashMap::new();
+    let mut source_direct_supertypes: HashMap<TypeName, Vec<TypeName>> = HashMap::default();
     if let Some(headers) = compact_headers {
         let empty_context = PassOneLocalClassContext::default();
         for stub in headers

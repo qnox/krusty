@@ -50,6 +50,7 @@ use crate::plugins::{
 };
 use crate::types::{type_name, Ty, TypeName};
 
+use crate::fx_hash::HashMap;
 use constructed_standard_serializers::constructed_standard_serializer;
 use declared_serializer::build_field_serializer_instance;
 use deserialization_constructor::add_cached_descriptor;
@@ -67,7 +68,6 @@ pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
 use serial_elements::{SerialElements, SerializedProperties};
 use serialize_body::SerializeBody;
-use std::collections::HashMap;
 use std::sync::Mutex;
 pub(super) use type_argument_serializers::named_serializers;
 use type_parameter_serializers::TypeParameterSerializers;
@@ -122,7 +122,7 @@ impl SerializationPlugin {
             abi,
             module: module.into(),
             compiler_plugin: None,
-            child_serializer_caches: Mutex::new(HashMap::new()),
+            child_serializer_caches: Mutex::new(HashMap::default()),
         }
     }
 
@@ -1681,7 +1681,7 @@ mod tests {
                 type_arguments: vec![Some(inner)],
                 argument_slots: vec![Some(argument)],
             }],
-            classifier_annotations: &crate::plugins::ClassifierAnnotationMap::new(),
+            classifier_annotations: &crate::plugins::ClassifierAnnotationMap::default(),
             call_resolver: None,
         };
         let mut plans = Vec::new();
@@ -1730,7 +1730,7 @@ mod tests {
         SerializationPlugin::default().plan_frontend_expressions(
             &FrontendExpressionContext {
                 calls: vec![call.clone()],
-                classifier_annotations: &crate::plugins::ClassifierAnnotationMap::new(),
+                classifier_annotations: &crate::plugins::ClassifierAnnotationMap::default(),
                 call_resolver: None,
             },
             &mut plans,
@@ -1759,7 +1759,7 @@ mod tests {
         SerializationPlugin::default().plan_frontend_expressions(
             &FrontendExpressionContext {
                 calls: vec![unrelated],
-                classifier_annotations: &crate::plugins::ClassifierAnnotationMap::new(),
+                classifier_annotations: &crate::plugins::ClassifierAnnotationMap::default(),
                 call_resolver: None,
             },
             &mut plans,
@@ -2017,7 +2017,7 @@ mod tests {
 
         let serializer = type_name("kotlinx/serialization/internal/InstantSerializer");
         let ctx = PluginContext::default()
-            .with_runtime_serializers(std::collections::HashSet::from([serializer]));
+            .with_runtime_serializers(crate::fx_hash::HashSet::from_iter([serializer]));
         assert!(matches!(
             element_serializer::element_serializer_plan(&ir, &ctx, &instant),
             Some(element_serializer::ElementSerializerPlan::Builtin(found)) if found == serializer

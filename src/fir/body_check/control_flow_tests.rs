@@ -597,7 +597,7 @@ fn when_smartcast_of_star_projected_property_selects_member_overloads() {
             assert_eq!(argument.ty, *parameter);
             parameter.get()
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     assert_eq!(
         selected,
         [Ty::obj("Foo"), Ty::obj("Bar")].into_iter().collect()

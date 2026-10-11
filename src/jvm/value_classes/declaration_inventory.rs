@@ -7,10 +7,10 @@
 
 use super::representation::has_native_carrier;
 use super::Under;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::referenced_classifiers::{collect_classifier_names, referenced_classifier_names};
 use crate::ir::IrFile;
 use crate::types::TypeName;
-use std::collections::{HashMap, HashSet};
 
 /// Publish the value classes this file references into its value-class facts, ahead of the
 /// passes that ask about them before the value-class pass runs (bridge derivation).
@@ -27,9 +27,9 @@ pub(super) fn merge_referenced(
     classifiers: &dyn crate::types::ClassifierFactSource,
     declarations: &mut Under,
 ) -> Option<HashMap<TypeName, String>> {
-    let mut underlying_properties = HashMap::new();
+    let mut underlying_properties = HashMap::default();
     let mut pending = referenced_classifier_names(ir);
-    let mut probed = HashSet::new();
+    let mut probed = HashSet::default();
     while let Some(classifier) = pending.pop() {
         if !probed.insert(classifier) {
             continue;
@@ -122,7 +122,7 @@ mod tests {
             Ty::obj_name(uint),
         ));
         ir.add_class(holder);
-        let mut declarations = Under::new();
+        let mut declarations = Under::default();
 
         assert!(merge_referenced(&mut ir, &UnsignedFacts, &mut declarations).is_some());
         assert_eq!(ir.value_class_underlying_name(uint), Some(Ty::Int));
@@ -158,7 +158,7 @@ mod tests {
             Ty::obj_name(array),
         ));
         ir.add_class(holder);
-        let mut declarations = Under::new();
+        let mut declarations = Under::default();
 
         assert!(merge_referenced(&mut ir, &UnsignedArrayFacts, &mut declarations).is_some());
         assert_eq!(
@@ -184,7 +184,7 @@ mod tests {
             Ty::obj_name(array),
         ));
         ir.add_class(holder);
-        let mut declarations = Under::new();
+        let mut declarations = Under::default();
 
         assert!(merge_referenced(
             &mut ir,
@@ -209,7 +209,7 @@ mod tests {
             Ty::obj_name(first),
         ));
         ir.add_class(holder);
-        let mut declarations = Under::new();
+        let mut declarations = Under::default();
 
         assert_eq!(
             merge_referenced(
