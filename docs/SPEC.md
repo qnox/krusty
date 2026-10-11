@@ -16905,6 +16905,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference compiler as well. Corpus: `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`,
   `statics/incInClassObject.kt`, `increment/argumentWithSideEffects.kt`,
   `defaultArguments/convention/incWithDefaultInGetter.kt` (the second `get` applies its default).
+- **An enum constructor's `init` block closes on its `}` line.** kotlinc marks an `init` block's
+  closing brace with a line entry of its own; where the next instruction is the constructor's
+  `return`, which maps back to the class header line, a `nop` holds the brace's line. A class's
+  primary constructor already marked the header line through the code builder, which realizes
+  the pending `nop`; an enum's constructor wrote its header entry only into the table, so the
+  brace line and the `return` shared one pc. The enum constructor now marks it the same way.
+  Test: `tests/enum_init_block_line_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`,
+  `enum/initEnumAfterObjectAccess.kt`.
 - **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
   kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
   `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and

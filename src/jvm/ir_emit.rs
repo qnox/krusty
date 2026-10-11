@@ -170,6 +170,8 @@ use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
+mod method_placement;
+use method_placement::MethodPlacement;
 mod primary_super_call;
 mod secondary_constructor;
 mod static_accessors;
@@ -1517,17 +1519,31 @@ fn emit_pass(
         };
         let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
-        emit_method_maybe_rescued(
-            ir,
-            i as u32,
-            StaticOwner::Facade,
-            facade,
-            facade,
-            &mut cw,
-            false,
-            env,
-            rescued,
-        );
+        if rescued {
+            // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
+            // `emit_all_with_class_meta`) — bypass the early return.
+            emit_method_inner(
+                ir,
+                i as u32,
+                StaticOwner::Facade,
+                facade,
+                facade,
+                &mut cw,
+                false,
+                env,
+            );
+        } else {
+            emit_method(
+                ir,
+                i as u32,
+                StaticOwner::Facade,
+                facade,
+                facade,
+                &mut cw,
+                false,
+                env,
+            );
+        }
         // A facade has no class declaration to close on.
         function_debug::attach_declared_function_debug(
             ir,
@@ -3845,18 +3861,18 @@ fn emit_enum_class(
         e.render_initializer_boundaries = false;
         max_locals = max_locals.max(e.frame.max());
     }
-    // The pc the trailing `return` starts at — kotlinc maps it back to the class HEADER line.
+    // The `return` maps back to the class header; a pending closing `init` line owns a `nop`.
+    if c.decl_line != 0 && !store_lines.is_empty() {
+        ctor.mark_line(c.decl_line);
+    }
     let ctor_return_pc = ctor.bytes.len() as u16;
     ctor.ret_void();
     ctor.ensure_locals(max_locals);
     ctor.link();
-    // An enum's constructor is `private`. An entry subclass reaches it through the marker accessor
-    // emitted with the class's other accessors, or through the `$default` overload.
+    // An enum's ctor is `private`: an entry subclass reaches it via its marker accessor or `$default`.
     let base_ctor_acc = 0x0002;
-    // kotlinc emits a generic `Signature` on the enum ctor listing only the USER params (the synthetic
-    // leading `(String, int)` are excluded) — e.g. `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
-    // javap reads it to display `Color()` instead of `Color(String, int)`; without it the synthetic
-    // params leak into the disassembly (a per-enum divergence from kotlinc).
+    // kotlinc's `Signature` on the enum ctor lists only the USER params, without the synthetic
+    // leading `(String, int)`: `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
     // An enum declaring ONLY secondary constructors has no primary to emit: every entry names one
     // of the secondaries. Registering the synthesized primary anyway collided with a no-argument
     // secondary — both are `(String, int)V` — and the class failed to load with a
@@ -4383,27 +4399,6 @@ fn emit_enum_class(
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
-#[allow(clippy::too_many_arguments)]
-fn emit_method_maybe_rescued(
-    ir: &IrFile,
-    fid: u32,
-    static_owner: StaticOwner,
-    owner: &str,
-    facade: &str,
-    cw: &mut ClassWriter,
-    instance: bool,
-    env: &EmitEnv,
-    rescued: bool,
-) {
-    if rescued {
-        // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
-        // `emit_all_with_class_meta`) — bypass the early return.
-        emit_method_inner(ir, fid, static_owner, owner, facade, cw, instance, env);
-    } else {
-        emit_method(ir, fid, static_owner, owner, facade, cw, instance, env);
-    }
-}
-
 fn emit_method(
     ir: &IrFile,
     fid: u32,
@@ -4444,7 +4439,15 @@ fn emit_holder_method(
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
-    emit_method_inner_with_holder(ir, fid, None, owner, facade, cw, true, env, Some(receiver));
+    emit_placed_method(
+        ir,
+        fid,
+        MethodPlacement::Holder(receiver),
+        owner,
+        facade,
+        cw,
+        env,
+    );
 }
 
 /// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
@@ -4506,34 +4509,29 @@ fn emit_method_inner(
     instance: bool,
     env: &EmitEnv,
 ) {
-    emit_method_inner_with_holder(
-        ir,
-        fid,
-        Some(static_owner),
-        owner,
-        facade,
-        cw,
+    let placement = MethodPlacement::Declared {
+        static_owner,
         instance,
-        env,
-        None,
-    );
+    };
+    emit_placed_method(ir, fid, placement, owner, facade, cw, env);
 }
 
-/// `holder_receiver` is `Some(interface)` when the body is being written onto that interface's
-/// `$DefaultImpls` holder: the code and slots are the instance method's, but the method is `static`
-/// and its descriptor carries the receiver as parameter 0.
-#[allow(clippy::too_many_arguments)]
-fn emit_method_inner_with_holder(
+fn emit_placed_method(
     ir: &IrFile,
     fid: u32,
-    static_owner: Option<StaticOwner>,
+    placement: MethodPlacement,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
-    instance: bool,
     env: &EmitEnv,
-    holder_receiver: Option<crate::types::TypeName>,
 ) {
+    let (static_owner, instance, holder_receiver) = match placement {
+        MethodPlacement::Declared {
+            static_owner,
+            instance,
+        } => (Some(static_owner), instance, None),
+        MethodPlacement::Holder(receiver) => (None, true, Some(receiver)),
+    };
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys = jvm_function_params(ir, fid);
