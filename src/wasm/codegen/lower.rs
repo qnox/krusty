@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod intrinsic_operations;
 mod objects;
 
 use crate::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
@@ -631,17 +632,10 @@ impl<'a> Body<'a> {
                 self.code.call(self.functions[function as usize]);
             }
             IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: IrIntrinsic::PrimitiveCompare { operand, .. },
-                        ..
-                    },
+                callee: Callee::Intrinsic { operation, .. },
                 dispatch_receiver,
                 args,
-            } => match (dispatch_receiver.as_ref(), args.as_slice()) {
-                (None, [lhs, rhs]) | (Some(lhs), [rhs]) => self.compare(operand, *lhs, *rhs)?,
-                _ => return Err("`compareTo` with an unexpected operand shape".to_string()),
-            },
+            } => self.intrinsic(operation, dispatch_receiver, &args)?,
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
@@ -775,33 +769,6 @@ impl<'a> Body<'a> {
             }
             other => return Err(describe_node(&other)),
         }
-        Ok(())
-    }
-
-    /// `a.compareTo(b)` on two integral values: `-1`, `0` or `1`. A floating-point `compareTo` is a
-    /// total order (`NaN` greatest, `-0.0` below `0.0`), not this, and declines.
-    fn compare(&mut self, operand: Ty, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        let value = carrier(operand)?;
-        let (greater, less) = match value {
-            Some(ValType::I32) => (GT_S32, LT_S32),
-            Some(ValType::I64) => (GT_S64, LT_S64),
-            _ => return Err(format!("`compareTo` on `{}`", describe(operand))),
-        };
-        let value = value.expect("matched above");
-        let left = self.local(value);
-        let right = self.local(value);
-        self.value(lhs, operand)?;
-        self.code.local_set(left);
-        self.value(rhs, operand)?;
-        self.code.local_set(right);
-        self.code
-            .local_get(left)
-            .local_get(right)
-            .op(greater)
-            .local_get(left)
-            .local_get(right)
-            .op(less)
-            .op(SUB32);
         Ok(())
     }
 
