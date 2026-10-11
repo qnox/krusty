@@ -131,6 +131,13 @@ pub trait SymbolSource {
         None
     }
 
+    /// The annotations kotlinc's sam-with-receiver plugin is configured with: an interface carrying
+    /// one directly converts a lambda with its abstract method's first parameter as the receiver.
+    /// A compilation fact, published by the current-module provider.
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Whether `companion` declares the exact serialization-plugin accessor shape. This reads a
     /// normalized callable record; consumers never infer the method merely from the owner's kind.
     fn has_serialization_serializer_accessor(
@@ -192,6 +199,14 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.generated_serializer_singleton(classifier))
+    }
+
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        self.children
+            .iter()
+            .map(|child| child.sam_with_receiver_annotations())
+            .find(|annotations| !annotations.is_empty())
+            .unwrap_or_default()
     }
 
     /// Only the child that assigned `identity` answers for it; the module's own declarations
@@ -375,6 +390,10 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.source.generated_serializer_singleton(classifier)
+    }
+
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        self.source.sam_with_receiver_annotations()
     }
 }
 

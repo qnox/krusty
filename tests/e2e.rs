@@ -2077,6 +2077,8 @@ mod reference_consumer_casts_e2e;
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "renamed_builtin_property_null_check_e2e.rs"]
 mod renamed_builtin_property_null_check_e2e;
+#[path = "sam_with_receiver_plugin_e2e.rs"]
+mod sam_with_receiver_plugin_e2e;
 #[path = "shared_cell_initial_values_e2e.rs"]
 mod shared_cell_initial_values_e2e;
 #[path = "source_when_nop_e2e.rs"]

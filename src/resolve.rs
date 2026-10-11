@@ -2827,6 +2827,9 @@ pub struct SymbolTable {
     pub libraries: Box<dyn SemanticPlatform>,
     /// The native compiler plugins this compilation runs (none unless the driver selects them).
     native_plugins: crate::plugins::registry::NativePlugins,
+    /// The annotations of kotlinc's sam-with-receiver plugin, from the native plugins this
+    /// compilation runs ([`crate::symbol_source::SymbolSource::sam_with_receiver_annotations`]).
+    pub(crate) sam_with_receiver_annotations: Vec<TypeName>,
     /// Top-level extension overloads keyed by name and semantic receiver.
     pub ext_funs: HashMap<String, HashMap<Ty, Vec<Signature>>>,
     source_ext_funs: HashMap<(u32, u32), (String, Ty, usize)>,
@@ -2952,6 +2955,7 @@ impl Default for SymbolTable {
             enums: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
+            sam_with_receiver_annotations: Vec::new(),
             ext_funs: HashMap::new(),
             source_ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
@@ -24316,6 +24320,7 @@ mod tests {
 
         let expectation = functional_argument_expectation(
             &crate::libraries::EmptySymbolSource,
+            &crate::libraries::EmptySymbolSource,
             &candidate.call_sig,
             false,
             0,
@@ -35647,6 +35652,13 @@ impl SymbolSource for CheckerModuleSymbols<'_> {
         match self {
             Self::Legacy(source) => source.symbols(namespace, name),
             Self::Streamed(source) => source.symbols(namespace, name),
+        }
+    }
+
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        match self {
+            Self::Legacy(source) => source.sam_with_receiver_annotations(),
+            Self::Streamed(source) => source.sam_with_receiver_annotations(),
         }
     }
 }
@@ -56278,6 +56290,7 @@ impl<'a> Checker<'a> {
                     })?;
                     functional_argument_expectation(
                         self.libraries,
+                        &self.fed_source(),
                         &candidate.call_sig,
                         candidate.flags.inline.can_inline(),
                         parameter_index,
@@ -56386,6 +56399,7 @@ impl<'a> Checker<'a> {
                     let param = specialized_params.get(parameter_index).copied()?;
                     functional_argument_expectation(
                         self.libraries,
+                        &self.fed_source(),
                         &candidate.call_sig,
                         candidate.inline.can_inline(),
                         parameter_index,

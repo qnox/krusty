@@ -43,6 +43,16 @@ impl ResolvedModuleIndex {
         self.no_arg_constructors.get(&classifier)
     }
 
+    /// The annotations kotlinc's sam-with-receiver plugin is configured with
+    /// ([`crate::symbol_source::SymbolSource::sam_with_receiver_annotations`]).
+    pub fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &self.sam_with_receiver_annotations
+    }
+
+    pub fn publish_sam_with_receiver_annotations(&mut self, annotations: &[TypeName]) {
+        self.sam_with_receiver_annotations = annotations.into();
+    }
+
     pub fn publish_no_arg_constructor(
         &mut self,
         classifier: DeclarationId,
