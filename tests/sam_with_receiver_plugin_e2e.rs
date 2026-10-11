@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 
 use super::common;
-use super::compiler_plugin_fixture::{assert_same_classes_and_box, plugin_switches, PluginFixture};
+use super::compiler_plugin_fixture::{
+    assert_same_classes_and_box, kotlinc_plugin_jar, plugin_switches, PluginFixture,
+};
 
 const SAM_WITH_RECEIVER_ID: &str = "org.jetbrains.kotlin.samWithReceiver";
 
@@ -106,6 +108,23 @@ fn sam_conversions_take_the_receiver_like_kotlinc() {
     let library = java_library();
     let sources = [("Main.kt", MAIN)];
     let switches = sam_with_receiver_switches(&["annotation=j.WithReceiver"]);
+    let classpath = [library.clone()];
+    let reference = fixture.kotlinc("main", &sources, &classpath, &switches);
+    let krusty = fixture.krusty("main", &sources, &classpath, &switches);
+    assert_same_classes_and_box(&reference, &krusty, &[common::stdlib_jar(), library]);
+}
+
+/// The modern plugin syntax attaches its options to the jar registration rather than spelling the
+/// plugin id in a separate `-P` switch. It must configure the same native implementation.
+#[test]
+fn modern_syntax_options_match_kotlinc() {
+    let fixture = PluginFixture::new("sam-with-receiver-modern-syntax");
+    let library = java_library();
+    let sources = [("Main.kt", MAIN)];
+    let switches = vec![format!(
+        "-Xcompiler-plugin={}=annotation=j.WithReceiver",
+        kotlinc_plugin_jar("sam-with-receiver-compiler-plugin.jar").display()
+    )];
     let classpath = [library.clone()];
     let reference = fixture.kotlinc("main", &sources, &classpath, &switches);
     let krusty = fixture.krusty("main", &sources, &classpath, &switches);

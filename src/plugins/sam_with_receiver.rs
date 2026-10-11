@@ -61,6 +61,12 @@ mod tests {
         let plugin =
             SamWithReceiverPlugin::from_options(&[option("annotation", "test.WithReceiver")]);
         let annotations = plugin.sam_with_receiver_annotations();
-        assert_eq!(annotations, [crate::types::type_name("test/WithReceiver")]);
+        assert_eq!(
+            annotations,
+            [
+                crate::types::type_name("test").nested_child("WithReceiver"),
+                crate::types::type_name("test/WithReceiver"),
+            ]
+        );
     }
 }
