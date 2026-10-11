@@ -58,8 +58,9 @@ pub(super) fn emit(
                 .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
                 .map(|(_, parameter)| parameter.as_str())
                 .or(field.type_param.as_deref());
-            let field_sig =
-                property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+            let field_sig = property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
+                .field
+                .filter(|_| !field.is_property_delegate());
             let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
             cw.add_field_sig(
                 acc,
@@ -254,7 +255,9 @@ fn emit_interface_companion_member_fields(
                     .map(|(_, parameter)| parameter.as_str())
                     .or(field.type_param.as_deref());
                 let field_sig =
-                    property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+                    property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
+                        .field
+                        .filter(|_| !field.is_property_delegate());
                 let physical_name = instance_field_jvm_name(ir, run, c, field_index);
                 let descriptor = ir_type_desc(&field.ty);
                 let nullability = field_visibility::publishes_field_nullability(c, field_index)

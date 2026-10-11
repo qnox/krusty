@@ -94,6 +94,8 @@ pub struct IrStatic {
     /// Source byte offset of the declaration (`u32::MAX` for a target/plugin synthetic). This is the
     /// exact ordering key when class metadata interleaves static and instance properties.
     pub source_order: u32,
+    /// A delegated property's `x$delegate` storage: it holds the delegate, not a property value.
+    pub property_delegate: bool,
 }
 
 impl IrStatic {

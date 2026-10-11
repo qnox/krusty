@@ -17034,6 +17034,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   brace line and the `return` shared one pc. The enum constructor now marks it the same way.
   Test: `tests/enum_init_block_line_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`,
   `enum/initEnumAfterObjectAccess.kt`.
+- **A property delegate's storage field has no generic `Signature`.** kotlinc's `ClassCodegen`
+  writes no `Signature` for a field of `PROPERTY_DELEGATE` origin, so `val x by Box<String>(…)`
+  stores into `Box x$delegate` with the erased descriptor only. The lowering marks that storage
+  (an instance field's `IrField` flag, a static's `property_delegate`) and every field table — the
+  facade, a class, an object and an enum class — drops the generic signature for it. A companion's
+  delegate that the JVM backend hoists to the outer class is a new field in kotlinc and keeps its
+  `Signature`. Test: `tests/delegate_field_signature_e2e.rs`. Corpus: `delegatedProperty/genericDelegate.kt`,
+  `fieldRename/delegates.kt`, `typeMapping/kt3863.kt`, `enum/k54079.kt`.
 - **A primitive compared with a reference is not boxed; an equality with a safe call folds.**
   A source `==` between a primitive and a nullable primitive stays one structural equality, both
   operands evaluated in source order (common IR no longer spills the nullable operand first). The

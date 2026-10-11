@@ -265,7 +265,8 @@ pub(super) fn materialize_member_delegate(
         plan.storage_type.get(),
     )
     .with_is_final(true)
-    .with_is_private(true);
+    .with_is_private(true)
+    .with_property_delegate(true);
     storage.constructor_store_line = property.decl_line;
     ir.classes[class_id as usize].fields.push(storage);
     let flags = property.flags;
@@ -508,7 +509,8 @@ pub(super) fn materialize_member_extension_delegate(
         plan.storage_type.get(),
     )
     .with_is_final(true)
-    .with_is_private(true);
+    .with_is_private(true)
+    .with_property_delegate(true);
     storage.constructor_store_line = property.decl_line;
     ir.classes[class_id as usize].fields.push(storage);
 
@@ -755,6 +757,7 @@ fn push_delegate_static(
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,
         source_order,
+        property_delegate: true,
     });
     Ok(index)
 }

@@ -108,6 +108,7 @@ pub(super) fn add_cached_serializer_delegate(
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: owner_line,
         source_order: u32::MAX,
+        property_delegate: false,
     });
 }
 

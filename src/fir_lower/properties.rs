@@ -700,6 +700,7 @@ fn materialize_top_level_property(
             accessors: top_level_accessors(index, &property),
             line: 0,
             source_order,
+            property_delegate: false,
         });
         if companion_block_owner.is_some() {
             ir.companion_blocks.mark_storage(storage_index);
@@ -1101,6 +1102,7 @@ fn materialize_member_property(
             accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: 0,
             source_order,
+            property_delegate: false,
         });
         ir.declared_class_statics
             .entry(owner)
