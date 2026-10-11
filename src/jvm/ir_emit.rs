@@ -3879,9 +3879,8 @@ fn emit_enum_class(
         if header != 0 {
             let mut entries = vec![(0u16, start)];
             if !store_lines.is_empty() {
-                // Each retained store maps to its property's source line; the trailing `return`
-                // maps back to where the primary constructor starts. A missing line is not
-                // reconstructed in the backend.
+                // Each retained store maps to its property's line and the `return` to the
+                // constructor start. A missing line is not reconstructed in the backend.
                 entries.extend(store_lines.iter().copied());
                 entries.push((ctor_return_pc, primary_constructor_line(ir, c)));
             }
