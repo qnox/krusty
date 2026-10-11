@@ -463,7 +463,10 @@ fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
             .current_dir(&toolchain.root)
             .env("LC_ALL", "C.UTF-8");
         if let Some(java_home) = &toolchain.java_home {
-            command.env("JAVA_HOME", java_home).env_remove("JAVACMD");
+            command
+                .env("JAVA_HOME", java_home)
+                .env("JAVA_OPTS", REFERENCE_JVM_OPTIONS)
+                .env_remove("JAVACMD");
         }
         let result = command
             .output()
@@ -778,6 +781,13 @@ fn the_reference_compiler_reproduces_every_applicable_cli_case() {
 /// there are no sources, apparently reading the empty argument as the working directory and
 /// compiling the whole checkout.
 const REFERENCE_JDK: u32 = 21;
+
+/// JVM options for every reference compile. Each case starts a fresh kotlinc that compiles a few
+/// small files and exits, and four run at once, so the C2 compiler's background compilation of
+/// kotlinc competed for the same cores without paying off before the JVM exited. Stopping at C1
+/// took the whole corpus from 588 s to 415 s with the same outcome for every case. The options
+/// change only how fast the JVM runs kotlinc, never what kotlinc prints.
+const REFERENCE_JVM_OPTIONS: &str = "-XX:TieredStopAtLevel=1";
 
 /// `java.runtime.version` of a JDK, which the reference `-version` line prints.
 fn jvm_runtime_version(java_home: &Path) -> Option<String> {
