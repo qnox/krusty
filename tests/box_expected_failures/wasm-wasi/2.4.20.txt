@@ -1995,7 +1995,6 @@ dataClasses/kt49715_behaviorChange.kt
 dataClasses/mixedParams.kt
 dataClasses/multiDeclaration.kt
 dataClasses/multiDeclarationFor.kt
-dataClasses/nonTrivialFinalMemberInSuperClass.kt
 dataClasses/nonTrivialMemberInSuperClass.kt
 dataClasses/privateValParams.kt
 dataClasses/propertyOfDnnType.kt

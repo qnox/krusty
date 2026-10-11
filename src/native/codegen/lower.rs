@@ -26,6 +26,7 @@ mod defaults;
 mod entry;
 mod enums;
 mod exceptions;
+mod expression_types;
 mod frame_objects;
 mod intrinsic_operations;
 use arithmetic::scalar_bound;
@@ -1040,11 +1041,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.builder.ins().return_(&[value]);
                     }
                     (Some(value), _) => {
-                        let source = self.type_of(value);
                         let lowered = self.expression(value)?;
                         if self.terminated {
                             return Ok(());
                         }
+                        let source = self.physical_type(value);
                         let Some(lowered) = lowered else {
                             return Err("a `return` of no value from a non-`Unit` function".into());
                         };
@@ -1358,7 +1359,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         result: Option<Ty>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
-        let result = result.filter(|ty| self.carrier(*ty) != Carrier::Void);
+        // A `when` every arm of which leaves (`Nothing`) merges no value.
+        let result = result.filter(|ty| *ty != Ty::Nothing && self.carrier(*ty) != Carrier::Void);
         if let Some(ty) = result {
             let clif = self.carrier(ty).clif().expect("non-void carrier");
             self.builder.append_block_param(merge, clif);
@@ -1479,7 +1481,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn expression_value(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
-        let logical = self.file.ir.logical_types.get(&id).copied();
+        let logical = self.file.ir.checked_type(id);
         let value = self.lowered_expression(id)?;
         let (Some(value), Some(logical)) = (value, logical) else {
             return Ok(value);
@@ -1507,7 +1509,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Does this expression's machine shape hold the value itself rather than a pointer to it?
     fn carried_as_scalar(&self, id: u32) -> bool {
-        self.physical_type_of(id)
+        self.physical_type(id)
             .is_some_and(|ty| matches!(self.carrier(ty), Carrier::Scalar(..)))
     }
 
@@ -1540,7 +1542,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
             }
             IrExpr::When { branches } => {
-                let result = self.type_of(id);
+                let result = self.checked_type(id);
                 self.when(&branches, result)
             }
             IrExpr::Call {
@@ -2047,355 +2049,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             &[pointer, length, slot],
         )?;
         Ok(string.expect("`kt_string_literal` returns a string"))
-    }
-
-    /// The Kotlin type of an expression, as far as the lowering needs it: enough to decide the
-    /// carrier. `None` means undetermined, and callers that cannot proceed decline.
-    /// The type an expression's value has: how wide it is, and how to read the bits in it.
-    ///
-    /// The node shapes answer the first — a value class has the shape of what it wraps, which is
-    /// what common lowering erased it to. The checked type beside the expression answers the second,
-    /// and for an UNSIGNED value the difference is not cosmetic: a `UInt` boxed as the `Int` sharing
-    /// its bits prints `-1879048193` for `0x8fffffffU`, and one compared as that `Int` answers
-    /// `0uL >= ULong.MAX_VALUE` true.
-    fn type_of(&self, id: u32) -> Option<Ty> {
-        let Some(physical) = self.physical_type_of(id) else {
-            // Every path that leaves an expression untyped comes through here, so this is where a
-            // decline naming only the two carriers becomes followable.
-            let rendered = format!("{:?}", self.file.ir.expr(id));
-            crate::trace_compiler!(
-                "native",
-                "untyped expression {id}: {}",
-                &rendered[..rendered.len().min(200)]
-            );
-            return None;
-        };
-        let logical = self.file.ir.logical_types.get(&id).copied();
-        // The checked type wins whenever it is unsigned, the value is a SCALAR rather than a
-        // pointer to one, and it is no WIDER than that scalar: `expression` has narrowed the value
-        // to it, so the two agree. Wider would be a claim about bits that are not there, and a
-        // pointer is not the value at all — `val any: Any = 7u` is still checked as `UInt`.
-        let bits = |ty: Ty| self.carrier(ty).clif().map(|clif| clif.bits());
-        match logical {
-            Some(logical)
-                if logical.is_unsigned()
-                    && matches!(self.carrier(physical), Carrier::Scalar(..))
-                    && bits(logical) <= bits(physical) =>
-            {
-                Some(logical)
-            }
-            _ => Some(physical),
-        }
-    }
-
-    /// The type of a block's value when that value is a local the block itself DECLARES.
-    ///
-    /// `Self::physical_type_of` answers a `GetValue` from the slot map, and that map is a lowering
-    /// artifact: a slot is in it once its declaring statement has been emitted. Typing is asked
-    /// EARLIER than that — a `when` types itself before lowering any arm, to know whether its
-    /// merge block carries a value — so a branch ending in a local it declares had no type, the
-    /// whole `when` typed as no-value, and every arm was lowered as a statement. The value went
-    /// nowhere and the destination read zero.
-    ///
-    /// Nothing about that is specific to what the block computes; it is any branch spliced from an
-    /// inline function, which is how `Array(n) { … }` arrives. The IR knows the answer — the
-    /// declaring `IrExpr::Variable` carries the type — so this asks the IR rather than the map.
-    fn declared_in(&self, stmts: &[u32], value: u32) -> Option<Ty> {
-        let IrExpr::GetValue(slot) = self.file.ir.expr(value) else {
-            return None;
-        };
-        stmts.iter().rev().find_map(|&statement| {
-            match self.file.ir.expr(statement) {
-                IrExpr::Variable { index, ty, .. } if index == slot => Some(*ty),
-                // A splice may nest another block around the declaration.
-                IrExpr::Block { stmts, .. } => self.declared_in(stmts, value),
-                _ => None,
-            }
-        })
-    }
-
-    /// The machine shape an expression lowers to, read from the node itself.
-    fn physical_type_of(&self, id: u32) -> Option<Ty> {
-        Some(match self.file.ir.expr(id) {
-            IrExpr::Const(constant) => match constant {
-                IrConst::Boolean(_) => Ty::Boolean,
-                // The unsigned identity common IR retained. Answering the signed type here would
-                // put every such constant back on the signed reading it was separated from.
-                IrConst::UByte(_) => Ty::UByte,
-                IrConst::UShort(_) => Ty::UShort,
-                IrConst::UInt(_) => Ty::UInt,
-                IrConst::ULong(_) => Ty::ULong,
-                IrConst::Byte(_) => Ty::Byte,
-                IrConst::Short(_) => Ty::Short,
-                IrConst::Int(_) => Ty::Int,
-                IrConst::Long(_) => Ty::Long,
-                IrConst::Float(_) => Ty::Float,
-                IrConst::Double(_) => Ty::Double,
-                IrConst::Char(_) => Ty::Char,
-                IrConst::String(_) => Ty::String,
-                IrConst::Null => Ty::Null,
-            },
-            IrExpr::UnitInstance => Ty::Unit,
-            IrExpr::GetValue(slot) => match self.values.get(slot) {
-                Some(&(_, ty)) => ty,
-                None if self.unit_values.contains(slot) => Ty::Unit,
-                None => return None,
-            },
-            IrExpr::TypeOp {
-                op, type_operand, ..
-            } => match op {
-                IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => Ty::Boolean,
-                IrTypeOp::SafeCast => Ty::nullable(*type_operand),
-                _ => *type_operand,
-            },
-            IrExpr::Block {
-                stmts,
-                value: Some(value),
-            } => self
-                .type_of(*value)
-                .or_else(|| self.declared_in(stmts, *value))?,
-            IrExpr::Block { value: None, .. } => Ty::Unit,
-            IrExpr::When { branches } => {
-                // NOT the first arm's type: `when (s) { "a" -> 1; else -> null }` is `Int?`, and
-                // carrying it as the `Int` the first arm produces would make the `null` arm store
-                // a pointer into a 32-bit slot. Arms whose carriers disagree — a `null` arm being
-                // the common case — make the whole `when` a reference, which is what nullability
-                // means here. An arm that leaves (a `return`) has no type and does not vote.
-                let mut result: Option<Ty> = None;
-                for (_, body) in branches {
-                    let Some(ty) = self.type_of(*body) else {
-                        continue;
-                    };
-                    result = Some(match result {
-                        None => ty,
-                        Some(previous) if self.carrier(previous) == self.carrier(ty) => previous,
-                        Some(_) => any(),
-                    });
-                }
-                result?
-            }
-            // A `try` merges every arm at its checked result's carrier, so that is what it yields.
-            IrExpr::Try { result, .. } => *result,
-            IrExpr::StringConcat(_) => Ty::String,
-            IrExpr::PrimitiveNeg { ty, .. } => *ty,
-            IrExpr::PrimitiveBinOp { op, .. } => match op {
-                IrBinOp::Lt
-                | IrBinOp::Le
-                | IrBinOp::Gt
-                | IrBinOp::Ge
-                | IrBinOp::Eq
-                | IrBinOp::Ne
-                | IrBinOp::RefEq
-                | IrBinOp::RefNe
-                | IrBinOp::And
-                | IrBinOp::Or => Ty::Boolean,
-                // The selected operator's declared result, which common lowering recorded: the
-                // primitive itself even when an operand is a bounded type parameter's reference.
-                _ => self.file.ir.checked_type(id)?,
-            },
-            IrExpr::Equality { .. } => Ty::Boolean,
-            IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(function)
-                | Callee::LocalWithDefaults { function, .. }
-                | Callee::ClassStaticWithDefaults { function, .. } => {
-                    self.file.ir.functions[*function as usize].ret
-                }
-                Callee::External { ret, .. }
-                | Callee::Intrinsic { ret, .. }
-                | Callee::Module { ret, .. }
-                | Callee::ModuleWithDefaults { ret, .. }
-                // Another file's function returns what its declaration fixes; both files carry
-                // that type by the same projection, a value class as its value.
-                | Callee::CrossFile { ret, .. }
-                | Callee::Super { ret, .. } => *ret,
-                Callee::Special { source, .. } => {
-                    let function = self.file.ir.checked_callable_functions.get(&(*source)?)?;
-                    self.file.ir.functions[*function as usize].ret
-                }
-                // A VIRTUAL call yields what the slot it dispatches through carries, which is the
-                // DECLARED return rather than the one this receiver's class narrows it to. For a
-                // generic member that is a type parameter, so the value is a reference — and
-                // saying so is what lets a site wanting a machine value unbox it. Leaving it
-                // undetermined is what made `class A(a: Tr<Int>) : Tr<Int> by a`'s `a.prop`
-                // reach an `Int` position as a reference with nothing to convert it by.
-                Callee::Virtual {
-                    params: Some((_, ret)),
-                    ..
-                } => *ret,
-                _ => return None,
-            },
-            IrExpr::New { internal, .. }
-            | IrExpr::SingletonValue {
-                classifier: internal,
-            }
-            | IrExpr::EnumEntry {
-                classifier: internal,
-                ..
-            }
-            | IrExpr::EnumValueOf {
-                classifier: internal,
-                ..
-            } => Ty::Obj(*internal, &[]),
-            IrExpr::EnumValues { classifier } => {
-                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
-            }
-            IrExpr::EnumEntries { classifier } => {
-                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::Obj(*classifier, &[])])
-            }
-            IrExpr::MethodCall { class, index, .. } => {
-                let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
-                self.file.ir.functions[fid as usize].ret
-            }
-            IrExpr::GetField { class, index, .. } => super::super::captures::physical_ty(
-                self.file.ir,
-                *class,
-                *index,
-                self.file.ir.classes[*class as usize].fields[*index as usize].ty,
-            ),
-            // The RAW field behind `::prop.isInitialized`, which carries what the field holds:
-            // the comparison against null is a node of its own around this one.
-            IrExpr::LateinitInitialized { class, index, .. } => {
-                super::super::captures::physical_ty(
-                    self.file.ir,
-                    *class,
-                    *index,
-                    self.file.ir.classes[*class as usize].fields[*index as usize].ty,
-                )
-            }
-            IrExpr::EnclosingInstance { inner, .. } => {
-                let (class, field) = self.enclosing_field(*inner).ok()?;
-                self.file.ir.classes[class as usize].fields[field as usize].ty
-            }
-            IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
-            IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
-            IrExpr::InvokeFunction { ret, .. } => *ret,
-            // What the checked accessor the access calls answers.
-            IrExpr::LocalDelegateAccess(access) => {
-                let plan = self
-                    .file
-                    .ir
-                    .local_delegate_plans
-                    .get(access.plan as usize)?;
-                match access.value {
-                    Some(_) => plan.setter.as_ref()?.result,
-                    None => plan.getter.result,
-                }
-            }
-            IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
-            IrExpr::CallableReference(reference) => reference.function_type,
-            IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
-            // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
-            // checked property table has nothing to say about them; their types are the language's
-            // and are stated where the read itself is recognized.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver,
-                result,
-                ..
-            }) => {
-                if self.is_text_length(*target) {
-                    return Some(Ty::Int);
-                }
-                if self.class_name_accessor(*target).is_some() {
-                    return Some(Ty::nullable(Ty::String));
-                }
-                if self.reference_property_role(*target).is_some() {
-                    return self
-                        .file
-                        .callables
-                        .property(*target)
-                        .map(|property| property.result);
-                }
-                match self.enum_member_name(*target) {
-                    Some("name") => Ty::String,
-                    Some(_) => Ty::Int,
-                    // A pair's components are references; a list's `size` is an `Int`; a range's
-                    // own members answer at their element's width. Which of the three this read is
-                    // depends on the receiver as much as on the getter — a range declares `first`
-                    // too — so the receiverless read is none of them.
-                    None => match receiver {
-                        // `x.indices` is realized as an `IntRange` and as nothing else, whatever
-                        // the receiver is indexable as, so the read IS one. Saying so is what
-                        // lets `b in a.indices` recognize its receiver as a range when `b` is not
-                        // an `Int`: that comparison is the ranges FACADE's, which reads its
-                        // element from the receiver, and a receiver with no type sent the call
-                        // to the dependency-member path to be declined by name.
-                        Some(_) if self.external_getter_is_indices(*target) => {
-                            Ty::obj("kotlin/ranges/IntRange")
-                        }
-                        Some(receiver)
-                            if self.lazy_getter(*target, *receiver).is_some()
-                                || self.pair_getter(*target, *receiver).is_some() =>
-                        {
-                            any()
-                        }
-                        Some(receiver)
-                            if self.indexed_value_getter(*target, *receiver).is_some() =>
-                        {
-                            let name = self
-                                .indexed_value_getter(*target, *receiver)
-                                .expect("checked by the guard");
-                            lists::indexed_value_getter_ty(&name)
-                        }
-                        Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
-                        Some(receiver) if self.map_getter(*target, *receiver).is_some() => {
-                            let property = self
-                                .map_getter(*target, *receiver)
-                                .expect("checked by the guard");
-                            let answer = property.answer();
-                            // The runtime's answer is only the carrier; the checked result names
-                            // the collection the read IS (`m.keys` is a `Set`). A walk over the
-                            // read itself, `for (k in m.keys)`, finds its collection shape there.
-                            if self.carrier(*result) == self.carrier(answer) {
-                                *result
-                            } else {
-                                answer
-                            }
-                        }
-                        Some(receiver) => {
-                            self.range_getter(*target, *receiver)?;
-                            *result
-                        }
-                        None => return None,
-                    },
-                }
-            }
-            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
-            IrExpr::LocalPropertyReference(_) => Ty::obj("kotlin/reflect/KProperty"),
-            // A class literal is an object of the reflection type Kotlin gives it, which is what
-            // makes an equality between two of them an equality between references.
-            IrExpr::KClassLiteral { .. } => classes_literal::kclass(),
-            IrExpr::Checked(IrCheckedOperation::PropertyReference { mutable, .. }) => self
-                .file
-                .ir
-                .logical_types
-                .get(&id)
-                .copied()
-                .unwrap_or_else(|| {
-                    Ty::obj(if *mutable {
-                        "kotlin/reflect/KMutableProperty"
-                    } else {
-                        "kotlin/reflect/KProperty"
-                    })
-                }),
-            // `x!!` yields `x` or fails, so its type is the OPERAND's with the nullability taken
-            // off — which is what the lowering already does, unboxing a nullable primitive there.
-            // Saying so here is what lets a CONSUMER of `x!!` know what it is holding: without it
-            // the value's type is undetermined, and `c!!.toInt()` on a `Char?` reached `convert`
-            // with a reference where a machine value was required and declined by that name.
-            IrExpr::NotNullAssert { operand, .. } => self.physical_type_of(*operand)?.non_null(),
-            // A `lateinit` read yields its operand too; only the guard differs.
-            IrExpr::LateinitCheck { operand, .. } => self.physical_type_of(*operand)?,
-            IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
-                match self.file.is_imported_property(target) {
-                    // A property declared in another file: the type its getter entry point
-                    // returns.
-                    true => self.module_property_ty(target)?,
-                    false => self.file.ir.checked_properties.get(target)?.ty,
-                }
-            }
-            _ => return None,
-        })
     }
 
     /// A string template: each part rendered by the runtime and joined left to right.

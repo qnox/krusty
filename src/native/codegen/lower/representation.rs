@@ -18,7 +18,7 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(Some(value));
         }
-        let source = self.type_of(arg);
+        let source = self.physical_type(arg);
         self.convert(value, source, target)
     }
 

@@ -113,7 +113,11 @@ pub(super) fn materialize_top_level_delegate(
         source_order,
     )?;
     let owner_ty = extension_receiver.unwrap_or(Ty::Null);
-    let receiver = ir.add_expr(IrExpr::GetStatic(delegate_static));
+    let receiver = delegate_storage_read(
+        ir,
+        IrExpr::GetStatic(delegate_static),
+        plan.storage_type.get(),
+    );
     let owner = if extension_receiver.is_some() {
         ir.add_expr(IrExpr::GetValue(0))
     } else {
@@ -146,7 +150,11 @@ pub(super) fn materialize_top_level_delegate(
         .set_value
         .as_ref()
         .map(|set_value| {
-            let receiver = ir.add_expr(IrExpr::GetStatic(delegate_static));
+            let receiver = delegate_storage_read(
+                ir,
+                IrExpr::GetStatic(delegate_static),
+                plan.storage_type.get(),
+            );
             let owner = if extension_receiver.is_some() {
                 ir.add_expr(IrExpr::GetValue(0))
             } else {
@@ -301,11 +309,15 @@ pub(super) fn materialize_member_delegate(
     ));
 
     let this_ref = ir.add_expr(IrExpr::GetValue(0));
-    let receiver = ir.add_expr(IrExpr::GetField {
-        receiver: this_ref,
-        class: class_id,
-        index: delegate_field,
-    });
+    let receiver = delegate_storage_read(
+        ir,
+        IrExpr::GetField {
+            receiver: this_ref,
+            class: class_id,
+            index: delegate_field,
+        },
+        plan.storage_type.get(),
+    );
     let this_ref = ir.add_expr(IrExpr::GetValue(0));
     let property_reference = reference(ir);
     let read = delegated_call(
@@ -335,11 +347,15 @@ pub(super) fn materialize_member_delegate(
         .as_ref()
         .map(|set_value| {
             let this_ref = ir.add_expr(IrExpr::GetValue(0));
-            let receiver = ir.add_expr(IrExpr::GetField {
-                receiver: this_ref,
-                class: class_id,
-                index: delegate_field,
-            });
+            let receiver = delegate_storage_read(
+                ir,
+                IrExpr::GetField {
+                    receiver: this_ref,
+                    class: class_id,
+                    index: delegate_field,
+                },
+                plan.storage_type.get(),
+            );
             let this_ref = ir.add_expr(IrExpr::GetValue(0));
             let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(1));
@@ -540,11 +556,15 @@ pub(super) fn materialize_member_extension_delegate(
     ));
 
     let dispatch = ir.add_expr(IrExpr::GetValue(0));
-    let delegate = ir.add_expr(IrExpr::GetField {
-        receiver: dispatch,
-        class: class_id,
-        index: delegate_field,
-    });
+    let delegate = delegate_storage_read(
+        ir,
+        IrExpr::GetField {
+            receiver: dispatch,
+            class: class_id,
+            index: delegate_field,
+        },
+        plan.storage_type.get(),
+    );
     let extension = ir.add_expr(IrExpr::GetValue(1));
     let property_reference = reference(ir);
     let read = delegated_call(
@@ -574,11 +594,15 @@ pub(super) fn materialize_member_extension_delegate(
         .as_ref()
         .map(|set_value| {
             let dispatch = ir.add_expr(IrExpr::GetValue(0));
-            let delegate = ir.add_expr(IrExpr::GetField {
-                receiver: dispatch,
-                class: class_id,
-                index: delegate_field,
-            });
+            let delegate = delegate_storage_read(
+                ir,
+                IrExpr::GetField {
+                    receiver: dispatch,
+                    class: class_id,
+                    index: delegate_field,
+                },
+                plan.storage_type.get(),
+            );
             let extension = ir.add_expr(IrExpr::GetValue(1));
             let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(2));
@@ -745,6 +769,14 @@ fn at_property_line(ir: &mut IrFile, call: ExprId, line: u32) {
     if line != 0 {
         ir.expr_source_lines.insert(call, line);
     }
+}
+
+/// A read of a delegate's own storage, which this lowering synthesizes: its checked type is the
+/// type the delegate is stored at.
+fn delegate_storage_read(ir: &mut IrFile, read: IrExpr, storage: Ty) -> ExprId {
+    let read = ir.add_expr(read);
+    ir.logical_types.insert(read, storage);
+    read
 }
 
 fn delegated_call(

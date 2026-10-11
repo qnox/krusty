@@ -190,7 +190,7 @@ impl BodyLowering<'_, '_, '_> {
         argument: u32,
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let other = self.type_of(argument).unwrap_or(element);
+        let other = self.checked_type(argument).unwrap_or(element);
         self.unsigned_call(element, "compareTo", &[other], ret, receiver, &[argument])
     }
 

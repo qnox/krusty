@@ -243,7 +243,7 @@ impl BodyLowering<'_, '_, '_> {
                         // — that is why those answers are the runtime's at all — so the member
                         // declines by name, with the type it was asked of still in sight.
                         if let Some(internal) = self
-                            .type_of(receiver)
+                            .checked_type(receiver)
                             .map(Ty::non_null)
                             .and_then(|ty| ty.obj_internal())
                         {
@@ -301,7 +301,7 @@ impl BodyLowering<'_, '_, '_> {
                         // The unsigned integers: a value class the erasure made look like the
                         // signed number sharing its bits, so every member where that difference
                         // shows is answered on purpose rather than by the signed instruction.
-                        if let Some(element) = self.type_of(receiver) {
+                        if let Some(element) = self.checked_type(receiver) {
                             if let Some(realized) =
                                 self.unsigned_member(element, &name, params, *ret, receiver, args)
                             {
@@ -363,7 +363,7 @@ impl BodyLowering<'_, '_, '_> {
                         if let Some(target) =
                             super::super::super::intrinsics::unsigned_conversion(owner, &name)
                         {
-                            let source = self.type_of(receiver).map(Ty::non_null);
+                            let source = self.checked_type(receiver).map(Ty::non_null);
                             if let Some(source @ (Ty::Byte | Ty::Short | Ty::Int | Ty::Long)) =
                                 source
                             {
@@ -383,7 +383,7 @@ impl BodyLowering<'_, '_, '_> {
                         // `a.mod(b)`: the remainder brought onto the DIVISOR's sign. Both
                         // operands are read at the width the declaration answers in, which is what
                         // makes `Int.mod(Long)` a `Long` question rather than a truncated one.
-                        let receiver_type = self.type_of(receiver).map(Ty::non_null);
+                        let receiver_type = self.checked_type(receiver).map(Ty::non_null);
                         if let Some((symbol, operand)) = receiver_type.and_then(|receiver_type| {
                             super::super::super::intrinsics::floor_mod(
                                 owner,
@@ -429,7 +429,7 @@ impl BodyLowering<'_, '_, '_> {
                             super::super::super::intrinsics::array_member(owner, &name, params)
                         {
                             if self
-                                .type_of(receiver)
+                                .checked_type(receiver)
                                 .map(Ty::non_null)
                                 .is_some_and(Ty::is_array)
                             {
@@ -514,7 +514,7 @@ impl BodyLowering<'_, '_, '_> {
                         // `x.toBits()` / `x.toRawBits()`: an extension whose receiver is a machine
                         // value, taken at its own width rather than through a box. The receiver's
                         // type says which width, the declaration having no parameter to say it.
-                        if let Some(receiver_ty) = self.type_of(receiver) {
+                        if let Some(receiver_ty) = self.checked_type(receiver) {
                             if let Some((symbol, answer)) =
                                 super::super::super::intrinsics::float_to_bits(
                                     owner,

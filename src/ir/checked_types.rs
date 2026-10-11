@@ -5,10 +5,11 @@
 //! template, the zero a relational comparison is tested against, a coercion it inserts) either has
 //! its type recorded there by its producer, or names that type in its own operands: a constant
 //! carries its type's identity, the `Unit` singleton is `Unit`, a type operation its target, an
-//! intrinsic call its declared result, and a comparison or equality is a `Boolean`. This is that
-//! contract in one place, so a backend reads the checked type and chooses only the carrier.
-//! Nothing here looks at a child to work out what its parent yields; a node whose type depends on
-//! its children has its type recorded by its producer or has none.
+//! intrinsic call its declared result, a construction or singleton its class, an array or callable
+//! reference its whole type, and a comparison or equality is a `Boolean`. This is that contract in
+//! one place, so a backend reads the checked type and chooses only the carrier. Nothing here looks
+//! at a child to work out what its parent yields; a node whose type depends on its children has its
+//! type recorded by its producer or has none.
 //!
 //! A `PrimitiveBinOp` that does not answer a `Boolean` is such a node. Its result is the result of
 //! the operator the checker selected (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
@@ -22,9 +23,16 @@ use super::*;
 impl IrFile {
     /// The checked type of the value `id` yields, if lowering recorded one.
     pub fn checked_type(&self, id: ExprId) -> Option<Ty> {
-        if let Some(ty) = self.logical_types.get(&id) {
-            return Some(*ty);
+        match self.logical_types.get(&id) {
+            Some(ty) => Some(*ty),
+            None => self.named_type(id),
         }
+    }
+
+    /// The type node `id` names in itself, whatever lowering recorded beside it: what a target
+    /// produces when it evaluates the node. It is the checked type unless a later pass recorded a
+    /// more specific one, as an inline call's substitution of a type parameter does.
+    pub fn named_type(&self, id: ExprId) -> Option<Ty> {
         Some(match self.expr(id) {
             IrExpr::Const(constant) => constant.checked_type(),
             IrExpr::TypeOp {
@@ -45,6 +53,23 @@ impl IrFile {
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
             IrExpr::StringConcat(_) => Ty::String,
             IrExpr::UnitInstance => Ty::Unit,
+            // A construction, a singleton and an enum constant name their class; an array
+            // construction and a callable reference name their whole type.
+            IrExpr::New { internal, .. } => Ty::Obj(*internal, &[]),
+            IrExpr::SingletonValue { classifier }
+            | IrExpr::EnumEntry { classifier, .. }
+            | IrExpr::EnumValueOf { classifier, .. } => Ty::Obj(*classifier, &[]),
+            // An enclosing-instance edge names the outer classifier it reaches.
+            IrExpr::EnclosingInstance { outer, .. } => Ty::Obj(*outer, &[]),
+            IrExpr::EnumValues { classifier } => {
+                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
+            }
+            IrExpr::EnumEntries { classifier } => {
+                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::Obj(*classifier, &[])])
+            }
+            IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
+            IrExpr::CallableReference(reference) => reference.function_type,
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
             _ => return None,
         })
     }

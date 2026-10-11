@@ -36,8 +36,8 @@ impl BodyLowering<'_, '_, '_> {
         match mode {
             crate::ir::EqualityMode::Structural => self.structural_equality(op, lhs, rhs),
             crate::ir::EqualityMode::Ieee754 => {
-                let lhs_ty = self.type_of(lhs);
-                let rhs_ty = self.type_of(rhs);
+                let lhs_ty = self.physical_type(lhs);
+                let rhs_ty = self.physical_type(rhs);
                 self.ieee_equality(op, lhs, lhs_ty, rhs, rhs_ty)
             }
             crate::ir::EqualityMode::Primitive => self.primitive_equality(op, lhs, rhs),
@@ -78,8 +78,8 @@ impl BodyLowering<'_, '_, '_> {
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Value>, Unsupported> {
-        let lhs_physical = self.type_of(lhs);
-        let rhs_physical = self.type_of(rhs);
+        let lhs_physical = self.physical_type(lhs);
+        let rhs_physical = self.physical_type(rhs);
         // EqualityMode::Primitive is a checked semantic decision. A generic member may still hand
         // its value back through a reference slot (`Pair<Int, _>.first: T`), while the selected
         // call's logical result records that the value is an Int. Keep both facts: the physical
@@ -277,8 +277,8 @@ impl BodyLowering<'_, '_, '_> {
         // The type each side unboxes to, which the guard has already established is a
         // floating-point one. Kotlin does not compare a `Double` with a `Float` through `==`, so
         // two different widths here are a shape this has no rule for rather than a conversion.
-        let left_physical = self.type_of(lhs);
-        let right_physical = self.type_of(rhs);
+        let left_physical = self.physical_type(lhs);
+        let right_physical = self.physical_type(rhs);
         let left_semantic = self.file.ir.logical_types.get(&lhs).copied().or(lhs_ty);
         let right_semantic = self.file.ir.logical_types.get(&rhs).copied().or(rhs_ty);
         let (Some(left_ty), Some(right_ty)) = (
@@ -359,8 +359,8 @@ impl BodyLowering<'_, '_, '_> {
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Value>, Unsupported> {
-        let lhs_ty = self.type_of(lhs);
-        let rhs_ty = self.type_of(rhs);
+        let lhs_ty = self.physical_type(lhs);
+        let rhs_ty = self.physical_type(rhs);
 
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
             // Two occurrences of one value class, both carried as the value: Kotlin's `==` on
@@ -697,7 +697,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Result<Option<Value>, Unsupported> {
         use super::super::super::intrinsics::FloatPredicate;
-        let ty = match self.type_of(receiver).map(Ty::non_null) {
+        let ty = match self.checked_type(receiver).map(Ty::non_null) {
             Some(Ty::Double) => Ty::Double,
             Some(Ty::Float) => Ty::Float,
             _ => return Err("a floating-point question about a value of another type".into()),

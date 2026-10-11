@@ -24,7 +24,7 @@ impl BodyLowering<'_, '_, '_> {
                 // the signed number sharing its bits — and ordering is exactly the question that
                 // reads those bits differently. The receiver's own checked type decides.
                 if let Some(element) = self
-                    .type_of(receiver)
+                    .checked_type(receiver)
                     .map(Ty::non_null)
                     .filter(|ty| ty.is_unsigned())
                 {
@@ -74,8 +74,8 @@ impl BodyLowering<'_, '_, '_> {
                 // the common floating declaration type. Physical carriers cannot supply either
                 // fact: a nullable float is a reference, and a property read through an interface
                 // may have a representation type that is deliberately less specific.
-                let left_ty = self.file.ir.logical_types.get(left).copied();
-                let right_ty = self.file.ir.logical_types.get(right).copied();
+                let left_ty = self.checked_type(*left);
+                let right_ty = self.checked_type(*right);
                 if [left_ty, right_ty]
                     .into_iter()
                     .any(|ty| ty.and_then(scalar_bound) != Some(operand))
