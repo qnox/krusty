@@ -178,6 +178,8 @@ fn write_class(
     for index in 0..tables.len() {
         cw.add_field(0x1019, &table_field(index), "[I"); // PUBLIC | STATIC | FINAL | SYNTHETIC
     }
+    // The owner may itself be nested (an object expression), which the file's nest declares.
+    env.inner_classes.register(&mut cw);
     cw.add_inner_class(InnerClassSpec {
         inner: internal.to_string(),
         outer: Some(owner.to_string()),
