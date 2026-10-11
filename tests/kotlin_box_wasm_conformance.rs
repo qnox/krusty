@@ -243,6 +243,30 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
 }
 
 #[test]
+fn wasm_string_intrinsics_count_and_read_utf16_code_units() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    return verify("", "a\u00E9\u4E2D\uD83D\uDE00z")
+}
+
+fun verify(empty: String, text: String): String {
+    if (empty.length != 0) return "fail: empty length"
+    if (text.length != 6) return "fail: length ${text.length}"
+    if (text[0] != 'a') return "fail: ascii"
+    if (text[1] != '\u00E9') return "fail: latin"
+    if (text[2] != '\u4E2D') return "fail: bmp"
+    if (text[3] != '\uD83D') return "fail: high surrogate"
+    if (text[4] != '\uDE00') return "fail: low surrogate"
+    if (text[5] != 'z') return "fail: tail"
+    return "OK"
+}
+"#,
+        "wasmStringIntrinsics",
+    );
+}
+
+#[test]
 fn wasm_classes_construct_store_fields_and_dispatch_virtually() {
     expect_wasm_box(
         r#"

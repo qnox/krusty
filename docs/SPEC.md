@@ -17002,6 +17002,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in the host function that writes bytes (`src/wasm/host.rs`). A `String` is a struct over a mutable
   `i16` array, so length and indexing are UTF-16 units as on the JVM; it is written out as UTF-8,
   with a lone surrogate written as the three bytes its unit encodes to, as the Native runtime does.
+  `String.length` and `String.get` consume their selected `IrIntrinsic` identities in the named
+  Wasm intrinsic-operation boundary, then read that representation without recovering a library
+  declaration from spelling.
   `Int`/`Long` division and remainder follow Kotlin, not wasm's trap: `MIN_VALUE / -1` is
   `MIN_VALUE` and `MIN_VALUE % -1` is `0`; division by zero still traps, which ends the program
   without a `box()` answer until exceptions land. A value narrowed to `Byte`, `Short` or `Char`
