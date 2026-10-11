@@ -6987,6 +6987,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   fields in source order, after `$$INSTANCE`. Reference constants carry `@NotNull`. The companion's
   `@Metadata` still lists every const; the interface's metadata lists `Companion` and not the const
   names. Tests: `tests/interface_companion_const_fields_e2e.rs`.
+- **A named object's backing fields are declared at the field-table visit.** kotlinc visits the field
+  table after `<clinit>` and the accessors, so a backing field's generic `Signature` (for
+  `val names: MutableList<String> = ArrayList()`) enters the constant pool after the initializer's
+  constants. The fields still precede the object's other static storage, such as a generated
+  `$cachedSerializer$delegate`. Verified against kotlinc 2.4.20. Interleaving a `const val` with
+  those fields in source order is not done yet. Tests: `tests/object_field_signature_order_e2e.rs`.
 - **An interface companion reads its own instance from `$$INSTANCE`.** The companion class stores
   that field in its `<clinit>` before any property initializer runs, and the interface's `Companion`
   field aliases it only after that `<clinit>` returns. A qualified use of the companion from the
