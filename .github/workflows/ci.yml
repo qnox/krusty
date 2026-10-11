@@ -383,18 +383,18 @@ jobs:
       # inventories live in their own cache, target/cache/ref-classes, whose entries
       # tests/box_reference_classes.rs keys by source, classpath, unit modes, the exact compiler and
       # the producing JDK. Restored from the base and saved by master like the recorded bytes; the
-      # key also hashes that file and the case planning it shares with src/conformance, so a change to
-      # the entry key, the layout or a case's split into units starts a fresh cache instead of
-      # replaying inventories planned the old way.
+      # key also hashes the inventory owner, shared case planning, reference server/Javac driver and
+      # content-identity implementation. A producer or layout change therefore starts a fresh cache
+      # instead of replaying inventories built by code that a hit would otherwise never execute.
       - name: restore kotlinc box references (${{ matrix.version }})
         if: matrix.target == 'jvm'
         id: box-references
         uses: actions/cache/restore@v6
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
-            box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'src/conformance.rs', 'src/conformance/**') }}-
+            box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-
       - name: download shared test binaries
         uses: actions/download-artifact@v8
         with:
@@ -423,7 +423,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}
+          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}
       - name: run native box conformance ${{ matrix.version }}
         if: matrix.target == 'native'
         id: native_box
