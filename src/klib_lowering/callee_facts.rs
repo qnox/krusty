@@ -1,12 +1,13 @@
-//! The frozen declarations a dependency body may call, by exact KLIB identity.
+//! The provider records of the dependency declarations a checked call selected, by exact KLIB
+//! identity.
 //!
-//! A KLIB body names a callee only by the public signature it was serialized with. Lowering the
-//! call needs the callee's selected declaration (its normalized parameters, result and parameter
-//! identities) exactly as the provider published it and the backend handoff froze it. This table
-//! is that input: the frozen views of every dependency declaration the caller selected, joined to a
-//! call by signature alone. A signature it does not hold is a callee no checked call selected, and
-//! a body that calls one declines by naming it; nothing is reconstructed from the callee's name or
-//! shape.
+//! A KLIB body names a callee only by the public signature it was serialized with, and lowering
+//! declares the callee from that signature's serialized header. When a checked call of the module
+//! also selected the callee, its provider record (normalized parameters, result and parameter
+//! identities, exactly as the backend handoff froze them) describes the same identity, and the
+//! two views must agree. This table is those records, joined to a call by signature alone; a
+//! signature it does not hold is a callee only its header describes. Nothing is reconstructed from
+//! the callee's name or shape.
 
 use std::collections::HashMap;
 

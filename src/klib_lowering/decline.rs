@@ -29,9 +29,8 @@ pub enum KlibBodyDeclineReason {
     UnsupportedOperation(&'static str),
     /// The body calls a declaration lowering cannot realize.
     UnsupportedCallee(Box<KlibPublicIdSignature>),
-    /// The body calls a dependency declaration no frozen selection describes, so lowering has no
-    /// normalized declaration to call it by.
-    UnselectedCallee(Box<KlibPublicIdSignature>),
+    /// The body calls a declaration no loaded library declares, so nothing describes the callee.
+    UndeclaredCallee(Box<KlibPublicIdSignature>),
     /// The body calls a dependency declaration that two frozen selections describe.
     AmbiguousCallee(Box<KlibPublicIdSignature>),
     /// The body reaches, through calls, a dependency body that declines.
@@ -108,10 +107,10 @@ impl std::fmt::Display for KlibBodyDecline {
                 write_qualified(formatter, callee)?;
                 write!(formatter, "`")
             }
-            KlibBodyDeclineReason::UnselectedCallee(callee) => {
+            KlibBodyDeclineReason::UndeclaredCallee(callee) => {
                 write!(formatter, "it calls `")?;
                 write_qualified(formatter, callee)?;
-                write!(formatter, "`, which no selected declaration describes")
+                write!(formatter, "`, which no loaded library declares")
             }
             KlibBodyDeclineReason::AmbiguousCallee(callee) => {
                 write!(formatter, "it calls `")?;

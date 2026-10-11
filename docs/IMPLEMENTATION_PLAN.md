@@ -4644,6 +4644,13 @@ code is the one the code generator already names: provider-owned bodies through 
   each target's stdlib KLIB must carry an operation: `klib_libraries::tests::external_coverage`
   checks Native, JS, wasm-js and wasm-wasi against `tests/klib_uncovered_externals/<target>/`,
   lists that may only shrink (2.4.20: 402, 25, 16 and 1 uncovered).
+- **Parameter defaults (constants done).** `KlibLibraries::open` reads each library's IR
+  declarations and publishes the constant default of every function or constructor value parameter
+  (`klib_libraries::parameter_defaults`), so a call that omits it passes the constant itself, as
+  for any library default the provider states. A non-constant default stays unpublished and the
+  call is rejected. `parameter_default` also gives body lowering the default's IR expression.
+  The Native corpus passes 3991 of 7089 against the stdlib KLIB (from 3542); reading the whole IR
+  at open is a known compile-time cost to narrow to the declarations a compilation selects.
 - **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
   decoded trees of a library set by linkable identity and answers a selected callable's frozen
   `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.
@@ -4665,10 +4672,8 @@ code is the one the code generator already names: provider-owned bodies through 
   frozen declarations the caller selected (`KlibCalleeFacts`, keyed by `KlibDeclarationSignature`
   over `KlibBodyCallable` views), declares each reached callee in the unit and lowers its body,
   once per signature and cycle-safe; any declining body rolls the whole attempt back. A callee
-  without a frozen fact declines by name (the provider freezes only the identities a checked file
-  references, so transitive callees need that file to have selected them; the provider lane that
-  freezes them comes with the Native lane switch). Also modelled: the `EQEQ`/`EQEQEQ`/
-  `ieee754equals` built-ins and `Boolean.not` (with `!=`/`!==` folded as the source operator),
+  without a frozen fact declined by name here; the fourth slice declares it from its header.
+  Also modelled: the `EQEQ`/`EQEQEQ`/`ieee754equals` built-ins and `Boolean.not` (with `!=`/`!==` folded as the source operator),
   local `val`/`var` declarations, reads and assignments, no-op implicit casts, and multi-branch
   `when`s by origin (`WHEN` flat, `IF` nested). The equality mode is the checker's own rule
   (`EqualityMode::of_source_operands`). The stdlib's `Kotlin_equals` now lowers; most remaining
@@ -4692,6 +4697,26 @@ code is the one the code generator already names: provider-owned bodies through 
   too; the remaining declines are led by generics, inlined blocks, file-private and member callees
   and constructor calls.
   Next: constructors and member callees in the provider, then the Native lane switch.
+- **Lowering (fourth slice): callees from their serialized headers.** A callee is joined to its
+  serialized declaration by exact signature, as a body is, and declared from that header: roles,
+  parameter and result types converted structurally, value parameters identified by their
+  serialized names. The KLIB IR header is the description of a dependency-only callee, so nothing
+  is frozen ahead of lowering and only reached bodies are read; a provider record of the same
+  identity (`KlibCalleeFacts`), when a checked call selected one, is cross-checked against the
+  header in name, parameter types and identities, context count and result, also when an already
+  declared function is reached or lowered as a root later. Lowering follows each call's serialized
+  `IdSignature` and never re-selects an overload. Declines by name: a call of a member function
+  (member dispatch is not modelled), a member signature no library serializes (a fake override;
+  the structural walk through the serialized class declarations to the real declaration comes
+  next), a header-only callee with context parameters (their kind is recorded only by a provider),
+  and a signature no loaded library declares. On the 2.4.20 stdlib no body calls a signature no
+  loaded library declares, and 160 non-generic top-level functions now lower past their first call
+  and decline inside a callee by the callee's own form: a body-less (intrinsic) declaration 51,
+  a member call 36, a compiler-introduced block 34, a parameter default 19, a file-private call 12,
+  a type with type arguments 6, a constructor call 2; none lowers end to end yet. Constructors are
+  not declared from their headers: a constructor call needs its class's layout and initializers,
+  not only a callable header. Next: member calls with their dispatch form and the fake-override
+  walk, callee parameter defaults, inlined function blocks, then constructors.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`

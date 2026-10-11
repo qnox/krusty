@@ -18,6 +18,7 @@ mod declaration_signatures;
 mod external_identities;
 mod inventory;
 mod lookup;
+pub(crate) mod parameter_defaults;
 mod platform;
 #[cfg(test)]
 mod tests;
