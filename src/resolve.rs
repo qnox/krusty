@@ -61191,7 +61191,7 @@ impl<'a> Checker<'a> {
         trailing: Option<ExprId>,
     ) -> Ty {
         let t = {
-            if let Some(candidates) = self.file.incdec_access_operands.get(&e) {
+            if let Some(candidates) = self.file.incdec_accesses.get(&e).map(|a| &a.operands) {
                 let runtime_operands = candidates
                     .iter()
                     .copied()

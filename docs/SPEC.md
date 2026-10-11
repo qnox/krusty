@@ -16905,6 +16905,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference compiler as well. Corpus: `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`,
   `statics/incInClassObject.kt`, `increment/argumentWithSideEffects.kt`,
   `defaultArguments/convention/incWithDefaultInGetter.kt` (the second `get` applies its default).
+- **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
+  kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
+  `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and
+  the index operands go into temporaries first, but kotlinc's JVM optimization folds a temporary
+  whose initializer is a constant or a read of an immutable value (a `val`, a parameter, the
+  current `this`) back into its uses, so only an operand such as a call, a `var` or a nested access
+  takes a slot. The postfix temporary is unnamed, so it has no `LocalVariableTable` row, and its
+  `inc()` is computed into the write: an `Int` property never becomes `iinc`. The statement form
+  keeps the same shape: the old value is still stored before the write, including for a property
+  reached through an implicit receiver or a top-level property. Checked FIR rebuilds these blocks
+  from the parser's expansion (`IncDecAccess`) in `src/fir/body_check/blocks.rs`. Not matched yet: a
+  statement whose write pushes nothing between the store and the load of the old value (a
+  top-level property, or a reference value moved with `swap`), where kotlinc's block-scope label
+  keeps the temporary, and the slots of an index update in statement position, which kotlinc keeps
+  until the enclosing block ends. Test: `tests/access_increment_shape_e2e.rs`. Corpus:
+  `increment/argumentWithSideEffects.kt`, `increment/kt36956.kt`, `classes/kt1891.kt`.
 - **A shared-cell capture stays one cell however many callables it crosses, and is forwarded BY the
   cell.** `var ok = "fail"; fun mk(): C = object : C { override fun i() = ok }` — the anonymous
   object must see the write `ok = "OK"` that happens after `mk()` returns, so it has to hold the

@@ -1027,15 +1027,30 @@ pub(super) fn compact(file: &mut File) {
     file.anon_fun_ret = remap_u32_map(std::mem::take(&mut file.anon_fun_ret), &expressions);
     file.spread_arg_ids = remap_u32_set(std::mem::take(&mut file.spread_arg_ids), &expressions);
 
-    file.incdec_access_operands = std::mem::take(&mut file.incdec_access_operands)
+    file.incdec_accesses = std::mem::take(&mut file.incdec_accesses)
         .into_iter()
-        .filter_map(|(old, operands)| {
+        .filter_map(|(old, access)| {
             let new = expressions.get(&old).copied()?;
-            let operands = operands
+            let operands = access
+                .operands
                 .into_iter()
                 .filter_map(|operand| expressions.get(&operand).copied())
                 .collect();
-            Some((new, operands))
+            let original = match access.original {
+                Some(original) => Some(statements.get(&original).copied()?),
+                None => None,
+            };
+            Some((
+                new,
+                crate::ast::IncDecAccess {
+                    operands,
+                    value: statements.get(&access.value).copied()?,
+                    original,
+                    update: statements.get(&access.update).copied()?,
+                    store: statements.get(&access.store).copied()?,
+                    prefix: access.prefix,
+                },
+            ))
         })
         .collect();
     file.anonymous_object_classes = std::mem::take(&mut file.anonymous_object_classes)

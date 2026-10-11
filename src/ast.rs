@@ -1554,6 +1554,20 @@ pub struct ExpectDeclaration {
     pub keyword: Span,
 }
 
+/// A member or index `++`/`--` the parser expanded into a block. The read and the write share
+/// `operands`; lowering evaluates each runtime operand once. `value` binds the first read, the
+/// optional `original` keeps it for a postfix value, `update` applies the operator to `value` and
+/// `store` writes it back. Checked FIR rebuilds kotlinc's shape from these parts.
+#[derive(Clone, Debug)]
+pub struct IncDecAccess {
+    pub operands: Vec<ExprId>,
+    pub value: StmtId,
+    pub original: Option<StmtId>,
+    pub update: StmtId,
+    pub store: StmtId,
+    pub prefix: bool,
+}
+
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
@@ -1626,11 +1640,8 @@ pub struct File {
     pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
     /// `@` token spans of this file's `return@label`s.
     pub(crate) return_label_spans: ReturnLabelSpans,
-    /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
-    /// shared between the read and write. Lowering spills the operands that semantic resolution
-    /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay
-    /// attached to both accesses.
-    pub incdec_access_operands: std::collections::HashMap<ExprId, Vec<ExprId>>,
+    /// Parser-desugared member/index inc/dec blocks, keyed by the block expression.
+    pub incdec_accesses: std::collections::HashMap<ExprId, IncDecAccess>,
     /// 1-based source line of each expression's start (parallel to `expr_spans`; 0 = unknown).
     /// Filled by the parser post-pass for the `LineNumberTable`.
     pub expr_lines: Vec<u32>,
@@ -1965,7 +1976,7 @@ impl File {
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
         self.init_block_keywords = Default::default();
-        self.incdec_access_operands = Default::default();
+        self.incdec_accesses = Default::default();
         self.call_arg_names = Default::default();
         self.collection_literal_calls = Default::default();
         self.call_arg_name_spans = Default::default();
