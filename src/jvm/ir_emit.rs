@@ -3838,9 +3838,11 @@ fn emit_enum_class(
         e.render_initializer_boundaries = false;
         max_locals = max_locals.max(e.frame.max());
     }
-    // The `return` maps back to the class header; a pending closing `init` line owns a `nop`.
-    if c.decl_line != 0 && !store_lines.is_empty() {
-        ctor.mark_line(c.decl_line);
+    // The `return` maps to the primary constructor's start; a pending closing `init` line owns a
+    // `nop` before that transition.
+    let return_line = primary_constructor_line(ir, c);
+    if return_line != 0 && !store_lines.is_empty() {
+        ctor.mark_line(return_line);
     }
     let ctor_return_pc = ctor.bytes.len() as u16;
     ctor.ret_void();
@@ -3878,9 +3880,10 @@ fn emit_enum_class(
             let mut entries = vec![(0u16, start)];
             if !store_lines.is_empty() {
                 // Each retained store maps to its property's source line; the trailing `return`
-                // maps back to the class header. A missing line is not reconstructed in the backend.
+                // maps back to where the primary constructor starts. A missing line is not
+                // reconstructed in the backend.
                 entries.extend(store_lines.iter().copied());
-                entries.push((ctor_return_pc, header));
+                entries.push((ctor_return_pc, primary_constructor_line(ir, c)));
             }
             // kotlinc never emits two consecutive entries for the same line.
             entries.dedup_by_key(|(_, l)| *l);

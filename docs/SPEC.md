@@ -10569,6 +10569,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm::java_stub::tests::type_variables_erase_to_their_leftmost_bound` (javac's descriptors) and
   `tests/java_source_interop_e2e.rs::java_source_headers_erase_type_variables_to_their_bounds`
   (Kotlin first, then javac against krusty's output, then a run).
+- **A primary constructor may start on a later line, and its `return` maps there.** The grammar
+  allows line breaks before a primary constructor (`class C` then `(val a: Int)` on the next line,
+  also after a KDoc comment), so the parser skips them when `(` follows. kotlinc maps the
+  constructor's trailing `return` to the line the constructor starts on: its first annotation,
+  modifier, `constructor` keyword, or `(`, not the class name's line
+  (`setExtraLineNumberForVoidReturningFunction` over the primary constructor's start offset). The
+  same holds for an enum class. Test: `tests/primary_constructor_newline_e2e.rs`.
 - **A `@Serializable object` is serialized by an `ObjectSerializer`; it has no `$serializer`.**
   kotlinc gives the object a member `serializer()` returning
   `ObjectSerializer(serialName, INSTANCE, annotations)`, cached in a synthetic static

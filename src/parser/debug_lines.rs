@@ -168,6 +168,9 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     line_at(c.span.hi.saturating_sub(1))
                 };
                 // The parser stored the primary ctor's `)` OFFSET here — rewrite it to the line.
+                if c.ctor_open_line != 0 {
+                    c.ctor_open_line = line_at(c.ctor_open_line);
+                }
                 if c.ctor_close_line != 0 {
                     c.ctor_close_line = line_at(c.ctor_close_line);
                 }
