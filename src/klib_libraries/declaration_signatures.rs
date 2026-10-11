@@ -44,9 +44,9 @@ pub(super) struct SignedFunction {
     pub(super) signature: KlibPublicIdSignature,
     pub(super) parameters: FunctionParameterIdentities,
     pub(super) type_parameters: TypeParameterIdentities,
-    /// The containing KLIB's manifest identifies it as the platform stdlib whose compiler-owned
-    /// declarations may receive package-level intrinsic roles. Ordinary dependencies remain false
-    /// even when they publish declarations under a `kotlin.*` package.
+    /// Compilation input assembly identifies the containing KLIB as the selected platform stdlib,
+    /// whose compiler-owned declarations may receive package-level intrinsic roles. Ordinary
+    /// dependencies remain false even when their manifests and packages mimic that stdlib.
     pub(super) compiler_builtin_owner: bool,
     /// The constant default of each value parameter, read from the library's IR; empty when the
     /// IR was not read or no default is a constant.

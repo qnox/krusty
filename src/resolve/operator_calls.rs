@@ -585,6 +585,7 @@ impl<'a> Checker<'a> {
             let comparison_provenance = selected_range_comparison_provenance(kind, &range_call);
             let operands_are_numeric = [range_vt, range_st, range_et].iter().all(prim);
             let uniform = range_vt == range_st && range_st == range_et;
+            let mut ordinary_contains = None;
             // kotlinc's `RangeContainsLowering` compares in the widest numeric type of the bounds
             // and the value (`computeComparisonClass`) when the call is the range's own `contains`
             // or a stdlib closed-range extension. Every primitive range declares the member
@@ -615,6 +616,9 @@ impl<'a> Checker<'a> {
                         }
                         _ => false,
                     };
+                    if range_vt == vt {
+                        ordinary_contains = Some(selected);
+                    }
                     let unsigned = [range_vt, range_st, range_et]
                         .iter()
                         .any(|ty| ty.is_unsigned());
@@ -662,7 +666,8 @@ impl<'a> Checker<'a> {
                 // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
                 // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
-                let contains = self.range_contains_call(scope, e, range_ty, vt, value);
+                let contains = ordinary_contains
+                    .unwrap_or_else(|| self.range_contains_call(scope, e, range_ty, vt, value));
                 self.finish_range_contains(&operands, range_ty, range_call, contains)
             }
         };

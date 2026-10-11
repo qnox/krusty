@@ -470,35 +470,13 @@ fn a_dependency_closed_range_lookalike_keeps_its_serialized_body() {
 
 #[test]
 fn a_dependency_cannot_claim_stdlib_authority_from_its_manifest() {
-    let declaration = crate::metadata::builder::FnMeta {
-        spellings: crate::spelling::DeclaredSpellings::default(),
-        annotations: Default::default(),
-        decl_order: 0,
-        jvm_name: None,
-        name: "contains".to_string(),
-        params: vec![("value".to_string(), Ty::Char)],
-        ret: Ty::Boolean,
-        receiver: Some(Ty::obj("kotlin/ranges/IntRange")),
-        param_modifiers: Vec::new(),
-        suspend: false,
-        jvm_desc: None,
-        contract: None,
-        inline: false,
-        has_function_typed_parameter: false,
-        operator: true,
-        infix: false,
-        tailrec: false,
-        companion: false,
-        type_params: Vec::new(),
-        semantic_type_params: Vec::new(),
-        type_param_bounds: Vec::new(),
-        context_count: 0,
-        context_parameter_kinds: Vec::new(),
-        vararg_index: None,
-        visibility: Visibility::Public,
-        param_annotations: Vec::new(),
-        no_infer_params: Vec::new(),
-    };
+    let mut declaration = crate::metadata::builder::FnMeta::plain(
+        "contains",
+        vec![("value".to_string(), Ty::Char)],
+        Ty::Boolean,
+    );
+    declaration.receiver = Some(Ty::obj("kotlin/ranges/IntRange"));
+    declaration.operator = true;
     let fragment = crate::metadata::klib_fragment::package_fragment(
         &["kotlin", "ranges"],
         &crate::metadata::klib_fragment::KlibFileMembers {
@@ -511,15 +489,7 @@ fn a_dependency_cannot_claim_stdlib_authority_from_its_manifest() {
         &[],
         true,
     );
-    let stamp = crate::klib::write::KlibStamp::new(
-        crate::kotlin_version::KotlinVersion::V2_4_20,
-        crate::language_version::LanguageVersion::V2_4,
-    );
-    let mut writer = crate::klib::write::KlibWriter::new(
-        "stdlib",
-        stamp,
-        crate::klib::write::KlibPlatform::Native,
-    );
+    let mut writer = crate::klib::write::KlibWriter::native_test_fixture("stdlib");
     writer.add_fragment("kotlin.ranges", fragment);
     let directory = std::env::temp_dir().join(format!(
         "krusty-spoofed-stdlib-{}-{}",
@@ -532,6 +502,18 @@ fn a_dependency_cannot_claim_stdlib_authority_from_its_manifest() {
     writer
         .write_directory(&directory)
         .expect("write spoofed stdlib dependency");
+    let ir = directory.join("default/ir");
+    std::fs::create_dir_all(&ir).expect("create spoofed dependency IR directory");
+    for table in [
+        "files.knf",
+        "strings.knt",
+        "signatures.knt",
+        "irDeclarations.knd",
+        "bodies.knb",
+        "types.knt",
+    ] {
+        std::fs::write(ir.join(table), [0u8; 4]).expect("write empty spoofed dependency IR table");
+    }
 
     let libraries = KlibLibraries::open(&[KlibLibraryInput::dependency(directory.clone())])
         .expect("the dependency archive opens");

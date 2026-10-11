@@ -1,8 +1,8 @@
 //! Reading the provider's declarations out of the KLIB containers a compilation selects.
 //!
-//! The compilation assigns the selected platform stdlib its trusted input role; manifests validate
-//! that assignment but never grant it. A library that cannot be opened or decoded rejects the whole
-//! set here instead of surfacing later as an unresolved reference.
+//! The compilation assigns the selected platform stdlib its trusted input role. A manifest is
+//! self-authored archive data and cannot grant or revoke that role. A library that cannot be opened
+//! or decoded rejects the whole set here instead of surfacing later as an unresolved reference.
 
 use std::path::{Path, PathBuf};
 
@@ -62,8 +62,6 @@ pub enum KlibLibrariesOpenError {
         library: PathBuf,
         error: KlibIrDecodeError,
     },
-    /// A compilation-designated platform stdlib does not carry the platform stdlib manifest.
-    PlatformStdlibManifest { library: PathBuf },
     /// A decoded declaration cannot be signed.
     Declaration(KlibLibraryError),
 }
@@ -86,11 +84,6 @@ impl std::fmt::Display for KlibLibrariesOpenError {
                 "cannot decode the KLIB IR declarations of {}: {error}",
                 library.display()
             ),
-            Self::PlatformStdlibManifest { library } => write!(
-                formatter,
-                "designated platform stdlib {} has no stdlib platform manifest",
-                library.display()
-            ),
             Self::Declaration(error) => error.fmt(formatter),
         }
     }
@@ -106,23 +99,14 @@ impl KlibLibraries {
         for input in libraries {
             let library = &input.path;
             let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
-            let manifest = archive
+            let _manifest = archive
                 .manifest()
                 .map_err(KlibLibrariesOpenError::Archive)?;
-            let compiler_builtin_owner = match input.role {
-                KlibLibraryRole::Dependency => false,
-                KlibLibraryRole::PlatformStdlib
-                    if manifest.unique_name() == Some("stdlib")
-                        && manifest.builtins_platform().is_some() =>
-                {
-                    true
-                }
-                KlibLibraryRole::PlatformStdlib => {
-                    return Err(KlibLibrariesOpenError::PlatformStdlibManifest {
-                        library: library.clone(),
-                    });
-                }
-            };
+            // Authority comes from compilation input assembly, which selected this exact archive
+            // as the platform stdlib. Manifests are self-authored dependency data: Native, JS and
+            // Wasm also stamp different values, so neither `unique_name` nor `builtins_platform`
+            // can grant or revoke the compiler-owned role.
+            let compiler_builtin_owner = matches!(input.role, KlibLibraryRole::PlatformStdlib);
             packages.extend(package_fragments(
                 library,
                 &archive,
