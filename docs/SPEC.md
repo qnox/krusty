@@ -9213,7 +9213,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that intersection does; there is no per-bound retry. An inferred binding still replaces the bounds.
   The same identity-backed query feeds source-constructor matching, nested `in`/`out` argument
   checks, and common-type validation; a `Nothing` branch remains bottom and cannot widen the
-  bounded variable.
+  bounded variable. A definitely-non-null `T & Any` meets the intersection of all of `T`'s bounds
+  made non-null, so `where T : A?, T : B?` makes `T & Any` an argument for both `A` and `B`.
   Pass 1 infers an expression-bodied result before the type-parameter headers are published, so the
   symbol table indexes every source type parameter's later bounds by identity (classifiers as they
   are inserted, callables once collection is done) and the module provider answers from that index.

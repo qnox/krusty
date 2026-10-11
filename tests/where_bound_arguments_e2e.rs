@@ -65,3 +65,21 @@ fun box(): String {
 "#;
     common::expect_box_same_as_kotlinc(src, "where_bound_variance_and_nothing");
 }
+
+#[test]
+fn a_definitely_non_null_type_variable_meets_every_non_null_bound() {
+    let src = r#"fun takeCs(c: CharSequence) = c.length
+fun takeComparable(c: Comparable<String>) = c.compareTo("b")
+fun <T> length(a: T & Any): Int where T : Comparable<T>?, T : CharSequence? = takeCs(a)
+fun <T : Comparable<String>?> compared(a: T & Any): Int where T : CharSequence? = takeComparable(a)
+
+fun box(): String {
+    val n = length<String?>("abc")
+    if (n != 3) return "length $n"
+    val c = compared<String?>("b")
+    if (c != 0) return "compared $c"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(src, "where_bound_definitely_non_null");
+}

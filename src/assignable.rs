@@ -72,15 +72,29 @@ fn variable_bound_assignable(
     bound: Ty,
     sup: Ty,
 ) -> bool {
-    let upper = cx.lookup(name).unwrap_or_else(|| {
-        let extra = oracle.type_variable_extra_bounds(name);
-        if extra.is_empty() {
-            bound
-        } else {
-            Ty::intersection(&[&[bound][..], &extra].concat())
-        }
-    });
+    let upper = cx
+        .lookup(name)
+        .unwrap_or_else(|| declared_upper_bound(oracle, name, bound, |bound| bound));
     upper != sub && assignable_inner(cx, oracle, upper, sup)
+}
+
+/// The intersection of type variable `name`'s declared bounds: `bound`, which `Ty::TyParam`
+/// carries, and the oracle's later ones, each passed through `shape`.
+fn declared_upper_bound(
+    oracle: &dyn TypeOracle,
+    name: &str,
+    bound: Ty,
+    shape: impl Fn(Ty) -> Ty,
+) -> Ty {
+    let extra = oracle.type_variable_extra_bounds(name);
+    if extra.is_empty() {
+        return shape(bound);
+    }
+    let bounds = std::iter::once(bound)
+        .chain(extra)
+        .map(shape)
+        .collect::<Vec<_>>();
+    Ty::intersection(&bounds)
 }
 
 /// Target-independent upper shape of a flexible type whose lower bound is retained in [`Ty`].
@@ -184,15 +198,16 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if matches!((sub, sup), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b) {
         return true;
     }
-    // `T & Any` is a subtype of the original parameter and of that parameter's non-null upper
-    // bound (`T : Any?` satisfies `Any`; `T : Throwable?` satisfies `Throwable`). It does not
-    // satisfy an unrelated non-null bound.
+    // `T & Any` is a subtype of the original parameter and of the non-null intersection of that
+    // parameter's upper bounds (`T : Any?` satisfies `Any`; `T : Throwable?` satisfies
+    // `Throwable`; `where T : A?, T : B?` satisfies both `A` and `B`). It does not satisfy an
+    // unrelated non-null bound.
     if let Ty::DefinitelyNotNull(original) = sub {
         if assignable_inner(cx, oracle, *original, sup) {
             return true;
         }
-        if let Ty::TyParam(_, bound) = *original {
-            let tightened = bound.non_null();
+        if let Ty::TyParam(name, bound) = *original {
+            let tightened = declared_upper_bound(oracle, name, *bound, Ty::non_null);
             if tightened != *original && assignable_inner(cx, oracle, tightened, sup) {
                 return true;
             }
