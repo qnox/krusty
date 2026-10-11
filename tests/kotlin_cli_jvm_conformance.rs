@@ -465,7 +465,7 @@ fn run_case(toolchain: &Toolchain, args_file: &Path) -> Outcome {
         if let Some(java_home) = &toolchain.java_home {
             command
                 .env("JAVA_HOME", java_home)
-                .env("JAVA_OPTS", REFERENCE_JVM_OPTIONS)
+                .env("JAVA_OPTS", reference_jvm_options())
                 .env_remove("JAVACMD");
         }
         let result = command
@@ -782,12 +782,26 @@ fn the_reference_compiler_reproduces_every_applicable_cli_case() {
 /// compiling the whole checkout.
 const REFERENCE_JDK: u32 = 21;
 
-/// JVM options for every reference compile. Each case starts a fresh kotlinc that compiles a few
-/// small files and exits, and four run at once, so the C2 compiler's background compilation of
+/// The JIT option every reference compile adds. Each case starts a fresh kotlinc that compiles a
+/// few small files and exits, and four run at once, so the C2 compiler's background compilation of
 /// kotlinc competed for the same cores without paying off before the JVM exited. Stopping at C1
-/// took the whole corpus from 588 s to 415 s with the same outcome for every case. The options
-/// change only how fast the JVM runs kotlinc, never what kotlinc prints.
-const REFERENCE_JVM_OPTIONS: &str = "-XX:TieredStopAtLevel=1";
+/// took the whole corpus from 588 s to 415 s with the same outcome for every case. It changes only
+/// how fast the JVM runs kotlinc, never what kotlinc prints.
+const REFERENCE_JIT_OPTION: &str = "-XX:TieredStopAtLevel=1";
+
+/// The launcher applies its own heap bounds only when `JAVA_OPTS` is empty, so they are spelled out
+/// here to keep every reference compile under the limits a plain `kotlinc` run has.
+const KOTLINC_LAUNCHER_HEAP: &str = "-Xmx512M -Xms128M";
+
+/// `JAVA_OPTS` for a reference compile: the caller's options, or the launcher's default heap when
+/// there are none, followed by [`REFERENCE_JIT_OPTION`].
+fn reference_jvm_options() -> String {
+    let base = std::env::var("JAVA_OPTS")
+        .ok()
+        .filter(|options| !options.trim().is_empty())
+        .unwrap_or_else(|| KOTLINC_LAUNCHER_HEAP.to_string());
+    format!("{base} {REFERENCE_JIT_OPTION}")
+}
 
 /// `java.runtime.version` of a JDK, which the reference `-version` line prints.
 fn jvm_runtime_version(java_home: &Path) -> Option<String> {
