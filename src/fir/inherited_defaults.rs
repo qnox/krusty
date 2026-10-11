@@ -40,6 +40,10 @@ pub struct ResolvedInheritedDefault {
     /// The selected function declaration, which a `super` call through the classifier names; an
     /// accessor leaves it unset.
     pub function: Option<super::ResolvedFunctionOverrideTarget>,
+    /// The exact selected property-accessor target; a function leaves it unset. A module getter and
+    /// setter share their property's stable identity, while a dependency accessor retains the
+    /// provider identity of that exact getter or setter.
+    pub accessor: Option<super::ResolvedPropertyOverrideTarget>,
     /// The interface that declares the selected member.
     pub declaring_interface: TypeName,
     /// The first declared direct superinterface of the classifier through which the member is
@@ -82,6 +86,15 @@ impl ResolvedModuleIndex {
             "inherited defaults require a published classifier"
         );
         for default in &defaults {
+            assert!(
+                matches!(
+                    (&default.name, default.function, default.accessor),
+                    (InheritedMemberName::Function(_), Some(_), None)
+                        | (InheritedMemberName::PropertyGetter(_), None, Some(_))
+                        | (InheritedMemberName::PropertySetter(_), None, Some(_))
+                ),
+                "an inherited default publishes exactly its selected function or accessor target"
+            );
             for ty in default
                 .parameters
                 .iter()

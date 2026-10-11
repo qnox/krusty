@@ -175,6 +175,7 @@ pub(super) fn inherited_defaults(
                 defaults.push(ResolvedInheritedDefault {
                     name: accessor.name,
                     function: accessor.function,
+                    accessor: accessor.target,
                     declaring_interface: interface,
                     dispatch_interface,
                     parameters: accessor.parameters,
@@ -347,6 +348,9 @@ struct SurfaceMember {
 struct SurfaceAccessor {
     name: InheritedMemberName,
     function: Option<crate::fir::ResolvedFunctionOverrideTarget>,
+    /// The exact target a checked read/write of this accessor carries. Module accessors share their
+    /// property id; dependency accessors retain their own provider callable id.
+    target: Option<crate::fir::ResolvedPropertyOverrideTarget>,
     parameters: Box<[Ty]>,
     parameter_identities: Box<[ResolvedParameterIdentity]>,
     result: Ty,
@@ -485,6 +489,7 @@ fn module_surface(
                         function: Some(crate::fir::ResolvedFunctionOverrideTarget::Module(
                             callable.id,
                         )),
+                        target: None,
                         parameters: parameters.into_boxed_slice(),
                         parameter_identities,
                         result: signature.result.get(),
@@ -528,6 +533,9 @@ fn module_surface(
                 let mut accessors = vec![SurfaceAccessor {
                     name: InheritedMemberName::PropertyGetter(name.into()),
                     function: None,
+                    target: Some(crate::fir::ResolvedPropertyOverrideTarget::Module(
+                        property_id,
+                    )),
                     parameters: parameters.clone().into_boxed_slice(),
                     parameter_identities: getter_identities.clone().into_boxed_slice(),
                     result: signature.result.get(),
@@ -553,6 +561,9 @@ fn module_surface(
                     accessors.push(SurfaceAccessor {
                         name: InheritedMemberName::PropertySetter(name.into()),
                         function: None,
+                        target: Some(crate::fir::ResolvedPropertyOverrideTarget::Module(
+                            property_id,
+                        )),
                         parameters: parameters.into_boxed_slice(),
                         parameter_identities: setter_identities.into_boxed_slice(),
                         result: Ty::Unit,
@@ -679,6 +690,7 @@ fn dependency_function(function: &FunctionInfo) -> SurfaceAccessor {
         function: callable
             .external_identity
             .map(crate::fir::ResolvedFunctionOverrideTarget::External),
+        target: None,
         parameters: callable.params.clone().into_boxed_slice(),
         parameter_identities: function
             .call_sig
@@ -731,6 +743,9 @@ fn dependency_accessor(
     SurfaceAccessor {
         name,
         function: None,
+        target: callable
+            .external_identity
+            .map(crate::fir::ResolvedPropertyOverrideTarget::External),
         parameters: callable.params.clone().into_boxed_slice(),
         parameter_identities: identities.into_boxed_slice(),
         result: callable.ret,

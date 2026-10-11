@@ -212,3 +212,36 @@ pub(crate) fn specialized_super_descriptor(
     }
     None
 }
+
+/// The static a value class writes for an inherited default beside its forwarder:
+/// `name-impl(carrier, parameters…)`, which boxes the carrier and calls the forwarder.
+pub(crate) struct ValueClassInheritedStatic {
+    pub(crate) name: String,
+    /// The physical parameters after the carrier, as the classifier's applied supertype gives them.
+    pub(crate) parameters: Vec<crate::types::Ty>,
+    pub(crate) result: crate::types::Ty,
+}
+
+/// The static a value class realizes `default` with under `jvm_default`, or `None` when the class
+/// writes no forwarder for it. A suspend member keeps its CPS shape and is left to interface
+/// dispatch.
+pub(crate) fn value_class_inherited_static(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    default: &crate::fir::ResolvedInheritedDefault,
+    jvm_default: JvmDefaultMode,
+) -> Option<ValueClassInheritedStatic> {
+    if default.suspend {
+        return None;
+    }
+    forwarder_realization(default, callables, jvm_default)?;
+    let types = crate::jvm::value_classes::specialized_member_types(ir, callables, default);
+    Some(ValueClassInheritedStatic {
+        name: crate::jvm::value_classes::inherited_member_impl_name(
+            &inherited_member_declared_name(default),
+            &inherited_member_jvm_name(ir, callables, default),
+        ),
+        parameters: crate::jvm::method_descriptors::jvm_tys(&types.physical_params),
+        result: crate::jvm::method_descriptors::jvm_declared_ty(&types.physical_ret),
+    })
+}

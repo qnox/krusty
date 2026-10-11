@@ -295,15 +295,23 @@ fn run_backend_passes_after_plugins(
     );
     facts.inherited_collection_bridges =
         crate::jvm::inherited_collection_bridges::select(ir, classpath, &facts.override_results);
-    // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
-    // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
-    // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
-    // construction/member resolution for source value classes).
+    // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
+    // underlying) for its erasure/mangle map from the frontend symbols directly, NOT through the
+    // resolver's library view (which would change the checker's construction/member resolution for
+    // source value classes).
+    let inherited_default_statics = crate::jvm::value_classes::InheritedDefaultStatics::plan(
+        ir,
+        classifiers,
+        callables,
+        &facts.property_realizations,
+        facts.jvm_default,
+    );
     if !crate::jvm::value_classes::lower_value_classes(
         ir,
         classifiers,
         module_value_classes,
         module_readable_value_classes,
+        &inherited_default_statics,
         &mut facts.bridge_adaptations,
         &mut facts.override_results,
         &mut facts.property_reference_realizations,

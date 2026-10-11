@@ -29,9 +29,11 @@ pub enum UndeterminedType {
 
 /// The only semantic query a representation backend may make after common lowering.
 ///
-/// Calls, properties, overloads, and source names are absent deliberately: checked IR already owns
-/// every selected declaration identity and realization. The returned classifier is guaranteed not
-/// to contain `Ty::Pending`, `Ty::Error`, source type references, or ordinary source-body payloads.
+/// Callable/property lookup, overload sets, and source names are absent deliberately: checked IR
+/// already owns every selected declaration identity and realization. A finalized module contract
+/// may retain those opaque identities, but exposes no way to reopen their declarations. The
+/// returned classifier is guaranteed not to contain `Ty::Pending`, `Ty::Error`, source type
+/// references, or ordinary source-body payloads.
 pub trait BackendClassifierSource {
     fn classifier(&self, classifier: TypeName) -> Option<Arc<BackendClassifierFact>>;
 }
@@ -134,6 +136,10 @@ pub struct BackendModuleFacts {
     body_local_classifiers: HashSet<TypeName>,
     source_value_classes: HashMap<TypeName, Ty>,
     metadata_readable_value_classes: HashSet<TypeName>,
+    /// Finalized inherited-interface defaults of named source classifiers. These records retain
+    /// the exact selected declaration identities and applied types, so every Pass-2 file can make
+    /// its target-representation decision without walking providers or recovering a member name.
+    inherited_defaults: HashMap<TypeName, Box<[crate::fir::ResolvedInheritedDefault]>>,
     source_declarations: HashMap<TypeName, SourceDeclaration>,
 }
 
@@ -147,6 +153,7 @@ impl BackendModuleFacts {
         let mut body_local_classifiers = HashSet::default();
         let mut source_value_classes = HashMap::default();
         let mut metadata_readable_value_classes = HashSet::default();
+        let mut inherited_defaults = HashMap::default();
         let mut source_declarations = HashMap::default();
         let mut generated_classifiers = Vec::new();
         for raw in 0..index.declaration_count() {
@@ -312,6 +319,10 @@ impl BackendModuleFacts {
                     metadata_readable_value_classes.insert(classifier.classifier);
                 }
             }
+            if let Some(defaults) = index.inherited_defaults(declaration) {
+                inherited_defaults
+                    .insert(classifier.classifier, defaults.to_vec().into_boxed_slice());
+            }
             classifiers.insert(classifier.classifier, Arc::new(fact));
         }
         Ok(Self {
@@ -320,6 +331,7 @@ impl BackendModuleFacts {
             body_local_classifiers,
             source_value_classes,
             metadata_readable_value_classes,
+            inherited_defaults,
             source_declarations,
         })
     }
@@ -352,6 +364,7 @@ impl BackendModuleFacts {
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
             metadata_readable_value_classes,
+            inherited_defaults: HashMap::default(),
             source_declarations: HashMap::default(),
         })
     }
@@ -380,6 +393,15 @@ impl BackendModuleFacts {
 
     pub fn metadata_readable_value_classes(&self) -> &HashSet<TypeName> {
         &self.metadata_readable_value_classes
+    }
+
+    /// The checked defaults `classifier` inherits without overriding, independent of which source
+    /// file is currently entering Pass 2.
+    pub(crate) fn inherited_defaults(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&[crate::fir::ResolvedInheritedDefault]> {
+        self.inherited_defaults.get(&classifier).map(Box::as_ref)
     }
 }
 
