@@ -189,6 +189,7 @@ mod safe_call_flow;
 mod safe_index;
 mod sam_constructors;
 mod sam_conversion_recording;
+mod source_constructor_type_oracle;
 mod source_fragment;
 mod source_generic_signatures;
 mod source_signature_display;
@@ -220,6 +221,7 @@ use selected_argument_commitment::{
 };
 mod signature_collection;
 mod signature_parameter_identity;
+mod type_parameter_bounds;
 mod type_spellings;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
@@ -2672,6 +2674,11 @@ pub struct SymbolTable {
     /// collected. Forward property inference may need to classify a later-file source singleton; this
     /// identity table avoids both source-order dependence and the old global simple-name object set.
     source_class_headers: HashMap<TypeName, SourceClassHeader>,
+    /// Declared upper bounds after the first of each source type parameter that has several,
+    /// keyed by its semantic identity. `Ty::TyParam` carries only the first; assignability reads
+    /// the rest here. Classifier parameters are recorded as their classifier is inserted, callable
+    /// parameters by [`SymbolTable::index_callable_type_parameter_bounds`] once collection is done.
+    type_parameter_extra_bounds: type_parameter_bounds::ExtraBoundsIndex,
     /// Parser classifier coordinates retained only while Pass 1 inspection/capture analysis is
     /// active, bound once to the compact header's stable semantic identity. This prevents that
     /// legacy retained-AST lane from rebuilding an anonymous/local classifier from its parser
@@ -2858,6 +2865,7 @@ impl Default for SymbolTable {
             classes: HashMap::default(),
             source_packages: crate::fx_hash::HashSet::default(),
             source_class_headers: HashMap::default(),
+            type_parameter_extra_bounds: type_parameter_bounds::ExtraBoundsIndex::default(),
             stable_parser_classifier_identities: HashMap::default(),
             source_class_aliases: HashMap::default(),
             source_alias_fqns: HashMap::default(),
@@ -3114,14 +3122,26 @@ impl SymbolTable {
     /// Insert under the class's own internal name (the map's key scheme).
     pub fn insert_class(&mut self, sig: ClassSig) -> Option<ClassSig> {
         let internal = sig.internal;
-        self.register_source_package_for_owner(internal);
-        self.classes.insert(internal, sig)
+        self.insert_class_sig(internal, sig)
     }
 
     pub fn insert_class_sig(&mut self, internal: TypeName, sig: ClassSig) -> Option<ClassSig> {
         debug_assert_eq!(internal, sig.internal);
         self.register_source_package_for_owner(internal);
+        self.type_parameter_extra_bounds.record_classifier(&sig);
         self.classes.insert(internal, sig)
+    }
+
+    /// Record the bounds after the first of every collected source callable's type parameters.
+    /// Called once callable signatures carry their generic shapes and before any body is inferred.
+    pub(crate) fn index_callable_type_parameter_bounds(&mut self) {
+        let callables = type_parameter_bounds::ExtraBoundsIndex::from_callables(self);
+        self.type_parameter_extra_bounds.extend(callables);
+    }
+
+    /// The declared bounds after the first of source type parameter `identity`.
+    pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
+        self.type_parameter_extra_bounds.get(identity)
     }
 
     pub fn ext_prop(&self, recv: Ty, name: &str) -> Option<(Ty, bool)> {
@@ -3795,54 +3815,6 @@ impl SourceConstructorMatcher<'_> {
 
     fn same_name(&self, left: TypeName, right: TypeName) -> bool {
         <Self as crate::assignable::TypeOracle>::same_class_name(self, left, right)
-    }
-}
-
-impl crate::assignable::TypeOracle for SourceConstructorMatcher<'_> {
-    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
-        let Some(internal) = ty.kotlin_class_internal() else {
-            return Vec::new();
-        };
-        if let Some(class) = self.symbols.class_by_type_name(internal) {
-            return self
-                .symbols
-                .applied_source_parents(class, class.type_parameter_bindings(ty))
-                .into_iter()
-                .map(|(_, applied)| applied)
-                .collect();
-        }
-        crate::symbol_resolver::direct_supertypes(self.libraries, ty)
-    }
-
-    fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        a == b
-    }
-
-    fn type_param_variance(&self, internal: TypeName, index: usize) -> crate::types::TypeVariance {
-        self.symbols
-            .class_by_type_name(internal)
-            .and_then(|classifier| classifier.type_param_variances().get(index).copied())
-            .or_else(|| {
-                self.libraries
-                    .classifier(internal)
-                    .and_then(|classifier| classifier.type_param_variances.get(index).copied())
-            })
-            .unwrap_or_default()
-    }
-
-    fn type_param_upper_bounds(&self, internal: TypeName, index: usize) -> Vec<Ty> {
-        self.symbols
-            .class_by_type_name(internal)
-            .and_then(|classifier| classifier.type_param_bounds().get(index).copied())
-            .filter(|bound| *bound != Ty::Error)
-            .map(|bound| vec![bound])
-            .or_else(|| {
-                self.libraries
-                    .classifier(internal)
-                    .and_then(|classifier| classifier.type_param_bounds.get(index).cloned())
-                    .filter(|bounds| !bounds.is_empty())
-            })
-            .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))])
     }
 }
 
@@ -12381,7 +12353,7 @@ impl<'a> Checker<'a> {
         self.declared_tparam_extra_bounds(identity)
     }
 
-    /// The declared bounds of type parameter `identity` after its first, from its header.
+    /// The declared bounds of type parameter `identity` after its first, from its stable header.
     fn declared_tparam_extra_bounds(&self, identity: &str) -> Vec<Ty> {
         if let Some(bounds) = self.resolved_index.and_then(|index| {
             let parameter = index.type_parameter_by_semantic_name(identity)?;

@@ -9211,7 +9211,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   now asks the oracle for the variable's remaining declared bounds (`type_variable_extra_bounds`) and
   compares the source as the intersection of all of them, so a variable meets a target exactly when
   that intersection does; there is no per-bound retry. An inferred binding still replaces the bounds.
-  Test: `tests/where_bound_arguments_e2e.rs`.
+  The same identity-backed query feeds source-constructor matching, nested `in`/`out` argument
+  checks, and common-type validation; a `Nothing` branch remains bottom and cannot widen the
+  bounded variable.
+  Pass 1 infers an expression-bodied result before the type-parameter headers are published, so the
+  symbol table indexes every source type parameter's later bounds by identity (classifiers as they
+  are inserted, callables once collection is done) and the module provider answers from that index.
+  The Pass-1 bound index and source-constructor oracle are isolated ownership modules rather than
+  additional responsibilities in the resolver facade. Test: `tests/where_bound_arguments_e2e.rs`.
 - **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
   candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
   `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver
