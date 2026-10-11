@@ -108,12 +108,14 @@ impl NoArgConstructors {
                 continue;
             }
             // The superclass constructor the generated one calls with every argument omitted,
-            // else the no-arg constructor the plugin generates for a matched superclass.
+            // else the no-arg constructor the plugin generates for a matched superclass. kotlinc
+            // generates none over a superclass whose only all-defaulted constructor is a plain
+            // secondary one: its checker accepts that constructor, its generator does not.
             let target = match &super_constructors {
                 None => Some(NoArgSuperConstructor::Unrestricted),
                 Some(constructors) => constructors
                     .iter()
-                    .find(|constructor| constructor.all_defaulted())
+                    .find(|constructor| constructor.zero_parameter())
                     .and_then(|constructor| constructor.target.clone())
                     .or(superclass_matches.then_some(NoArgSuperConstructor::Unrestricted)),
             };

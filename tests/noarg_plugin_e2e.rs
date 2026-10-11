@@ -105,7 +105,7 @@ fun box(): String {
     val defaulted = make(OfDefaulted::class.java)
     if (defaulted.tag != "tag" || defaulted.n != 4) return "defaulted"
     if (make(OfOverloaded::class.java).o != 9L) return "overloaded"
-    if (make(OfSecondaryDefaulted::class.java).text != "tag") return "secondary-defaulted"
+    if (OfSecondaryDefaulted::class.java.declaredConstructors.size != 1) return "secondary-defaulted"
     val secondary: String? = make(SecondaryOnly::class.java).made
     return if (secondary == null) "OK" else "secondary"
 }
@@ -115,8 +115,9 @@ fun box(): String {
 /// class with only secondary constructors; classes that already declare a constructor callable
 /// without arguments and get none; a data class, whose generated members follow the constructor; a
 /// nested class; a private primary constructor; a sealed superclass, whose constructor is reached
-/// through its marker accessor; primary and secondary superclass constructors whose parameters all
-/// default, called through their defaults constructor.
+/// through its marker accessor; primary and `@JvmOverloads` superclass constructors whose
+/// parameters all default, called through their defaults constructor; a superclass whose only
+/// all-defaulted constructor is a plain secondary one, which gets the subclass none.
 #[test]
 fn no_arg_constructors_match_kotlinc() {
     let fixture = PluginFixture::new("noarg-same-module");
