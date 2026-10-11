@@ -204,6 +204,42 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_unsigned_equality_and_shifts_use_the_checked_unsigned_carrier() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    if (0x80000000u != 0x80000000u) return "uint equality"
+    if (0x8000000000000000uL != 0x8000000000000000uL) return "ulong equality"
+    if (1u shl 20 != 1_048_576u) return "uint shl"
+    if (1uL shl 20 != 1_048_576uL) return "ulong shl"
+    if (1u shl -1 != 0x80000000u || 1u shl 32 != 1u || 1u shl 33 != 2u) return "uint mask"
+    if (1uL shl -1 != 0x8000000000000000uL || 1uL shl 64 != 1uL || 1uL shl 65 != 2uL) return "ulong mask"
+    if (0x80000000u shr 31 != 1u) return "uint shr"
+    if (0x8000000000000000uL shr 63 != 1uL) return "ulong shr"
+    return "OK"
+}
+"#,
+        "wasmUnsignedEqualityAndShifts",
+    );
+}
+
+#[test]
+fn wasm_mixed_numeric_range_contains_uses_the_selected_stdlib_declaration() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    if (1L !in 1..2 || 0L in 1..2) return "long in int"
+    if (1 !in 1L..2L || 0 in 1L..2L) return "int in long"
+    if (1.0 !in 1.0f..2.0f || 0.0 in 1.0f..2.0f) return "double in float"
+    if (1.0f !in 1.0..2.0 || 0.0f in 1.0..2.0) return "float in double"
+    return "OK"
+}
+"#,
+        "wasmMixedNumericRangeContains",
+    );
+}
+
+#[test]
 fn kotlin_codegen_box_wasm_js_conformance() {
     box_lane::run(&WasmLane {
         target: WasmTarget::Js,

@@ -399,11 +399,11 @@ mod tests {
             .is_some());
         assert_eq!(
             super::lower::ordinary_numeric_carrier(crate::types::Ty::UInt).unwrap_err(),
-            "an ordinary operator on `UInt`"
+            "an ordinary operator on `kotlin.UInt`"
         );
         assert_eq!(
             super::lower::ordinary_numeric_carrier(crate::types::Ty::ULong).unwrap_err(),
-            "an ordinary operator on `ULong`"
+            "an ordinary operator on `kotlin.ULong`"
         );
     }
 

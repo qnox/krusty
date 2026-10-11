@@ -3,9 +3,8 @@ use crate::fir::{
     FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
     FirCallableReferenceTarget, FirCapture, FirCatch, FirConstant, FirConstructorCall,
     FirConstructorTarget, FirConversion, FirConversionKind, FirExpr, FirExprKind, FirIntrinsic,
-    FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget, FirPropertyTarget,
-    FirRangeOperation, FirReceiver, FirStatement, FirStatementKind, FirVarargElement, OriginId,
-    ResolvedModuleIndex, ResolvedTy,
+    FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget, FirPropertyTarget, FirReceiver,
+    FirStatement, FirStatementKind, FirVarargElement, OriginId, ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::{
     Callee, IrBinOp, IrCheckedArgument, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
@@ -24,6 +23,7 @@ mod inline_plan_tests;
 mod integral_constants;
 mod local_classifier_provenance;
 mod lowering_temporaries;
+mod ranges;
 
 use super::lower_body;
 
@@ -149,99 +149,6 @@ fn immutable_local_array_loop_reads_the_source_value_slot() {
             } if matches!(ir.expr(*value), IrExpr::GetValue(slot) if slot == source_slot)
         )
     }));
-}
-
-#[test]
-fn literal_until_loop_stays_checked_until_backend_realization() {
-    let ir = lower_single_source(
-        "fun sum(): Int { var sum = 0; for (value in 0 until 10) sum += value; return sum }\n",
-        "LiteralUntilLoop",
-    );
-    let loops = ir
-        .exprs
-        .iter()
-        .filter_map(|expression| match expression {
-            IrExpr::Checked(IrCheckedOperation::RangeLoop {
-                variable,
-                variable_name,
-                counter,
-                source:
-                    crate::ir::IrProgressionSource::Literal {
-                        operation,
-                        start,
-                        end,
-                    },
-                unsigned_compare: None,
-                body,
-                label,
-                with_index: None,
-            }) => Some((
-                *variable,
-                variable_name.as_deref(),
-                *counter,
-                *operation,
-                *start,
-                *end,
-                *body,
-                label.as_str(),
-            )),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(loops.len(), 1);
-    let (variable, name, counter, operation, start, end, body, label) = loops[0];
-    assert_eq!(name, Some("value"));
-    assert_eq!(counter, Ty::Int);
-    assert_eq!(operation, FirRangeOperation::Until);
-    assert!(matches!(ir.expr(start), IrExpr::Const(IrConst::Int(0))));
-    assert!(matches!(ir.expr(end), IrExpr::Const(IrConst::Int(10))));
-    assert_eq!(label, "$fir_control_0_1");
-    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
-        panic!("range-loop body must retain its checked statement block")
-    };
-    assert_eq!(stmts.len(), 1);
-    assert!(matches!(ir.expr(stmts[0]), IrExpr::SetValue { .. }));
-    assert_eq!(
-        ir.exprs
-            .iter()
-            .filter(|expression| matches!(expression, IrExpr::While { .. }))
-            .count(),
-        0
-    );
-    assert_eq!(
-        ir.exprs
-            .iter()
-            .filter(|expression| matches!(expression, IrExpr::Variable { index, .. } if *index == variable))
-            .count(),
-        0
-    );
-}
-
-#[test]
-fn range_loop_records_an_exact_type_stable_bound_read() {
-    let ir = lower_single_source(
-        "fun sum(limit: Int): Int { var sum = 0; for (value in 0 until limit) sum += value; return sum }\n",
-        "StableRangeBound",
-    );
-    let loops = ir
-        .exprs
-        .iter()
-        .filter_map(|expression| match expression {
-            IrExpr::Checked(IrCheckedOperation::RangeLoop {
-                source: crate::ir::IrProgressionSource::Literal { end, .. },
-                ..
-            }) => Some(*end),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(loops.len(), 1);
-    let end = loops[0];
-    assert!(matches!(ir.expr(end), IrExpr::GetValue(0)));
-    assert_eq!(
-        ir.binding_read_stability.get(&end),
-        Some(&crate::ir::IrBindingStability::Stable)
-    );
-    assert_eq!(ir.logical_types.get(&end), Some(&Ty::Int));
 }
 
 /// fir2ir holds an elvis's left side in a temporary of its own (nullable) type even over a safe
@@ -3100,60 +3007,6 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
     assert_eq!(sink.attached_body_count(), 2);
     sink.finish(&index).unwrap();
     assert!(no_inline_insertions.is_empty());
-}
-
-#[test]
-fn unsigned_range_containment_stays_semantic_until_backend_realization() {
-    let origin = OriginId::from_raw(0);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(12));
-    let value = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::UInt),
-        kind: FirExprKind::Constant(FirConstant::UInt(2)),
-    });
-    let start = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::UInt),
-        kind: FirExprKind::Constant(FirConstant::UInt(1)),
-    });
-    let end = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::UInt),
-        kind: FirExprKind::Constant(FirConstant::UInt(3)),
-    });
-    let contains = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::Boolean),
-        kind: FirExprKind::InRange {
-            operation: FirRangeOperation::Through,
-            provenance: crate::fir::FirRangeComparisonProvenance::RangeConstruction {
-                open_end: false,
-            },
-            comparison: resolved(Ty::UInt),
-            unsigned_compare: None,
-            value,
-            start,
-            end,
-            negated: false,
-        },
-    });
-    let root = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(contains),
-    });
-    body.push_root(root);
-
-    let mut ir = IrFile::default();
-    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    assert!(matches!(
-        ir.expr(lowered.roots[0]),
-        IrExpr::Checked(IrCheckedOperation::RangeContains {
-            operation: FirRangeOperation::Through,
-            counter: Ty::UInt,
-            negated: false,
-            ..
-        })
-    ));
 }
 
 pub(super) fn lower_single_source(source: &str, stem: &str) -> IrFile {

@@ -947,13 +947,23 @@ impl<'a> Body<'a> {
             return Err(format!("the operator {op:?} answering `Nothing`"));
         };
         let shift = matches!(op, IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr);
+        let unsigned = if shift {
+            left.is_unsigned() || result.is_unsigned()
+        } else {
+            left.is_unsigned() || right.is_unsigned()
+        };
+        if unsigned
+            && !matches!(
+                op,
+                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr
+            )
+        {
+            return Err(format!("an ordinary operator on `{}`", describe(left)));
+        }
         // The operator's checked result fixes the instruction's operand width; a comparison
         // compares at the wider of its operands' carriers.
         let operand = if is_comparison(op) {
-            let (Some(l), Some(r)) = (
-                ordinary_numeric_carrier(left)?,
-                ordinary_numeric_carrier(right)?,
-            ) else {
+            let (Some(l), Some(r)) = (carrier(left)?, carrier(right)?) else {
                 return Err("an operator on `Unit`".into());
             };
             match (rank(l), rank(r)) {
@@ -961,7 +971,7 @@ impl<'a> Body<'a> {
                 _ => return Err(format!("the operator {op:?} on references")),
             }
         } else {
-            ordinary_numeric_carrier(result)?
+            carrier(result)?
         };
         let Some(operand) = operand else {
             return Err("an operator on `Unit`".into());
@@ -980,7 +990,9 @@ impl<'a> Body<'a> {
         } else {
             self.value(rhs, operand_ty)?;
         }
-        let opcode = opcode(op, operand)
+        // Unsignedness is a checked semantic fact; the I32/I64 carrier itself deliberately does
+        // not encode it. Shifts take an ordinary Int count, so the value (left operand) decides.
+        let opcode = opcode(op, operand, unsigned)
             .ok_or_else(|| format!("the operator {op:?} on `{}`", describe(left)))?;
         match opcode {
             Opcode::Plain(opcode) => {
@@ -1082,7 +1094,7 @@ enum Opcode {
 }
 
 /// The instruction realizing `op` over operands carried as `operand`.
-fn opcode(op: IrBinOp, operand: ValType) -> Option<Opcode> {
+fn opcode(op: IrBinOp, operand: ValType, unsigned: bool) -> Option<Opcode> {
     use IrBinOp::*;
     let plain = match (operand, op) {
         (ValType::I32, Add) => ADD32,
@@ -1100,6 +1112,7 @@ fn opcode(op: IrBinOp, operand: ValType) -> Option<Opcode> {
         (ValType::I32, Or | BitOr) => OR32,
         (ValType::I32, BitXor) => XOR32,
         (ValType::I32, Shl) => SHL32,
+        (ValType::I32, Shr) if unsigned => SHR_U32,
         (ValType::I32, Shr) => SHR_S32,
         (ValType::I32, Ushr) => SHR_U32,
         (ValType::I64, Add) => ADD64,
@@ -1117,6 +1130,7 @@ fn opcode(op: IrBinOp, operand: ValType) -> Option<Opcode> {
         (ValType::I64, BitOr) => OR64,
         (ValType::I64, BitXor) => XOR64,
         (ValType::I64, Shl) => SHL64,
+        (ValType::I64, Shr) if unsigned => SHR_U64,
         (ValType::I64, Shr) => SHR_S64,
         (ValType::I64, Ushr) => SHR_U64,
         (ValType::F32, Add) => 0x92,

@@ -95,6 +95,8 @@ fn platform_floating_nan_not_in_negates_the_positive_membership() {
         "public final class PlatformValue {\
             public static Double nan() { return Double.NaN; }\
             public static Float nanFloat() { return Float.NaN; }\
+            public static Double absent() { return null; }\
+            public static Float absentFloat() { return null; }\
         }"
         .to_string(),
     )];
@@ -113,6 +115,26 @@ fun box(): String = if (platformDoubleNotIn() && platformFloatNotIn()) "OK" else
     common::expect_true_e2e(
         "platform Float and Double NaN !in floating ranges",
         source,
+        std::slice::from_ref(&directory),
+    );
+    let null_source = r#"
+fun absentDoubleThrows(): Boolean = try {
+    PlatformValue.absent() !in 1.0..2.0
+    false
+} catch (_: NullPointerException) {
+    true
+}
+fun absentFloatThrows(): Boolean = try {
+    PlatformValue.absentFloat() !in 1.0f..2.0f
+    false
+} catch (_: NullPointerException) {
+    true
+}
+fun box(): String = if (absentDoubleThrows() && absentFloatThrows()) "OK" else "FAIL"
+"#;
+    common::expect_true_e2e(
+        "platform Float and Double nulls fail their non-null range comparisons",
+        null_source,
         std::slice::from_ref(&directory),
     );
     if let Some(root) = directory.parent() {

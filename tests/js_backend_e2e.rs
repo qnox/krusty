@@ -87,18 +87,6 @@ fn checked_equality_mode_distinguishes_boxed_and_ieee_zero() {
 }
 
 #[test]
-fn ulong_conversion_and_literal_share_one_javascript_carrier() {
-    check(
-        "fun converted(x: Long): ULong = x.toULong()\n\
-         fun box(): String {\n\
-           val value = converted(5L)\n\
-           return if (value == 5uL && value + 1uL == 6uL) \"OK\" else \"FAIL\"\n\
-         }",
-        "OK",
-    );
-}
-
-#[test]
 fn nullable_ulong_equality_preserves_null() {
     check(
         "fun box(): String {\n\
@@ -274,6 +262,13 @@ fn ulong_backend_ir_uses_one_node_carrier() {
         type_operand: Ty::Float,
     });
     add_ir_function(&mut ir, "ulongToFloat", as_float, Ty::Float);
+    let five = ir.add_expr(IrExpr::Const(IrConst::Long(5)));
+    let as_ulong = ir.add_expr(IrExpr::TypeOp {
+        op: krusty::ir::IrTypeOp::ImplicitCoercion,
+        arg: five,
+        type_operand: Ty::ULong,
+    });
+    add_ir_function(&mut ir, "longToULong", as_ulong, Ty::ULong);
 
     let mut js = krusty::js::emit_file(&ir);
     let shift_checks = checks
@@ -282,7 +277,7 @@ fn ulong_backend_ir_uses_one_node_carrier() {
         .collect::<Vec<_>>()
         .join(" && ");
     js.push_str(&format!(
-        "\nconsole.log(({shift_checks} && !presentIsNull() && absentIsNull() && nullIsAbsent() && erasedZeroEqualsULong() && newArrayZeroEqualsULong() && ulongToInt() === -1 && ulongToUInt() === 1 && ulongToLongIsNegative() && ulongToChar() === \"A\" && ulongToFloat() === 16777216) ? \"OK\" : \"FAIL\");\n"
+        "\nconsole.log(({shift_checks} && !presentIsNull() && absentIsNull() && nullIsAbsent() && erasedZeroEqualsULong() && newArrayZeroEqualsULong() && ulongToInt() === -1 && ulongToUInt() === 1 && ulongToLongIsNegative() && ulongToChar() === \"A\" && ulongToFloat() === 16777216 && longToULong() === 5n) ? \"OK\" : \"FAIL\");\n"
     ));
     match common::run_js(&js) {
         Some(out) => assert_eq!(out, "OK", "js output mismatch\n--- js ---\n{js}"),

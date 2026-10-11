@@ -13,6 +13,7 @@
 mod builtin_inventory;
 mod builtin_signatures;
 use builtin_members::BuiltinPackageFunction;
+mod builtins_selection;
 mod builtins_validation;
 mod call_metadata;
 mod candidate_union;
@@ -1008,6 +1009,14 @@ struct BuiltinsFile {
     functions: Vec<BuiltinFunction>,
 }
 
+/// One selected builtins fragment and the exact classpath input that supplied it. Parsed bytes may
+/// be process-shared; authority is deliberately retained only in this classpath-local selection.
+#[derive(Clone)]
+struct SelectedBuiltinsFile {
+    file: std::sync::Arc<BuiltinsFile>,
+    owner: Option<usize>,
+}
+
 struct BuiltinFunction {
     name: String,
     generic_sig: GenericSig,
@@ -1515,7 +1524,7 @@ pub struct Classpath {
     /// the API version it was built for, so one compile's view never serves another's.
     resolved_types: RefCell<HashMap<LanguageVersion, ResolvedTypeCache>>,
     /// Parsed `.kotlin_builtins` fragments by package name.
-    builtins: RefCell<HashMap<TypeName, std::sync::Arc<BuiltinsFile>>>,
+    builtins: RefCell<HashMap<TypeName, SelectedBuiltinsFile>>,
     /// Complete-catalog validation succeeded once. Failures stay unset and are retried.
     builtins_validated: Cell<bool>,
     /// Resolved builtin member vectors, keyed by Kotlin internal class name. The raw builtins fragment is
@@ -1606,18 +1615,18 @@ impl Classpath {
     /// for this classpath. This is dependency provenance, not an owner-name test: a copied or
     /// shadowing jar cannot actualize identities from a different library's KLIB.
     pub(super) fn common_metadata_owns(&self, internal: TypeName) -> bool {
-        let Some(klib) = self.common_expectation_klib.as_ref() else {
-            return false;
-        };
-        let Some(directory) = klib.parent() else {
-            return false;
-        };
-        let stdlib = directory.join("kotlin-stdlib.jar");
-        let Some(expected) = self.entries.iter().position(|entry| entry.path() == stdlib) else {
+        let Some(expected) = self.paired_stdlib_entry() else {
             return false;
         };
         let physical = super::jvm_class_map::to_jvm_type_name(internal);
         self.owning_entry(physical) == Some(expected)
+    }
+
+    /// Exact classpath entry paired with the selected common stdlib KLIB.
+    fn paired_stdlib_entry(&self) -> Option<usize> {
+        let directory = self.common_expectation_klib.as_ref()?.parent()?;
+        let stdlib = directory.join("kotlin-stdlib.jar");
+        self.entries.iter().position(|entry| entry.path() == stdlib)
     }
 
     pub fn new(paths: Vec<PathBuf>) -> Classpath {
@@ -2356,151 +2365,6 @@ impl Classpath {
             });
         }
         out
-    }
-
-    /// A parsed `.kotlin_builtins` fragment by package id (class internal-name id → supertypes+members),
-    /// read once and cached. The single builtins entry point — both the collection hierarchy and a
-    /// type's member API derive from it.
-    fn try_builtins_file_for_package(
-        &self,
-        package: TypeName,
-    ) -> Result<std::sync::Arc<BuiltinsFile>, std::sync::Arc<BuiltinsLoadError>> {
-        let tree = self.package_tree();
-        let catalog_complete = tree.incomplete_entries.is_empty();
-        if catalog_complete {
-            if let Some(m) = self.builtins.borrow().get(&package) {
-                return Ok(m.clone());
-            }
-        }
-        let path = Self::builtins_path_for_package(package);
-        let declared_indices = tree
-            .node_for_name(package)
-            .map_or_else(Vec::new, |node| node.builtins_jars.clone());
-        let mut indices = declared_indices.clone();
-        indices.extend(tree.incomplete_entries.iter().copied());
-        indices.sort_unstable();
-        indices.dedup();
-        let mut found = None;
-        for i in indices {
-            let Some(entry) = self.entries.get(i) else {
-                continue;
-            };
-            let declared = declared_indices.contains(&i);
-            // Per-entry global cache first: the parse of one entry's fragment is independent of the
-            // classpath composition, so per-test classpath sets share it (see
-            // [`global_entry_builtins_cache`]). The classpath-order walk still decides WHICH entry's
-            // fragment wins. Directory entries carry no slot — per-test/module-local, never shared.
-            let global = if catalog_complete {
-                self.entry_builtins_caches[i].as_ref()
-            } else {
-                None
-            };
-            let global_slot = global.map(|cache| {
-                cache
-                    .write()
-                    .unwrap()
-                    .entry(package)
-                    .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(None)))
-                    .clone()
-            });
-            let read_and_parse = || {
-                // Split PERMANENT absence (the entry has no fragment — cacheable) from a FAILED
-                // read (EMFILE under load, an interrupted read): publishing a transient failure
-                // as a process-global `None` would silently strip the stdlib's builtins from
-                // every later compile sharing the entry.
-                let read = match entry {
-                    Entry::Dir(dir) => match std::fs::read(dir.join(&path)) {
-                        Ok(bytes) => EntryReadResult::Data(bytes),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            EntryReadResult::Absent
-                        }
-                        Err(error) => EntryReadResult::Failed(error.to_string()),
-                    },
-                    Entry::Jar(jar) => self.jar_entry_read(jar, &path),
-                    // `.kotlin_builtins` fragments never live in the JDK jimage.
-                    Entry::Jimage(_) | Entry::CtSym { .. } => EntryReadResult::Absent,
-                };
-                match read {
-                    EntryReadResult::Data(bytes) => match super::metadata::parse_builtins(&bytes) {
-                        Ok(decoded) => (
-                            Ok(Some(std::sync::Arc::new(BuiltinsFile::from_package(
-                                decoded,
-                            )))),
-                            true,
-                        ),
-                        Err(error) => (
-                            Err(std::sync::Arc::new(BuiltinsLoadError::Decode {
-                                entry: entry.path().to_path_buf(),
-                                resource: path.clone(),
-                                source: error,
-                            })),
-                            true,
-                        ),
-                    },
-                    EntryReadResult::Absent if declared => (
-                        Err(std::sync::Arc::new(BuiltinsLoadError::Read {
-                            entry: entry.path().to_path_buf(),
-                            resource: path.clone(),
-                            detail: "selected builtins resource is absent".to_string(),
-                        })),
-                        false,
-                    ),
-                    EntryReadResult::Absent => (Ok(None), true),
-                    EntryReadResult::Failed(error) if declared => (
-                        Err(std::sync::Arc::new(BuiltinsLoadError::Read {
-                            entry: entry.path().to_path_buf(),
-                            resource: path.clone(),
-                            detail: error,
-                        })),
-                        false,
-                    ),
-                    // An entry whose catalog could not be read is probed because it *might* own
-                    // this package. Failure to perform that speculative probe is already reported
-                    // by the classpath-entry diagnostic; it is not evidence that this particular
-                    // builtins resource was selected and then became unreadable.
-                    EntryReadResult::Failed(_) => (Ok(None), false),
-                }
-            };
-            let parsed = match global_slot {
-                Some(slot) => {
-                    // Keep the per-package lock across the archive read and parse. Other packages
-                    // in this same entry still initialize independently, while workers requesting
-                    // this exact fragment wait for and reuse the first result.
-                    let mut cached = slot.lock().unwrap();
-                    if let Some(hit) = cached.as_ref() {
-                        hit.clone()
-                    } else {
-                        let (parsed, cacheable) = read_and_parse();
-                        if cacheable {
-                            *cached = Some(parsed.clone());
-                        }
-                        parsed
-                    }
-                }
-                None => read_and_parse().0,
-            };
-            match parsed? {
-                Some(file) => {
-                    found = Some(file);
-                    break;
-                }
-                None => continue,
-            }
-        }
-        let rc = found.unwrap_or_else(|| {
-            std::sync::Arc::new(BuiltinsFile::from_package(
-                super::metadata::BuiltinPackage::default(),
-            ))
-        });
-        if catalog_complete {
-            self.builtins.borrow_mut().insert(package, rc.clone());
-        }
-        Ok(rc)
-    }
-
-    fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
-        self.try_builtins_file_for_package(package)
-            .unwrap_or_else(|error| panic!("validated Kotlin builtins became unreadable: {error}"))
     }
 
     /// The `.kotlin_builtins` fragment path for a package, mirroring kotlinc's

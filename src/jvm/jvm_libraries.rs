@@ -19,8 +19,10 @@ mod java_nullability;
 mod mapped_builtin_member_status;
 mod object_methods;
 mod parameter_plans;
+mod provider_normalization;
 #[cfg(test)]
 mod provider_normalization_tests;
+use provider_normalization::normalize_tail;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
@@ -52,7 +54,6 @@ use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::type_descriptor;
-use crate::libraries::builtin_top_level_realization::attach_dependency_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
     FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind,
@@ -531,7 +532,7 @@ impl JvmLibraries {
                 },
                 ..FunctionInfo::plain(kind, None, callable)
             });
-            cm.attach_tail(c.paired_common, namespace, name, &mut overloads);
+            normalize_tail(cm, namespace, name, c.paired_common, &mut overloads);
         }
         for builtin in self.cp.builtin_package_functions(pkg, name) {
             if overloads.iter().any(|candidate| {
@@ -602,7 +603,9 @@ impl JvmLibraries {
                 return_value_status: None,
             };
             function.callable.annotations = builtin.annotations;
+            let authority = builtin.compiler_builtin_owner;
             overloads.push(function);
+            normalize_tail(cm, namespace, name, authority, &mut overloads);
         }
         overloads
     }
@@ -4247,8 +4250,8 @@ impl JvmLibraries {
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
-                self.common_expectations
-                    .attach_tail(paired, namespace, name, &mut overloads);
+                let common = &self.common_expectations;
+                normalize_tail(common, namespace, name, paired, &mut overloads);
             }
             // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
             // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's
@@ -4286,10 +4289,6 @@ impl JvmLibraries {
             }
         }
         if let SymbolNamespace::Package(package) = namespace {
-            for overload in &mut overloads {
-                let stdlib = self.cp.common_metadata_owns(overload.callable.owner);
-                attach_dependency_function_realization(package, name, stdlib, overload);
-            }
             for property in &mut props {
                 if let Some(intrinsic) =
                     crate::libraries::builtin_top_level_realization::normalized_property_realization(

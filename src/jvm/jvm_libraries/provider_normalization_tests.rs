@@ -98,6 +98,128 @@ fn a_dependency_closed_range_lookalike_keeps_its_body() {
     std::fs::remove_dir_all(directory).expect("remove dependency facade");
 }
 
+fn required_closed_range_contains_roles(
+    libraries: &JvmLibraries,
+) -> Vec<Option<crate::libraries::CompilerIntrinsic>> {
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/ranges")),
+        "contains",
+    );
+    let functions = symbols.callables.functions();
+    [
+        (Ty::obj("kotlin/ranges/IntRange"), Ty::Long),
+        (Ty::obj("kotlin/ranges/LongRange"), Ty::Int),
+        (
+            Ty::obj_args("kotlin/ranges/ClosedRange", &[Ty::Float]),
+            Ty::Double,
+        ),
+        (
+            Ty::obj_args("kotlin/ranges/ClosedRange", &[Ty::Double]),
+            Ty::Float,
+        ),
+    ]
+    .into_iter()
+    .map(|(receiver, value)| {
+        functions
+            .iter()
+            .find(|function| {
+                function.generic_sig.as_ref().is_some_and(|signature| {
+                    signature.receiver == Some(receiver) && signature.params == [value]
+                })
+            })
+            .unwrap_or_else(|| panic!("missing {receiver:?}.contains({value:?})"))
+            .callable
+            .compiler_intrinsic
+    })
+    .collect()
+}
+
+#[test]
+fn selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not() {
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    let trusted = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib.clone()],
+    )));
+    assert_eq!(
+        required_closed_range_contains_roles(&trusted),
+        vec![Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains); 4],
+        "the exact mixed numeric stdlib overloads carry the intrinsic role"
+    );
+
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-provider-builtins-origin-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).expect("create dependency directory");
+    let dependency = directory.join("dependency.jar");
+    std::fs::copy(&stdlib, &dependency).expect("copy stdlib as an ordinary dependency");
+
+    // Pair the real common declarations with an otherwise empty selected stdlib. The earlier exact
+    // stdlib copy supplies both physical facades and .kotlin_builtins declarations, but its ordinary
+    // dependency name must keep every one of those declarations untrusted.
+    let paired = directory.join("paired");
+    std::fs::create_dir_all(&paired).expect("create paired stdlib directory");
+    let selected_stdlib = paired.join("kotlin-stdlib.jar");
+    zip::ZipWriter::new(std::fs::File::create(&selected_stdlib).expect("create empty stdlib"))
+        .finish()
+        .expect("finish empty stdlib");
+    let common_name = "kotlin-stdlib-wasm-js.klib";
+    let common = stdlib.parent().expect("stdlib directory").join(common_name);
+    let paired_common = paired.join(common_name);
+    std::fs::hard_link(&common, &paired_common)
+        .or_else(|_| std::fs::copy(&common, &paired_common).map(|_| ()))
+        .expect("pair the selected stdlib with common declarations");
+
+    let shadowed = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![dependency, selected_stdlib],
+    )));
+    assert_eq!(
+        required_closed_range_contains_roles(&shadowed),
+        vec![None; 4],
+        "an earlier full stdlib copy has identical declarations but no selected-stdlib authority"
+    );
+
+    drop(shadowed);
+    std::fs::remove_dir_all(directory).expect("remove copied builtins");
+}
+
+#[test]
+fn paired_stdlib_enum_entries_keeps_its_exact_common_role_through_symbols() {
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib],
+    )));
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/enums")),
+        "enumEntries",
+    );
+    let exact = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| {
+            function.flags.reified
+                && function.flags.inline == crate::libraries::InlineKind::MustInline
+                && function
+                    .generic_sig
+                    .as_ref()
+                    .is_some_and(|signature| signature.params.is_empty())
+        })
+        .expect("zero-argument inline enumEntries");
+    assert_eq!(
+        exact.callable.compiler_intrinsic,
+        Some(crate::libraries::CompilerIntrinsic::EnumEntries)
+    );
+}
+
 /// Classpath records are shared across worker compilations, but `@SinceKotlin` filtering belongs to
 /// one provider's API version. An older compile must not leave its narrower normalized view behind.
 #[test]
