@@ -1094,6 +1094,8 @@ mod inherited_reference_owner_e2e;
 mod init_block_lines_e2e;
 #[path = "inline_call_operand_spill_e2e.rs"]
 mod inline_call_operand_spill_e2e;
+#[path = "inline_call_result_bytes_e2e.rs"]
+mod inline_call_result_bytes_e2e;
 #[path = "inline_capture_default_e2e.rs"]
 mod inline_capture_default_e2e;
 #[path = "inline_capture_splice_e2e.rs"]

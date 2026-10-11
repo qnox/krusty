@@ -5615,6 +5615,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   statement whose `Unit` value follows the lambda's brace now does too, unless a copied body's
   terminal `Unit` keeps its own mapped line and so writes that `nop` itself.
   Tests: `tests/inline_scope_function_bytes_e2e.rs`.
+- **A same-file inline call's result is adapted after its inlined body ends.** kotlinc's inliner
+  ends the `$i$f$` marker and the inlined parameter locals (`$this$pass$iv`) at the body's end
+  label; the call site then adapts the erased result. So `val r = a?.pass(f)` with
+  `inline fun <T, R> T.pass(f: (T) -> R): R = f(this)` narrows `invoke`'s `Object` with a
+  `checkcast` after the locals end, a value-position `Unit` result (`a?.pass { f(it) }`)
+  materializes `getstatic Unit.INSTANCE` after them, and a discarded call (`a.pass(f)`,
+  `twice(f)`) pops its result after them, without the narrowing a consumer would need. The
+  deferral applies only where the callee declares an unreified type-parameter result: an
+  `inline fun block(p: () -> Int) = p()` still narrows inside its body, where kotlinc compiles
+  the coercion. A safe call's null result carries the safe call's own line (fir2ir gives it the
+  call's offsets), which kotlinc marks at the null branch; the `pop` the temporaries pass inserts
+  there keeps that line when no label follows it.
+  Tests: `tests/inline_call_result_bytes_e2e.rs`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's

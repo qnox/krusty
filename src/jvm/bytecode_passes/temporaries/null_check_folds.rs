@@ -371,8 +371,9 @@ fn generated_receiver_temporary(body: &Body, jump: NodeId, slot: u16) -> bool {
 }
 
 /// Stand what describes each `ifnull` target's instruction after the `pop` put in front of it:
-/// the labels after the folded jumps' own, and the line numbers and local-range bounds standing
-/// there, under a new label. Returns the labels now after a `pop`, which the later passes pin.
+/// the labels after the folded jumps' own, the line numbers standing with them, and the
+/// local-range bounds standing there, under a new label. Returns the labels now after a `pop`,
+/// which the later passes pin.
 pub(super) fn place_after_pops(
     body: &mut Body,
     method: &mut MethodNode,
@@ -385,6 +386,14 @@ pub(super) fn place_after_pops(
             .iter()
             .position(|&at| *body.list.node(at) == Node::Label(target.label))
             .expect("the folded jumps' label stands in front of its pop");
+        // kotlinc's label normalization merges the labels in front of the target's first
+        // instruction into the jump's own, so a line number marked there names that label and
+        // stays on the `pop`. A label bound at the target after the jump's own stood past a
+        // line number in kotlinc's list; that line number and the label land after the `pop`.
+        let lines_follow = run
+            .iter()
+            .enumerate()
+            .any(|(k, &at)| k > own && matches!(body.list.node(at), Node::Label(_)));
         let mut late: Vec<Node> = Vec::new();
         let mut lines = Vec::new();
         let mut standing = Vec::new();
@@ -398,10 +407,11 @@ pub(super) fn place_after_pops(
                         body.list.remove(at);
                     }
                 }
-                Node::Line { line, .. } => {
+                Node::Line { line, .. } if lines_follow => {
                     lines.push(line);
                     body.list.remove(at);
                 }
+                Node::Line { .. } => {}
                 Node::Insn(_) => unreachable!("a run holds labels and line numbers"),
             }
         }

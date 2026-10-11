@@ -1066,7 +1066,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::SafeCall { receiver, selector } => {
-                self.safe_call_expression(receiver, *selector, expression.ty.get())?
+                let line = self.body.expression_debug_lines(expression_id).source;
+                self.safe_call_expression(receiver, *selector, expression.ty.get(), line)?
             }
             FirExprKind::Elvis { lhs, rhs } => {
                 let lhs_value = self.expression(*lhs)?;
@@ -1935,6 +1936,7 @@ impl BodyLowering<'_> {
         receiver: &FirReceiver,
         selector: FirExprId,
         result_type: Ty,
+        line: u32,
     ) -> Result<ExprId, FirLoweringFailure> {
         let receiver_value =
             self.expression_with_conversion(receiver.value, receiver.conversion)?;
@@ -1975,6 +1977,11 @@ impl BodyLowering<'_> {
         } else {
             self.ir.add_expr(IrExpr::Const(IrConst::Null))
         };
+        // fir2ir gives the null result the safe call's own offsets. A selector that was inlined
+        // leaves its callee's lines in effect, so that result states the caller's line again.
+        if line != 0 {
+            self.ir.expr_source_lines.insert(null_result, line);
+        }
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
