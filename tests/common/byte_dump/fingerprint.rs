@@ -295,13 +295,30 @@ pub(super) fn normalize_invocation_flag(arg: &str) -> Result<String, String> {
 /// selected JDK `modules` and `ct.sym` entries contribute their kind, exact image content, and the
 /// small `release` label. Every arbitrary dependency—including a jar with a stdlib-like basename
 /// or a different `lib/modules`—contributes its own content, in declaration order.
-pub(super) fn classpath_content_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
+pub(crate) fn classpath_content_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
     let kotlinc_lib = krusty::toolchain::kotlinc_lib_dir();
     let jdk_modules = krusty::toolchain::jdk_modules();
-    classpath_content_fingerprint_with_platform(
+    classpath_content_fingerprint_with_platform_policy(
         paths,
         kotlinc_lib.as_deref(),
         jdk_modules.as_deref(),
+        false,
+    )
+}
+
+/// Content identity for an immutable reference-compilation environment. Unlike class-dump
+/// invocations, whose scratch classpaths can change in place, box-reference dependencies are fixed
+/// for the process and are hashed once by canonical artifact identity.
+pub(crate) fn immutable_classpath_content_fingerprint(
+    paths: &[PathBuf],
+    producing_jdk_modules: &Path,
+) -> Result<String, String> {
+    let kotlinc_lib = krusty::toolchain::kotlinc_lib_dir();
+    classpath_content_fingerprint_with_platform_policy(
+        paths,
+        kotlinc_lib.as_deref(),
+        Some(producing_jdk_modules),
+        true,
     )
 }
 
@@ -309,6 +326,24 @@ pub(super) fn classpath_content_fingerprint_with_platform(
     paths: &[PathBuf],
     kotlinc_lib: Option<&Path>,
     jdk_modules: Option<&Path>,
+) -> Result<String, String> {
+    classpath_content_fingerprint_with_platform_policy(paths, kotlinc_lib, jdk_modules, false)
+}
+
+#[cfg(test)]
+pub(super) fn immutable_classpath_content_fingerprint_with_platform(
+    paths: &[PathBuf],
+    kotlinc_lib: Option<&Path>,
+    jdk_modules: Option<&Path>,
+) -> Result<String, String> {
+    classpath_content_fingerprint_with_platform_policy(paths, kotlinc_lib, jdk_modules, true)
+}
+
+fn classpath_content_fingerprint_with_platform_policy(
+    paths: &[PathBuf],
+    kotlinc_lib: Option<&Path>,
+    jdk_modules: Option<&Path>,
+    immutable_explicit_paths: bool,
 ) -> Result<String, String> {
     let selected_kotlinc = selected_kotlinc_root(kotlinc_lib)?;
     let mut rows = Vec::new();
@@ -334,7 +369,10 @@ pub(super) fn classpath_content_fingerprint_with_platform(
             rows.push(row);
             continue;
         }
-        if path.is_dir() {
+        if immutable_explicit_paths {
+            let kind = if path.is_dir() { "dir" } else { "file" };
+            rows.push(format!("{kind}:{}", selected_content_identity(path)?));
+        } else if path.is_dir() {
             rows.push(format!("dir:{}", hash_tree(path)?));
         } else {
             let bytes = std::fs::read(path)

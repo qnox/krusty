@@ -379,6 +379,22 @@ jobs:
           fi
           echo "write=$write" >> "$GITHUB_OUTPUT"
           echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
+      # The byte score compiles every applicable box case with that version's kotlinc. Those
+      # inventories live in their own cache, target/cache/ref-classes, whose entries
+      # tests/box_reference_classes.rs keys by source, classpath, unit modes, the exact compiler and
+      # the producing JDK. Restored from the base and saved by master like the recorded bytes; the
+      # key also hashes the inventory owner, shared case planning, reference server/Javac driver and
+      # content-identity implementation. A producer or layout change therefore starts a fresh cache
+      # instead of replaying inventories built by code that a hit would otherwise never execute.
+      - name: restore kotlinc box references (${{ matrix.version }})
+        if: matrix.target == 'jvm'
+        id: box-references
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/ref-classes
+          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-
       - name: download shared test binaries
         uses: actions/download-artifact@v8
         with:
@@ -402,6 +418,12 @@ jobs:
           just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" jvm-byte-equality.txt > pct.txt
           bash scripts/conformance-badge.sh fields conformance pct.txt "${{ matrix.version }}"
           bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
+      - name: save kotlinc box references (${{ matrix.version }})
+        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/ref-classes
+          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}
       - name: run native box conformance ${{ matrix.version }}
         if: matrix.target == 'native'
         id: native_box
