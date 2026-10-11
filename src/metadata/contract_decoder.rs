@@ -72,11 +72,30 @@ fn decode_effect(
             _ => cursor.skip(wire, "contract effect")?,
         }
     }
-    if condition_kind.unwrap_or(0) != 0 {
-        return Err(cursor.error(format!(
-            "unsupported contract condition kind {}",
-            condition_kind.unwrap_or(0)
-        )));
+    match condition_kind.unwrap_or(0) {
+        0 => {}
+        // HOLDSIN_CONDITION: `<conclusion> holdsIn <argument>`. kotlinc writes no effect type, the
+        // lambda parameter as the only argument, and the condition as the conclusion.
+        2 => {
+            if effect_type.unwrap_or(0) != 0 || invocation_kind.is_some() {
+                return Err(
+                    cursor.error("holdsIn effect carries an effect type or invocation kind")
+                );
+            }
+            let [argument] = arguments.as_slice() else {
+                return Err(cursor.error("holdsIn effect must name exactly one parameter"));
+            };
+            let Some(conclusion) = conclusion else {
+                return Err(cursor.error("holdsIn effect has no condition"));
+            };
+            return Ok(Effect::HoldsIn {
+                condition: decode_expression(conclusion, resolve_type)?,
+                lambda: ParamRef::from_wire(decode_parameter_reference(argument)?),
+            });
+        }
+        kind => {
+            return Err(cursor.error(format!("unsupported contract condition kind {kind}")));
+        }
     }
     let effect = match effect_type.unwrap_or(0) {
         0 => {
@@ -121,7 +140,9 @@ fn decode_effect(
                 returns,
                 conclusion: decode_expression(conclusion, resolve_type)?,
             }),
-            Effect::CallsInPlace { .. } | Effect::ConditionalReturns { .. } => {
+            Effect::CallsInPlace { .. }
+            | Effect::ConditionalReturns { .. }
+            | Effect::HoldsIn { .. } => {
                 Err(cursor.error("only a returns effect may have a conclusion"))
             }
         },
@@ -372,6 +393,32 @@ mod tests {
         let error = decode_contract(&contract_with(&effect), &mut |_| unreachable!())
             .expect_err("RETURNS_RESULT_OF is not modeled");
         assert_eq!(error.into_parts().1, "unsupported contract effect type 3");
+    }
+
+    #[test]
+    fn a_holds_in_effect_names_its_lambda_and_condition() {
+        // kotlinc 2.4.20's bytes for `(this@whenString is String) holdsIn block`, where `block` is
+        // the first value parameter and `String` is type-table entry 0.
+        let effect = [
+            0x12, 0x02, 0x10, 0x01, 0x1a, 0x04, 0x10, 0x00, 0x28, 0x00, 0x28, 0x02,
+        ];
+        let contract = decode_contract(&contract_with(&effect), &mut |reference| match reference {
+            ContractTypeRef::Table(0) => Ok(Ty::obj("kotlin/String")),
+            _ => unreachable!("the condition names type-table entry 0"),
+        })
+        .expect("holdsIn is a modeled effect")
+        .expect("the contract has an effect");
+        assert_eq!(
+            contract.effects,
+            vec![Effect::HoldsIn {
+                condition: Condition::IsType {
+                    param: ParamRef::Receiver,
+                    ty: ConditionType::Metadata(Ty::obj("kotlin/String")),
+                    negated: false,
+                },
+                lambda: ParamRef::Param(0),
+            }]
+        );
     }
 
     #[test]
