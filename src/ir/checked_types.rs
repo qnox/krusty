@@ -5,10 +5,11 @@
 //! template, the zero a relational comparison is tested against, a coercion it inserts) either has
 //! its type recorded there by its producer, or names that type in its own operands: a constant
 //! carries its type's identity, the `Unit` singleton is `Unit`, a type operation its target, an
-//! intrinsic call its declared result, and a comparison or equality is a `Boolean`. This is that
-//! contract in one place, so a backend reads the checked type and chooses only the carrier.
-//! Nothing here looks at a child to work out what its parent yields; a node whose type depends on
-//! its children has its type recorded by its producer or has none.
+//! intrinsic call its declared result, a construction or singleton its class, an array or callable
+//! reference its whole type, and a comparison or equality is a `Boolean`. This is that contract in
+//! one place, so a backend reads the checked type and chooses only the carrier. Nothing here looks
+//! at a child to work out what its parent yields; a node whose type depends on its children has its
+//! type recorded by its producer or has none.
 //!
 //! A `PrimitiveBinOp` that does not answer a `Boolean` is such a node. Its result is the result of
 //! the operator the checker selected (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
@@ -20,11 +21,52 @@
 use super::*;
 
 impl IrFile {
+    /// The declared semantic type of every local value slot in `root`'s value namespace.
+    ///
+    /// A nested lambda's captures still read this namespace, but its inline body has the lambda
+    /// function's own slots. [`value_namespace_expressions`] observes that boundary, so two
+    /// unrelated slot zeroes never enter the same inventory.
+    pub(crate) fn declared_value_slot_types(
+        &self,
+        root: ExprId,
+    ) -> std::collections::HashMap<u32, Ty> {
+        let mut declarations = std::collections::HashMap::new();
+        let mut declare = |slot, ty| {
+            let previous = declarations.insert(slot, ty);
+            debug_assert!(
+                previous.is_none_or(|previous| previous == ty),
+                "common-IR value slot {slot} has two semantic declaration types"
+            );
+        };
+        for expression in super::value_namespace_expressions(self, root) {
+            match self.expr(expression) {
+                IrExpr::Variable { index, ty, .. } => declare(*index, *ty),
+                IrExpr::Try { catches, .. } => {
+                    for catch in catches {
+                        declare(catch.var, catch.ty);
+                    }
+                }
+                IrExpr::Checked(IrCheckedOperation::RangeLoop {
+                    variable, counter, ..
+                }) => declare(*variable, *counter),
+                _ => {}
+            }
+        }
+        declarations
+    }
+
     /// The checked type of the value `id` yields, if lowering recorded one.
     pub fn checked_type(&self, id: ExprId) -> Option<Ty> {
-        if let Some(ty) = self.logical_types.get(&id) {
-            return Some(*ty);
+        match self.logical_types.get(&id) {
+            Some(ty) => Some(*ty),
+            None => self.named_type(id),
         }
+    }
+
+    /// The type node `id` names in itself, whatever lowering recorded beside it: what a target
+    /// produces when it evaluates the node. It is the checked type unless a later pass recorded a
+    /// more specific one, as an inline call's substitution of a type parameter does.
+    pub fn named_type(&self, id: ExprId) -> Option<Ty> {
         Some(match self.expr(id) {
             IrExpr::Const(constant) => constant.checked_type(),
             IrExpr::TypeOp {
@@ -40,11 +82,32 @@ impl IrFile {
                 callee: Callee::Intrinsic { ret, .. },
                 ..
             } => *ret,
+            // These property-read nodes carry the checker-selected logical result. A later
+            // backend decides whether the physical realization is a field or an accessor.
+            IrExpr::PropertyRead { ty, .. } => *ty,
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { result, .. }) => *result,
             IrExpr::PrimitiveBinOp { op, .. } if op.yields_boolean() => Ty::Boolean,
             IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
             IrExpr::StringConcat(_) => Ty::String,
             IrExpr::UnitInstance => Ty::Unit,
+            // A construction, a singleton and an enum constant name their class; an array
+            // construction and a callable reference name their whole type.
+            IrExpr::New { internal, .. } => Ty::Obj(*internal, &[]),
+            IrExpr::SingletonValue { classifier }
+            | IrExpr::EnumEntry { classifier, .. }
+            | IrExpr::EnumValueOf { classifier, .. } => Ty::Obj(*classifier, &[]),
+            // An enclosing-instance edge names the outer classifier it reaches.
+            IrExpr::EnclosingInstance { outer, .. } => Ty::Obj(*outer, &[]),
+            IrExpr::EnumValues { classifier } => {
+                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
+            }
+            IrExpr::EnumEntries { classifier } => {
+                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::Obj(*classifier, &[])])
+            }
+            IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
+            IrExpr::CallableReference(reference) => reference.function_type,
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
             _ => return None,
         })
     }
@@ -93,5 +156,63 @@ impl IrConst {
             IrConst::ULong(_) => Ty::ULong,
             IrConst::Null => Ty::Null,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declaration_inventory_includes_every_common_ir_slot_declaration() {
+        let mut file = IrFile::default();
+        let unit = file.add_expr(IrExpr::UnitInstance);
+        let local = file.add_expr(IrExpr::Variable {
+            index: 3,
+            ty: Ty::String,
+            init: None,
+            named: true,
+        });
+        let guarded = file.add_expr(IrExpr::Try {
+            body: unit,
+            catches: vec![IrCatch {
+                var: 5,
+                binding: None,
+                ty: Ty::obj("sample/Failure"),
+                body: unit,
+                line: None,
+            }],
+            finally: None,
+            result: Ty::Unit,
+        });
+        let start = file.add_expr(IrExpr::Const(IrConst::Long(0)));
+        let end = file.add_expr(IrExpr::Const(IrConst::Long(1)));
+        let loop_ = file.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+            variable: 8,
+            variable_name: None,
+            counter: Ty::Long,
+            source: IrProgressionSource::Literal {
+                operation: crate::fir::FirRangeOperation::Through,
+                start,
+                end,
+            },
+            unsigned_compare: None,
+            body: unit,
+            label: "loop".to_string(),
+            with_index: None,
+        }));
+        let root = file.add_expr(IrExpr::Block {
+            stmts: vec![local, guarded, loop_],
+            value: None,
+        });
+
+        assert_eq!(
+            file.declared_value_slot_types(root),
+            std::collections::HashMap::from([
+                (3, Ty::String),
+                (5, Ty::obj("sample/Failure")),
+                (8, Ty::Long),
+            ])
+        );
     }
 }

@@ -233,7 +233,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// declaration coercion can check it as that wrapper; after the null check Kotlin reads it
     /// through `Number.toX`.
     pub(super) fn not_null_assert(&mut self, operand: u32) -> Result<Option<Value>, Unsupported> {
-        let ty = self.type_of(operand);
+        let ty = self.physical_type(operand);
         let (value, primitive) = match self.asserted_declaration_number(operand) {
             Some((produced, primitive)) => (self.reference(produced)?, Some(primitive)),
             None => match ty {
@@ -481,7 +481,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 //
                 // Unboxing first and converting would answer `1` to a program Kotlin refuses with
                 // a ClassCastException, so the descriptor is asked before anything is read out.
-                let source_carrier = self.type_of(arg).map(|ty| self.carrier(ty));
+                let source_carrier = self.physical_type(arg).map(|ty| self.carrier(ty));
                 if self.carrier(target) != Carrier::Ref
                     && source_carrier.is_none_or(|source| source != self.carrier(target))
                 {
@@ -720,7 +720,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         (*type_operand == primitive
             && self.carrier(primitive) != Carrier::Ref
             && self
-                .type_of(*inner)
+                .physical_type(*inner)
                 .is_some_and(|ty| self.carrier(ty) == Carrier::Ref))
         .then_some(*inner)
     }

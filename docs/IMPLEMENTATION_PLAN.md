@@ -4471,6 +4471,14 @@ each one lowering more and declining less:
   `Int?`, which must hold `null`), or as nothing (`Unit` in return position). A change between
   carriers is one `convert`, and an expression whose type the lowering cannot state declines
   rather than being guessed at.
+- **Two types per expression** (`lower/expression_types.rs`). The CHECKED type is the frontend's
+  (`IrFile::checked_type`, as Wasm reads it) and answers every semantic question: which range,
+  list or map member a call is, what a `when` merges to, which scalar is compared. The PHYSICAL
+  type is only the form a node's value arrives in where that differs: a slot, field or static at
+  its declared type, a call at its callee's declared (erased) result, a runtime member at the
+  carrier the runtime answers, an operator at the width it computes. Nothing re-derives a
+  semantic type from the node's shape; a producer in common lowering that synthesizes a value node
+  records its type there.
 - **Exceptions** travel through the runtime's one pending slot: a `throw` records and returns, and
   every call site loads the slot and branches. `try`/`catch`/`finally` are ordinary control flow
   over that check, which is correct under Cranelift's SSA on every architecture. A `try`'s value

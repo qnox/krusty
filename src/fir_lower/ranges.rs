@@ -4,6 +4,32 @@ use crate::types::{stored_value_ty, Ty};
 
 use super::{BodyLowering, FirLoweringFailure};
 
+pub(super) struct InRangeLowering {
+    operation: FirRangeOperation,
+    comparison_ty: Ty,
+    operands: [FirExprId; 3],
+    negated: bool,
+    origin: OriginId,
+}
+
+impl InRangeLowering {
+    pub(super) fn new(
+        operation: FirRangeOperation,
+        comparison_ty: Ty,
+        operands: [FirExprId; 3],
+        negated: bool,
+        origin: OriginId,
+    ) -> Self {
+        Self {
+            operation,
+            comparison_ty,
+            operands,
+            negated,
+            origin,
+        }
+    }
+}
+
 impl BodyLowering<'_> {
     pub(super) fn range_expression(
         &mut self,
@@ -28,17 +54,17 @@ impl BodyLowering<'_> {
             })))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn in_range_expression(
         &mut self,
-        operation: FirRangeOperation,
-        comparison_ty: Ty,
-        value: FirExprId,
-        start: FirExprId,
-        end: FirExprId,
-        negated: bool,
-        origin: OriginId,
+        range: InRangeLowering,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let InRangeLowering {
+            operation,
+            comparison_ty,
+            operands: [value, start, end],
+            negated,
+            origin,
+        } = range;
         if !matches!(
             comparison_ty,
             Ty::Int | Ty::Long | Ty::Char | Ty::UInt | Ty::ULong | Ty::Float | Ty::Double
@@ -180,14 +206,15 @@ impl BodyLowering<'_> {
             FirRangeOperation::OpenEnd | FirRangeOperation::Until => (start_slot, end_slot, true),
             FirRangeOperation::DownTo => (end_slot, start_slot, false),
         };
-        let result = if negated {
-            let below = self.comparison(IrBinOp::Lt, value_slot, low);
+        if negated {
+            let below = self.comparison(IrBinOp::Lt, comparison_ty, value_slot, low);
             let above = self.comparison(
                 if high_strict {
                     IrBinOp::Ge
                 } else {
                     IrBinOp::Gt
                 },
+                comparison_ty,
                 value_slot,
                 high,
             );
@@ -197,13 +224,14 @@ impl BodyLowering<'_> {
                 rhs: above,
             })
         } else {
-            let above_low = self.comparison(IrBinOp::Le, low, value_slot);
+            let above_low = self.comparison(IrBinOp::Le, comparison_ty, low, value_slot);
             let below_high = self.comparison(
                 if high_strict {
                     IrBinOp::Lt
                 } else {
                     IrBinOp::Le
                 },
+                comparison_ty,
                 value_slot,
                 high,
             );
@@ -212,8 +240,7 @@ impl BodyLowering<'_> {
                 lhs: above_low,
                 rhs: below_high,
             })
-        };
-        result
+        }
     }
 
     fn expression_ty(&self, expression: FirExprId) -> Result<Ty, FirLoweringFailure> {
@@ -231,9 +258,14 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn comparison(&mut self, operation: IrBinOp, lhs: u32, rhs: u32) -> ExprId {
+    fn comparison(&mut self, operation: IrBinOp, ty: Ty, lhs: u32, rhs: u32) -> ExprId {
         let lhs = self.ir.add_expr(IrExpr::GetValue(lhs));
         let rhs = self.ir.add_expr(IrExpr::GetValue(rhs));
+        // These reads are synthesized from temporaries declared above, rather than lowered from
+        // source FIR expressions. Preserve the selected range-comparison type on each operand so
+        // targets choose only its representation.
+        self.ir.logical_types.insert(lhs, ty);
+        self.ir.logical_types.insert(rhs, ty);
         self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: operation,
             lhs,

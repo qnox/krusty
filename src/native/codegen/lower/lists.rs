@@ -478,7 +478,7 @@ impl BodyLowering<'_, '_, '_> {
             if self.terminated {
                 return Ok(None);
             }
-            operands.push((value, self.type_of(*argument)));
+            operands.push((value, self.physical_type(*argument)));
         }
         let produced =
             self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
@@ -616,7 +616,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<String> {
         if !self
-            .type_of(receiver)
+            .checked_type(receiver)
             .is_some_and(|ty| has_standard_identity(ty, super::classifier_shapes::is_lazy))
         {
             return None;
@@ -676,7 +676,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<String> {
         if !self
-            .type_of(receiver)
+            .checked_type(receiver)
             .is_some_and(|ty| has_standard_identity(ty, super::classifier_shapes::is_pair))
         {
             return None;
@@ -720,7 +720,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<String> {
         if !self
-            .type_of(receiver)
+            .checked_type(receiver)
             .is_some_and(|ty| has_standard_identity(ty, super::classifier_shapes::is_indexed_value))
         {
             return None;
@@ -739,7 +739,7 @@ impl BodyLowering<'_, '_, '_> {
         target: crate::fir::ExternalPropertyId,
         receiver: u32,
     ) -> Option<String> {
-        let ty = self.type_of(receiver)?;
+        let ty = self.checked_type(receiver)?;
         if !(is_list(self.file, ty) || is_collection(self.file, ty)) {
             return None;
         }
@@ -777,7 +777,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let ty = self.type_of(receiver)?;
+        let ty = self.checked_type(receiver)?;
         let (symbol, answer) = if has_standard_identity(ty, super::classifier_shapes::is_lazy) {
             ("kt_lazy_value", any())
         } else if has_standard_identity(ty, super::classifier_shapes::is_pair) {
@@ -819,7 +819,7 @@ impl BodyLowering<'_, '_, '_> {
         physical: &[Ty],
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let name = signature.name;
-        let ty = self.type_of(receiver)?;
+        let ty = self.checked_type(receiver)?;
         // Iteration first: a `List` is iterated through the same dispatch an `Iterable` is, so the
         // one member both spellings share is answered in one place.
         if has_standard_identity(ty, super::classifier_shapes::is_lazy) {
@@ -902,7 +902,7 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let ty = self.type_of(receiver)?;
+        let ty = self.checked_type(receiver)?;
         if self.file.implements_unwalkable_collection_of(ty) {
             return None;
         }
@@ -970,7 +970,7 @@ impl BodyLowering<'_, '_, '_> {
         use super::super::super::intrinsics::CollectionAlgorithm;
 
         let operation = super::super::super::intrinsics::collection_algorithm(signature)?;
-        let receiver_ty = self.type_of(receiver)?;
+        let receiver_ty = self.checked_type(receiver)?;
         let shape = self
             .file
             .iteration_shape_of(receiver_ty)
@@ -1171,7 +1171,7 @@ impl BodyLowering<'_, '_, '_> {
         ) {
             return None;
         }
-        let ty = self.type_of(receiver)?;
+        let ty = self.checked_type(receiver)?;
         // Which runtime entry point would have answered this. Three tables reach a member of a
         // runtime-known type: the ITERATION one, keyed on the receiver representation and complete
         // declaration signature; the SCALAR one, keyed on the owner AND the parameter types, because that is
@@ -1257,7 +1257,7 @@ impl BodyLowering<'_, '_, '_> {
             if self.terminated {
                 return Ok(None);
             }
-            operands.push((value, self.type_of(*argument)));
+            operands.push((value, self.physical_type(*argument)));
         }
         let runtime_params: Vec<Ty> = carried.to_vec();
         let runtime_operands = operands.clone();

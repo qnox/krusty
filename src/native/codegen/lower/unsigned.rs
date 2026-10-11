@@ -190,7 +190,11 @@ impl BodyLowering<'_, '_, '_> {
         argument: u32,
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let other = self.type_of(argument).unwrap_or(element);
+        let Some(other) = self.checked_type(argument) else {
+            return Err(declined!(
+                "an unsigned comparison whose argument has no checked type"
+            ));
+        };
         self.unsigned_call(element, "compareTo", &[other], ret, receiver, &[argument])
     }
 
