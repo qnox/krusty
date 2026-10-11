@@ -17034,6 +17034,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   brace line and the `return` shared one pc. The enum constructor now marks it the same way.
   Test: `tests/enum_init_block_line_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`,
   `enum/initEnumAfterObjectAccess.kt`.
+- **An inner class's `this$0` is typed by the outer class's default type.** kotlinc's outer
+  instance field has the outer class applied to its own type parameters (`Outer<T, R>`), so a
+  generic outer signs it (`LOuter<TT;TR;>;`). Lowering takes that type from the resolved
+  classifier's self type for the field only; the constructor's outer-instance parameter is a
+  physical prefix and stays the plain class. Test: `tests/inner_outer_field_signature_e2e.rs`.
+  Corpus: `innerNested/innerWithDefaultArgumentGenericExtensionProperty.kt`,
+  `delegation/delegationToInnerClassOfGenericClass.kt`, `reflection/classes/qualifiedName.kt`.
 - **A property delegate's storage field has no generic `Signature`.** kotlinc's `ClassCodegen`
   writes no `Signature` for a field of `PROPERTY_DELEGATE` origin, so `val x by Box<String>(…)`
   stores into `Box x$delegate` with the erased descriptor only. The lowering marks that storage
