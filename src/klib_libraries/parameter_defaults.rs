@@ -8,8 +8,44 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::libraries::DefaultValue;
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrExprId, KlibIrExprKind, KlibIrFunction};
 use crate::metadata::klib_ir::{KlibIrConstant, KlibIrModuleTrees, KlibIrSignature};
+
+/// The top-level declarations, by package and simple name, whose IR a compilation decodes for
+/// defaults. A member's defaults live in the tree of the top-level classifier that encloses it.
+#[derive(Default)]
+pub(super) struct TopLevelDeclarations {
+    by_package: HashMap<Vec<String>, HashSet<String>>,
+}
+
+impl TopLevelDeclarations {
+    pub(super) fn insert(&mut self, signature: &KlibPublicIdSignature) {
+        let Some(top_level) = signature.declaration().segments().first() else {
+            return;
+        };
+        self.by_package
+            .entry(signature.package().segments().to_vec())
+            .or_default()
+            .insert(top_level.clone());
+    }
+
+    /// Whether the top-level declaration serialized under `signature` is one of these. A
+    /// file-local identity is never one: metadata publishes no declaration under it.
+    pub(super) fn contains(&self, signature: &KlibIrSignature) -> bool {
+        let public = match signature {
+            KlibIrSignature::Public(public) => public,
+            KlibIrSignature::Accessor(accessor) => accessor.property(),
+            KlibIrSignature::FileLocal { .. } => return false,
+        };
+        let Some(top_level) = public.declaration().segments().first() else {
+            return false;
+        };
+        self.by_package
+            .get(public.package().segments())
+            .is_some_and(|names| names.contains(top_level))
+    }
+}
 
 /// The constant default of each value parameter, by the declaration's linkable identity. Only
 /// declarations with at least one constant default are listed.
