@@ -79,6 +79,11 @@ Which programs depend on a C library at run time follows Go and its cgo mode:
   cgo does. Its threads must then start through `pthread_create`, so that libc has per-thread
   state for C code on every thread. The runtime's thread-start entry is the one switch between the
   two modes.
+- **On Linux, that libc is glibc, imported dynamically and bound to an old glibc baseline.** Every
+  import is bound to the symbol version the baseline defines, so the program runs on that glibc
+  and every later one, wherever it was built. A fully static program with musl is a later opt-in
+  target, `linux-musl`, not the default: linking musl statically means every C library the
+  program uses must itself be built against musl, which brings a C compiler back into the build.
 - **macOS and Windows** have no stable system-call ABI, so programs there always import
   `libSystem` or `kernel32` dynamically, as Go programs do.
 
@@ -136,7 +141,8 @@ functions it exports with their default versions. It never reads a library file 
   byte.
 - **For the C library of each target,** krusty ships the captured facts the same way it ships the
   prebuilt runtime, so a cgo-mode program needs no target sysroot either. This is the arrangement
-  Zig uses to cross-link against glibc.
+  Zig uses to cross-link against glibc. For glibc the facts are the baseline's, so the default
+  version an import records is the one the baseline defines.
 
 ## C interop
 
@@ -163,9 +169,17 @@ unchanged.
   `platform.zlib`) are made the same way from Kotlin/Native's own `.def` files.
 - **What direct mode cannot express**, Kotlin/Native's direct mode cannot either: a function
   defined in the `.def` file itself, and a macro that expands to an expression rather than a
-  constant. `errno` is the important case: it is `(*__errno_location())`. These need code, and the
+  constant. `errno` is the important case: it is `(*__errno_location())`. Both are declared, with
+  a `@CCall.Direct` name that says why they cannot be called. Calling them needs code, and the
   plan is for krusty's cinterop to emit such accessors as Cranelift functions in the library
   rather than compile C.
+- **The library is metadata only** (`src/native/cinterop/library/`), laid out as
+  `cinterop -Xccall-mode direct` lays one out: manifest, module header and package fragments, with
+  no IR and no bitcode. Its declarations are those of the `.def` file's own headers (all of them,
+  or those its `headerFilter` names) and of its code, plus every struct, enum and typedef they
+  reference. The library depends only on the standard library, so a referenced type from another
+  header (`size_t`, `__va_list_tag`) is declared in it too, as Kotlin/Native declares it with
+  `-no-default-libs`. Types from the platform libraries are not yet imported from them.
 - **Per-target ABI, never the host's.** Struct layout, integer widths (`long` is 64-bit on LP64
   Linux and macOS, 32-bit on LLP64 Windows) and how a struct is passed by value are computed for
   the target: SysV x86-64, AAPCS64 (and Apple's variant), RISC-V LP64D, and Win64.

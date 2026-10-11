@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use super::super::lexer::{Kind, Token};
 use super::super::model::{
-    Enum, Enumerator, Field, FloatKind, IntRank, Qualifiers, Record, RecordKind, Signedness, Type,
-    TypeId,
+    Declared, Enum, Enumerator, Field, FloatKind, IntRank, Qualifiers, Record, RecordKind,
+    Signedness, Type, TypeId,
 };
 use super::attributes::Attributes;
 use super::constant::Value;
@@ -441,6 +441,7 @@ impl Parser<'_> {
                 &format!("redefinition of '{}'", tag.as_deref().unwrap_or("")),
             ));
         }
+        self.declarations.order.push(Declared::Record(id));
         let fields = self.member_declarations()?;
         self.expect("}")?;
         self.attributes(&mut attributes)?;
@@ -565,13 +566,15 @@ impl Parser<'_> {
                 &format!("redefinition of 'enum {}'", tag.as_deref().unwrap_or("")),
             ));
         }
+        self.declarations.order.push(Declared::Enum(id));
         let mut enumerators = Vec::new();
         let mut next_value: i128 = 0;
         while !self.at("}") {
             let name: Rc<str> = self.identifier()?.text.clone();
             let mut ignored = Attributes::default();
             self.attributes(&mut ignored)?;
-            let value = if self.eat("=") {
+            let explicit = self.eat("=");
+            let value = if explicit {
                 self.constant_expression()?.value
             } else {
                 next_value
@@ -581,7 +584,11 @@ impl Parser<'_> {
             }
             self.ordinary
                 .insert(name.clone(), Ordinary::Constant(Value::enumerator(value)));
-            enumerators.push(Enumerator { name, value });
+            enumerators.push(Enumerator {
+                name,
+                value,
+                explicit,
+            });
             next_value = value + 1;
             if !self.eat(",") {
                 break;

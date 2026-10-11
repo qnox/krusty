@@ -1,0 +1,6 @@
+headers = defcode.h
+package = defcode
+---
+#define IN_DEF 42
+int def_function(int x);
+static inline int def_inline(void) { return 1; }

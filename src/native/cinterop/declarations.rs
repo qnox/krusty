@@ -19,12 +19,15 @@
 mod attributes;
 mod constant;
 mod declarators;
+mod macro_value;
 mod parser;
 mod specifiers;
 
+use std::rc::Rc;
+
 use super::layout::LayoutEngine;
 use super::lexer::Token;
-use super::model::Declarations;
+use super::model::{Declarations, MacroConstant};
 use crate::native::target::NativeTarget;
 
 /// A declaration the parser could not read, with where it is.
@@ -52,6 +55,28 @@ pub(super) fn parse(tokens: &[Token], target: NativeTarget) -> Result<Header, Pa
     let mut parser = parser::Parser::new(tokens, target);
     parser.translation_unit()?;
     Ok(parser.finish())
+}
+
+/// Parse the preprocessed `tokens` of one translation unit for `target`, then read each of
+/// `macros` — an object-like macro's name and its expansion after the unit — as a C expression in
+/// the unit's scope. A macro that is not a constant or a well-typed expression is left out.
+pub(super) fn parse_with_macros<'t>(
+    tokens: &'t [Token],
+    macros: &'t [(Rc<str>, Vec<Token>)],
+    target: NativeTarget,
+) -> Result<(Header, Vec<MacroConstant>), ParseError> {
+    let mut parser = parser::Parser::new(tokens, target);
+    parser.translation_unit()?;
+    let constants = macros
+        .iter()
+        .filter_map(|(name, expansion)| {
+            parser.macro_value(expansion).map(|value| MacroConstant {
+                name: name.clone(),
+                value,
+            })
+        })
+        .collect();
+    Ok((parser.finish(), constants))
 }
 
 #[cfg(test)]

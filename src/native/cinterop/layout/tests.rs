@@ -184,17 +184,29 @@ fn builtin_atomic_complex_enum_and_vector_types_per_target() {
 #[test]
 fn an_incomplete_record_or_too_wide_bitfield_has_no_layout() {
     let mut incomplete = header(X86_64, "struct opaque;");
+    let opaque = incomplete
+        .declarations
+        .records
+        .iter()
+        .position(|record| record.tag.as_deref() == Some("opaque"))
+        .expect("declares `struct opaque`");
     assert_eq!(
         incomplete
             .layouts
-            .record(&incomplete.declarations, RecordId(0))
+            .record(&incomplete.declarations, RecordId(opaque as u32))
             .expect_err("incomplete"),
         LayoutError("`struct opaque` is an incomplete type".to_string())
     );
     let mut wide = header(X86_64, "struct w { char c : 9; };");
+    let w = wide
+        .declarations
+        .records
+        .iter()
+        .position(|record| record.tag.as_deref() == Some("w"))
+        .expect("declares `struct w`");
     assert_eq!(
         wide.layouts
-            .record(&wide.declarations, RecordId(0))
+            .record(&wide.declarations, RecordId(w as u32))
             .expect_err("too wide"),
         LayoutError("bitfield `c` is wider than its type `char`".to_string())
     );

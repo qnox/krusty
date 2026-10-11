@@ -7,14 +7,14 @@ use std::rc::Rc;
 use super::super::layout::{LayoutEngine, LayoutError};
 use super::super::lexer::{Kind, Token};
 use super::super::model::{
-    Declarations, EnumId, Function, IntRank, Origin, RecordId, Signedness, Storage, Type, TypeId,
-    Typedef, TypedefId, Variable,
+    Declarations, Declared, EnumId, Field, Function, IntRank, Origin, Record, RecordId, RecordKind,
+    Signedness, Storage, Type, TypeId, Typedef, TypedefId, Variable,
 };
 use super::constant::Value;
 use super::declarators::{Declarator, DeclaratorKind};
 use super::specifiers::{Specifiers, StorageClass};
 use super::{Header, ParseError};
-use crate::native::target::NativeTarget;
+use crate::native::target::{Arch, NativeTarget};
 
 /// What a struct, union or enum tag names.
 #[derive(Clone, Copy, Debug)]
@@ -57,7 +57,7 @@ impl<'t> Parser<'t> {
             variables: HashMap::new(),
         };
         // The typedefs a C compiler provides without a header.
-        let va_list = parser.declarations.intern(Type::VaList);
+        let va_list = parser.builtin_va_list(target);
         let int128 = parser.int_type(IntRank::Int128, Signedness::Signed);
         let uint128 = parser.int_type(IntRank::Int128, Signedness::Unsigned);
         for (name, ty) in [
@@ -75,6 +75,85 @@ impl<'t> Parser<'t> {
             parser.ordinary.insert(name, Ordinary::Typedef(id));
         }
         parser
+    }
+
+    /// The target's `__builtin_va_list`, as clang declares it: on x86-64 an array of one
+    /// `struct __va_list_tag`, on AArch64 a `struct __va_list`, on RISC-V a `void *`.
+    fn builtin_va_list(&mut self, target: NativeTarget) -> TypeId {
+        let void = self.declarations.intern(Type::Void);
+        let pointer = self.declarations.intern(Type::Pointer(void));
+        let unsigned = self.int_type(IntRank::Int, Signedness::Unsigned);
+        let int = self.int_type(IntRank::Int, Signedness::Signed);
+        let (tag, fields): (&str, &[(&str, TypeId)]) = match target.arch {
+            Arch::X86_64 => (
+                "__va_list_tag",
+                &[
+                    ("gp_offset", unsigned),
+                    ("fp_offset", unsigned),
+                    ("overflow_arg_area", pointer),
+                    ("reg_save_area", pointer),
+                ],
+            ),
+            Arch::Aarch64 => (
+                "__va_list",
+                &[
+                    ("__stack", pointer),
+                    ("__gr_top", pointer),
+                    ("__vr_top", pointer),
+                    ("__gr_offs", int),
+                    ("__vr_offs", int),
+                ],
+            ),
+            Arch::Riscv64 => return pointer,
+        };
+        let tag: Rc<str> = Rc::from(tag);
+        let record = self.declarations.add_record(Record {
+            kind: RecordKind::Struct,
+            tag: Some(tag.clone()),
+            fields: Some(
+                fields
+                    .iter()
+                    .map(|&(name, ty)| Field {
+                        name: Some(Rc::from(name)),
+                        ty,
+                        bit_width: None,
+                        aligned: None,
+                        packed: false,
+                    })
+                    .collect(),
+            ),
+            packed: false,
+            aligned: None,
+            origin: Origin {
+                file: Rc::from("<built-in>"),
+                line: 0,
+            },
+        });
+        self.tags.insert(tag, Tag::Record(record));
+        let record = self.declarations.intern(Type::Record(record));
+        match target.arch {
+            Arch::X86_64 => self.declarations.intern(Type::Array {
+                element: record,
+                length: Some(1),
+            }),
+            _ => record,
+        }
+    }
+
+    /// Run `read` over `tokens` instead of the translation unit's, at their start, then resume
+    /// where the translation unit was.
+    pub(super) fn reading<R>(
+        &mut self,
+        tokens: &'t [Token],
+        read: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let (saved, at) = (self.tokens, self.at);
+        self.tokens = tokens;
+        self.at = 0;
+        let result = read(self);
+        self.tokens = saved;
+        self.at = at;
+        result
     }
 
     pub(super) fn finish(self) -> Header {
@@ -269,7 +348,13 @@ impl<'t> Parser<'t> {
         let origin = self.origin();
         let specifiers = self.specifiers(true)?;
         if self.eat(";") {
-            // `struct tag { … };` or `enum { … };`: the specifiers were the declaration.
+            // `struct tag { … };` or `enum { … };`: the specifiers were the declaration. A record
+            // declared without a body (`struct tag;`) is declared here.
+            if let Type::Record(id) = *self.declarations.ty(specifiers.ty) {
+                if self.declarations.record(id).fields.is_none() {
+                    self.declarations.order.push(Declared::Record(id));
+                }
+            }
             return Ok(());
         }
         loop {
@@ -367,15 +452,20 @@ impl<'t> Parser<'t> {
                 }
                 if has_body || existing.param_names.iter().all(Option::is_none) {
                     existing.param_names = declarator.param_names.clone();
+                    existing.param_types = declarator.param_types.clone();
                 }
                 return Ok(());
             }
             self.functions
                 .insert(name.clone(), self.declarations.functions.len());
+            self.declarations
+                .order
+                .push(Declared::Function(self.declarations.functions.len()));
             self.declarations.functions.push(Function {
                 name,
                 ty,
                 param_names: declarator.param_names.clone(),
+                param_types: declarator.param_types.clone(),
                 storage,
                 inline: specifiers.inline,
                 noreturn,
@@ -396,6 +486,9 @@ impl<'t> Parser<'t> {
         }
         self.variables
             .insert(name.clone(), self.declarations.variables.len());
+        self.declarations
+            .order
+            .push(Declared::Variable(self.declarations.variables.len()));
         self.declarations.variables.push(Variable {
             name,
             ty,
@@ -444,6 +537,7 @@ impl<'t> Parser<'t> {
                     aligned,
                     origin: Some(origin),
                 });
+                self.declarations.order.push(Declared::Typedef(id));
                 self.ordinary.insert(name, Ordinary::Typedef(id));
                 Ok(())
             }

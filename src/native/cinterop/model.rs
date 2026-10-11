@@ -60,7 +60,7 @@ pub(super) enum Signedness {
     Plain,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum FloatKind {
     Float,
     Double,
@@ -98,8 +98,6 @@ pub(super) enum Type {
     },
     Float(FloatKind),
     Complex(FloatKind),
-    /// The target's `__builtin_va_list`, whose shape is the target's.
-    VaList,
     Pointer(TypeId),
     /// `None` is an array of unknown length (`T x[]`).
     Array {
@@ -171,6 +169,8 @@ pub(super) struct Record {
 pub(super) struct Enumerator {
     pub(super) name: Rc<str>,
     pub(super) value: i128,
+    /// Whether the enumerator was given its value (`= 4`) rather than counting on from the last.
+    pub(super) explicit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,6 +207,9 @@ pub(super) struct Function {
     /// A [`Type::Function`].
     pub(super) ty: TypeId,
     pub(super) param_names: Vec<Option<Rc<str>>>,
+    /// The parameter types as declared, before C adjusts an array or function parameter to a
+    /// pointer: what cinterop maps a parameter from.
+    pub(super) param_types: Vec<TypeId>,
     pub(super) storage: Storage,
     pub(super) inline: bool,
     pub(super) noreturn: bool,
@@ -229,6 +232,38 @@ pub(super) struct Variable {
     pub(super) origin: Origin,
 }
 
+/// What an object-like macro's expansion is, read as a C expression after the whole header.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum MacroValue {
+    /// An integer constant expression, with its C type (a cast's typedef kept).
+    Integer { value: i128, ty: TypeId },
+    /// A floating constant expression, with its C type.
+    Floating { value: f64, ty: TypeId },
+    /// A string literal, or adjacent ones, as UTF-8.
+    String(Rc<str>),
+    /// A well-typed expression that is not a constant, such as one reading a global variable.
+    Expression(TypeId),
+}
+
+/// An object-like macro a header defines, with its value when it has one cinterop reads.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct MacroConstant {
+    pub(super) name: Rc<str>,
+    pub(super) value: MacroValue,
+}
+
+/// One file-scope declaration, as an index into the table that holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Declared {
+    Record(RecordId),
+    Enum(EnumId),
+    Typedef(TypedefId),
+    /// An index into [`Declarations::functions`].
+    Function(usize),
+    /// An index into [`Declarations::variables`].
+    Variable(usize),
+}
+
 /// Everything a translation unit declares at file scope.
 #[derive(Debug, Default)]
 pub(super) struct Declarations {
@@ -239,6 +274,10 @@ pub(super) struct Declarations {
     pub(super) typedefs: Vec<Typedef>,
     pub(super) functions: Vec<Function>,
     pub(super) variables: Vec<Variable>,
+    /// The declarations in the order the source declares them: a record or enum where it is
+    /// defined (or declared without a body, `struct tag;`), every other declaration where it is
+    /// first declared. A record reaches this list before the records its members define.
+    pub(super) order: Vec<Declared>,
 }
 
 impl Declarations {
@@ -348,7 +387,6 @@ impl Declarations {
             Type::Int { rank, signedness } => with(int_spelling(*rank, *signedness).to_string()),
             Type::Float(kind) => with(float_spelling(*kind).to_string()),
             Type::Complex(kind) => with(format!("_Complex {}", float_spelling(*kind))),
-            Type::VaList => with("__builtin_va_list".to_string()),
             Type::Record(record) => {
                 let record = self.record(*record);
                 let keyword = match record.kind {
@@ -416,7 +454,7 @@ impl Declarations {
     }
 }
 
-fn int_spelling(rank: IntRank, signedness: Signedness) -> &'static str {
+pub(super) fn int_spelling(rank: IntRank, signedness: Signedness) -> &'static str {
     match (rank, signedness) {
         (IntRank::Bool, _) => "_Bool",
         (IntRank::Char, Signedness::Plain) => "char",
@@ -435,7 +473,7 @@ fn int_spelling(rank: IntRank, signedness: Signedness) -> &'static str {
     }
 }
 
-fn float_spelling(kind: FloatKind) -> &'static str {
+pub(super) fn float_spelling(kind: FloatKind) -> &'static str {
     match kind {
         FloatKind::Float => "float",
         FloatKind::Double => "double",

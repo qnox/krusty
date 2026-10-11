@@ -81,14 +81,6 @@ impl LayoutEngine {
                 size: 2 * float_size(*kind),
                 align: float_size(*kind),
             },
-            Type::VaList => match self.arch {
-                // `struct __va_list_tag[1]`: two unsigned offsets and two pointers.
-                Arch::X86_64 => Layout { size: 24, align: 8 },
-                // `struct __va_list`: three pointers and two int offsets.
-                Arch::Aarch64 => Layout { size: 32, align: 8 },
-                // A plain `void *`.
-                Arch::Riscv64 => scalar(8),
-            },
             Type::Pointer(_) => scalar(8),
             Type::Array { element, length } => {
                 let Some(length) = length else {

@@ -191,9 +191,11 @@ fn records_keep_bitfields_anonymous_members_and_attributes() {
          struct later;\n\
          struct later *forward (void);\n",
     );
+    // The header's own records; x86-64's `__builtin_va_list` declares `struct __va_list_tag` too.
     let summary: Vec<String> = declarations
         .records
         .iter()
+        .filter(|record| &*record.origin.file == "t.h")
         .map(|record| {
             let fields: Vec<String> = record
                 .fields
@@ -238,10 +240,11 @@ fn records_keep_bitfields_anonymous_members_and_attributes() {
             "later packed=false []",
         ]
     );
-    assert_eq!(
-        declarations.member_path(super::super::model::RecordId(0), "f"),
-        Some(vec![4, 1])
-    );
+    let node = (0..declarations.records.len())
+        .map(|index| super::super::model::RecordId(index as u32))
+        .find(|&id| declarations.record(id).tag.as_deref() == Some("node"))
+        .expect("struct node");
+    assert_eq!(declarations.member_path(node, "f"), Some(vec![4, 1]));
     assert_eq!(
         functions(&declarations),
         ["forward: struct later *(void) ()"]
@@ -295,7 +298,11 @@ fn a_typedef_name_is_a_declarator_after_a_type_specifier() {
         X86_64,
         "typedef int size;\nstruct s { size size; };\nint f (int size, size other);\n",
     );
-    let record = &declarations.records[0];
+    let record = declarations
+        .records
+        .iter()
+        .find(|record| record.tag.as_deref() == Some("s"))
+        .expect("declares `struct s`");
     let field = &record.fields.as_ref().expect("defined")[0];
     assert_eq!(field.name.as_deref(), Some("size"));
     assert!(matches!(declarations.ty(field.ty), Type::Typedef(_)));
@@ -333,4 +340,81 @@ fn errors_name_the_line_and_what_was_wrong() {
     );
     assert_eq!(error("enum { A = 1 / 0 };"), "t.h:1: division by zero");
     assert_eq!(error("int f (int) {"), "t.h:1: unbalanced brackets");
+}
+
+/// Each object-like macro of `source` as `name = value: type`, read after the whole unit.
+fn macro_values(target: NativeTarget, source: &str) -> Vec<String> {
+    use super::super::model::MacroValue;
+    let mut preprocessor = preprocessor_for(target, Vec::new(), Vec::new()).expect("predefines");
+    let tokens = preprocessor.run("t.h", source).expect("preprocesses");
+    let mut macros = Vec::new();
+    for (name, file) in preprocessor.definitions.clone() {
+        let object_like = preprocessor
+            .macros
+            .get(&name)
+            .is_some_and(|definition| definition.params.is_none());
+        if file.is_some() && object_like {
+            let expansion = preprocessor.expand_name(&name).expect("expands");
+            macros.push((name, expansion));
+        }
+    }
+    let (header, constants) =
+        parse_with_macros(&tokens, &macros, target).unwrap_or_else(|error| panic!("{error}"));
+    let declarations = header.declarations;
+    constants
+        .iter()
+        .map(|constant| {
+            let value = match &constant.value {
+                MacroValue::Integer { value, ty } => {
+                    format!("{value}: {}", declarations.spell(*ty))
+                }
+                MacroValue::Floating { value, ty } => {
+                    format!("{value}: {}", declarations.spell(*ty))
+                }
+                MacroValue::String(text) => format!("{text:?}"),
+                MacroValue::Expression(ty) => format!("expression: {}", declarations.spell(*ty)),
+            };
+            format!("{} = {value}", constant.name)
+        })
+        .collect()
+}
+
+#[test]
+fn macros_read_as_typed_c_expressions_after_the_whole_unit() {
+    let source = "typedef unsigned int uint;\n\
+                  extern int counter;\n\
+                  extern const char *names[2];\n\
+                  enum { TWO = 2 };\n\
+                  #define CAST ((uint) 3)\n\
+                  #define LATER NEXT * 2\n\
+                  #define NEXT (TWO + 1)\n\
+                  #define CHARS 'a'\n\
+                  #define NARROW ((char) 300)\n\
+                  #define SIZE sizeof (long)\n\
+                  #define HALF (1.0f / 2)\n\
+                  #define MIXED (2 * 1.5)\n\
+                  #define CHOSE (TWO > 1 ? 1.5 : 2)\n\
+                  #define TEXT \"a\" u8\"b\" \"\\x41\"\n\
+                  #define WIDE L\"w\"\n\
+                  #define READ (counter + 1)\n\
+                  #define FIRST names[0]\n\
+                  #define EMPTY\n\
+                  #define TYPE uint\n";
+    assert_eq!(
+        macro_values(X86_64, source),
+        [
+            "CAST = 3: uint",
+            "LATER = 6: int",
+            "NEXT = 3: int",
+            "CHARS = 97: int",
+            "NARROW = 44: char",
+            "SIZE = 8: unsigned long",
+            "HALF = 0.5: float",
+            "MIXED = 3: double",
+            "CHOSE = 1.5: double",
+            "TEXT = \"abA\"",
+            "READ = expression: int",
+            "FIRST = expression: const char *",
+        ]
+    );
 }

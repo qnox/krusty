@@ -72,8 +72,9 @@ struct OpenFile {
 pub(crate) struct Preprocessor {
     include_dirs: Vec<IncludeDir>,
     pub(crate) macros: HashMap<Rc<str>, Macro>,
-    /// Macro names in definition order (the last definition wins), for a stable constant order.
-    pub(crate) macro_order: Vec<Rc<str>>,
+    /// Every `#define` in order, as the macro's name and the file it is in (`None` for a
+    /// predefined or command-line macro); a later definition of a name replaces an earlier one.
+    pub(crate) definitions: Vec<(Rc<str>, Option<Rc<str>>)>,
     once: HashSet<String>,
     queue: VecDeque<Token>,
     files: Vec<OpenFile>,
@@ -95,7 +96,7 @@ impl Preprocessor {
         Self {
             include_dirs,
             macros: HashMap::new(),
-            macro_order: Vec::new(),
+            definitions: Vec::new(),
             once: HashSet::new(),
             queue: VecDeque::new(),
             files: Vec::new(),
@@ -103,6 +104,11 @@ impl Preprocessor {
             counter: 0,
             included: Vec::new(),
         }
+    }
+
+    /// The directories headers are searched in, in order.
+    pub(crate) fn include_dirs(&self) -> &[IncludeDir] {
+        &self.include_dirs
     }
 
     /// Define the macros a source of `#define` lines defines, as predefined (no file).
@@ -137,6 +143,38 @@ impl Preprocessor {
     /// Preprocess the file at `path` (with `source` as its text) to the tokens the parser reads.
     pub(crate) fn run(&mut self, path: &str, source: &str) -> Result<Vec<Token>, PreprocessError> {
         self.push_file(path, source, None)?;
+        let mut out = Vec::new();
+        while let Some(token) = self.next_expanded()? {
+            out.push(token);
+        }
+        Ok(out)
+    }
+
+    /// What the identifier `name` expands to after the last line that was run, with every macro
+    /// defined then: an object-like macro's expansion, or `name` itself when it is no macro.
+    /// This is how cinterop reads a header's constant macros.
+    pub(crate) fn expand_name(&mut self, name: &str) -> Result<Vec<Token>, PreprocessError> {
+        let location = self
+            .macros
+            .get(name)
+            .and_then(|definition| definition.body.first())
+            .map_or_else(
+                || {
+                    Rc::new(Location {
+                        file: Rc::from("<macro>"),
+                        line: 0,
+                    })
+                },
+                |token| token.location.clone(),
+            );
+        self.queue.push_back(Token {
+            kind: Kind::Identifier,
+            text: Rc::from(name),
+            at_line_start: false,
+            space_before: false,
+            location,
+            hide: Rc::from(Vec::new()),
+        });
         let mut out = Vec::new();
         while let Some(token) = self.next_expanded()? {
             out.push(token);
@@ -383,7 +421,7 @@ impl Preprocessor {
             first.space_before = false;
         }
         let key = name.text.clone();
-        self.macro_order.push(key.clone());
+        self.definitions.push((key.clone(), file.clone()));
         self.macros.insert(
             key,
             Macro {

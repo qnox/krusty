@@ -1,0 +1,7 @@
+headers = layouts.h
+package = layouts
+compilerOpts = -I. -DBIG_DEFINED=1
+excludedFunctions = excluded_one
+linkerOpts = -lbig -L/opt/big
+strictEnums = color_flags
+nonStrictEnums = named_strict

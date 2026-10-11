@@ -35,6 +35,8 @@ enum Suffix {
     Function {
         params: Vec<TypeId>,
         names: Vec<Option<Rc<str>>>,
+        /// Each parameter's type as declared, before adjustment.
+        declared: Vec<TypeId>,
         variadic: bool,
         prototyped: bool,
     },
@@ -52,6 +54,8 @@ pub(super) struct Declarator {
     pub(super) asm_name: Option<Rc<str>>,
     /// The parameter names, when the declarator declares a function.
     pub(super) param_names: Vec<Option<Rc<str>>>,
+    /// The parameter types as declared, before adjustment, when it declares a function.
+    pub(super) param_types: Vec<TypeId>,
 }
 
 impl Parser<'_> {
@@ -63,6 +67,7 @@ impl Parser<'_> {
             attributes: Attributes::default(),
             asm_name: None,
             param_names: Vec::new(),
+            param_types: Vec::new(),
         }
     }
 
@@ -82,8 +87,12 @@ impl Parser<'_> {
         // The derivation applied last is the one closest to the name.
         for level in declarator.levels.iter().rev() {
             if let Some(first) = level.suffixes.first() {
-                if let Suffix::Function { names, .. } = first {
+                if let Suffix::Function {
+                    names, declared, ..
+                } = first
+                {
                     declarator.param_names = names.clone();
+                    declarator.param_types = declared.clone();
                 }
                 break;
             }
@@ -230,10 +239,12 @@ impl Parser<'_> {
         self.next();
         let mut params = Vec::new();
         let mut names = Vec::new();
+        let mut declared = Vec::new();
         if self.eat(")") {
             return Ok(Suffix::Function {
                 params,
                 names,
+                declared,
                 variadic: false,
                 prototyped: false,
             });
@@ -244,6 +255,7 @@ impl Parser<'_> {
             return Ok(Suffix::Function {
                 params,
                 names,
+                declared,
                 variadic: false,
                 prototyped: true,
             });
@@ -260,6 +272,7 @@ impl Parser<'_> {
             let declarator = self.declarator(DeclaratorKind::Parameter)?;
             let ty = self.declared_type(&specifiers, &declarator, &origin)?;
             params.push(self.adjust_parameter(ty));
+            declared.push(ty);
             names.push(declarator.name);
             if self.eat(",") {
                 continue;
@@ -270,6 +283,7 @@ impl Parser<'_> {
         Ok(Suffix::Function {
             params,
             names,
+            declared,
             variadic,
             prototyped: true,
         })

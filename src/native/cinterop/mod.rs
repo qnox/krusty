@@ -8,7 +8,9 @@
 
 mod compiler_headers;
 mod declarations;
+mod def_file;
 mod layout;
 mod lexer;
+mod library;
 mod model;
 mod preprocessor;

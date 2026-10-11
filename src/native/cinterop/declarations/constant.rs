@@ -26,12 +26,16 @@ const UNSIGNED_LONG: IntType = IntType {
 };
 
 impl IntType {
-    fn bits(self) -> u32 {
+    pub(super) const fn new(rank: IntRank, signed: bool) -> Self {
+        Self { rank, signed }
+    }
+
+    pub(super) fn bits(self) -> u32 {
         (self.rank.size() * 8) as u32
     }
 
     /// The integer promotions (C11 §6.3.1.1p2).
-    fn promoted(self) -> Self {
+    pub(super) fn promoted(self) -> Self {
         if self.rank < IntRank::Int {
             INT
         } else {
@@ -40,7 +44,7 @@ impl IntType {
     }
 
     /// The usual arithmetic conversions' common type (C11 §6.3.1.8).
-    fn common(self, other: Self) -> Self {
+    pub(super) fn common(self, other: Self) -> Self {
         let (left, right) = (self.promoted(), other.promoted());
         if left.signed == right.signed {
             return if left.rank >= right.rank { left } else { right };
@@ -64,7 +68,7 @@ impl IntType {
 
     /// `value` converted to this type, wrapping as C's conversions to unsigned types do (and as
     /// GCC and clang define the conversion to a signed type).
-    fn wrap(self, value: i128) -> i128 {
+    pub(super) fn wrap(self, value: i128) -> i128 {
         if self.rank == IntRank::Bool {
             return i128::from(value != 0);
         }
@@ -94,7 +98,7 @@ pub(super) struct Value {
 }
 
 impl Value {
-    fn new(value: i128, ty: IntType) -> Self {
+    pub(super) fn new(value: i128, ty: IntType) -> Self {
         Self {
             value: ty.wrap(value),
             ty,
@@ -142,13 +146,17 @@ impl Value {
         self.value as u64
     }
 
-    fn converted(self, ty: IntType) -> i128 {
+    pub(super) fn ty(self) -> IntType {
+        self.ty
+    }
+
+    pub(super) fn converted(self, ty: IntType) -> i128 {
         ty.wrap(self.value)
     }
 }
 
 /// Binary operators by precedence, lowest first.
-fn precedence(operator: &str) -> Option<u8> {
+pub(super) fn precedence(operator: &str) -> Option<u8> {
     Some(match operator {
         "||" => 0,
         "&&" => 1,
@@ -206,7 +214,7 @@ impl Parser<'_> {
         }
     }
 
-    fn apply(
+    pub(super) fn apply(
         &self,
         operator: &str,
         left: Value,
@@ -325,7 +333,7 @@ impl Parser<'_> {
     }
 
     /// The operand of `sizeof` or `_Alignof`: a parenthesized type name or an expression.
-    fn measured_operand(&mut self) -> Result<TypeId, ParseError> {
+    pub(super) fn measured_operand(&mut self) -> Result<TypeId, ParseError> {
         if self.at("(")
             && self
                 .peek_at(1)
@@ -385,7 +393,7 @@ impl Parser<'_> {
 
     /// An integer constant's value and type (C11 §6.4.4.1p5): the first of its suffix's candidate
     /// types that holds it.
-    fn integer_constant(&self, text: &str) -> Result<Value, ParseError> {
+    pub(super) fn integer_constant(&self, text: &str) -> Result<Value, ParseError> {
         let lower = text.to_ascii_lowercase();
         let hex = lower.starts_with("0x");
         if lower.contains('.') || (!hex && lower.contains('e')) || (hex && lower.contains('p')) {
@@ -427,7 +435,7 @@ impl Parser<'_> {
     }
 
     /// The integer type a cast to `ty` converts to.
-    fn integer_type(&self, ty: TypeId, origin: &Origin) -> Result<IntType, ParseError> {
+    pub(super) fn integer_type(&self, ty: TypeId, origin: &Origin) -> Result<IntType, ParseError> {
         let canonical = self.declarations.canonical(ty);
         Ok(match self.declarations.ty(canonical) {
             Type::Int { rank, signedness } => IntType {
@@ -582,14 +590,7 @@ impl Parser<'_> {
                 }
                 Some(Ordinary::Constant(_)) | None => {
                     let value = self.constant_expression()?;
-                    Ok(self.int_type(
-                        value.ty.rank,
-                        if value.ty.signed {
-                            Signedness::Signed
-                        } else {
-                            Signedness::Unsigned
-                        },
-                    ))
+                    Ok(self.value_type(value))
                 }
                 Some(Ordinary::Typedef(_)) => {
                     Err(self.error(&format!("unexpected type name '{}'", token.text)))
@@ -597,16 +598,26 @@ impl Parser<'_> {
             },
             _ => {
                 let value = self.constant_expression()?;
-                Ok(self.int_type(
-                    value.ty.rank,
-                    if value.ty.signed {
-                        Signedness::Signed
-                    } else {
-                        Signedness::Unsigned
-                    },
-                ))
+                Ok(self.value_type(value))
             }
         }
+    }
+
+    /// The C type of a constant's value.
+    pub(super) fn value_type(&mut self, value: Value) -> TypeId {
+        self.int_type_id(value.ty)
+    }
+
+    /// The C type an arithmetic [`IntType`] is.
+    pub(super) fn int_type_id(&mut self, ty: IntType) -> TypeId {
+        self.int_type(
+            ty.rank,
+            if ty.signed {
+                Signedness::Signed
+            } else {
+                Signedness::Unsigned
+            },
+        )
     }
 }
 

@@ -1,0 +1,4 @@
+headers = types.h
+package = org.example.types
+compilerOpts = -I.
+headerFilter = types.h
