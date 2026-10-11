@@ -549,7 +549,6 @@ callableReference/bound/receiverEvaluatedOnce.kt
 callableReference/bound/simpleFunction.kt
 callableReference/bound/simpleProperty.kt
 callableReference/bound/smartCastForExtensionReceiver.kt
-callableReference/bound/typeAliasObjectBoundReference.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionMethod.kt
 callableReference/callableReferenceOfCompanionProperty.kt

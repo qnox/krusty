@@ -1147,6 +1147,7 @@ impl BodyLowering<'_> {
                 deeply_exhaustive,
             } => {
                 let condition = self.expression(*condition)?;
+                self.ir.mark_early_inline_result_adaptation(condition);
                 let then_branch =
                     self.expression_with_conversion(*then_branch, *then_conversion)?;
                 let else_branch =

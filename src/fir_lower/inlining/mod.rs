@@ -1083,7 +1083,7 @@ impl BodyLowering<'_> {
     /// The reference itself is not a value: the body invokes it. The expressions that build it
     /// are still arguments of the call, so they run in that argument's place and the reference
     /// reads the stored values. A local read has already run.
-    fn stage_spliced_reference_operands(
+    pub(super) fn stage_spliced_reference_operands(
         &mut self,
         reference: ExprId,
         declarations: &mut Vec<ExprId>,

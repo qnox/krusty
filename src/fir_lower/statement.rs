@@ -38,6 +38,9 @@ impl BodyLowering<'_> {
                 let init = initializer
                     .map(|initializer| self.expression_with_conversion(initializer, *conversion))
                     .transpose()?;
+                if let Some(initializer) = init {
+                    self.ir.mark_early_inline_result_adaptation(initializer);
+                }
                 // A shared cell's holder is created uninitialized, as kotlinc's
                 // `SharedVariablesLowering` does for a declaration without an initializer
                 // (`lateinit` included): its `element` keeps the field's default.
