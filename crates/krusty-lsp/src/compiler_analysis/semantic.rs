@@ -670,7 +670,7 @@ impl<'a> SemanticClassifier<'a> {
         // for indexed storage, so keep that parity without hiding the corresponding member-property
         // token. The parser's access-block marker makes this structural rather than name/span based.
         let synthetic_index_inc_dec_statements = file
-            .incdec_access_operands
+            .incdec_accesses
             .keys()
             .filter_map(|&expression| {
                 let Expr::Block { stmts, .. } = file.expr(expression) else {
