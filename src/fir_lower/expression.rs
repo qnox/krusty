@@ -932,15 +932,13 @@ impl BodyLowering<'_> {
                 start,
                 end,
                 negated,
-            } => self.in_range_expression(
+            } => self.in_range_expression(super::ranges::InRangeLowering::new(
                 *operation,
                 comparison.get(),
-                *value,
-                *start,
-                *end,
+                [*value, *start, *end],
                 *negated,
                 origin,
-            )?,
+            ))?,
             FirExprKind::StringTemplate(_) => {
                 unreachable!("a string template folds to a constant or is a concatenation")
             }
