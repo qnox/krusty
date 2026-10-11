@@ -205,6 +205,18 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 }
                 for e in &mut c.enum_entries {
                     e.decl_line = line_at(e.span.lo);
+                    // An entry's body is the `Enum$ENTRY` subclass: its members are declarations
+                    // with lines of their own, exactly like the class's.
+                    for m in &mut e.methods {
+                        m.sig_line = line_at(m.span.lo);
+                        m.decl_line = body_line(&m.body, m.sig_line);
+                        m.body_close_line = body_close(&m.body);
+                        m.body_end_line = body_end(&m.body);
+                    }
+                    for p in &mut e.props {
+                        p.decl_line = line_at(p.span.lo);
+                        p.accessor_lines = accessor_lines(p, line_at, body_end);
+                    }
                 }
                 // A secondary constructor is a declaration of its own, and its lines are its own:
                 // kotlinc anchors the synthetic `$default` overload on the `constructor` keyword,

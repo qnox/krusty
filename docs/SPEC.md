@@ -6685,6 +6685,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body's initializers. An object or local class declared in one of them names that constructor in
   its `EnclosingMethod` (`Level$HIGH.<init>(Ljava/lang/String;I)V`), not the enum's. Test:
   `tests/enum_entry_body_enclosure_e2e.rs`.
+- **An enum entry body's members carry their own declaration lines.** Like a class's members, a
+  method of `ON { ... }` returns from a `Unit` block body on its closing `}` line (a one-line
+  `fun empty() {}` gets that single entry), and an accessor with a body anchors on its own header.
+  Test: `tests/enum_entry_member_lines_e2e.rs`.
 - **A reference to the current enum entry is that entry's instance.** The static field that
   publishes an entry is assigned only after its constructor returns, so code that belongs to the
   entry — a member of the entry class, or a class nested in it — reads the instance (`this`, or
