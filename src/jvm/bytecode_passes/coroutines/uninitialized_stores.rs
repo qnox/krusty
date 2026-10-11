@@ -15,11 +15,13 @@ use super::super::opcodes::*;
 use super::CoroutineError;
 use crate::jvm::method_node::{Insn, Node};
 
-/// A basic value, or the not yet constructed object a `new` at this node index pushed.
+/// A basic value, or the not yet constructed object a `new` at this node index pushed. The object
+/// keeps the value it becomes once constructed, whose descriptor is interned, so copying a frame
+/// that holds one copies no string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NewValue {
     Basic(BasicValue),
-    Uninitialized { new: usize, class: String },
+    Uninitialized { new: usize, object: BasicValue },
 }
 
 impl Value for NewValue {
@@ -35,7 +37,7 @@ impl NewValue {
     fn basic(&self) -> BasicValue {
         match self {
             NewValue::Basic(value) => value.clone(),
-            NewValue::Uninitialized { class, .. } => BasicValue::of_class(class),
+            NewValue::Uninitialized { object, .. } => object.clone(),
         }
     }
 }
@@ -63,7 +65,7 @@ impl Interpreter for NewValueInterpreter {
             self.usages.entry(at.index).or_default();
             return Ok(NewValue::Uninitialized {
                 new: at.index,
-                class: class.clone(),
+                object: BasicValue::of_class(class),
             });
         }
         Ok(NewValue::Basic(BasicInterpreter.new_operation(at)?))
@@ -173,13 +175,13 @@ fn constructor_arguments(insn: &Insn) -> Option<usize> {
 }
 
 /// `getUninitializedValueForConstructorCall`: the object a constructor call initializes, when it
-/// came from a `new` in this method.
+/// came from a `new` in this method: the `new`'s index and the value the object becomes.
 fn uninitialized_receiver(
     frame: &Frame<NewValue>,
     insn: &Insn,
     special_method: bool,
     index: usize,
-) -> Result<Option<(usize, String)>, AnalyzerError> {
+) -> Result<Option<(usize, BasicValue)>, AnalyzerError> {
     let Some(arguments) = constructor_arguments(insn) else {
         return Ok(None);
     };
@@ -193,7 +195,7 @@ fn uninitialized_receiver(
             .and_then(|at| frame.stack.get(at))
     };
     match peek(arguments + 1) {
-        Some(NewValue::Uninitialized { new, class }) => {
+        Some(NewValue::Uninitialized { new, object }) => {
             if !matches!(peek(arguments), Some(NewValue::Uninitialized { .. })) {
                 return Err(AnalyzerError {
                     index,
@@ -201,7 +203,7 @@ fn uninitialized_receiver(
                         .to_string(),
                 });
             }
-            Ok(Some((*new, class.clone())))
+            Ok(Some((*new, object.clone())))
         }
         _ if special_method => Ok(None),
         _ => Err(AnalyzerError {
@@ -225,11 +227,9 @@ impl Executor<NewValueInterpreter> for NewValueFrames {
     ) -> Result<(), AnalyzerError> {
         let initializes = uninitialized_receiver(frame, at.insn, self.special_method, at.index)?;
         frame.execute(at, interpreter)?;
-        if let Some((_, class)) = initializes {
+        if let Some((_, object)) = initializes {
             frame.stack.pop();
-            frame
-                .stack
-                .push(NewValue::Basic(BasicValue::of_class(&class)));
+            frame.stack.push(NewValue::Basic(object));
         }
         Ok(())
     }
@@ -291,7 +291,7 @@ pub(crate) fn process_uninitialized_stores(
         let Node::Insn(insn) = &snapshot.nodes[index] else {
             continue;
         };
-        let Some((new, class)) = uninitialized_receiver(frame, insn, special_method, index)
+        let Some((new, _)) = uninitialized_receiver(frame, insn, special_method, index)
             .map_err(CoroutineError::Analysis)?
         else {
             continue;
@@ -331,13 +331,8 @@ pub(crate) fn process_uninitialized_stores(
         method.method.max_locals = method.method.max_locals.max(next_slot);
         method.insns.insert_before(
             call,
-            vec![
-                Node::Insn(Insn::Type {
-                    op: NEW,
-                    class: class.clone(),
-                }),
-                Node::Insn(Insn::Op(DUP)),
-            ],
+            // The `new` itself, moved down to its constructor call.
+            vec![snapshot.nodes[new].clone(), Node::Insn(Insn::Op(DUP))],
         );
         for descriptor in stored.iter().rev() {
             next_slot -= descriptors::size(descriptor) as u16;
