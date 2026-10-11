@@ -19801,7 +19801,7 @@ impl<'a> Checker<'a> {
                             // parameter's own template. An unbound `ROOT` erases to its bound,
                             // which types the lambda's parameter as `Any` and fails every member
                             // read in the body.
-                            let shaped = constructor_expectations
+                            let (shaped, postponed_formals) = constructor_expectations
                                 .as_ref()
                                 .zip(bare_classifier)
                                 .and_then(|(plan, internal)| {
@@ -19823,27 +19823,39 @@ impl<'a> Checker<'a> {
                                     // variable's erased bound, which the typed-lambda path then
                                     // imposed on the body — so `val n = N { it + "K" }` inferred
                                     // `N<Any>` and every later use of the real type was rejected.
-                                    Some(crate::types::ty_subst_keep_unbound(shape, &binds))
+                                    let postponed = plan
+                                        .type_params
+                                        .iter()
+                                        .filter(|formal| !binds.contains_key(*formal))
+                                        .cloned()
+                                        .collect();
+                                    Some((
+                                        crate::types::ty_subst_keep_unbound(shape, &binds),
+                                        postponed,
+                                    ))
                                 })
-                                .unwrap_or(declared);
+                                .unwrap_or_else(|| {
+                                    (
+                                        declared,
+                                        constructor_expectations
+                                            .as_ref()
+                                            .map(|plan| plan.type_params.clone())
+                                            .unwrap_or_default(),
+                                    )
+                                });
+                            let (shaped, collect_postponed) =
+                                PostponedCallConstraints::enter_for_type(
+                                    &mut self.postponed_call_constraints,
+                                    self.compilation_id,
+                                    self.file_index,
+                                    call,
+                                    &postponed_formals,
+                                    shaped,
+                                );
                             if let Ty::Fun(signature) = shaped.non_null() {
-                                let postponed_formals = constructor_expectations
-                                    .as_ref()
-                                    .map(|plan| plan.type_params.as_slice())
-                                    .unwrap_or_default();
-                                let collect_postponed =
-                                    ty_mentions_param(shaped, postponed_formals);
-                                if collect_postponed {
-                                    self.postponed_call_constraints.push(
-                                        PostponedCallConstraints::for_formals(postponed_formals),
-                                    );
-                                }
-                                // The expected constructor result may have replaced the class's
-                                // inference variable with a type parameter owned by the enclosing
-                                // lexical declaration. That variable is fixed at this call site, so
-                                // route through the common argument seam: it distinguishes a truly
-                                // open constructor variable from a lexical one and propagates the
-                                // latter through nested lambda results.
+                                // Route through the common seam after call-site instantiation: it
+                                // distinguishes the constructor's open variable from an enclosing
+                                // declaration's fixed parameter in nested lambda results.
                                 let checked = self.check_argument_expected(
                                     scope,
                                     a,
@@ -19853,7 +19865,7 @@ impl<'a> Checker<'a> {
                                         .map(str::to_string)
                                         .as_deref(),
                                 );
-                                if collect_postponed {
+                                let checked = if collect_postponed {
                                     let inferred = self
                                         .postponed_call_constraints
                                         .pop()
@@ -19864,8 +19876,15 @@ impl<'a> Checker<'a> {
                                         inferred.lower,
                                         inferred.upper,
                                     );
-                                    postponed_constraints.merge(&self.fed_source(), inferred);
-                                }
+                                    self.merge_postponed_lambda(
+                                        a,
+                                        checked,
+                                        &mut postponed_constraints,
+                                        inferred,
+                                    )
+                                } else {
+                                    checked
+                                };
                                 return checked;
                             }
                         }
@@ -20159,14 +20178,33 @@ impl<'a> Checker<'a> {
                                             matches!(expected.non_null(), Ty::Fun(_))
                                         })
                                 });
-                            let postponed_formals = toplevel_lambda_formals.as_slice();
-                            let collect_postponed = expected_type.is_some_and(|expected| {
-                                ty_mentions_param(expected, postponed_formals)
-                            });
-                            if collect_postponed {
-                                self.postponed_call_constraints
-                                    .push(PostponedCallConstraints::for_formals(postponed_formals));
-                            }
+                            // Shapes above already substitute every binding this call fixed. Only
+                            // the still-open declaration variables belong to the postponed frame;
+                            // freshening a formal already replaced by an enclosing type parameter
+                            // turns that fixed caller identity back into a callee-owned variable.
+                            let postponed_formals = toplevel_lambda_formals
+                                .iter()
+                                .filter(|formal| !known_generic_bindings.contains_key(*formal))
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let (
+                                selected_params,
+                                expected_type,
+                                fixed_expected_type,
+                                recv_i,
+                                collect_postponed,
+                            ) = PostponedCallConstraints::enter_lambda(
+                                &mut self.postponed_call_constraints,
+                                self.compilation_id,
+                                self.file_index,
+                                call,
+                                &postponed_formals,
+                                selected_params,
+                                expected_type,
+                                toplevel_lambda_fixed_expected.as_deref(),
+                                i,
+                                recv_i,
+                            );
                             self.argument_lambda_inlining.insert(
                                 a,
                                 (toplevel_inline || toplevel_shape_inline) && !boxes_captures,
@@ -20175,13 +20213,7 @@ impl<'a> Checker<'a> {
                                     toplevel_inline && !boxes_captures,
                                     |c| {
                                         if let Some(Ty::Fun(signature)) = expected_type {
-                                            if toplevel_lambda_fixed_expected
-                                                .as_ref()
-                                                .and_then(|types| types.get(i))
-                                                .copied()
-                                                .flatten()
-                                                == expected_type
-                                            {
+                                            if fixed_expected_type == expected_type {
                                                 return c.check_lambda_with_fixed_function_type_and_params_labeled(
                                                     scope,
                                                     a,
@@ -20245,7 +20277,7 @@ impl<'a> Checker<'a> {
                                 checked,
                                 &mut known_generic_bindings,
                             );
-                            if collect_postponed {
+                            let checked = if collect_postponed {
                                 let inferred = self
                                     .postponed_call_constraints
                                     .pop()
@@ -20256,8 +20288,15 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(&self.fed_source(), inferred);
-                            }
+                                self.merge_postponed_lambda(
+                                    a,
+                                    checked,
+                                    &mut postponed_constraints,
+                                    inferred,
+                                )
+                            } else {
+                                checked
+                            };
                             return checked;
                         }
                     }
@@ -20465,10 +20504,26 @@ impl<'a> Checker<'a> {
                             let postponed_formals = sig
                                 .generic_sig
                                 .as_ref()
-                                .map(|generic| generic.formals.as_slice())
+                                .map(|generic| {
+                                    generic
+                                        .formals
+                                        .iter()
+                                        .filter(|formal| {
+                                            !known_generic_bindings.contains_key(*formal)
+                                        })
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                })
                                 .unwrap_or_default();
-                            let collect_postponed =
-                                ty_mentions_param(Ty::Fun(expected_function), postponed_formals);
+                            let (expected_function, collect_postponed) =
+                                PostponedCallConstraints::enter_for_function(
+                                    &mut self.postponed_call_constraints,
+                                    self.compilation_id,
+                                    self.file_index,
+                                    call,
+                                    &postponed_formals,
+                                    expected_function,
+                                );
                             let open_callee_result =
                                 sig.generic_sig.as_ref().is_some_and(|generic| {
                                     let declared =
@@ -20489,16 +20544,10 @@ impl<'a> Checker<'a> {
                                         })
                                     })
                                 });
-                            // A caller declaration's visible `<T>` is universally quantified
-                            // and therefore a fixed expectation. A symbolic result introduced
-                            // by a surrounding generic call (`getResult(...): B1`) is still an
-                            // inference variable and must remain postponed with that call.
+                            // A caller's `<T>` is fixed; a surrounding generic call's symbolic
+                            // result (`getResult(...): B1`) remains postponed with that call.
                             let fixed_expected_return = !open_callee_result
                                 && Self::type_is_lexically_fixed(scope, expected_function.ret);
-                            if collect_postponed {
-                                self.postponed_call_constraints
-                                    .push(PostponedCallConstraints::for_formals(postponed_formals));
-                            }
                             let has_receiver = sig.lambda_recv.get(pi).copied().unwrap_or(false);
                             let checked =
                                 self.with_argument_lambda(a, sig.inlines_lambda_for(pi), |c| {
@@ -20521,7 +20570,7 @@ impl<'a> Checker<'a> {
                                         call_fn_name.as_deref(),
                                     )
                                 });
-                            if collect_postponed {
+                            let checked = if collect_postponed {
                                 let inferred = self
                                     .postponed_call_constraints
                                     .pop()
@@ -20532,8 +20581,15 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(&self.fed_source(), inferred);
-                            }
+                                self.merge_postponed_lambda(
+                                    a,
+                                    checked,
+                                    &mut postponed_constraints,
+                                    inferred,
+                                )
+                            } else {
+                                checked
+                            };
                             // `expected_function` was specialized with these bindings before the
                             // lambda was checked. The checked lambda therefore already carries the
                             // selected parameter shape; substituting it again confuses an outer
@@ -42374,6 +42430,34 @@ impl<'a> Checker<'a> {
             "a selected callable's declared and selected parameters line up"
         );
         let declared_params = shape.declared_params(&declared_signature.params);
+        // Selection may admit a declaration bound that still contains a variable owned by an
+        // enclosing postponed call. Admission only keeps this candidate in the overload set; the
+        // selected-call boundary must now publish the same relation into that owner's frame. For
+        // example, `C = MutableSet<E(call)>` under `C : MutableCollection<in String>` contributes
+        // `String <: E(call)` to the surrounding builder inference problem.
+        if let Some(signature) = selected.generic_sig.as_ref() {
+            for (index, formal) in signature.formals.iter().enumerate() {
+                let Some(actual) = selected_bindings.get(formal).copied() else {
+                    continue;
+                };
+                for &bound in signature.formal_bounds.get(index).into_iter().flatten() {
+                    let expected =
+                        crate::symbol_resolver::ty_subst_keep_unbound(bound, &selected_bindings);
+                    if !self.receiver_is_assignable(actual, expected)
+                        && !self.nominal_function_bound_admits(actual, expected)
+                        && (self.postponed_call_mentions(actual)
+                            || self.postponed_call_mentions(expected))
+                    {
+                        self.expect_assignable(
+                            expected,
+                            actual,
+                            self.call_callee_name_span(call),
+                            "type argument",
+                        );
+                    }
+                }
+            }
+        }
         // Snapshot postponed producer ownership before selected-argument commitment turns those
         // calls into proper concrete values. Selection has already consumed their declaration
         // signatures; commitment finalizes the nested call and must not reopen the outer winner's
@@ -55187,40 +55271,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn postponed_call_mentions(&self, ty: Ty) -> bool {
-        self.postponed_call_constraints
-            .iter()
-            .any(|constraints| constraints.mentions_formal(ty))
-    }
-
-    /// Defer an unresolved member on a still-symbolic postponed lambda input. This is not
-    /// diagnostic suppression: the call solution rechecks the expression with its concrete input,
-    /// and an unsolved or still-invalid expression is reported at the commit point below.
-    fn defer_postponed_member_error(
-        &mut self,
-        receiver: Ty,
-        expression: Option<ExprId>,
-        span: Span,
-        name: &str,
-    ) -> bool {
-        let Some(expression) = expression else {
-            return false;
-        };
-        let Some(frame) = self
-            .postponed_call_constraints
-            .iter_mut()
-            .rev()
-            .find(|constraints| constraints.mentions_formal(receiver))
-        else {
-            return false;
-        };
-        let diagnostic = (expression, span, name.to_string());
-        if !frame.deferred_member_errors.contains(&diagnostic) {
-            frame.deferred_member_errors.push(diagnostic);
-        }
-        true
-    }
-
     /// Prove a nominal value against one function-type bound from its declared `invoke` overloads.
     /// A classifier can implement several different function shapes, while its compact
     /// `callable_signature` intentionally exposes at most one unambiguous shape. Generic-bound
@@ -55281,29 +55331,6 @@ impl<'a> Checker<'a> {
                         .copied()
                         .any(|constituent| self.receiver_is_assignable(constituent, bound))
                 })
-    }
-
-    fn apply_postponed_call_bindings(&self, ty: Ty) -> Ty {
-        self.postponed_call_constraints
-            .iter()
-            .rev()
-            .fold(ty, |ty, constraints| {
-                crate::symbol_resolver::ty_subst_keep_unbound(ty, &constraints.lower)
-            })
-    }
-
-    /// Whether every symbolic slot in `ty` belongs to the surrounding declaration rather than to
-    /// an inference problem currently being solved. A recursive generic call can legitimately
-    /// resolve its callee-owned `T` to the caller's lexical `T`; those identities are equal because
-    /// both name the same declaration, but the latter is universally quantified and therefore
-    /// fixed at this call site.
-    fn type_is_lexically_fixed(scope: &CheckerScope<'_>, ty: Ty) -> bool {
-        let lexical_bindings = scope
-            .lexical_tparam_identities()
-            .into_iter()
-            .map(|formal| (formal, Ty::obj("kotlin/Any")))
-            .collect::<crate::symbol_resolver::GSigBinds>();
-        !crate::symbol_resolver::ty_subst_keep_unbound(ty, &lexical_bindings).mentions_ty_param()
     }
 
     fn check_lambda_with_sam_signature_labeled(

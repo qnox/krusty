@@ -2962,6 +2962,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   qualified call kotlinc emits `checkcast Shape` after each discarded `put` result (the solved
   `V?`), krusty does not; the test compares diagnostics and the run, not the facade's code. Test:
   `tests/builder_sibling_lower_bounds_e2e.rs`.
+- **A builder variable related to itself gains no constraint.** kotlinc accepts a repository-owned
+  `build { x?.let { yield(1) } }.same()` and an equivalent call as an unannotated initializer: PCLA
+  fixes the builder's `T` to `Int`. The nested lambda's result is `yield`'s `T?`; committing the
+  lambda therefore relates `() -> T?` to the identical type. Subtyping answers `T? <: T?` without
+  recording a constraint. krusty's postponed-call frame instead recorded `T & Any` as a lower bound
+  of `T`, which absorbed the `Int` evidence and left `Buildee<T>` in receiver position. A frame now
+  drops a bound that is its own variable in an always-true position (`T` or `T & Any` below `T`,
+  `T` or `T?` above it). Every postponed call expression owns distinct variables, including nested
+  calls to the same generic builder; otherwise the outer call can specialize the inner receiver
+  before its lambda contributes independent evidence. A recursive call instead
+  receives a fresh call-owned variable, so the enclosing declaration's fixed `T` remains distinct
+  evidence and the solution is translated back at the call boundary. When an inner selected call's
+  declared bound mentions that variable (`C = MutableSet<E(call)>` under
+  `C : MutableCollection<in String>`), selection may provisionally admit the bound, but the selected
+  call must publish `String <: E(call)` into the owning postponed frame before that frame is solved.
+  Tests: `tests/postponed_bound_inference_e2e.rs`,
+  `class_lambda_e2e::builder_inferred_class_lambda_metadata_matches_kotlinc`,
+  `tests/builder_nested_lambda_result_e2e.rs`,
+  `nested_lambda_builder_result_keeps_value_evidence_in_receiver_position`
+  (`src/fir/body_check/builder_inference_tests.rs`).
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
