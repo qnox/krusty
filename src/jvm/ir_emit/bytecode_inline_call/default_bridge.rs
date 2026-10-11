@@ -45,10 +45,7 @@ impl Emitter<'_> {
         if masks.is_empty() {
             return Err("a default call passes no mask");
         }
-        let start = physical[..suffix]
-            .iter()
-            .map(|&ty| slot_words(ty))
-            .sum();
+        let start = physical[..suffix].iter().map(|&ty| slot_words(ty)).sum();
         Ok(Some(DefaultMasks { start, masks }))
     }
 
