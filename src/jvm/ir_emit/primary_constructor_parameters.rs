@@ -4,6 +4,7 @@
 //! field but is annotated like a property-backed one.
 
 use super::*;
+use crate::jvm::declared_type_nullability::declared_reference_nullability;
 
 /// The backing field each physical constructor parameter stores into, `None` for a plain parameter.
 /// A synthesized class (no `ctor_args`) stores every parameter into its leading fields.

@@ -6,6 +6,7 @@ use super::{
     slot_words, type_descriptor, ClassWriter, CodeBuilder, EmitEnv, Emitter,
 };
 use crate::ir::{IrClass, IrConstructorTarget, IrCtorParameterProvenance, IrFile, IrSecondaryCtor};
+use crate::jvm::declared_type_nullability::declared_annotation;
 use crate::jvm::method_parameters::OwnerConstructorPrefix;
 use crate::jvm::private_static_access::StaticOwner;
 use crate::types::Ty;
@@ -104,7 +105,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             sc.named_params
                 .iter()
                 .zip(&sc_source_tys)
-                .map(|((_, semantic), physical)| parameter_nullability(*semantic, *physical))
+                .map(|((_, semantic), physical)| declared_annotation(*semantic, *physical))
                 .collect::<Vec<_>>()
         };
         let nullability_types = nullability.iter().flatten().copied().collect::<Vec<_>>();
@@ -644,20 +645,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 cw,
             );
         }
-    }
-}
-
-/// kotlinc's nullability annotation on a declared constructor parameter: none on a primitive or on
-/// a type parameter whose bound admits null, `@Nullable` on a nullable reference, else `@NotNull`.
-fn parameter_nullability(semantic: Ty, physical: Ty) -> Option<&'static str> {
-    let descriptor = type_descriptor(physical);
-    if !(descriptor.starts_with('L') || descriptor.starts_with('[')) {
-        return None;
-    }
-    match semantic {
-        Ty::TyParam(_, bound) if bound.is_nullable() => None,
-        _ if semantic.is_nullable() => Some("Lorg/jetbrains/annotations/Nullable;"),
-        _ => Some("Lorg/jetbrains/annotations/NotNull;"),
     }
 }
 

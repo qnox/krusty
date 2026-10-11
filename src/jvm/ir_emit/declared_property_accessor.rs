@@ -1,6 +1,7 @@
 //! A declared property's synthesized accessors: its default getter and setter.
 
 use super::*;
+use crate::jvm::declared_type_nullability::declared_reference_nullability;
 
 /// The class whose property accessors are emitted, with what their bodies and signatures need.
 pub(super) struct AccessorOwner<'a> {

@@ -68,8 +68,7 @@ mod default_impls;
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
-    declared_reference_nullability, field_nullability_kind, is_nonnull_reference_field,
-    nullability_annotation,
+    field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
 };
 mod discarding;
 use discarding::discard;
@@ -3127,9 +3126,8 @@ fn emit_class(
         c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
     if early_value_nullability {
         attach_synth_nullability(ir, c, env.run, &mut cw);
-        // The underlying field is visited with those annotations, so a generic underlying's field
-        // `Signature` (`TT;`) interns before `@JvmInline` too.
-        cw.realize_late_fields();
+        // `set_class_annotations` visits the deferred underlying field first, so a generic
+        // underlying's `Signature` (`TT;`) interns before `@JvmInline` too.
         cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     }
     // Debug tables + nullability annotations follow a successfully computed `@Metadata` shape.

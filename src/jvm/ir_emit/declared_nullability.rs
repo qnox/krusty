@@ -1,7 +1,7 @@
 //! kotlinc's synthesized `@NotNull`/`@Nullable` on a declared function's result and parameters.
 //!
 //! A reference result or parameter is annotated with its declared nullability, classified by
-//! [`declared_reference_nullability`]. A value-class member's static replacement leaves its carrier
+//! `declared_type_nullability`. A value-class member's static replacement leaves its carrier
 //! unannotated, and so does every position whose type is a bare type parameter with a nullable bound.
 //! A value class's `constructor-impl` declares the class's own constructor parameters and returns the
 //! class type, so its result is always `@NotNull` whatever the carrier. The value-class interface entry, which stands in
@@ -9,8 +9,8 @@
 //! function's result is its CPS `Object`, always `@Nullable`.
 
 use super::body_has_reified_markers;
-use super::field_nullability::{declared_reference_nullability, nullability_annotation};
 use crate::ir::IrFile;
+use crate::jvm::declared_type_nullability::{declared_annotation, is_unannotated_type_parameter};
 use crate::types::Ty;
 
 /// The nullability annotation type descriptors of one function, in physical parameter order.
@@ -21,20 +21,13 @@ pub(super) struct DeclaredNullability {
 
 pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability {
     let f = &ir.functions[fid as usize];
-    let ann_of = |physical: Ty, semantic: Ty| -> Option<&'static str> {
-        let d = crate::jvm::names::type_descriptor(physical);
-        if !(d.starts_with('L') || d.starts_with('[')) {
-            return None;
-        }
-        nullability_annotation(declared_reference_nullability(semantic))
-    };
+    let ann_of = |physical: Ty, semantic: Ty| declared_annotation(semantic, physical);
     // A bare type parameter whose upper-bound chain admits null has no fixed nullability
     // annotation. A non-null bound (`T : Any`) or `T & Any` is different: kotlinc publishes
     // `@NotNull` on that occurrence.
     let gsig = ir.signatures.get(&fid);
     let member_sem = ir.member_semantic_sigs.get(&fid);
-    let unannotated_type_parameter =
-        |ty: Ty| matches!(ty, Ty::TyParam(..)) && declared_reference_nullability(ty) == 0;
+    let unannotated_type_parameter = is_unannotated_type_parameter;
     let value_class_declaration = ir.vc_declared_sigs.get(&fid);
     // A synthesized value-class `constructor-impl` has already been rewritten to its carrier in
     // `f.params`, but its recorded representation signature still owns the source parameters. A

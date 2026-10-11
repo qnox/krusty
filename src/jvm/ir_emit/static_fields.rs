@@ -717,8 +717,7 @@ pub(super) fn emit_enum_static_fields(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(signature_formatter, &s.ty, None);
-        let ann =
-            nullability_annotation(field_nullability_kind(s.ty)).filter(|_| !s.is_lateinit);
+        let ann = nullability_annotation(field_nullability_kind(s.ty)).filter(|_| !s.is_lateinit);
         // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
         let constant = (s.init)
             .filter(|_| s.is_const && !s.is_var && !ir.is_jvm_companion_hoisted_static(index))
