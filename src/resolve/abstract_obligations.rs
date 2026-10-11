@@ -73,7 +73,7 @@ impl Checker<'_> {
             .map(|name| {
                 (
                     name.clone(),
-                    crate::symbol_resolver::members_in_hierarchy(&source, root, name),
+                    crate::symbol_resolver::member_declarations_in_hierarchy(&source, root, name),
                 )
             })
             .collect::<Vec<_>>();

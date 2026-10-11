@@ -38,8 +38,13 @@ pub(crate) fn override_parameter_types_match(
             .zip(implementation.iter().copied())
             .all(|(inherited, implementation)| {
                 let inherited = crate::types::ty_canonicalize_params(inherited, inherited_formals);
-                let implementation =
-                    crate::types::ty_canonicalize_params(implementation, implementation_formals);
+                // kotlinc substitutes the implementation's own formals by the inherited ones. A
+                // declaration nested in the inherited function's body can name that function's
+                // formal itself, which then occupies the inherited slot.
+                let implementation = crate::types::ty_canonicalize_params(
+                    crate::types::ty_canonicalize_params(implementation, implementation_formals),
+                    inherited_formals,
+                );
                 inherited == implementation
                     || resolution_subtype(source, inherited, implementation)
                         && resolution_subtype(source, implementation, inherited)
@@ -338,7 +343,9 @@ pub(crate) fn specialize_member_function(
     }
 }
 
-pub(crate) fn declared_member_callables(
+/// All exact declarations in one classifier slot, including HIDDEN-deprecated callables used by
+/// override matching. This is a declaration-model query, not a call-candidate query.
+pub(crate) fn declared_member_declarations(
     source: &dyn SymbolSource,
     receiver: Ty,
     name: &str,
@@ -350,6 +357,24 @@ pub(crate) fn declared_member_callables(
         return Callables::None;
     };
     declared_callables(source, &classifier, receiver, name)
+}
+
+/// Call-visible declarations in one classifier slot. HIDDEN declarations remain in the common
+/// model for override edges but never enter overload selection.
+pub(crate) fn declared_member_callables(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    name: &str,
+) -> Callables {
+    let (mut functions, mut properties) =
+        declared_member_declarations(source, receiver, name).into_parts();
+    functions
+        .overloads
+        .retain(|function| !function.flags.deprecated_hidden);
+    properties
+        .overloads
+        .retain(|property| !property.deprecated_hidden);
+    Callables::from_parts(functions, properties)
 }
 
 /// Whether the applied receiver hierarchy declares `name` only as a hidden-deprecated callable.
@@ -403,6 +428,31 @@ pub(crate) fn members_in_hierarchy(
     receiver: Ty,
     name: &str,
 ) -> Callables {
+    members_in_hierarchy_for(source, receiver, name, HierarchyMemberView::CallCandidates)
+}
+
+/// All declarations in an applied receiver hierarchy, including HIDDEN-deprecated callables.
+/// Override validation consumes declaration semantics rather than the call-candidate view.
+pub(crate) fn member_declarations_in_hierarchy(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    name: &str,
+) -> Callables {
+    members_in_hierarchy_for(source, receiver, name, HierarchyMemberView::Declarations)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HierarchyMemberView {
+    CallCandidates,
+    Declarations,
+}
+
+fn members_in_hierarchy_for(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    name: &str,
+    view: HierarchyMemberView,
+) -> Callables {
     // A function type carries its callable shape directly in `FnSig`; it is not named by deriving a
     // `FunctionN` classifier from the parameter count. For ordinary member lookup its declared
     // classifier is the arity-independent `Function<R>`, whose hierarchy supplies `Any` members.
@@ -438,6 +488,14 @@ pub(crate) fn members_in_hierarchy(
         };
         let (mut current_functions, mut current_properties) =
             declared_callables(source, &classifier, current, name).into_parts();
+        if view == HierarchyMemberView::CallCandidates {
+            current_functions
+                .overloads
+                .retain(|function| !function.flags.deprecated_hidden);
+            current_properties
+                .overloads
+                .retain(|property| !property.deprecated_hidden);
+        }
         if depth > 0 {
             // Private declarations belong only to their declaring classifier. They are not an
             // inaccessible inherited candidate: omitting them lets the scope tower continue to a

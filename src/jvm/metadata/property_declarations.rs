@@ -187,11 +187,21 @@ pub(super) fn decode_properties(
         };
         let ParsedJvmPropertySignature {
             field: field_signature,
+            synthetic_method: synthetic_method_signature,
             getter: getter_signature,
             setter: setter_signature,
         } = sig;
         let setter_parameter_name = setter_value_parameter
             .and_then(|parameter| resolve_string(records, d2, parameter.name_id as usize));
+        let annotation_method = synthetic_method_signature.and_then(|signature| {
+            let name = signature
+                .name_id
+                .and_then(|id| resolve_string(records, d2, id as usize))?;
+            let desc = signature
+                .desc_id
+                .and_then(|id| resolve_string(records, d2, id as usize))?;
+            Some(MetaJvmMethodSig { name, desc })
+        });
         let (flags, is_var_bit, is_const_bit) = modern_flags.map_or_else(
             || {
                 legacy_flags.map_or(
@@ -366,6 +376,8 @@ pub(super) fn decode_properties(
             setter,
             field,
             setter_parameter_name,
+            annotation_method,
+            deprecated_hidden: false,
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
             return_value_status: modern_flags.map_or_else(Default::default, |flags| {
                 crate::types::ReturnValueStatus::from_metadata(
@@ -381,6 +393,7 @@ pub(super) fn decode_properties(
                 declared_read_stability(flags, getter_flags, has_context_parameters)
             },
             is_abstract: (flags >> 4) & 0x3 == 2,
+            is_final: (flags >> 4) & 0x3 == 0,
             is_var,
             is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
             receiver_class,

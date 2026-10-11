@@ -22,6 +22,14 @@ pub(super) struct LocalMethodDependency {
     this_extension_receiver: Option<Span>,
 }
 
+/// Result of joining an `override` method to its own declaration for override matching.
+pub(super) enum OverrideImplementation {
+    Bound(crate::libraries::FunctionInfo),
+    Absent,
+    /// This phase cannot bind the parser method to a stable declaration.
+    Unbound,
+}
+
 pub(super) enum LocalMethodDemand {
     NotScheduled,
     Complete(Option<Ty>),
@@ -279,6 +287,75 @@ impl Checker<'_> {
             .collect()
     }
 
+    /// The declaration a class method overriding a supertype member is matched as. Pass 2 binds
+    /// the parser method to its stable declaration and reads that exact declaration: from the
+    /// provider (HIDDEN members included) or the finalized index when it has a signature, and
+    /// otherwise from its own header, because a body-local method whose result is inferred on
+    /// this rung has none yet. Without a resolved index the parser coordinate is the join.
+    pub(super) fn override_implementation(
+        &mut self,
+        class_scope: &CheckerScope<'_>,
+        class: DeclId,
+        method: &FunDecl,
+        receiver: Ty,
+        declaration: Option<crate::fir::DeclarationId>,
+        source_member: crate::libraries::SourceMember,
+    ) -> OverrideImplementation {
+        let declared = crate::symbol_resolver::declared_member_declarations(
+            &self.fed_source(),
+            receiver,
+            &method.name,
+        )
+        .into_parts()
+        .0
+        .overloads;
+        if self.resolved_index.is_none() {
+            if !declared.is_empty()
+                && declared
+                    .iter()
+                    .all(|candidate| candidate.source_member.is_none())
+            {
+                return OverrideImplementation::Unbound;
+            }
+            return declared
+                .into_iter()
+                .find(|candidate| candidate.source_member == Some(source_member))
+                .map_or(
+                    OverrideImplementation::Absent,
+                    OverrideImplementation::Bound,
+                );
+        }
+        // A visit whose active binding does not own this parser method cannot bind it; the
+        // Pass-2 visit of the declaring unit owns that binding and this diagnostic.
+        let Some(declaration) = declaration else {
+            return OverrideImplementation::Unbound;
+        };
+        if let Some(found) = declared
+            .into_iter()
+            .find(|candidate| candidate.stable_declaration == Some(declaration))
+        {
+            return OverrideImplementation::Bound(found);
+        }
+        let header = self.body_local_method_candidate(
+            class_scope,
+            class,
+            method,
+            source_member,
+            declaration,
+        );
+        if let Some(finalized) = header.as_ref().and_then(|(owner, _)| {
+            let owner_is_interface =
+                matches!(self.file.decl(class), Decl::Class(class) if class.is_interface());
+            self.module
+                .finalized_function(declaration, *owner, owner_is_interface)
+        }) {
+            return OverrideImplementation::Bound(finalized);
+        }
+        header.map_or(OverrideImplementation::Absent, |(_, candidate)| {
+            OverrideImplementation::Bound(candidate)
+        })
+    }
+
     fn body_local_declared_member_candidates_at(
         &self,
         receiver: Ty,
@@ -432,12 +509,49 @@ impl Checker<'_> {
         source: crate::libraries::SourceMember,
         declaration: crate::fir::DeclarationId,
     ) {
+        let Some((owner_name, mut candidate)) =
+            self.body_local_method_candidate(class_scope, owner, function, source, declaration)
+        else {
+            return;
+        };
+        self.body_local_default_providers.remove(&declaration);
+        if let Some(provider) = self.apply_inherited_body_local_defaults(owner_name, &mut candidate)
+        {
+            self.body_local_default_providers
+                .insert(declaration, provider);
+        }
+        let candidates = self
+            .checked_local_methods
+            .entry(owner_name)
+            .or_default()
+            .entry(function.name.clone())
+            .or_default();
+        if let Some(existing) = candidates
+            .iter_mut()
+            .find(|existing| existing.stable_declaration == candidate.stable_declaration)
+        {
+            *existing = candidate;
+        } else {
+            candidates.push(candidate);
+        }
+    }
+
+    /// The normalized candidate of one active body-local method, read from its header in the
+    /// class scope. Its result is `Pending` while an expression body is still being inferred.
+    fn body_local_method_candidate(
+        &mut self,
+        class_scope: &CheckerScope<'_>,
+        owner: DeclId,
+        function: &FunDecl,
+        source: crate::libraries::SourceMember,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<(TypeName, crate::libraries::FunctionInfo)> {
         let (owner_name, owner_is_interface) = match self.file.decl(owner) {
-            Decl::Class(class) => match self.active_classifier_internal(owner, class) {
-                Some(owner_name) => (owner_name, class.is_interface()),
-                None => return,
-            },
-            Decl::Fun(_) | Decl::Property(_) => return,
+            Decl::Class(class) => (
+                self.active_classifier_internal(owner, class)?,
+                class.is_interface(),
+            ),
+            Decl::Fun(_) | Decl::Property(_) => return None,
         };
 
         let method_scope = class_scope.child(ScopeKind::Function { receiver: None });
@@ -630,33 +744,16 @@ impl Checker<'_> {
             contract: None,
             plugin_expression: None,
         };
-        let mut candidate = crate::module_symbols::source_member_function(
-            &function.name,
-            &signature,
-            receiver,
+        Some((
             owner_name,
-            owner_is_interface,
-        );
-        self.body_local_default_providers.remove(&declaration);
-        if let Some(provider) = self.apply_inherited_body_local_defaults(owner_name, &mut candidate)
-        {
-            self.body_local_default_providers
-                .insert(declaration, provider);
-        }
-        let candidates = self
-            .checked_local_methods
-            .entry(owner_name)
-            .or_default()
-            .entry(function.name.clone())
-            .or_default();
-        if let Some(existing) = candidates
-            .iter_mut()
-            .find(|existing| existing.stable_declaration == candidate.stable_declaration)
-        {
-            *existing = candidate;
-        } else {
-            candidates.push(candidate);
-        }
+            crate::module_symbols::source_member_function(
+                &function.name,
+                &signature,
+                receiver,
+                owner_name,
+                owner_is_interface,
+            ),
+        ))
     }
 
     pub(super) fn begin_registered_local_method(

@@ -175,6 +175,7 @@ pub(crate) fn declared_function(
         infix: function.is_infix,
         is_abstract,
         is_final: function.modality == KotlinModality::Final,
+        deprecated_hidden: false,
         inherited_by_delegation: false,
         return_value_status: Some(function.return_value_status),
     };
@@ -297,6 +298,8 @@ pub(crate) fn declared_property(
             .any(|annotation| *annotation == crate::types::wk::implicit_integer_coercion()),
         compile_time_constant,
         metadata_constant_read: false,
+        deprecated_hidden: false,
+        is_final: property.modality == KotlinModality::Final,
         visibility: property.visibility,
         owner: declaration_owner.name(),
         receiver_rank: 0,

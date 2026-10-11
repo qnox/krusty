@@ -46,6 +46,26 @@ fn an_interface_method_implemented_at_another_representation_is_bridged() {
     expect_native_box(source, "InterfaceBridge", "OK");
 }
 
+/// A final-by-default implementation remains available as the body of an inherited specialized
+/// interface bridge. Finality prevents the declaration from being overridden again; it does not
+/// make the declaration disappear when the bridge planner resolves the concrete implementation.
+#[test]
+fn a_final_implementation_supplies_an_inherited_value_class_bridge() {
+    let source = "@JvmInline value class Payload(val value: Int)\n\
+         interface Root<T> { fun echo(value: T): T }\n\
+         abstract class Specialized : Root<Payload>\n\
+         class Implementation : Specialized() {\n\
+         \x20   override fun echo(value: Payload): Payload = Payload(value.value + 1)\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val root: Root<Payload> = Implementation()\n\
+         \x20   val actual = root.echo(Payload(41)).value\n\
+         \x20   return if (actual == 42) \"OK\" else \"fail: \" + actual\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "FinalInheritedValueClassBridge");
+    expect_native_box(source, "FinalInheritedValueClassBridge", "OK");
+}
+
 /// Two interfaces declaring the same member at different representations, joined by a third.
 ///
 /// `A.foo(T, Int)` already carries the second operand as a machine integer and `B.foo(T, U)`
