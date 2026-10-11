@@ -81,6 +81,8 @@ impl JvmLibraries {
             implicit_integer_coercion: false,
             compile_time_constant: None,
             metadata_constant_read: false,
+            deprecated_hidden: false,
+            is_final: false,
             visibility: function.visibility,
             owner,
             receiver_rank: 0,

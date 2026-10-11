@@ -79,6 +79,9 @@ impl SymbolResolver<'_> {
                     .inherited_accessor_properties(&self.src, current, name)
                     .overloads,
             );
+            local_properties
+                .overloads
+                .retain(|property| !property.deprecated_hidden);
             if depth > 0 {
                 local_properties
                     .overloads

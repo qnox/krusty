@@ -165,3 +165,24 @@ class Gen(private val config: Config) {\n\
         "smart cast to 'String' is impossible, because 'path' is a property that has an open or custom getter.",
     );
 }
+
+/// An abstract getter is necessarily implemented by a subclass. It is an override target and an
+/// unstable repeated read even when its source header does not carry an explicit `open` modifier.
+#[test]
+fn an_abstract_property_in_the_path_is_still_refused() {
+    const MAIN: &str = "abstract class Config { abstract val path: String? }\n\
+\n\
+class Gen(private val config: Config) {\n\
+\x20   fun show(): String {\n\
+\x20       if (config.path != null) {\n\
+\x20           return config.path.length.toString()\n\
+\x20       }\n\
+\x20       return \"none\"\n\
+\x20   }\n\
+}\n";
+    both_compilers_reject_unstable_path(
+        MAIN,
+        6,
+        "smart cast to 'String' is impossible, because 'path' is a property that has an open or custom getter.",
+    );
+}
