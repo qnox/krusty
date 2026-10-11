@@ -938,6 +938,8 @@ impl ClassWriter {
     /// attribute here, once, for every class kind. `@kotlin.Deprecated` on the classifier also
     /// stamps the zero-length JVM `Deprecated` attribute; its name interns after `SourceFile`.
     pub fn set_class_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
+        // The field-table visit precedes the class annotations in kotlinc's writer.
+        self.intern_late_fields();
         if annotations.deprecated() {
             self.set_deprecated();
         }
@@ -1318,12 +1320,16 @@ impl ClassWriter {
         if !self.nullability_annotations {
             return;
         }
-        let n = self.cp.utf8(name);
+        // A deferred field is not in the table yet; it carries its own nullability and interns it
+        // in the field-table window, so nothing may intern here for it.
+        let Some(n) = self.cp.lookup_utf8(name) else {
+            return;
+        };
+        let Some(index) = self.fields.iter().position(|f| f.name == n) else {
+            return;
+        };
         let ti = self.cp.utf8(ann_type);
-        let ann = vec![(ti >> 8) as u8, ti as u8, 0, 0];
-        if let Some(f) = self.fields.iter_mut().find(|f| f.name == n) {
-            f.invisible_anns = vec![ann];
-        }
+        self.fields[index].invisible_anns = vec![vec![(ti >> 8) as u8, ti as u8, 0, 0]];
     }
 
     /// A ≥2-field data class's `hashCode` LocalVariableTable: the `result` accumulator (`I`, slot 1,

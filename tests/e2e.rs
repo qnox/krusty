@@ -243,6 +243,8 @@ mod checker_operator_methods_e2e;
 mod ci_required_check_e2e;
 #[path = "class_annotation_attributes_e2e.rs"]
 mod class_annotation_attributes_e2e;
+#[path = "class_annotation_pool_order_e2e.rs"]
+mod class_annotation_pool_order_e2e;
 #[path = "class_body_e2e.rs"]
 mod class_body_e2e;
 #[path = "class_enclosure_e2e.rs"]

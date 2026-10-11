@@ -6610,6 +6610,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after every member, so the descriptor landed after the companion's marker constructor. The
   synthesized setter is now a debug-locals declaration, like a data-class member. Test:
   `tests/method_pool_order_e2e.rs::a_hoisted_companion_setter_interns_its_locals_with_its_body`.
+- **A class's own annotations intern after its field table.** kotlinc's writer visits every
+  method, then every field (name, descriptor, `ConstantValue` constant, field annotations), and only
+  then the class's annotations ahead of `@Metadata`. krusty queued a class or interface annotation
+  before its deferred fields, so `@Deprecated` interned ahead of a companion's hoisted `Companion`
+  and `const` fields or an object's `const` fields, and a deferred field's nullability probe
+  interned `@NotNull` before that field's own `@JvmField`. Queuing class annotations now realizes the
+  deferred fields first, and a nullability probe interns nothing for a field not yet in the table.
+  Found in intellij-community's `//platform/util/multiplatform`. Test:
+  `tests/class_annotation_pool_order_e2e.rs`.
 - **Every class interns its `InnerClasses` rows from one retained set.** kotlinc adds each enclosing
   class of a nested class it references to the table, so a facade reading `A.B.C.ok` keeps the
   `A$B` row, which sorts first, only because `A$B$C`'s row names it. The rows are interned row by
