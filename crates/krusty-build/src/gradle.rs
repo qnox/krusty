@@ -909,7 +909,7 @@ mod tests {
                 if case == "compiler-plugin" {
                     assert!(log.exists(), "{case} must be rejected by krusty's registry");
                     let invocation = single_invocation(&log);
-                    assert_assignment_rejected_exactly(&diagnostics, &invocation, &[]);
+                    assert_assignment_rejected_exactly(&diagnostics, &invocation, &[], &[]);
                 } else {
                     let expected_line = format!("> {expected}");
                     assert_eq!(
@@ -1322,7 +1322,18 @@ error: warnings found and -Werror specified\n";
                 1,
                 "{run:?}"
             );
-            assert!(run.iter().all(|arg| arg != "-P"), "{run:?}");
+            // Only `:model` configures sam-with-receiver; serialization takes no options.
+            let options = run
+                .windows(2)
+                .filter(|pair| pair[0] == "-P")
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>();
+            let expected: &[&str] = if source_names(run).contains(&"Point.kt") {
+                &["plugin:org.jetbrains.kotlin.samWithReceiver:annotation=model.WithReceiver"]
+            } else {
+                &[]
+            };
+            assert_eq!(options, expected, "{run:?}");
         }
         for class in [
             "model/build/classes/kotlin/main/model/Point$$serializer.class",
@@ -1363,6 +1374,7 @@ error: warnings found and -Werror specified\n";
                     "org.jetbrains.kotlin.samWithReceiver.SamWithReceiverComponentRegistrar",
                 ),
             ],
+            &[],
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -1547,8 +1559,6 @@ fun main() {
         }
 
         let _ = std::fs::remove_file(log);
-        std::fs::create_dir_all(root.join("app/build/generated/ksp/main/classes"))
-            .expect("create empty KSP class output expected on the app classpath");
         let result = fixture
             .build()
             .property("krusty.negative", "assignment")
@@ -1563,7 +1573,19 @@ fun main() {
             "the compiler registry must inspect the forwarded plugin classpath"
         );
         let invocation = single_invocation(log);
-        assert_assignment_rejected_exactly(diagnostics, &invocation, &[]);
+        // kspKotlin reruns for this build and recreates its outputs; the processor emits no Java,
+        // so its generated-classes directory on the classpath does not exist and krusty warns
+        // about it as kotlinc does.
+        let generated_classes = root.join("app/build/generated/ksp/main/classes");
+        assert_assignment_rejected_exactly(
+            diagnostics,
+            &invocation,
+            &[],
+            &[format!(
+                "classpath entry points to a non-existent location: {}",
+                generated_classes.display()
+            )],
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1969,6 +1991,7 @@ fun main() {
         diagnostics: &Path,
         args: &[String],
         native_plugins: &[(&str, &str)],
+        warnings: &[String],
     ) {
         let requests = args
             .iter()
@@ -1986,6 +2009,11 @@ fun main() {
             })
             .expect("the invocation carries the assignment compiler plugin");
         let mut expected = String::new();
+        for warning in warnings {
+            expected.push_str("warning: ");
+            expected.push_str(warning);
+            expected.push('\n');
+        }
         for &(plugin_id, registrar) in native_plugins {
             let jar = requests
                 .iter()
