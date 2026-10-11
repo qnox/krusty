@@ -69,12 +69,15 @@ impl Emitter<'_> {
         // A checked implicit coercion can name the call-site substitution even though the value
         // still occupies the declaration's erased bound. Let this consumer choose whether that
         // bound needs narrowing; eagerly emitting the coercion can cast `Comparable` to `String`
-        // and then back to `Comparable` for a function that returns the bound itself.
+        // and then back to `Comparable` for a function that returns the bound itself. An `Object`
+        // slot is no different: `fun f(b: Box<String>): CharSequence = b.v` casts only to
+        // `CharSequence`, and a function returning `Any` does not cast at all.
         let source = if matches!(
             self.erased_reference_result(expression),
-            Some(ErasedResult::Coerced { slot, .. })
-                if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
+            Some(ErasedResult::Coerced { .. })
         ) {
+            // The coercion is not emitted, so its line marks the call that produces the value.
+            self.mark_expression_start(expression, code);
             self.emit_consumed_operand(expression, code)
         } else {
             self.emit_value(expression, code);

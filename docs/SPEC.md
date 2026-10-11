@@ -2482,6 +2482,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   when the receiver is null and when it is not, so `{ w?.s = "X" }` has type `() -> Unit`.
   Test: `tests/unit_value_e2e.rs::safe_assignment_returns_unit_when_the_receiver_is_null`.
   Corpus: `unit/kt56723.kt`.
+- **A returned erased call result is cast only to the return type.** A generic call's result
+  occupies its declaration's erasure (`Object` for `T`); a function returning a supertype of the
+  substituted type materializes it at its own declared type, as kotlinc's codegen does at every
+  consumer: `fun f(b: Box<String>): CharSequence = b.v` is `getV; checkcast CharSequence`, and a
+  function returning `Any` writes no cast. Test: `tests/erased_result_consumer_e2e.rs`.
 - **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
   established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
   that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a
