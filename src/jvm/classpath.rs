@@ -1040,6 +1040,9 @@ struct BuiltinClass {
     supertype_tys: Vec<Ty>,
     /// The class's formal type-parameter names, in declaration order (`Map` → `[K, V]`).
     formals: Vec<String>,
+    /// Each formal's declared upper bounds (`Enum<E : Enum<E>>` → `[[Enum<E>]]`), parallel to
+    /// `formals`; empty for an unbounded formal.
+    formal_bounds: Vec<Vec<Ty>>,
     formal_variances: Vec<crate::types::TypeVariance>,
     members: Vec<BuiltinMember>,
     constructors: Vec<BuiltinConstructor>,
@@ -1051,6 +1054,14 @@ struct BuiltinClass {
     /// The builtin's own JVM class access flags, as an `InnerClasses` entry records them.
     access: u16,
     nullable_member_returns: Vec<(String, usize)>,
+}
+
+/// The generic declaration facts decoded from one builtin classifier. They travel together so no
+/// provider consumer can observe formals without their parallel bounds.
+pub(super) struct BuiltinClassSignature {
+    pub(super) formals: Vec<String>,
+    pub(super) formal_bounds: Vec<Vec<Ty>>,
+    pub(super) supertypes: Vec<Ty>,
 }
 
 /// A decoded `.kotlin_builtins` member's non-derivable, unerased declaration signature. It retains
@@ -1124,6 +1135,16 @@ impl BuiltinsFile {
                 .map(|t| builtin_ty(t, &class_bounds))
                 .collect();
             let formals: Vec<String> = class.type_params.iter().map(|p| p.name.clone()).collect();
+            let formal_bounds = class
+                .type_params
+                .iter()
+                .map(|p| {
+                    p.bounds
+                        .iter()
+                        .map(|b| builtin_ty(b, &class_bounds))
+                        .collect()
+                })
+                .collect();
             let formal_variances = class.type_params.iter().map(|p| p.variance).collect();
             let members = class
                 .members
@@ -1176,6 +1197,7 @@ impl BuiltinsFile {
                     supertypes,
                     supertype_tys,
                     formals,
+                    formal_bounds,
                     formal_variances,
                     members,
                     constructors,
@@ -2462,15 +2484,36 @@ impl Classpath {
             .unwrap_or_default()
     }
 
-    /// Formal names and generic supertypes from `.kotlin_builtins`, so a receiver's type argument
-    /// still binds when the mapped JVM class is absent. `internal` may be the Kotlin name or
-    /// `java/util/List`.
-    pub fn builtin_class_gsig_name(&self, internal: TypeName) -> Option<(Vec<String>, Vec<Ty>)> {
+    /// Formal names, their parallel declared bounds, and generic supertypes from
+    /// `.kotlin_builtins`. Keeping these declaration facts in one record prevents a consumer from
+    /// observing formals without the bounds decoded from that same declaration. `internal` may be
+    /// the Kotlin name or `java/util/List`.
+    pub(super) fn builtin_class_signature_name(
+        &self,
+        internal: TypeName,
+    ) -> Option<BuiltinClassSignature> {
         let kotlin =
             super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal);
         self.builtins_file_for_package(Self::builtins_package_for(kotlin))
             .get_name(kotlin)
-            .map(|c| (c.formals.clone(), c.supertype_tys.clone()))
+            .map(|class| {
+                assert_eq!(
+                    class.formals.len(),
+                    class.formal_bounds.len(),
+                    "builtin formals and bounds must be decoded in parallel"
+                );
+                BuiltinClassSignature {
+                    formals: class.formals.clone(),
+                    formal_bounds: class.formal_bounds.clone(),
+                    supertypes: class.supertype_tys.clone(),
+                }
+            })
+    }
+
+    /// Formal names and generic supertypes from the same normalized builtin declaration.
+    pub fn builtin_class_gsig_name(&self, internal: TypeName) -> Option<(Vec<String>, Vec<Ty>)> {
+        self.builtin_class_signature_name(internal)
+            .map(|signature| (signature.formals, signature.supertypes))
     }
 
     pub fn builtin_class_variances_name(

@@ -3,13 +3,15 @@
 
 use super::*;
 
+pub(super) struct LibraryConstructorMappingFailure {
+    failure: CallArgMappingFailure,
+    params: Vec<Ty>,
+    call_sig: CallSig,
+    class_name: String,
+}
+
 pub(super) enum LibraryConstructorFailure {
-    Mapping {
-        failure: CallArgMappingFailure,
-        params: Vec<Ty>,
-        call_sig: CallSig,
-        class_name: String,
-    },
+    Mapping(Box<LibraryConstructorMappingFailure>),
     TypeMismatch {
         source_argument: usize,
         expected: Ty,
@@ -26,10 +28,24 @@ pub(super) enum LibraryConstructorFailure {
 }
 
 impl LibraryConstructorFailure {
+    pub(super) fn mapping(
+        failure: CallArgMappingFailure,
+        params: Vec<Ty>,
+        call_sig: CallSig,
+        class_name: String,
+    ) -> Self {
+        Self::Mapping(Box::new(LibraryConstructorMappingFailure {
+            failure,
+            params,
+            call_sig,
+            class_name,
+        }))
+    }
+
     pub(super) fn result_type(&self) -> Option<Ty> {
         match self {
             Self::TypeMismatch { result, .. } => *result,
-            Self::Mapping { .. } | Self::TypeArgumentMismatch { .. } => None,
+            Self::Mapping(_) | Self::TypeArgumentMismatch { .. } => None,
         }
     }
 }
@@ -44,12 +60,13 @@ impl Checker<'_> {
         failure: LibraryConstructorFailure,
     ) {
         match failure {
-            LibraryConstructorFailure::Mapping {
-                failure,
-                params,
-                call_sig,
-                class_name,
-            } => {
+            LibraryConstructorFailure::Mapping(mapping) => {
+                let LibraryConstructorMappingFailure {
+                    failure,
+                    params,
+                    call_sig,
+                    class_name,
+                } = *mapping;
                 if !self.report_constructor_too_many_arguments(
                     call,
                     args,

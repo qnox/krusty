@@ -1703,6 +1703,8 @@ mod unit_expression_body_return_line_e2e;
 mod unsigned_operations_e2e;
 #[path = "unsupported_kotlinc_arguments_e2e.rs"]
 mod unsupported_kotlinc_arguments_e2e;
+#[path = "upper_bound_violations_e2e.rs"]
+mod upper_bound_violations_e2e;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]
 mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
