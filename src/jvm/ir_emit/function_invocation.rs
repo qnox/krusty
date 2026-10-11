@@ -189,4 +189,64 @@ impl Emitter<'_> {
             }
         }
     }
+
+    /// Emit a generated function-value invocation whose result adaptation belongs outside the
+    /// external inline frame that contains it. The exact invocation is marked by common IR; an
+    /// unmarked invocation, a transformed suspension, or an intentionally erased result stays on
+    /// the ordinary all-at-once path.
+    pub(super) fn emit_invocation_before_result_adaptation(
+        &mut self,
+        expression: u32,
+        code: &mut CodeBuilder,
+    ) -> Option<Ty> {
+        if self
+            .ir
+            .invocation_result_adaptation_line(expression)
+            .is_none()
+            || self.transformed_result(expression).is_some()
+            || self.erased_invocations.contains(&expression)
+        {
+            return None;
+        }
+        let IrExpr::InvokeFunction {
+            func,
+            args,
+            params,
+            ret,
+        } = self.ir.expr(expression).clone()
+        else {
+            return None;
+        };
+        self.emit_function_invocation(expression, func, &args, &params, code);
+        Some(ret)
+    }
+
+    /// Enter the caller again at the physical adaptation of an erased function-value result.
+    pub(super) fn finish_function_invocation_result(
+        &mut self,
+        expression: u32,
+        ret: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        // A transformed suspension materializes its declared result when the point closes.
+        // Narrowing here would checkcast the erased `Object` first.
+        if self.transformed_result(expression).is_some()
+            || self.erased_invocations.remove(&expression)
+        {
+            return;
+        }
+        if self.ir.inline_result_adaptation_restores_early(expression) {
+            let line = self
+                .ir
+                .invocation_result_adaptation_line(expression)
+                .expect("a claimed invocation adaptation must retain its caller line");
+            // This is the expansion's return to caller-owned code. Reset the callee line before
+            // marking it because a source initializer or branch condition restores its line
+            // before its store/jump. A return does not claim this boundary: its own instruction
+            // restores the caller line after narrowing instead.
+            code.forget_line();
+            self.mark_expression_line(expression, line, code);
+        }
+        self.narrow_invocation_result(ret, code);
+    }
 }

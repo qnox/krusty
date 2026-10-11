@@ -16842,6 +16842,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   value still ends the locals first and returns to the inline body's line with a `nop` after the
   value (`jvm/ir_emit/block_scope.rs`). Test: `tests/also_apply_result_line_e2e.rs`.
 
+- **A checked function value passed to a provider-planned inline call is invoked.** A stdlib scope
+  function such as `let` takes its provider plan for every expression already checked against its
+  function parameter: locals, captures, properties, calls, conditionals, and callable references
+  all evaluate once. A literal body is spliced. A non-suspend callable reference is spliced through
+  its checked adapter template, including its bound receiver and captures, so kotlinc's direct call
+  and `pN` inline locals are retained without rediscovering the reference target. The other
+  expressions use the common function-value invocation path. On the JVM, `FunctionN.invoke` remains
+  inside the provider's inline frame. A source local declaration restores the caller line before
+  adapting the erased result to the checked type, so the real `checkcast`/unbox anchors that line
+  once before the store and consumes the ordinary post-inline reset. A branch condition makes the
+  same transition at the adaptation and leaves that line in effect for its jump without writing a
+  duplicate line-table entry. A return keeps the
+  reset pending until its return instruction, after result adaptation. FIR storage
+  representation therefore cannot make
+  `object : R { override fun run(t: Throwable?) { t?.let(x) } }` reach a backend as an external
+  `StandardKt.let` call. Tests:
+  `fir_lower::tests::inline_plan_tests::dependency_scope_plans_invoke_function_values_captured_by_local_classes`,
+  `tests/scope_function_value_arg_e2e.rs`,
+  `tests/native_codegen_e2e.rs` (`a_scope_function_whose_block_is_a_captured_function_value_runs`).
+
 - **The Wasm backend keeps Kotlin's text and arithmetic in the module.** `src/wasm/` compiles one
   program to one WasmGC module for either kotlinc Wasm target; `wasm-js` and `wasm-wasi` differ only
   in the host function that writes bytes (`src/wasm/host.rs`). A `String` is a struct over a mutable

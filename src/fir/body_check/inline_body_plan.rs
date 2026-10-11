@@ -638,15 +638,12 @@ pub(super) fn finalize(
         crate::fir::FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
         _ => None,
     });
-    let readable_function_value = selected.is_some_and(|argument| {
-        matches!(
-            &argument.kind,
-            crate::fir::FirExprKind::ValueRead(_)
-                | crate::fir::FirExprKind::CapturedValueRead { .. }
-        )
-    });
     let supported = if invokes_function_value {
-        literal_body.is_some() || readable_function_value
+        // The call checker has already established that this argument has the selected function
+        // parameter's type. `InvokeLambda` evaluates that expression once and either splices a
+        // literal template or invokes the resulting function value. Its FIR representation is not
+        // part of the provider plan's applicability contract.
+        selected.is_some()
     } else {
         literal_body.is_some_and(|body| !collection_transform || body.direct_suspension)
     };
@@ -710,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn callable_reference_keeps_the_selected_external_call_without_provider_plan() {
+    fn callable_reference_keeps_the_selected_external_call_and_provider_plan() {
         let (body, _) = checked_function_body_with_platform(
             "fun id(value: String): Int = value.length\n\
              fun read(): Int = \"value\".let(::id)\n",
@@ -721,13 +718,46 @@ mod tests {
         let FirExprKind::Call(call) = &root.kind else {
             panic!("let must remain a checked call")
         };
-        let FirCallTarget::External { inline_plan, .. } = &call.target else {
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
             panic!("stdlib let must retain its selected external identity")
         };
-        assert!(
-            inline_plan.is_none(),
-            "a callable-reference adapter is not an ordinary function-value read"
-        );
+        assert!(matches!(
+            plan.as_ref(),
+            FirInlineBodyPlan::InvokeLambda {
+                lambda_parameter: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn every_checked_function_expression_keeps_the_invoke_plan() {
+        for source in [
+            "class Holder(val block: (String) -> Int)\n\
+             fun read(holder: Holder): Int = \"value\".let(holder.block)\n",
+            "fun read(flag: Boolean, first: (String) -> Int, second: (String) -> Int): Int =\n\
+             \x20   \"value\".let(if (flag) first else second)\n",
+            "fun make(): (String) -> Int = { it.length }\n\
+             fun read(): Int = \"value\".let(make())\n",
+        ] {
+            let (body, _) =
+                checked_function_body_with_platform(source, "read", jvm_stdlib_semantics());
+            let root = body.expr(root_expression(&body)).expect("root call");
+            let FirExprKind::Call(call) = &root.kind else {
+                panic!("let must remain a checked call")
+            };
+            assert!(matches!(
+                &call.target,
+                FirCallTarget::External {
+                    inline_plan: Some(_),
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

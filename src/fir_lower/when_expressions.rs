@@ -91,7 +91,9 @@ impl BodyLowering<'_> {
                             }
                             self.set_expression_state(expression, LoweringState::Lowered(read));
                         }
-                        self.expression(candidate)?
+                        let candidate = self.expression(candidate)?;
+                        self.ir.mark_early_inline_result_adaptation(candidate);
+                        candidate
                     }
                 };
                 condition = Some(match condition {
@@ -101,6 +103,7 @@ impl BodyLowering<'_> {
             }
             if let Some(guard) = branch.guard {
                 let guard = self.expression(guard)?;
+                self.ir.mark_early_inline_result_adaptation(guard);
                 condition = Some(match condition {
                     Some(previous) => self.short_circuit_and(previous, guard),
                     None => guard,
