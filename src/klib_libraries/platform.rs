@@ -10,6 +10,18 @@ use crate::types::{SemanticCallableOwner, Ty, TypeName};
 use super::KlibLibraries;
 
 impl SemanticPlatform for KlibLibraries {
+    fn internal_accessible(&self, owner: TypeName) -> bool {
+        self.inventory.classifier_is_friend(owner)
+    }
+
+    fn internal_callable_accessible(
+        &self,
+        identity: Option<crate::fir::ExternalCallableId>,
+        _owner: TypeName,
+    ) -> bool {
+        identity.is_some_and(|identity| self.identities.internal_friend(identity))
+    }
+
     fn function_type(&self, arity: usize) -> Option<Ty> {
         Some(function_classifiers::function_type(arity))
     }

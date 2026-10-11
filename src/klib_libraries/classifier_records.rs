@@ -38,6 +38,7 @@ pub(super) fn classifier_record(
             &constructor.signature,
             &constructor.parameters,
             identity,
+            signed.internal_friend,
             &mut member,
         );
         shape
@@ -229,6 +230,7 @@ fn enum_class_members(
         KlibDeclarationSignature::Public(signatures.values.clone()),
         &[],
         owner,
+        signed.internal_friend,
         &mut values,
     );
     members.push((EnumClassMember::Function, values));
@@ -237,6 +239,7 @@ fn enum_class_members(
         KlibDeclarationSignature::Public(signatures.value_of.clone()),
         &[ResolvedParameterIdentity::Source("value".into())],
         owner,
+        signed.internal_friend,
         &mut value_of,
     );
     members.push((EnumClassMember::Function, value_of));
@@ -246,6 +249,7 @@ fn enum_class_members(
             KlibDeclarationSignature::Accessor(getter_signature.clone()),
             &[],
             owner,
+            signed.internal_friend,
             &mut getter,
         );
         members.push((EnumClassMember::EntriesGetter, getter));

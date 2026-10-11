@@ -173,7 +173,13 @@ impl Checker<'_> {
                 );
                 let owner = callable.owner;
                 if setter.visibility != Visibility::Public {
-                    self.reject_if_inaccessible(setter.visibility, name, owner, target_span);
+                    self.reject_callable_if_inaccessible(
+                        setter.visibility,
+                        name,
+                        owner,
+                        callable.external_identity,
+                        target_span,
+                    );
                 }
                 self.stmt_lowers.insert(
                     s,
@@ -286,7 +292,22 @@ impl Checker<'_> {
         // receives only an already-authorized accessor plan.
         let write_visibility = property.setter_visibility.unwrap_or(property.visibility);
         if write_visibility != Visibility::Public {
-            self.reject_if_inaccessible(write_visibility, site.name, property.owner, target_span);
+            self.reject_callable_if_inaccessible(
+                write_visibility,
+                site.name,
+                property.owner,
+                property
+                    .setter
+                    .as_ref()
+                    .and_then(|setter| setter.external_identity)
+                    .or_else(|| {
+                        property
+                            .getter
+                            .as_ref()
+                            .and_then(|getter| getter.external_identity)
+                    }),
+                target_span,
+            );
         }
         self.mark_extension_receiver_stmt_used(site.stmt, property.dispatch_receiver);
         for source in &property.context_args {

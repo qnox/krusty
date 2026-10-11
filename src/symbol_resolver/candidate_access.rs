@@ -52,7 +52,12 @@ impl SymbolResolver<'_> {
                 candidate.visibility,
                 candidate.source_file,
                 self.access_file,
-                || self.lib.internal_accessible(candidate.callable.owner),
+                || {
+                    self.lib.internal_callable_accessible(
+                        candidate.callable.external_identity,
+                        candidate.callable.owner,
+                    )
+                },
             )
     }
 

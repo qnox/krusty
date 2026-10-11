@@ -64,14 +64,30 @@ impl std::error::Error for KlibLibrariesOpenError {}
 impl KlibLibraries {
     /// Publish every package fragment of the KLIBs at `libraries`, zipped or unpacked.
     pub fn open(libraries: &[PathBuf]) -> Result<Self, KlibLibrariesOpenError> {
+        Self::open_with_friends(libraries, &[])
+    }
+
+    /// Publish `libraries`, granting internal access only to declarations from `friend_libraries`.
+    ///
+    /// Friendship follows the selected archive, not a package or classifier spelling. Two KLIBs
+    /// may contribute internal top-level declarations to the same package without sharing access.
+    pub fn open_with_friends(
+        libraries: &[PathBuf],
+        friend_libraries: &[PathBuf],
+    ) -> Result<Self, KlibLibrariesOpenError> {
         let mut packages = Vec::new();
         let mut archives = Vec::with_capacity(libraries.len());
         for library in libraries {
             let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
-            packages.extend(package_fragments(library, &archive)?);
+            let internal_friend = friend_libraries.iter().any(|friend| friend == library);
+            packages.extend(
+                package_fragments(library, &archive)?
+                    .into_iter()
+                    .map(|(segments, package)| (segments, package, internal_friend)),
+            );
             archives.push(archive);
         }
-        let mut inventory = PackageInventory::from_packages(packages)
+        let mut inventory = PackageInventory::from_package_inputs(packages)
             .map_err(KlibLibrariesOpenError::Declaration)?;
         // Only a declaration metadata marks as defaulted has a default to read from the IR.
         let wanted = inventory.defaulted_top_levels();

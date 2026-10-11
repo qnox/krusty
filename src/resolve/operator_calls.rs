@@ -181,12 +181,17 @@ impl<'a> Checker<'a> {
                 return None;
             };
             if selected.kind == crate::libraries::FnKind::Member
-                && !self.member_accessible(selected.visibility, selected.callable.owner)
+                && !self.callable_accessible(
+                    selected.visibility,
+                    selected.callable.owner,
+                    selected.callable.external_identity,
+                )
             {
-                self.reject_if_inaccessible(
+                self.reject_callable_if_inaccessible(
                     selected.visibility,
                     name,
                     selected.callable.owner,
+                    selected.callable.external_identity,
                     span,
                 );
                 return None;
@@ -361,9 +366,19 @@ impl<'a> Checker<'a> {
             return None;
         };
         if selected.kind == crate::libraries::FnKind::Member
-            && !self.member_accessible(selected.visibility, selected.callable.owner)
+            && !self.callable_accessible(
+                selected.visibility,
+                selected.callable.owner,
+                selected.callable.external_identity,
+            )
         {
-            self.reject_if_inaccessible(selected.visibility, name, selected.callable.owner, span);
+            self.reject_callable_if_inaccessible(
+                selected.visibility,
+                name,
+                selected.callable.owner,
+                selected.callable.external_identity,
+                span,
+            );
             return None;
         }
         self.expect_call_args(scope, &params, false, arg_exprs, arg_tys);

@@ -39,6 +39,18 @@ impl PackageInventory {
     pub(super) fn from_packages(
         packages: Vec<(Vec<String>, KotlinPackage)>,
     ) -> Result<Self, KlibLibraryError> {
+        Self::from_package_inputs(
+            packages
+                .into_iter()
+                .map(|(segments, package)| (segments, package, false))
+                .collect(),
+        )
+    }
+
+    /// Build an inventory while retaining which archive supplied friend-visible internals.
+    pub(super) fn from_package_inputs(
+        packages: Vec<(Vec<String>, KotlinPackage, bool)>,
+    ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
             functions: HashMap::new(),
             properties: HashMap::new(),
@@ -53,7 +65,7 @@ impl PackageInventory {
         // publish the same declaration more than once; they must not become duplicate overload
         // candidates carrying one ExternalCallableId.
         let mut declared_signatures = HashSet::new();
-        for (segments, package) in packages {
+        for (segments, package, internal_friend) in packages {
             let identity = inventory.declare_package(&segments);
             for alias in package
                 .type_aliases
@@ -75,7 +87,7 @@ impl PackageInventory {
                 // A private top-level function is visible only inside its own file; its library
                 // serializes it under a file-local identity, never a public one.
                 .filter(|function| function.visibility != Visibility::Private)
-                .map(|function| sign_package_function(&segments, function))
+                .map(|function| sign_package_function(&segments, function, internal_friend))
                 .collect::<Result<Vec<_>, _>>()?;
             for function in signed {
                 if !declared_signatures.insert(function.signature.clone()) {
@@ -107,7 +119,7 @@ impl PackageInventory {
                 .into_iter()
                 // As for functions, a private top-level property has a file-local identity.
                 .filter(|property| property.visibility != Visibility::Private)
-                .map(|property| sign_package_property(&segments, property))
+                .map(|property| sign_package_property(&segments, property, internal_friend))
                 .collect::<Result<Vec<_>, _>>()?;
             for property in signed {
                 if !declared_signatures.insert(property.signature.clone()) {
@@ -134,9 +146,12 @@ impl PackageInventory {
                     .or_default()
                     .push(property);
             }
-            for (classifier, signed) in
-                sign_package_classes(&segments, package.classes, &mut declared_signatures)?
-            {
+            for (classifier, signed) in sign_package_classes(
+                &segments,
+                package.classes,
+                &mut declared_signatures,
+                internal_friend,
+            )? {
                 for alias in &signed.type_aliases {
                     inventory
                         .type_aliases
@@ -274,6 +289,13 @@ impl PackageInventory {
     /// The published class with exactly this identity.
     pub(super) fn classifier(&self, identity: TypeName) -> Option<&SignedClassifier> {
         self.classifiers.get(&identity)
+    }
+
+    /// Whether `identity` is declared by a friend KLIB selected for this compilation.
+    pub(super) fn classifier_is_friend(&self, identity: TypeName) -> bool {
+        self.classifiers
+            .get(&identity)
+            .is_some_and(|classifier| classifier.internal_friend)
     }
 
     /// The type alias declared with exactly this qualified identity.

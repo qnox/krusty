@@ -202,6 +202,32 @@ fn single_function(libraries: &KlibLibraries, package: &str, name: &str) -> Func
 }
 
 #[test]
+fn internal_friend_access_follows_the_selected_archive_not_the_package() {
+    let mut friend_only = function("friendOnly", None, Vec::new());
+    friend_only.visibility = Visibility::Internal;
+    let mut ordinary_only = function("ordinaryOnly", None, Vec::new());
+    ordinary_only.visibility = Visibility::Internal;
+    let shared = segments(&["shared"]);
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![
+        (shared.clone(), package_of(vec![friend_only]), true),
+        (shared, package_of(vec![ordinary_only]), false),
+    ])
+    .expect("both package fragments are signable");
+    let libraries = KlibLibraries::over(Rc::new(inventory));
+
+    let friend = single_function(&libraries, "shared", "friendOnly");
+    let ordinary = single_function(&libraries, "shared", "ordinaryOnly");
+    let platform = &libraries as &dyn crate::libraries::SemanticPlatform;
+    assert!(platform
+        .internal_callable_accessible(friend.callable.external_identity, friend.callable.owner,));
+    assert!(!platform.internal_callable_accessible(
+        ordinary.callable.external_identity,
+        ordinary.callable.owner,
+    ));
+    assert_eq!(friend.callable.owner, ordinary.callable.owner);
+}
+
+#[test]
 fn a_top_level_function_resolves_with_its_semantic_signature() {
     let libraries = kotlin_io();
     let println = single_function(&libraries, "kotlin/io", "println");

@@ -56,7 +56,10 @@ impl SymbolResolver<'_> {
                     || self
                         .module
                         .is_some_and(|module| module.classifier(property.owner).is_some())
-                    || self.lib.internal_accessible(property.owner)
+                    || self.lib.internal_callable_accessible(
+                        property.getter.external_identity,
+                        property.owner,
+                    )
             }
             Visibility::PackagePrivate => self.package_private_member_accessible(property.owner),
             Visibility::Private => property

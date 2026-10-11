@@ -17,6 +17,8 @@ use crate::types::{SemanticCallableOwner, TypeName};
 #[derive(Default)]
 pub(super) struct ExternalIdentities {
     realizations: RefCell<Vec<ExternalCallableRealization>>,
+    /// Parallel to `realizations`: the declaring KLIB is a friend of this compilation.
+    internal_friends: RefCell<Vec<bool>>,
     by_signature: RefCell<HashMap<KlibDeclarationSignature, ExternalCallableId>>,
     properties: RefCell<Vec<ExternalPropertyRealization>>,
     properties_by_signature: RefCell<HashMap<KlibPublicIdSignature, ExternalPropertyId>>,
@@ -35,6 +37,7 @@ impl ExternalIdentities {
             KlibDeclarationSignature::Public(signed.signature.clone()),
             kind,
             &signed.parameters.physical,
+            signed.internal_friend,
             &mut function.callable,
         );
     }
@@ -52,6 +55,7 @@ impl ExternalIdentities {
             KlibDeclarationSignature::Accessor(signed.getter.clone()),
             kind,
             &signed.parameters.getter,
+            signed.internal_friend,
             &mut property.getter,
         );
         if let Some(setter) = &mut property.setter {
@@ -68,6 +72,7 @@ impl ExternalIdentities {
                 KlibDeclarationSignature::Accessor(signature),
                 kind,
                 parameters,
+                signed.internal_friend,
                 setter,
             );
         }
@@ -84,6 +89,7 @@ impl ExternalIdentities {
         signature: &KlibPublicIdSignature,
         parameters: &[ResolvedParameterIdentity],
         owner: TypeName,
+        internal_friend: bool,
         constructor: &mut LibraryMember,
     ) {
         let mut callable = LibraryCallable::constructor(owner, constructor);
@@ -92,6 +98,7 @@ impl ExternalIdentities {
             KlibDeclarationSignature::Public(signature.clone()),
             ExternalCallableKind::Constructor,
             parameters,
+            internal_friend,
             &mut callable,
         );
         constructor.external_identity = callable.external_identity;
@@ -105,6 +112,7 @@ impl ExternalIdentities {
         signature: KlibDeclarationSignature,
         parameters: &[ResolvedParameterIdentity],
         owner: TypeName,
+        internal_friend: bool,
         member: &mut LibraryMember,
     ) {
         let mut callable =
@@ -114,6 +122,7 @@ impl ExternalIdentities {
             signature,
             ExternalCallableKind::TopLevel,
             parameters,
+            internal_friend,
             &mut callable,
         );
         member.external_identity = callable.external_identity;
@@ -161,10 +170,20 @@ impl ExternalIdentities {
         signature: KlibDeclarationSignature,
         kind: ExternalCallableKind,
         parameters: &[ResolvedParameterIdentity],
+        internal_friend: bool,
         callable: &mut LibraryCallable,
     ) {
         if let Some(identity) = self.by_signature.borrow().get(&signature).copied() {
             callable.external_identity = Some(identity);
+            if internal_friend {
+                if let Some(friend) = self
+                    .internal_friends
+                    .borrow_mut()
+                    .get_mut(identity.raw() as usize)
+                {
+                    *friend = true;
+                }
+            }
             return;
         }
         let mut realizations = self.realizations.borrow_mut();
@@ -173,6 +192,7 @@ impl ExternalIdentities {
                 .expect("too many external callable declarations for packed FIR identity"),
         );
         callable.external_identity = Some(identity);
+        self.internal_friends.borrow_mut().push(internal_friend);
         realizations.push(ExternalCallableRealization {
             callable: callable.clone(),
             kind,
@@ -201,5 +221,13 @@ impl ExternalIdentities {
             .borrow()
             .get(identity.raw() as usize)
             .cloned()
+    }
+
+    pub(super) fn internal_friend(&self, identity: ExternalCallableId) -> bool {
+        self.internal_friends
+            .borrow()
+            .get(identity.raw() as usize)
+            .copied()
+            .unwrap_or(false)
     }
 }

@@ -441,6 +441,7 @@ impl ProductionSignatureSemantics<'_> {
         setter_present: bool,
         setter_visibility: crate::types::Visibility,
         owner: crate::types::TypeName,
+        setter_identity: Option<crate::fir::ExternalCallableId>,
         receiver: Option<Ty>,
     ) -> bool {
         let site = SignatureMemberSite {
@@ -450,16 +451,18 @@ impl ProductionSignatureSemantics<'_> {
         };
         let mutable = setter_present
             && match receiver {
-                Some(receiver) => super::super::access_control::site_receiver_member_accessible(
+                Some(receiver) => super::super::access_control::site_receiver_callable_accessible(
                     &site,
                     setter_visibility,
                     owner,
                     receiver,
+                    setter_identity,
                 ),
-                None => super::super::access_control::site_member_accessible(
+                None => super::super::access_control::site_callable_accessible(
                     &site,
                     setter_visibility,
                     owner,
+                    setter_identity,
                 ),
             };
         crate::trace_compiler!(
@@ -483,6 +486,10 @@ impl ProductionSignatureSemantics<'_> {
                 property.setter.is_some(),
                 property.setter_visibility,
                 property.owner,
+                property
+                    .setter
+                    .as_ref()
+                    .and_then(|setter| setter.external_identity),
                 None,
             ),
             &[result],
@@ -504,6 +511,10 @@ impl ProductionSignatureSemantics<'_> {
                 property.setter.is_some(),
                 property.setter_visibility,
                 property.getter.owner,
+                property
+                    .setter
+                    .as_ref()
+                    .and_then(|setter| setter.external_identity),
                 Some(receiver),
             ),
             arguments,
@@ -538,8 +549,15 @@ impl super::super::access_control::SourceMemberSite for SignatureMemberSite<'_, 
         super::super::access_control::module_declares_classifier(&module, owner)
     }
 
-    fn internal_friend(&self, owner: crate::types::TypeName) -> bool {
-        self.semantics.table.libraries.internal_accessible(owner)
+    fn internal_friend(
+        &self,
+        owner: crate::types::TypeName,
+        callable: Option<crate::fir::ExternalCallableId>,
+    ) -> bool {
+        self.semantics
+            .table
+            .libraries
+            .internal_callable_accessible(callable, owner)
     }
 
     fn access_classes(&self) -> Vec<crate::types::TypeName> {

@@ -520,6 +520,18 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         false
     }
 
+    /// Whether an internal dependency callable is visible to this compilation. The stable
+    /// provider identity is authoritative when present: a package can contain declarations from
+    /// several modules, only some of which are friends. Providers whose physical owner uniquely
+    /// identifies a module may keep using [`Self::internal_accessible`].
+    fn internal_callable_accessible(
+        &self,
+        _identity: Option<crate::fir::ExternalCallableId>,
+        owner: TypeName,
+    ) -> bool {
+        self.internal_accessible(owner)
+    }
+
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
     fn function_type(&self, _arity: usize) -> Option<Ty> {
         None

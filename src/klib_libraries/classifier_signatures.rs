@@ -34,6 +34,8 @@ pub(super) struct SignedClassifier {
     pub(super) shape: LibraryType,
     pub(super) modality: KotlinModality,
     pub(super) type_parameters: ClassTypeParameters,
+    /// Whether this classifier's KLIB is a friend of the current compilation.
+    pub(super) internal_friend: bool,
     pub(super) constructors: Vec<SignedConstructor>,
     /// Instance members and member extensions.
     pub(super) functions: Vec<SignedFunction>,
@@ -58,6 +60,7 @@ pub(super) fn sign_package_classes(
     package: &[String],
     mut classes: HashMap<String, KotlinClass>,
     declared: &mut HashSet<KlibPublicIdSignature>,
+    internal_friend: bool,
 ) -> Result<Vec<(TypeName, SignedClassifier)>, KlibLibraryError> {
     let prefix = if package.is_empty() {
         String::new()
@@ -191,6 +194,7 @@ pub(super) fn sign_package_classes(
                 &path,
                 declaration,
                 Some(type_parameters.identities()),
+                internal_friend,
             )?;
             if !declared.insert(signed.signature.clone()) {
                 continue;
@@ -213,6 +217,7 @@ pub(super) fn sign_package_classes(
                 &path,
                 declaration,
                 Some(type_parameters.identities()),
+                internal_friend,
             )?;
             if !declared.insert(signed.signature.clone()) {
                 continue;
@@ -237,6 +242,7 @@ pub(super) fn sign_package_classes(
                 shape,
                 modality: class.modality,
                 type_parameters,
+                internal_friend,
                 constructors,
                 functions,
                 properties,

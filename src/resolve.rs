@@ -11537,10 +11537,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if candidate.visibility != Visibility::Public {
-                    self.reject_if_inaccessible(
+                    self.reject_callable_if_inaccessible(
                         candidate.visibility,
                         name,
                         candidate.owner,
+                        candidate.external_identity,
                         self.call_callee_name_span(call),
                     );
                 }
@@ -11639,6 +11640,7 @@ impl<'a> Checker<'a> {
                                     property.visibility,
                                     property.owner,
                                     receiver,
+                                    property.getter.external_identity,
                                 ),
                                 property.context_count,
                             )
@@ -12653,7 +12655,11 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let access_owner = property.associated_access_owner.unwrap_or(property.owner);
         if property.visibility != Visibility::Public
-            && !self.member_accessible(property.visibility, access_owner)
+            && !self.callable_accessible(
+                property.visibility,
+                access_owner,
+                property.getter.external_identity,
+            )
         {
             if let Some(expr) = expr.filter(|_| report_diagnostics) {
                 let span = self.member_name_span(expr, &property.name);
@@ -13234,10 +13240,11 @@ impl<'a> Checker<'a> {
         );
         if let Some(selected) = selection.and_then(CallableCandidateSelection::available) {
             let selected_owner = selected.callable.owner_type();
-            if self.reject_if_inaccessible(
+            if self.reject_callable_if_inaccessible(
                 selected.visibility,
                 name,
                 selected_owner,
+                selected.callable.external_identity,
                 self.call_callee_name_span(call),
             ) {
                 return ClassifierValueCall::Checked(Ty::Error);
@@ -13364,11 +13371,14 @@ impl<'a> Checker<'a> {
         };
         if let Some(selection) = property {
             if let Some((visibility, owner)) = selection.access() {
-                if visibility != Visibility::Public && !self.member_accessible(visibility, owner) {
-                    self.reject_if_inaccessible(
+                if visibility != Visibility::Public
+                    && !self.callable_accessible(visibility, owner, selection.callable_identity())
+                {
+                    self.reject_callable_if_inaccessible(
                         visibility,
                         name,
                         owner,
+                        selection.callable_identity(),
                         self.call_callee_name_span(call),
                     );
                     return ClassifierValueCall::Checked(Ty::Error);
@@ -15477,10 +15487,11 @@ impl<'a> Checker<'a> {
                 .get(&call.0)
                 .is_none_or(Vec::is_empty);
         if fi.visibility != Visibility::Public {
-            self.reject_if_inaccessible(
+            self.reject_callable_if_inaccessible(
                 fi.visibility,
                 name,
                 owner,
+                fi.external_identity,
                 self.call_callee_name_span(call),
             );
         }
@@ -15965,11 +15976,16 @@ impl<'a> Checker<'a> {
         match companion_selection.flatten() {
             Some(CallableCandidateSelection::Selected(selected)) => {
                 let selected = *selected;
-                if !self.member_accessible(selected.visibility, selected.callable.owner) {
-                    self.reject_if_inaccessible(
+                if !self.callable_accessible(
+                    selected.visibility,
+                    selected.callable.owner,
+                    selected.callable.external_identity,
+                ) {
+                    self.reject_callable_if_inaccessible(
                         selected.visibility,
                         "of",
                         selected.callable.owner,
+                        selected.callable.external_identity,
                         span,
                     );
                     return Ty::Error;
@@ -17191,7 +17207,11 @@ impl<'a> Checker<'a> {
                         .and_then(CallableCandidateSelection::available)
                     {
                         if selected.visibility == Visibility::PackagePrivate
-                            && !self.member_accessible(selected.visibility, selected.callable.owner)
+                            && !self.callable_accessible(
+                                selected.visibility,
+                                selected.callable.owner,
+                                selected.callable.external_identity,
+                            )
                         {
                             self.reject_package_private_classifier_call(
                                 receiver, call, classifier, &name, &selected,
@@ -17935,10 +17955,11 @@ impl<'a> Checker<'a> {
                 if let Some(plan) = property_invoke_plan {
                     if let Some((visibility, owner)) = plan.property.access() {
                         if visibility != Visibility::Public
-                            && self.reject_if_inaccessible(
+                            && self.reject_callable_if_inaccessible(
                                 visibility,
                                 &name,
                                 owner,
+                                plan.property.callable_identity(),
                                 self.call_callee_name_span(call),
                             )
                         {
@@ -17968,10 +17989,11 @@ impl<'a> Checker<'a> {
                     Ok(Some(selection)) => {
                         if let Some((visibility, owner)) = selection.access() {
                             if visibility != Visibility::Public
-                                && self.reject_if_inaccessible(
+                                && self.reject_callable_if_inaccessible(
                                     visibility,
                                     &name,
                                     owner,
+                                    selection.callable_identity(),
                                     self.call_callee_name_span(call),
                                 )
                             {
@@ -18028,10 +18050,11 @@ impl<'a> Checker<'a> {
                             Ok(Some(selection)) if is_function_property_shape(selection.ty()) => {
                                 if let Some((visibility, owner)) = selection.access() {
                                     if visibility != Visibility::Public
-                                        && self.reject_if_inaccessible(
+                                        && self.reject_callable_if_inaccessible(
                                             visibility,
                                             &name,
                                             owner,
+                                            selection.callable_identity(),
                                             self.call_callee_name_span(call),
                                         )
                                     {
@@ -22830,10 +22853,11 @@ impl<'a> Checker<'a> {
                             self.mark_extension_receiver_stmt_used(s, resolution.receiver);
                             if let Some(setter) = resolution.setter.as_ref() {
                                 if setter.visibility != Visibility::Public {
-                                    self.reject_if_inaccessible(
+                                    self.reject_callable_if_inaccessible(
                                         setter.visibility,
                                         &name,
                                         setter.callable.owner,
+                                        setter.callable.external_identity,
                                         target_span,
                                     );
                                 }
@@ -23004,7 +23028,15 @@ impl<'a> Checker<'a> {
             if let Some(property) = self.resolver().associated_property(owner, &name) {
                 let member_span = self.assignment_member_name_span(s, &name);
                 let access_owner = property.associated_access_owner.unwrap_or(property.owner);
-                if !self.member_accessible(property.visibility, access_owner) {
+                if !self.callable_accessible(
+                    property.visibility,
+                    access_owner,
+                    property
+                        .setter
+                        .as_ref()
+                        .and_then(|setter| setter.external_identity)
+                        .or(property.getter.external_identity),
+                ) {
                     self.report_inaccessible_associated_property(&property, member_span);
                     return;
                 }
@@ -23103,6 +23135,7 @@ impl<'a> Checker<'a> {
                                         property.visibility,
                                         property.owner,
                                         rt,
+                                        property.getter.external_identity,
                                     ),
                                     property.context_count,
                                 )
@@ -23169,7 +23202,15 @@ impl<'a> Checker<'a> {
                 context_args
             };
             if property.setter_visibility != Visibility::Public
-                && !self.receiver_property_accessible(property.setter_visibility, owner, rt)
+                && !self.receiver_property_accessible(
+                    property.setter_visibility,
+                    owner,
+                    rt,
+                    property
+                        .setter
+                        .as_ref()
+                        .and_then(|setter| setter.external_identity),
+                )
             {
                 self.report_inaccessible_property(
                     property.setter_visibility,
@@ -37381,7 +37422,10 @@ impl<'a> Checker<'a> {
                     function.visibility,
                     function.source_file,
                     Some(self.file_index),
-                    || self.libraries.internal_accessible(function.callable.owner),
+                    || self.libraries.internal_callable_accessible(
+                        function.callable.external_identity,
+                        function.callable.owner,
+                    ),
                 );
                 if !accessible {
                     return None;
@@ -38706,7 +38750,10 @@ impl<'a> Checker<'a> {
                     function.visibility,
                     function.source_file,
                     Some(self.file_index),
-                    || self.libraries.internal_accessible(function.callable.owner),
+                    || self.libraries.internal_callable_accessible(
+                        function.callable.external_identity,
+                        function.callable.owner,
+                    ),
                 );
                 if !accessible {
                     inaccessible = true;
@@ -41049,11 +41096,16 @@ impl<'a> Checker<'a> {
         match selection {
             BoundCallableRefSelection::Property(property) => {
                 let owner = property.getter.owner;
-                if !self.member_accessible(property.getter_visibility, owner) {
-                    self.reject_if_inaccessible(
+                if !self.callable_accessible(
+                    property.getter_visibility,
+                    owner,
+                    property.getter.external_identity,
+                ) {
+                    self.reject_callable_if_inaccessible(
                         property.getter_visibility,
                         &property.name,
                         owner,
+                        property.getter.external_identity,
                         self.member_name_span(expression, &property.name),
                     );
                     return Some(Ty::Error);
@@ -41305,7 +41357,12 @@ impl<'a> Checker<'a> {
             candidate.visibility,
             candidate.source_file,
             Some(self.file_index),
-            || self.libraries.internal_accessible(candidate.callable.owner),
+            || {
+                self.libraries.internal_callable_accessible(
+                    candidate.callable.external_identity,
+                    candidate.callable.owner,
+                )
+            },
         )
     }
 
@@ -44230,7 +44287,11 @@ impl<'a> Checker<'a> {
                         && property.context_count == 0
                         && (!inherited
                             || crate::symbol_resolver::member_is_inheritable(property.visibility))
-                        && checker.member_accessible(property.visibility, property.owner)
+                        && checker.callable_accessible(
+                            property.visibility,
+                            property.owner,
+                            property.getter.external_identity,
+                        )
                 }) {
                     let ty = crate::symbol_resolver::specialize_signature_output_type(
                         source,
@@ -45266,7 +45327,11 @@ impl<'a> Checker<'a> {
         let bindings = crate::symbol_resolver::classifier_bindings(&base, applied_supertype);
         let mut candidates = Vec::new();
         for constructor in &base.constructors {
-            if !self.member_accessible(constructor.visibility, owner) {
+            if !self.callable_accessible(
+                constructor.visibility,
+                owner,
+                constructor.external_identity,
+            ) {
                 continue;
             }
             let params = constructor
@@ -64849,14 +64914,12 @@ impl<'a> Checker<'a> {
         selected: &crate::symbol_resolver::ResolvedMember,
         owner: TypeName,
     ) -> bool {
-        let visibility = selected.member.visibility;
-        if visibility == Visibility::Internal
-            && matches!(selected.origin, Origin::Library)
-            && !self.libraries.internal_accessible(owner)
-        {
-            return false;
-        }
-        self.receiver_member_accessible(visibility, owner, selected.receiver)
+        self.receiver_callable_accessible(
+            selected.member.visibility,
+            owner,
+            selected.receiver,
+            selected.member.external_identity,
+        )
     }
 
     fn this_member_call_ret(
@@ -65305,8 +65368,18 @@ impl<'a> Checker<'a> {
             );
             return Err(());
         }
-        if !self.member_accessible(candidate.visibility, candidate.owner) {
-            self.reject_if_inaccessible(candidate.visibility, name, candidate.owner, span);
+        if !self.callable_accessible(
+            candidate.visibility,
+            candidate.owner,
+            candidate.external_identity,
+        ) {
+            self.reject_callable_if_inaccessible(
+                candidate.visibility,
+                name,
+                candidate.owner,
+                candidate.external_identity,
+                span,
+            );
             return Err(());
         }
         let interface = self
@@ -67000,7 +67073,7 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
-        if !self.member_accessible(member.visibility, internal)
+        if !self.callable_accessible(member.visibility, internal, member.external_identity)
             && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
             self.diags.error(
@@ -67769,50 +67842,6 @@ impl<'a> Checker<'a> {
         Ty::obj_args_name(internal, &arguments)
     }
 
-    /// Property-only visibility exception controlled by Kotlin's
-    /// `AllowAccessToProtectedFieldFromSuperCompanion` language feature. Despite that historical
-    /// feature name, this is a semantic property access: FIR records the resolved property and the
-    /// target backend alone decides whether it becomes a field load or an accessor call.
-    fn receiver_property_accessible(
-        &self,
-        visibility: Visibility,
-        owner: TypeName,
-        receiver: Ty,
-    ) -> bool {
-        if self.visibility_access_suppressed() {
-            return true;
-        }
-        if self.receiver_member_accessible(visibility, owner, receiver) {
-            return true;
-        }
-        if visibility != Visibility::Protected
-            || !self.file.allow_protected_super_companion_property_access
-            || receiver.non_null().obj_internal() != Some(owner)
-        {
-            return false;
-        }
-        let Some(superclass) = owner.nested_owner() else {
-            return false;
-        };
-        let declared_companion = self
-            .resolver()
-            .classifier(superclass)
-            .and_then(|class| {
-                class
-                    .companion_object
-                    .as_ref()
-                    .map(|(_, companion)| *companion)
-            })
-            .is_some_and(|companion| companion == owner);
-        declared_companion
-            && self
-                .lexical_source_class_names()
-                .into_iter()
-                .any(|enclosing| {
-                    enclosing != superclass && self.obj_name_is_subtype(enclosing, superclass)
-                })
-    }
-
     fn inaccessible_classifier(
         &self,
         scope: &CheckerScope<'_>,
@@ -67869,76 +67898,6 @@ impl<'a> Checker<'a> {
         // member access does not add an unrelated "unresolved reference" cascade.
         self.silent_error_exprs.insert(expression);
         true
-    }
-
-    /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
-    /// from the current site. Shared by the property-read and member-call checks.
-    fn reject_if_inaccessible(
-        &mut self,
-        vis: Visibility,
-        name: &str,
-        owner: TypeName,
-        span: Span,
-    ) -> bool {
-        if !self.member_accessible(vis, owner) && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-        {
-            let kind = match vis {
-                Visibility::Private => "private",
-                Visibility::Protected => "protected",
-                Visibility::Internal => "internal",
-                Visibility::PackagePrivate => "package-private",
-                Visibility::Public => "public",
-            };
-            self.diags.error(
-                span,
-                format!(
-                    "cannot access '{name}': it is {kind} in '{}'",
-                    owner.render()
-                ),
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Render an already-established semantic property-access rejection. The caller owns receiver
-    /// and lexical accessibility; the provider contributes only the declaration label used by the
-    /// diagnostic (for example Java's `field name: Type!`).
-    fn report_inaccessible_property(
-        &mut self,
-        visibility: Visibility,
-        name: &str,
-        ty: Ty,
-        owner: TypeName,
-        property: Option<crate::fir::ExternalPropertyId>,
-        span: Span,
-    ) {
-        if self.visibility_access_suppressed() {
-            return;
-        }
-        let label = property.and_then(|property| {
-            self.libraries
-                .external_property_diagnostic_label(property, name, ty)
-        });
-        let Some(label) = label else {
-            self.reject_if_inaccessible(visibility, name, owner, span);
-            return;
-        };
-        let visibility = match visibility {
-            Visibility::Private => "private",
-            Visibility::Protected => "protected",
-            Visibility::Internal => "internal",
-            Visibility::PackagePrivate => "package-private",
-            Visibility::Public => "public",
-        };
-        self.diags.error(
-            span,
-            format!(
-                "cannot access '{label}': it is {visibility} in '{}'.",
-                Self::access_owner_display(owner),
-            ),
-        );
     }
 
     /// Resolve one annotation classifier in the active lexical type scope without performing its

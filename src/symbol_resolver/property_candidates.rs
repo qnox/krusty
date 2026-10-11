@@ -166,5 +166,6 @@ pub(super) fn source_property_visible(
     property.visibility == Visibility::Public
         || matches!(property.getter.origin, Origin::Module { .. })
         || (property.visibility == Visibility::Internal
-            && platform.internal_accessible(property.owner))
+            && platform
+                .internal_callable_accessible(property.getter.external_identity, property.owner))
 }

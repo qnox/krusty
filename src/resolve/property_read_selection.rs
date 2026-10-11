@@ -63,13 +63,35 @@ impl PropertyReadSelection {
         }
     }
 
+    /// Stable provider identity of the selected getter, when this is a dependency declaration.
+    pub(super) fn callable_identity(&self) -> Option<crate::fir::ExternalCallableId> {
+        match self {
+            Self::Member(member) => member
+                .getter
+                .as_ref()
+                .map(|getter| getter.member.external_identity)
+                .flatten()
+                .or_else(|| {
+                    member
+                        .accessor
+                        .as_deref()
+                        .and_then(|accessor| accessor.external_identity)
+                }),
+            Self::MemberExtension(property) => property
+                .getter
+                .as_ref()
+                .and_then(|getter| getter.external_identity),
+            Self::Extension(access, _) => access.property.getter.external_identity,
+        }
+    }
+
     /// A non-public read the visibility gate rejects. A member extension is gated on its dispatch
     /// receiver — the extension receiver is an ordinary argument — so `f.observable` inside the
     /// declaring class reads a `protected` member of `this`, not of `f`. Public reads stay visible.
     pub(super) fn hidden_from(
         &self,
         receiver: Ty,
-        gate: impl FnOnce(Visibility, TypeName, Ty) -> bool,
+        gate: impl FnOnce(Visibility, TypeName, Ty, Option<crate::fir::ExternalCallableId>) -> bool,
     ) -> Option<(Visibility, TypeName)> {
         let (visibility, owner) = self.access()?;
         if visibility == Visibility::Public {
@@ -79,7 +101,7 @@ impl PropertyReadSelection {
             Self::MemberExtension(property) => property.dispatch_receiver.ty,
             Self::Member(_) | Self::Extension(..) => receiver,
         };
-        (!gate(visibility, owner, probed)).then_some((visibility, owner))
+        (!gate(visibility, owner, probed, self.callable_identity())).then_some((visibility, owner))
     }
 
     pub(super) fn external_property(&self) -> Option<crate::fir::ExternalPropertyId> {
@@ -103,8 +125,8 @@ impl Checker<'_> {
         selection: &PropertyReadSelection,
         receiver: Ty,
     ) -> Option<(Visibility, TypeName)> {
-        selection.hidden_from(receiver, |visibility, owner, probed| {
-            self.receiver_property_accessible(visibility, owner, probed)
+        selection.hidden_from(receiver, |visibility, owner, probed, callable| {
+            self.receiver_property_accessible(visibility, owner, probed, callable)
         })
     }
 }
