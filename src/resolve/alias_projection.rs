@@ -344,7 +344,7 @@ impl Checker<'_> {
             self.resolved_type_tys
                 .insert((syntax.span.lo, syntax.span.hi), resolved);
             if !scope.tparam_contains(&syntax.name) {
-                self.check_type_reference_opt_in(syntax, resolved);
+                self.check_type_reference_usage(syntax, resolved);
             }
         }
         resolved

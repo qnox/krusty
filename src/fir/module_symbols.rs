@@ -1526,7 +1526,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 infix: header.flags.has(DeclarationFlags::INFIX),
                 is_abstract: header.flags.has(DeclarationFlags::ABSTRACT),
                 is_final: header.flags.has(DeclarationFlags::FINAL),
-                deprecated_hidden: false,
+                deprecated_hidden: self.declaration_is_deprecated_hidden(declaration),
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
@@ -1776,6 +1776,10 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             functions.overloads.extend(associated_functions);
             properties.overloads.extend(associated_properties);
         }
+        // A HIDDEN-deprecated declaration stays in binary form but is never a Kotlin candidate.
+        functions
+            .overloads
+            .retain(|function| !function.flags.deprecated_hidden);
         properties
             .overloads
             .retain(|property| !property.deprecated_hidden);
