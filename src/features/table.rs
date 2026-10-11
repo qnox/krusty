@@ -70,15 +70,17 @@ pub struct LanguageFeature {
     /// The argument kotlinc's diagnostics name for enabling the feature (its `@Enables` argument,
     /// `-Xcontext-parameters`); `None` leaves `-XXLanguage:+Feature`.
     pub flag: Option<String>,
+    /// The YouTrack issue kotlinc's deprecation warnings cite for the feature (`KT-11914`).
+    pub issue: Option<String>,
 }
 
 impl LanguageFeature {
     fn parse_row(row: &str) -> Result<Self, String> {
         let columns: Vec<&str> = row.split('\t').collect();
-        let [name, since, since_api, progressive, pre_release, pre_release_before, test_only, behavior, hint_url, flag, presentable_name] =
+        let [name, since, since_api, progressive, pre_release, pre_release_before, test_only, behavior, hint_url, flag, issue, presentable_name] =
             columns[..]
         else {
-            return Err(format!("expected 11 columns: {row:?}"));
+            return Err(format!("expected 12 columns: {row:?}"));
         };
         let optional_text = |text: &str| (!text.is_empty()).then(|| text.to_string());
         let version = |text: &str| {
@@ -110,6 +112,7 @@ impl LanguageFeature {
             presentable_name: presentable_name.to_string(),
             hint_url: optional_text(hint_url),
             flag: optional_text(flag),
+            issue: optional_text(issue),
         })
     }
 
@@ -121,6 +124,29 @@ impl LanguageFeature {
     ) -> bool {
         self.since_version
             .is_some_and(|since| language_version >= since && api_version >= self.since_api_version)
+    }
+
+    /// kotlinc's `toDeprecationWarningMessage`: the warning a diagnostic reports while this feature,
+    /// which turns it into an error, is still off.
+    pub fn deprecation_warning_message(&self, message: &str) -> String {
+        let mut warning = message.to_string();
+        if warning.ends_with('.') {
+            warning.push(' ');
+        } else if !warning.ends_with(char::is_whitespace) {
+            warning.push_str(". ");
+        }
+        match self.since_version {
+            Some(since) => warning.push_str(&format!(
+                "This will become an error in language version {since}."
+            )),
+            None => warning.push_str("This will become an error in a future release."),
+        }
+        if let Some(issue) = &self.issue {
+            warning.push_str(&format!(
+                " See https://youtrack.jetbrains.com/issue/{issue}."
+            ));
+        }
+        warning
     }
 
     /// kotlinc's `forcesPreReleaseBinariesIfEnabled`: enabling a feature that no stable language
@@ -243,6 +269,31 @@ mod tests {
                 .progressive()
                 .all(|feature| feature.since_version.is_some()));
         }
+    }
+
+    /// The suffix kotlinc's `toDeprecationWarningMessage` appends while the deprecating feature is off.
+    #[test]
+    fn a_deprecation_warning_names_the_version_and_issue() {
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
+        let feature = table
+            .get("ForbidValueClassRecursionViaTypeParameters")
+            .unwrap();
+        assert_eq!(
+            feature.deprecation_warning_message("value class cannot be recursive."),
+            "value class cannot be recursive. This will become an error in language version 2.5. \
+             See https://youtrack.jetbrains.com/issue/KT-85848."
+        );
+        assert_eq!(
+            feature.deprecation_warning_message("unterminated"),
+            "unterminated. This will become an error in language version 2.5. \
+             See https://youtrack.jetbrains.com/issue/KT-85848."
+        );
+        let unissued = table.get("TypeAliases").unwrap();
+        assert_eq!(unissued.issue, None);
+        assert_eq!(
+            unissued.deprecation_warning_message("message."),
+            "message. This will become an error in language version 1.1."
+        );
     }
 
     /// `EnumEntries` is a language 1.9 feature that also needs API 1.8.
