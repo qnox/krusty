@@ -329,53 +329,198 @@ fn guarded_positions_match_the_reference_compiler() {
     );
 }
 
-/// kotlinc's OTHER form: where the narrowed value has no name to report (a source-block branch,
-/// the merged value of a conditional in ARGUMENT position) it emits the message-less
-/// `Intrinsics.checkNotNull(Object)V`. krusty emits it for a block branch; the argument-position
-/// conditional is still unguarded, and this pins that gap so the assertion fails the day it closes.
+/// Every not-null check kotlinc emits WITHOUT a message: the operand of its implicit cast is
+/// neither a call nor a field read, so `checkNotNull(Object)` checks it through a temporary — or,
+/// for a stable local, through the local itself. A local read in any committed position, a
+/// conditional or `try` merged in argument position, and a `try` whose expected type reaches its
+/// body and catches. `box()` proves each one fires.
+const MESSAGE_LESS: &str = r#"
+fun takesNonNull(value: String): Int = value.length
+
+fun localArgument(): Int {
+    val local = System.getenv("KRUSTY_ABSENT_1")
+    return takesNonNull(local)
+}
+
+fun localDeclaration(): Int {
+    val local = System.getenv("KRUSTY_ABSENT_2")
+    val declared: String = local
+    return declared.length
+}
+
+fun localReturn(): String {
+    val local = System.getenv("KRUSTY_ABSENT_3")
+    return local
+}
+
+fun parameterArgument(values: java.util.ArrayList<String>): Int {
+    var total = 0
+    for (value in values) {
+        total += takesNonNull(value)
+    }
+    return total
+}
+
+fun ifArgument(c: Boolean): Int = takesNonNull(if (c) System.getenv("KRUSTY_ABSENT_4") else "x")
+
+fun whenArgument(k: Int): Int = takesNonNull(
+    when (k) {
+        1 -> System.getenv("KRUSTY_ABSENT_5")
+        else -> "x"
+    }
+)
+
+fun elvisArgument(s: String?): Int = takesNonNull(s ?: System.getenv("KRUSTY_ABSENT_6"))
+
+fun tryArgument(): Int = takesNonNull(try { System.getenv("KRUSTY_ABSENT_7") } finally { })
+
+fun tryDeclaration(): String {
+    val declared: String = try {
+        System.getenv("KRUSTY_ABSENT_8")
+    } catch (e: IllegalStateException) {
+        "x"
+    }
+    return declared
+}
+
+fun fail(): String = throw IllegalStateException()
+
+fun tryReturn(): String = try {
+    fail()
+} catch (e: IllegalStateException) {
+    System.getenv("KRUSTY_ABSENT_9")
+}
+
+fun fails(position: Int): Boolean = try {
+    when (position) {
+        0 -> localArgument()
+        1 -> localDeclaration()
+        2 -> localReturn().length
+        3 -> ifArgument(true)
+        4 -> whenArgument(1)
+        5 -> elvisArgument(null)
+        6 -> tryArgument()
+        7 -> tryDeclaration().length
+        else -> tryReturn().length
+    }
+    false
+} catch (e: NullPointerException) {
+    true
+}
+
+fun box(): String {
+    var position = 0
+    while (position < 9) {
+        if (!fails(position)) {
+            return "position " + position + " did not fail"
+        }
+        position = position + 1
+    }
+    return "OK"
+}
+"#;
+
+fn message_less() -> &'static Builds {
+    static BUILDS: OnceLock<Builds> = OnceLock::new();
+    BUILDS.get_or_init(|| Builds {
+        krusty: common::expect_classes_with_stdlib(MESSAGE_LESS, "MessageLess"),
+        reference: compile_reference(MESSAGE_LESS, "MessageLess"),
+    })
+}
+
+/// `javap -p -c` of `classes` with constant-pool indices removed: the executed instructions and
+/// their resolved operands, independent of where a constant landed in the pool.
+fn disassembly(classes: &[(String, Vec<u8>)], tag: &str) -> String {
+    let work = common::scratch_dir().expect("allocate javap fixture");
+    let mut arguments = vec!["-p".to_string(), "-c".to_string()];
+    for (internal, bytes) in classes {
+        let path = work.join(format!("{internal}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create javap input directory");
+        }
+        std::fs::write(&path, bytes).expect("write javap input");
+        arguments.push(path.to_string_lossy().into_owned());
+    }
+    let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    let text = common::javap(&borrowed).unwrap_or_else(|| panic!("javap failed for {tag}"));
+    let _ = std::fs::remove_dir_all(work);
+    text.lines()
+        .filter(|line| !line.starts_with("Compiled from"))
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|token| !token.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The declaring method of every message-less `Intrinsics.checkNotNull(Object)` call.
+fn message_less_sites(classes: &[(String, Vec<u8>)], tag: &str) -> Vec<String> {
+    let mut method = String::new();
+    let mut sites = Vec::new();
+    for line in disassembly(classes, tag).lines() {
+        if !line.contains(':') && line.ends_with(';') && line.contains('(') {
+            method = line.to_string();
+        } else if line.contains("Intrinsics.checkNotNull:(Ljava/lang/Object;)V") {
+            sites.push(method.clone());
+        }
+    }
+    sites
+}
+
+/// The positions fixture: a block branch committed to a declared type and a conditional merged
+/// in argument position are both checked without a message, like kotlinc.
 #[test]
-fn message_less_guards_match_the_reference_compiler_except_argument_conditionals() {
-    let nameless = |classes: &[(String, Vec<u8>)], tag| {
-        let work = common::scratch_dir().expect("allocate javap fixture");
-        let mut arguments = vec!["-p".to_string(), "-c".to_string()];
-        for (internal, bytes) in classes {
-            let path = work.join(format!("{internal}.class"));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).expect("create javap input directory");
-            }
-            std::fs::write(&path, bytes).expect("write javap input");
-            arguments.push(path.to_string_lossy().into_owned());
-        }
-        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        let text = common::javap(&borrowed).unwrap_or_else(|| panic!("javap failed for {tag}"));
-        let _ = std::fs::remove_dir_all(work);
-        let mut method = String::new();
-        let mut sites = Vec::new();
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if !line.starts_with("    ") && trimmed.ends_with(';') && trimmed.contains('(') {
-                method = trimmed.to_string();
-            } else if trimmed.contains("Intrinsics.checkNotNull:(Ljava/lang/Object;)V") {
-                sites.push(method.clone());
-            }
-        }
-        sites
-    };
-    let reference = nameless(&positions().reference, "kotlinc");
-    let argument = "public static final int conditionalArgument(boolean);";
+fn message_less_guards_match_the_reference_compiler() {
+    let reference = message_less_sites(&positions().reference, "kotlinc");
     assert_eq!(
         reference,
         [
             "public static final int blockBranch(boolean);".to_string(),
-            argument.to_string(),
+            "public static final int conditionalArgument(boolean);".to_string(),
         ],
         "the fixture must exercise kotlinc's message-less form in both positions"
     );
     assert_eq!(
-        nameless(&positions().krusty, "krusty"),
-        ["public static final int blockBranch(boolean);".to_string()],
-        "krusty guards the block branch like kotlinc and does not yet guard `{argument}`"
+        message_less_sites(&positions().krusty, "krusty"),
+        reference,
+        "krusty must guard the block branch and the argument conditional like kotlinc"
     );
+}
+
+/// Each message-less position emits kotlinc's exact instructions: the temporary, or the stable
+/// local reread in its place, and where the check sits inside a `try`.
+#[test]
+fn message_less_checks_are_instruction_identical_to_the_reference_compiler() {
+    let reference = message_less_sites(&message_less().reference, "kotlinc");
+    assert_eq!(
+        reference,
+        [
+            "public static final int localArgument();",
+            "public static final int localDeclaration();",
+            "public static final java.lang.String localReturn();",
+            "public static final int ifArgument(boolean);",
+            "public static final int whenArgument(int);",
+            "public static final int elvisArgument(java.lang.String);",
+            "public static final int tryArgument();",
+            "public static final java.lang.String tryDeclaration();",
+            "public static final java.lang.String tryReturn();",
+        ],
+        "the fixture must make kotlinc check every position without a message"
+    );
+    assert_eq!(
+        disassembly(&message_less().krusty, "krusty"),
+        disassembly(&message_less().reference, "kotlinc"),
+        "krusty must emit kotlinc's message-less checks instruction for instruction"
+    );
+}
+
+#[test]
+fn message_less_checks_fail_where_the_value_enters() {
+    assert_eq!(run(&message_less().krusty), "OK");
+    assert_eq!(run(&message_less().reference), "OK");
 }
 
 /// A Java bean property names the accessor (`getTitle(...)`), a Java field names the field, a

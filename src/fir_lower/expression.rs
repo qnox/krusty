@@ -1829,21 +1829,33 @@ impl BodyLowering<'_> {
     }
 
     /// kotlinc's implicit not-null cast over a value it cannot name keeps the value in a temporary,
-    /// checks the temporary, and yields it (`astore; aload; checkNotNull; aload`).
+    /// checks the temporary, and yields it (`astore; aload; checkNotNull; aload`). A read of a
+    /// stable binding is its own snapshot: `irLetS` checks and yields the binding itself.
     fn unnamed_null_check(&mut self, value: ExprId, source_type: Ty, target: Ty) -> ExprId {
-        let temporary = self.allocate_temporary();
-        let stored = self.ir.add_expr(IrExpr::Variable {
-            index: temporary,
-            ty: source_type,
-            init: Some(value),
-            named: false,
-        });
-        let checked = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let reused = self.stable_value_read(value);
+        let (stored, temporary) = match reused {
+            Some(slot) => (None, slot),
+            None => {
+                let temporary = self.allocate_temporary();
+                let stored = self.ir.add_expr(IrExpr::Variable {
+                    index: temporary,
+                    ty: source_type,
+                    init: Some(value),
+                    named: false,
+                });
+                (Some(stored), temporary)
+            }
+        };
+        let checked = if reused.is_some() {
+            value
+        } else {
+            self.checked_value_read(temporary, false)
+        };
         let check = self.ir.add_expr(IrExpr::NotNullAssert {
             operand: checked,
             check: crate::ir::NullCheck::Unnamed,
         });
-        let mut result = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let mut result = self.checked_value_read(temporary, reused.is_some());
         if source_type != target {
             result = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -1852,9 +1864,21 @@ impl BodyLowering<'_> {
             });
         }
         self.ir.add_expr(IrExpr::Block {
-            stmts: vec![stored, check],
+            stmts: stored.into_iter().chain([check]).collect(),
             value: Some(result),
         })
+    }
+
+    /// A fresh read of `slot`: a stable binding the checked value already read (`stable`), or the
+    /// temporary holding that value.
+    fn checked_value_read(&mut self, slot: u32, stable: bool) -> ExprId {
+        let read = self.ir.add_expr(IrExpr::GetValue(slot));
+        if stable {
+            self.ir
+                .binding_read_stability
+                .insert(read, crate::ir::IrBindingStability::Stable);
+        }
+        read
     }
 
     pub(super) fn short_circuit_and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {

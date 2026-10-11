@@ -2662,12 +2662,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constant (`ACC_ENUM`) is not-null, so `== null` is always false and a non-null use emits no guard.
   A static field of an enum type that is not itself an enum constant stays `T!` and is guarded.
   Test: `tests/platform_call_assertions_e2e.rs::java_enum_constant_is_not_a_platform_value`.
-  Also unimplemented:
-  kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, which it emits wherever the
-  narrowed value has no name to report — a plain read of a platform-typed local, a source-block branch,
-  a `try` value, the merged value of a conditional in argument position. krusty emits the NAMED form
-  only, so a narrowing it
-  cannot name stays unguarded rather than guarded under an invented name.
+  kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, follows from where its
+  message comes from: the JVM lowering names an implicit not-null cast only when the cast's OPERAND is
+  a call (`name(...)`, a property accessor and an index `get` included) or a declared field read, and
+  checks every other operand without a message. So a plain read of a platform-typed local or
+  parameter — in any committed position, directly or through a lambda's capture — a `try` value, a
+  source-block branch, and a conditional merged in argument position (`takesNonNull(if (c)
+  javaCall() else "x")`, likewise a `when`, an elvis, or a `try`) are all checked without a name. The
+  operand is kept in a temporary (`astore; aload; checkNotNull; aload`) unless it already reads a
+  stable binding (`val`, parameter, loop variable), which kotlinc's `irLetS` checks and yields
+  directly (`aload; checkNotNull; aload`). A `try` committed to a declared type is a value boundary
+  like a conditional: the expected type reaches its body and every `catch` (never its `finally`), so
+  the check sits inside the protected range on the branch that produced the platform value.
+  Test: `tests/platform_call_assertions_e2e.rs::message_less_checks_are_instruction_identical_to_the_reference_compiler`
+  (instruction-identical to kotlinc 2.4.20 for every such position, each one run to its failure).
   Tests: `tests/platform_call_assertions_e2e.rs` (per-position `checkNotNullExpressionValue` call-site
   and message differential vs kotlinc, every guarded position run for its exception and message,
   including a default argument, the top-level `<clinit>` repro, and constructor delegation, including
