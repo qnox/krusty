@@ -60,3 +60,21 @@ fn generated_range_membership_records_the_comparison_type() {
         ]
     );
 }
+
+#[test]
+fn a_negated_containment_call_records_its_boolean_operand() {
+    let ir = lower_single_source(
+        "fun outside(value: Int, range: IntRange): Boolean = value !in range\n",
+        "CheckedNegatedContainmentOperand",
+    );
+    let negations = ir.negations.iter().copied().collect::<Vec<_>>();
+    assert_eq!(negations.len(), 1);
+    let IrExpr::PrimitiveBinOp { lhs, rhs, .. } = ir.expr(negations[0]) else {
+        panic!("a recorded negation must remain a primitive comparison");
+    };
+
+    assert_eq!(
+        (ir.checked_type(*lhs), ir.checked_type(*rhs)),
+        (Some(Ty::Boolean), Some(Ty::Boolean))
+    );
+}

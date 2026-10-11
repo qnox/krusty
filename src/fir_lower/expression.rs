@@ -380,6 +380,10 @@ impl BodyLowering<'_> {
             FirExprKind::ContainmentCall { call, negated } => {
                 let call = self
                     .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
+                // The selected `contains` convention call is the Boolean operand of a synthesized
+                // negation for `!in`. The outer FIR expression records the negation's type, not
+                // this nested call's, so preserve the checker-owned result before building it.
+                self.ir.logical_types.insert(call, Ty::Boolean);
                 if *negated {
                     self.ir.add_negation(call)
                 } else {
