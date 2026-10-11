@@ -75,7 +75,9 @@ impl BodyLowering<'_> {
             });
         }
         let value_ty = self.expression_ty(value)?;
-        if !(value_ty.is_reference() && comparison_ty.is_jvm_scalar()) {
+        if matches!(comparison_ty, Ty::UInt | Ty::ULong)
+            || !(value_ty.is_reference() && comparison_ty.is_jvm_scalar())
+        {
             // The backend realizes membership in a range literal as kotlinc's
             // `RangeContainsLowering` does, from the operands as written.
             let start = self.expression(start)?;

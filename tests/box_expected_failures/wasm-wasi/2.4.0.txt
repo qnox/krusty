@@ -4986,7 +4986,6 @@ ranges/contains/inExtensionRange.kt
 ranges/contains/inFloatingPointRangeWithNaNBound.kt
 ranges/contains/inIntRange.kt
 ranges/contains/inIterable.kt
-ranges/contains/inNonMatchingRange.kt
 ranges/contains/inOptimizableDoubleRange.kt
 ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt
@@ -5001,8 +5000,6 @@ ranges/contains/inRangeWithSmartCast.kt
 ranges/contains/inUntilMaxValue.kt
 ranges/contains/inUntilMinValue.kt
 ranges/contains/inUntilMinValueNonConst.kt
-ranges/contains/intInByteRangeWithPossibleOverflow.kt
-ranges/contains/intInShortRangeWithPossibleOverflow.kt
 ranges/contains/kt20106.kt
 ranges/contains/nullableInPrimitiveRange.kt
 ranges/contains/rangeContainsString.kt

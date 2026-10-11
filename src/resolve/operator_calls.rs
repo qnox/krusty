@@ -552,39 +552,39 @@ impl<'a> Checker<'a> {
             let range_st = range_operand(st);
             let range_et = range_operand(et);
             let comparison_provenance = selected_range_comparison_provenance(kind, &range_call);
-            let contains = self.operator_call_ret(
-                scope,
-                e,
-                range_ty,
-                "contains",
-                &[vt],
-                &[value],
-                self.span(e),
-                None,
-            );
-            // kotlinc's `RangeContainsLowering` compares in the widest numeric type of the bounds
-            // and the value (`computeComparisonClass`) when the call is the range's own `contains`
-            // or a stdlib closed-range extension. Unsigned membership is compared only between
-            // operands of one type.
-            let selects_range_contains =
-                matches!(&contains, Some((Ty::Boolean, ResolvedCall::Member(_))))
-                    || matches!(
-                        &contains,
-                        Some((Ty::Boolean, ResolvedCall::Extension(extension)))
-                            if extension.callable.compiler_intrinsic
-                                == Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
-                    );
             let operands_are_numeric = [range_vt, range_st, range_et].iter().all(prim);
             let uniform = range_vt == range_st && range_st == range_et;
-            let comparison =
-                if operands_are_numeric
-                    && (uniform
-                        || ![range_vt, range_st, range_et]
-                            .iter()
-                            .any(|ty| ty.is_unsigned()))
-                    && selects_range_contains
-                {
-                    range_comparison_type(range_st, range_et, range_vt)
+            // kotlinc's `RangeContainsLowering` compares in the widest numeric type of the bounds
+            // and the value (`computeComparisonClass`) when the call is the range's own `contains`
+            // or a stdlib closed-range extension. Every primitive range declares the member
+            // `contains` of its own element type, and a member wins over any extension, so operands
+            // of one type always select it; mixed operands select through ordinary resolution.
+            // Unsigned membership is compared only between operands of one type. A range kotlinc
+            // does not compare (`downTo`, a floating `..<`) calls its `contains`.
+            let mut contains = None;
+            let comparison = if operands_are_numeric
+                && uniform
+                && comparison_provenance.is_some()
+            {
+                range_comparison_type(range_st, range_et, range_vt)
+            } else if operands_are_numeric
+                && ![range_vt, range_st, range_et]
+                    .iter()
+                    .any(|ty| ty.is_unsigned())
+            {
+                let selected = self.range_contains_call(scope, e, range_ty, vt, value);
+                let selects_range_contains = match &selected {
+                    Some((Ty::Boolean, ResolvedCall::Member(_))) => true,
+                    Some((Ty::Boolean, ResolvedCall::Extension(extension))) => {
+                        extension.callable.compiler_intrinsic
+                            == Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
+                    }
+                    _ => false,
+                };
+                contains = Some(selected);
+                selects_range_contains
+                    .then(|| range_comparison_type(range_st, range_et, range_vt))
+                    .flatten()
                 } else if prim(&range_st)
                     && range_st == range_et
                     && self.in_range_widened_value(vt, range_st)
@@ -617,10 +617,35 @@ impl<'a> Checker<'a> {
                 // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
                 // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
+                let contains = match contains {
+                    Some(contains) => contains,
+                    None => self.range_contains_call(scope, e, range_ty, vt, value),
+                };
                 self.finish_range_contains(&operands, range_ty, range_call, contains)
             }
         };
         self.set(e, t)
+    }
+
+    /// The `contains` operator call testing membership of `value` in a range of `range_ty`.
+    fn range_contains_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        range_ty: Ty,
+        value_ty: Ty,
+        value: ExprId,
+    ) -> Option<(Ty, ResolvedCall)> {
+        self.operator_call_ret(
+            scope,
+            expression,
+            range_ty,
+            "contains",
+            &[value_ty],
+            &[value],
+            self.span(expression),
+            None,
+        )
     }
 
     fn finish_range_contains(
