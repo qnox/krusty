@@ -50634,24 +50634,26 @@ impl<'a> Checker<'a> {
                     if self.signature_defaults_only && !default_owned_class && !selected_default {
                         continue;
                     }
-                    let source = self.fed_source();
                     let implementation_declaration =
                         self.member_declaration(d, current_owner, method_index);
-                    let implementation = crate::symbol_resolver::declared_member_declarations(
-                        &source, receiver, &m.name,
-                    )
-                    .into_parts()
-                    .0
-                    .overloads
-                    .into_iter()
-                    .find(|candidate| {
-                        if self.resolved_index.is_some() {
-                            implementation_declaration.is_some()
-                                && candidate.stable_declaration == implementation_declaration
-                        } else {
-                            candidate.source_member == Some(source_member)
-                        }
-                    });
+                    let implementation = match self.override_implementation(
+                        scope,
+                        d,
+                        m,
+                        receiver,
+                        implementation_declaration,
+                        source_member,
+                    ) {
+                        local_method_dependencies::OverrideImplementation::Bound(
+                            implementation,
+                        ) => Some(implementation),
+                        local_method_dependencies::OverrideImplementation::Absent => None,
+                        // Compact Pass 1 publishes a body-local member by stable identity only and
+                        // has no index to bind this parser method to it. The Pass-2 check of the
+                        // same body owns that binding and this diagnostic.
+                        local_method_dependencies::OverrideImplementation::Unbound => continue,
+                    };
+                    let source = self.fed_source();
                     let candidates = direct_supertypes
                         .iter()
                         .flat_map(|supertype| {
