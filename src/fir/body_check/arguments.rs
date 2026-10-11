@@ -1013,6 +1013,28 @@ impl BodyFirChecker<'_> {
         }
     }
 
+    /// A member access's explicit dispatch `receiver`. Resolution commits a Java value received by
+    /// a value class to that class's non-null type (see `resolve::value_classes`), and it is guarded
+    /// against that type like an argument.
+    pub(super) fn explicit_dispatch_receiver(
+        &mut self,
+        receiver: ExprId,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
+        let mut checked = self.explicit_receiver(receiver)?;
+        if checked.conversion.is_none() && self.info.platform_narrowings.contains_key(&receiver) {
+            let span = self
+                .file
+                .expr_span(receiver)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+            let received = self.info.semantic_ty(receiver).platform_lower_bound();
+            let target = self.resolved_type(span, received)?;
+            let cause = self.expression_origin(receiver)?;
+            checked.conversion =
+                Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+        }
+        Ok(checked)
+    }
+
     /// An extension call's explicit `receiver`, converted as the argument of the receiver
     /// parameter it is. Besides a smart cast of its own value, a Java value the checker committed
     /// to a receiver type that rejects `null` is guarded (`System.getProperty(key).ext()` checks

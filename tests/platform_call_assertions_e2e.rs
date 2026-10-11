@@ -428,12 +428,15 @@ fn message_less() -> &'static Builds {
     })
 }
 
-/// `javap -p -c` of `classes` with constant-pool indices removed: the executed instructions and
-/// their resolved operands, independent of where a constant landed in the pool.
+/// `javap -p -c` of `classes`, in class-name order, with constant-pool indices removed: the
+/// executed instructions and their resolved operands, independent of where a constant landed in
+/// the pool or which class a compiler wrote first.
 fn disassembly(classes: &[(String, Vec<u8>)], tag: &str) -> String {
     let work = common::scratch_dir().expect("allocate javap fixture");
     let mut arguments = vec!["-p".to_string(), "-c".to_string()];
-    for (internal, bytes) in classes {
+    let mut ordered: Vec<&(String, Vec<u8>)> = classes.iter().collect();
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    for (internal, bytes) in ordered {
         let path = work.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create javap input directory");
@@ -521,6 +524,88 @@ fn message_less_checks_are_instruction_identical_to_the_reference_compiler() {
 fn message_less_checks_fail_where_the_value_enters() {
     assert_eq!(run(&message_less().krusty), "OK");
     assert_eq!(run(&message_less().reference), "OK");
+}
+
+/// A value class receives its dispatch receiver as its value, so kotlinc commits a Java value
+/// received by one to the class's non-null type and checks it like an argument: a member call, the
+/// underlying property, an override of an interface member, and an `Any` member alike. An ordinary
+/// class receiver stays unchecked (`property_and_index_guards_name_the_producing_callable`).
+const VALUE_CLASS_RECEIVERS: &str = r#"
+interface Measured {
+    fun size(): Int
+}
+
+@JvmInline
+value class Meters(val amount: Int) : Measured {
+    fun plusOne(): Int = amount + 1
+    override fun size(): Int = amount
+}
+
+fun member(values: java.util.ArrayList<Meters>): Int = values[0].plusOne()
+
+fun property(values: java.util.ArrayList<Meters>): Int = values[0].amount
+
+fun overridden(values: java.util.ArrayList<Meters>): Int = values[0].size()
+
+fun anyMember(values: java.util.ArrayList<Meters>): Int = values[0].hashCode()
+
+fun fails(values: java.util.ArrayList<Meters>, position: Int): Boolean = try {
+    when (position) {
+        0 -> member(values)
+        1 -> property(values)
+        2 -> overridden(values)
+        else -> anyMember(values)
+    }
+    false
+} catch (e: NullPointerException) {
+    e.message == "get(...) must not be null"
+}
+
+fun box(): String {
+    val values = java.util.ArrayList<Meters>()
+    values.add(Meters(2))
+    val total = member(values) + property(values) + overridden(values) + anyMember(values)
+    if (total != 9) return "total " + total
+    val absent = java.util.ArrayList<Meters>()
+    (absent as java.util.ArrayList<Any?>).add(null)
+    var position = 0
+    while (position < 4) {
+        if (!fails(absent, position)) return "position " + position + " did not fail"
+        position = position + 1
+    }
+    return "OK"
+}
+"#;
+
+fn value_class_receivers() -> &'static Builds {
+    static BUILDS: OnceLock<Builds> = OnceLock::new();
+    BUILDS.get_or_init(|| Builds {
+        krusty: common::expect_classes_with_stdlib(VALUE_CLASS_RECEIVERS, "ValueReceivers"),
+        reference: compile_reference(VALUE_CLASS_RECEIVERS, "ValueReceivers"),
+    })
+}
+
+#[test]
+fn a_java_value_received_by_a_value_class_is_checked_like_kotlinc() {
+    let reference = assertion_sites(&value_class_receivers().reference, "kotlinc");
+    assert_eq!(
+        reference,
+        [
+            "public static final int anyMember(java.util.ArrayList<Meters>);",
+            "public static final int member(java.util.ArrayList<Meters>);",
+            "public static final int overridden(java.util.ArrayList<Meters>);",
+            "public static final int property(java.util.ArrayList<Meters>);",
+        ]
+        .map(|method| (method.to_string(), "get(...)".to_string())),
+        "the fixture must make kotlinc check every value-class receiver"
+    );
+    assert_eq!(
+        disassembly(&value_class_receivers().krusty, "krusty"),
+        disassembly(&value_class_receivers().reference, "kotlinc"),
+        "krusty must check a value-class receiver instruction for instruction like kotlinc"
+    );
+    assert_eq!(run(&value_class_receivers().krusty), "OK");
+    assert_eq!(run(&value_class_receivers().reference), "OK");
 }
 
 /// A Java bean property names the accessor (`getTitle(...)`), a Java field names the field, a

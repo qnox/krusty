@@ -2662,6 +2662,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constant (`ACC_ENUM`) is not-null, so `== null` is always false and a non-null use emits no guard.
   A static field of an enum type that is not itself an enum constant stays `T!` and is guarded.
   Test: `tests/platform_call_assertions_e2e.rs::java_enum_constant_is_not_a_platform_value`.
+  A VALUE CLASS receives its dispatch receiver as its value, not as an object that could be `null`,
+  so a Java value used as the explicit receiver of a value-class member (`list[0].f()`,
+  `list[0].amount`, an override of an interface member, an `Any` member such as `hashCode()`) is
+  committed to the class's non-null type and checked like an argument (`get(...)`), while an
+  ordinary class receiver stays unchecked and a safe call has already tested its receiver
+  (`resolve/value_classes.rs`). Test:
+  `tests/platform_call_assertions_e2e.rs::a_java_value_received_by_a_value_class_is_checked_like_kotlinc`.
+
   kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, follows from where its
   message comes from: the JVM lowering names an implicit not-null cast only when the cast's OPERAND is
   a call (`name(...)`, a property accessor and an index `get` included) or a declared field read, and

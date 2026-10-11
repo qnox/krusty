@@ -849,7 +849,7 @@ impl BodyFirChecker<'_> {
                     self.implicit_receiver(expression)?
                 } else {
                     receiver
-                        .map(|receiver| self.explicit_receiver(receiver))
+                        .map(|receiver| self.explicit_dispatch_receiver(receiver))
                         .transpose()?
                 };
                 let Some(dispatch_receiver) = dispatch_receiver else {
