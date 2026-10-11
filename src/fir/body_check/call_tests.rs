@@ -4555,9 +4555,11 @@ fn functional_intersection_selects_the_matching_constituent_for_suspend_conversi
 #[test]
 fn flow_intersection_type_argument_preserves_all_bounds_in_checked_fir() {
     let (body, index) = checked_function_body(
-        "interface A\n\
+        "// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter\n\
+         interface A\n\
          interface B\n\
          inline fun <reified K> select(x: K): K where K : A, K : B = x\n\
+         @Suppress(\"TYPE_INTERSECTION_AS_REIFIED_WARNING\")\n\
          fun test(value: Any) { if (value is A && value is B) select(value) }\n",
         "test",
     );
@@ -4606,6 +4608,7 @@ fn reified_intersection_argument_records_its_common_supertype() {
          object B : X, Y\n\
          fun <T> sel(left: T, right: T): T = left\n\
          inline fun <reified T> T.keep(): T = this\n\
+         @Suppress(\"TYPE_INTERSECTION_AS_REIFIED_WARNING\")\n\
          fun run() { sel(A, B).keep() }\n",
         "run",
     );

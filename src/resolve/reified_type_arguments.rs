@@ -99,41 +99,82 @@ impl Checker<'_> {
         let Some(arguments) = self.resolved_call_type_args.get(&expression) else {
             return Vec::new();
         };
-        let (reified, formals): (&[u32], &[String]) = match self.resolved_calls.get(&expression) {
-            Some(ResolvedCall::Member(selected)) => (
+        let Some(call) = self.resolved_calls.get(&expression) else {
+            return Vec::new();
+        };
+        self.reified_parameters(call, arguments.len())
+            .into_iter()
+            .filter_map(|(ordinal, formal)| {
+                let argument = (*arguments.get(ordinal)?)?;
+                Some(ReifiedTypeArgument {
+                    ordinal,
+                    argument: self.reified_argument_type(expression, ordinal, argument),
+                    formal,
+                })
+            })
+            .collect()
+    }
+
+    /// The reified type parameters of `call`'s callee, by ordinal among its own type parameters,
+    /// with their identities. A declaration of this module answers through its resolved
+    /// type-parameter headers; a dependency's callable carries the ordinals it was decoded with.
+    fn reified_parameters(&self, call: &ResolvedCall, arity: usize) -> Vec<(usize, String)> {
+        let declaration = match call {
+            ResolvedCall::Member(selected) => selected.member.stable_declaration,
+            ResolvedCall::Companion(member) => member.stable_declaration,
+            ResolvedCall::TopLevel(call) => call.stable_declaration,
+            ResolvedCall::Extension(call) => call.stable_declaration,
+            ResolvedCall::MemberExtension {
+                stable_declaration, ..
+            } => *stable_declaration,
+            // A local function cannot be `inline`, so none of its type parameters is reified.
+            ResolvedCall::LocalFunction(_) => return Vec::new(),
+        };
+        if let Some(declaration) = declaration {
+            let Some(index) = self.resolved_index else {
+                return Vec::new();
+            };
+            return (0..arity)
+                .filter_map(|ordinal| {
+                    let parameter =
+                        index.type_parameter(declaration, u32::try_from(ordinal).ok()?)?;
+                    if !index.type_parameter_header(parameter)?.flags.is_reified() {
+                        return None;
+                    }
+                    let formal = index.type_parameter_name(parameter)?;
+                    Some((ordinal, formal.to_string()))
+                })
+                .collect();
+        }
+        let (reified, formals): (&[u32], &[String]) = match call {
+            ResolvedCall::Member(selected) => (
                 &selected.member.call_sig.reified_type_parameter_ordinals,
                 generic_formals(selected.member.generic_sig.as_ref()),
             ),
-            Some(ResolvedCall::Companion(member)) => (
+            ResolvedCall::Companion(member) => (
                 &member.call_sig.reified_type_parameter_ordinals,
                 generic_formals(member.generic_sig.as_ref()),
             ),
-            Some(ResolvedCall::TopLevel(call)) => (
+            ResolvedCall::TopLevel(call) => (
                 &call.callable.reified_type_parameter_ordinals,
                 generic_formals(call.callable.generic_sig.as_deref()),
             ),
-            Some(ResolvedCall::Extension(call)) => (
+            ResolvedCall::Extension(call) => (
                 &call.callable.reified_type_parameter_ordinals,
                 generic_formals(call.callable.generic_sig.as_deref()),
             ),
-            Some(ResolvedCall::MemberExtension {
+            ResolvedCall::MemberExtension {
                 reified_type_parameter_ordinals,
                 type_parameters,
                 ..
-            }) => (reified_type_parameter_ordinals, type_parameters),
-            // A local function cannot be `inline`, so none of its type parameters is reified.
-            Some(ResolvedCall::LocalFunction(_)) | None => return Vec::new(),
+            } => (reified_type_parameter_ordinals, type_parameters),
+            ResolvedCall::LocalFunction(_) => return Vec::new(),
         };
         reified
             .iter()
             .filter_map(|&ordinal| {
                 let ordinal = ordinal as usize;
-                let argument = (*arguments.get(ordinal)?)?;
-                Some(ReifiedTypeArgument {
-                    ordinal,
-                    argument: self.reified_argument_type(expression, ordinal, argument),
-                    formal: formals.get(ordinal)?.clone(),
-                })
+                Some((ordinal, formals.get(ordinal)?.clone()))
             })
             .collect()
     }
@@ -178,7 +219,7 @@ impl Checker<'_> {
             }
             return;
         }
-        let features = self.file.reified_type_arguments;
+        let features = &self.file.reified_type_arguments;
         match argument {
             Ty::TyParam(name, _) => {
                 if !reified_type_parameter(scope, name) {
@@ -222,7 +263,7 @@ impl Checker<'_> {
     }
 
     fn report_reified_problem(&mut self, span: Span, formal: &str, problem: ReifiedProblem) {
-        let features = self.file.reified_type_arguments;
+        let features = self.file.reified_type_arguments.clone();
         match problem {
             ReifiedProblem::TypeParameter {
                 name,
@@ -231,12 +272,19 @@ impl Checker<'_> {
             } => {
                 let name = crate::types::type_parameter_source_name(name);
                 if in_dnn_or_flexible && !features.report_in_dnn_and_flexible {
+                    let message = type_parameter_as_reified(name);
+                    let warning = deprecation_warning_message(
+                        &message,
+                        features
+                            .report_in_dnn_and_flexible_warning_suffix
+                            .as_deref(),
+                    );
                     self.report_deprecation_error(
                         span,
-                        "ReportReificationProblemsInDnnAndFlexible",
                         false,
-                        "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING",
-                        &type_parameter_as_reified(name),
+                        warning.as_deref(),
+                        crate::diag::CompilerWarningName::TypeParameterAsReifiedDeprecation,
+                        &message,
                     );
                 } else if in_array {
                     self.diags.error(
@@ -264,25 +312,47 @@ impl Checker<'_> {
             } => {
                 let message = intersection_as_reified(formal, &parts);
                 if in_dnn_or_flexible && !features.report_in_dnn_and_flexible {
+                    let warning = deprecation_warning_message(
+                        &message,
+                        features
+                            .report_in_dnn_and_flexible_warning_suffix
+                            .as_deref(),
+                    );
                     self.report_deprecation_error(
                         span,
-                        "ReportReificationProblemsInDnnAndFlexible",
                         false,
-                        "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING",
+                        warning.as_deref(),
+                        crate::diag::CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
                         &message,
                     );
                 } else {
+                    let warning = deprecation_warning_message(
+                        &message,
+                        features.prohibit_intersection_warning_suffix.as_deref(),
+                    );
                     self.report_deprecation_error(
                         span,
-                        "ProhibitIntersectionReifiedTypeParameter",
                         features.prohibit_intersection,
-                        "TYPE_INTERSECTION_AS_REIFIED_WARNING",
+                        warning.as_deref(),
+                        crate::diag::CompilerWarningName::TypeIntersectionAsReified,
                         &message,
                     );
                 }
             }
         }
     }
+}
+
+/// Attach a parser-selected deprecation suffix to a message built from resolved types.
+fn deprecation_warning_message(message: &str, suffix: Option<&str>) -> Option<String> {
+    suffix.map(|suffix| {
+        let separator = if message.ends_with('.') || message.ends_with(char::is_whitespace) {
+            " "
+        } else {
+            ". "
+        };
+        format!("{message}{separator}{suffix}")
+    })
 }
 
 /// Whether the type parameter with identity `identity`, in scope here, is `reified`.

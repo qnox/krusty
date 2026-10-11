@@ -2039,15 +2039,20 @@ pub struct File {
 }
 
 /// The language features kotlinc's reified type-argument checker consults.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReifiedTypeArgumentFeatures {
     /// `+ReportReificationProblemsInDnnAndFlexible`: a type parameter or an intersection reached
     /// through a definitely-non-nullable or flexible type is the ordinary error rather than a
     /// KTLC-399 deprecation warning.
     pub report_in_dnn_and_flexible: bool,
+    /// Release-selected suffix for that feature's warning. Absent before the compiler exposed the
+    /// split warning/error diagnostic.
+    pub report_in_dnn_and_flexible_warning_suffix: Option<String>,
     /// `+ProhibitIntersectionReifiedTypeParameter`: an inferred intersection type argument is an
     /// error rather than a deprecation warning.
     pub prohibit_intersection: bool,
+    /// Release-selected suffix for the intersection warning.
+    pub prohibit_intersection_warning_suffix: Option<String>,
     /// `+NullableNothingInReifiedPosition`: `Nothing?` is an accepted reified type argument.
     pub nullable_nothing: bool,
 }
