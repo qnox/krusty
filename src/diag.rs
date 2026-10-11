@@ -32,6 +32,11 @@ pub enum DiagnosticKind {
     /// frontend has reported, so these follow every frontend diagnostic in its ledger, in the order
     /// actualization produced them rather than in source order.
     Actualization,
+    /// An error a compiler plugin's IR-generation extension reports. kotlinc runs those extensions
+    /// only once its frontend and actualization reported no error, so these follow every other
+    /// diagnostic, pass by pass; within a pass they keep source order. Fleet's `expects` plugin
+    /// reports every `linkToActual()` function (pass 0) before every `@Actual` one (pass 1).
+    IrPluginPass(u8),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -287,6 +292,24 @@ impl DiagSink {
             DiagnosticKind::Actualization => (1, 0, 0, 0),
             _ => (0, diagnostic.file, diagnostic.span.lo, diagnostic.span.hi),
         });
+        self.settle_ir_plugin_passes();
+    }
+
+    /// Give IR-plugin errors kotlinc's place once every file has been checked: after all other
+    /// diagnostics, pass by pass, keeping each pass's source order. kotlinc never runs its IR
+    /// plugins over a module its frontend rejected, so with any other error they are withdrawn.
+    pub(crate) fn settle_ir_plugin_passes(&mut self) {
+        let plugin_pass = |diagnostic: &Diagnostic| match diagnostic.kind {
+            DiagnosticKind::IrPluginPass(pass) => Some(pass),
+            _ => None,
+        };
+        if self.diags.iter().any(|diagnostic| {
+            diagnostic.severity == Severity::Error && plugin_pass(diagnostic).is_none()
+        }) {
+            self.diags.retain(|diagnostic| plugin_pass(diagnostic).is_none());
+            return;
+        }
+        self.diags.sort_by_key(plugin_pass);
     }
 
     pub fn has_errors(&self) -> bool {

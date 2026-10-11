@@ -572,6 +572,7 @@ fn copy_function_implementation_facts(
     copy_map!(fn_continuation_ordinal);
     copy_map!(fn_contracts);
     copy_set!(fn_debug_locals);
+    copy_set!(fn_positionless_bodies);
     copy_map!(lambda_own_params_from);
     if let Some(result) = ir.lambda_inferred_results.get(&source).copied() {
         ir.lambda_inferred_results

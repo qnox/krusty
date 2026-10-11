@@ -19,6 +19,7 @@ pub mod allopen;
 pub mod cli;
 pub mod codegen_loop;
 pub mod deps;
+pub mod fleet_expects;
 pub mod ksp;
 pub mod noarg;
 pub mod registry;
@@ -688,6 +689,14 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Whether the plugin links a function whose whole body is `fleet.util.multiplatform.linkToActual()`
+    /// to the `@fleet.util.multiplatform.Actual` function implementing it on the compilation's
+    /// platform, as JetBrains Fleet's `expects` plugin does. The frontend selects the function and
+    /// reports the plugin's errors; checked FIR calls the selected declaration.
+    fn links_actual_functions(&self) -> bool {
+        false
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -1107,6 +1116,13 @@ impl PluginHost {
             .iter()
             .flat_map(|plugin| plugin.sam_with_receiver_annotations().iter().copied())
             .collect()
+    }
+
+    /// Whether a registered plugin [links `linkToActual()` functions](IrPlugin::links_actual_functions).
+    pub fn links_actual_functions(&self) -> bool {
+        self.plugins
+            .iter()
+            .any(|plugin| plugin.links_actual_functions())
     }
 
     /// Every registered plugin's [`IrPlugin::no_arg_constructor_annotations`].

@@ -2420,6 +2420,10 @@ pub struct IrFile {
     /// deliberately has no executable source line. Generated declarations use this explicit
     /// source/debug contract instead of inventing a line merely to retain their binding names.
     pub fn_debug_locals: std::collections::HashSet<FunId>,
+    /// Source functions whose whole body a compiler plugin built without source offsets, such as a
+    /// `linkToActual()` body Fleet's `expects` plugin replaced. kotlinc's method keeps its locals
+    /// but has no `LineNumberTable`, not even the declaration line `fn_decl_lines` would give.
+    pub fn_positionless_bodies: std::collections::HashSet<FunId>,
     /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
     /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
     pub fn_close_lines: std::collections::HashMap<u32, u32>,

@@ -992,7 +992,10 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
     )
     .map_err(CheckedBodyDriverFailure::Check)?;
     publish_result_type(&mut body, signature.result)?;
-    if matches!(function.body, FunBody::Expr(_)) {
+    // A linked `linkToActual()` body returns its actual's result whatever its source form.
+    if matches!(function.body, FunBody::Expr(_))
+        || info.linked_actuals.contains_key(&work.declaration)
+    {
         body.set_implicit_return();
     }
     session.absorb_checked_body(&body);

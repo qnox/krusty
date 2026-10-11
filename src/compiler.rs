@@ -285,6 +285,7 @@ pub fn emit_analyzed<B: Backend>(
         default_arguments.is_empty(),
         "Pass 2 must consume every checked signature default"
     );
+    diags.settle_ir_plugin_passes();
     if !diags.has_errors() {
         backend.check_module(&state, diags);
     }

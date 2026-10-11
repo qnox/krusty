@@ -154,4 +154,41 @@ impl BodyFirChecker<'_> {
             None => None,
         }
     }
+
+    /// The root of a declaration body and the origin its statement takes. Only the declaration
+    /// driver knows whether this syntax root is a returned value (`root_value_target`) or a
+    /// block/delegate execution root. Publish that decision explicitly: FIR checking selects the
+    /// semantic conversion, and lowering merely consumes it. A body Fleet's `expects` plugin linked
+    /// to its actual is replaced by that positionless call.
+    pub(super) fn declaration_root(
+        &mut self,
+        root: ExprId,
+        root_value_target: Option<ResolvedTy>,
+    ) -> Result<(OriginId, FirExprId), BodyCheckFailure> {
+        let owner = DeclarationId::from_raw(self.body.owner().raw());
+        if let Some(&actual) = self.info.linked_actuals.get(&owner) {
+            let expression = self.linked_actual_call(root, actual)?;
+            let origin = self
+                .body
+                .expr(expression)
+                .map(|expression| expression.origin)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
+            return Ok((origin, expression));
+        }
+        let origin = self.expression_origin(root)?;
+        let named_unit_function_effect = root_value_target.is_some_and(|target| {
+            target.get().canonical_semantic() == Ty::Unit
+                && self.info.semantic_ty(root).canonical_semantic() == Ty::Unit
+                && self
+                    .index
+                    .declaration_anchor(owner)
+                    .is_some_and(|anchor| anchor.kind == DeclarationKind::Function)
+        });
+        let expression = match root_value_target {
+            Some(_) if named_unit_function_effect => self.expression(root)?,
+            Some(target) => self.value_at_selected_boundary(root, target)?,
+            None => self.expression(root)?,
+        };
+        Ok((origin, expression))
+    }
 }

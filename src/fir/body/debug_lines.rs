@@ -117,6 +117,19 @@ impl FirBody {
             .unwrap_or_default()
     }
 
+    /// Whether this body has statements and every one of them is a positionless expression: code
+    /// a plugin built in place of the source body, which marks no line at all.
+    pub fn is_positionless(&self) -> bool {
+        !self.roots().is_empty()
+            && self.roots().iter().all(|&root| {
+                matches!(
+                    self.statement(root).map(|statement| &statement.kind),
+                    Some(FirStatementKind::Expression(expression))
+                        if self.expression_debug_lines(*expression).positionless
+                )
+            })
+    }
+
     pub fn statement_debug_line(&self, statement: FirStatementId) -> u32 {
         self.statement_debug_lines(statement).source
     }
@@ -168,7 +181,8 @@ impl FirBody {
                         return Ok((file == source).then_some(span))
                     }
                     Some(Origin::Synthetic {
-                        kind: SyntheticOriginKind::ContextArgument,
+                        kind:
+                            SyntheticOriginKind::ContextArgument | SyntheticOriginKind::LinkedActual,
                         ..
                     }) => return Err(()),
                     Some(Origin::Synthetic { cause, .. }) => current = cause,

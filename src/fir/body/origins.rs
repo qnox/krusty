@@ -24,6 +24,9 @@ pub enum SyntheticOriginKind {
     /// declaration rather than from source syntax, such as the companion accessor call that
     /// supplies kotlinx's `serializer<T>()`. It belongs to the planned expression's line.
     PluginOperand,
+    /// The call of an `@Actual` function Fleet's `expects` plugin puts in place of a
+    /// `linkToActual()` body. kotlinc builds it without source offsets, so it carries no line.
+    LinkedActual,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -20,6 +20,9 @@ pub const KSP_PLUGIN_ID: &str = "com.google.devtools.ksp.symbol-processing";
 pub const ALLOPEN_PLUGIN_ID: &str = "org.jetbrains.kotlin.allopen";
 pub const NOARG_PLUGIN_ID: &str = "org.jetbrains.kotlin.noarg";
 pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = "org.jetbrains.kotlin.samWithReceiver";
+/// JetBrains Fleet's `expects` plugin (`fleet.multiplatform.expects.ExpectsPluginRegistrar`), which
+/// links `linkToActual()` functions to their `@Actual` platform implementations.
+pub const FLEET_EXPECTS_PLUGIN_ID: &str = "expects-compiler-plugin";
 /// kotlinc's default scripting plugin, which kotlinc loads into every compilation and the Kotlin
 /// Gradle plugin also passes explicitly on every JVM compile's `-Xplugin` classpath.
 pub const SCRIPTING_PLUGIN_ID: &str = "kotlin.scripting";

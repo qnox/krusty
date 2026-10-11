@@ -1540,6 +1540,9 @@ impl<'a> CommonIrBodySink<'a> {
             .and_then(|root| body.statement(*root))
             .map_or(OriginId::from_raw(0), |statement| statement.origin);
         let expected_result = self.ir.functions[function as usize].ret;
+        if body.is_positionless() {
+            self.ir.fn_positionless_bodies.insert(function);
+        }
         let lowered = lower_body_with_context(body, index, self.ir, &mut self.local_callables)
             .map_err(FirFileLoweringFailure::Body)?;
         let result = lowered

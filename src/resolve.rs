@@ -158,6 +158,7 @@ pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
 mod plugin_class_predicate;
 mod plugin_expression_annotations;
+mod plugin_expects;
 mod plugin_expression_planning;
 mod plugin_noarg;
 mod plugin_status;
@@ -2831,6 +2832,9 @@ pub struct SymbolTable {
     /// The annotations of kotlinc's sam-with-receiver plugin, from the native plugins this
     /// compilation runs ([`crate::symbol_source::SymbolSource::sam_with_receiver_annotations`]).
     pub(crate) sam_with_receiver_annotations: Vec<TypeName>,
+    /// The platform suffix of Fleet's `@Actual` functions when its `expects` plugin is enabled
+    /// ([`crate::plugins::IrPlugin::links_actual_functions`]).
+    pub(crate) actual_function_suffix: Option<&'static str>,
     /// Top-level extension overloads keyed by name and semantic receiver.
     pub ext_funs: HashMap<String, HashMap<Ty, Vec<Signature>>>,
     source_ext_funs: HashMap<(u32, u32), (String, Ty, usize)>,
@@ -2957,6 +2961,7 @@ impl Default for SymbolTable {
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
             sam_with_receiver_annotations: Vec::new(),
+            actual_function_suffix: None,
             ext_funs: HashMap::new(),
             source_ext_funs: HashMap::new(),
             ext_props: HashMap::new(),
@@ -7737,6 +7742,9 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level_call`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Functions Fleet's `expects` plugin links: each declaration's body becomes a call of the
+    /// selected `@Actual` declaration with its own parameters (`plugin_expects`).
+    pub(crate) linked_actuals: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
     /// The exact semantic receiver selected for an unqualified member access through the implicit-receiver
     /// stack. This is deliberately separate from [`Self::resolved_calls`]: the selected callable says
     /// what to invoke, while this map says which runtime object supplies its dispatch/extension
@@ -33348,6 +33356,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_function_value_conversions: HashMap::new(),
         narrowed_this_member: HashMap::new(),
         resolved_calls: HashMap::new(),
+        linked_actuals: HashMap::new(),
         unbound_value_lambda_call_formals: HashMap::new(),
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::new(),
@@ -34799,6 +34808,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         selected_function_value_conversions,
         narrowed_this_member,
         resolved_calls,
+        linked_actuals,
         implicit_receiver_selections,
         resolved_source_calls,
         extension_receiver_expr_uses,
@@ -35115,6 +35125,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         generated_class_names,
         narrowed_this_member,
         resolved_calls,
+        linked_actuals,
         implicit_receiver_selections,
         resolved_source_calls,
         inspection_source_declarations: std::sync::Arc::default(),
@@ -35961,6 +35972,7 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    linked_actuals: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
     /// Unsolved callee-owned formals used as ordinary lambda inputs. Receiver-lambda builder
     /// inference has separate body-constraint semantics and is deliberately absent here.
     unbound_value_lambda_call_formals: HashMap<ExprId, Vec<String>>,
@@ -48649,6 +48661,9 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
+        if check_ordinary_body && !self.signature_defaults_only {
+            self.link_expected_function(f, stable_declaration);
+        }
         self.report_inferred_nothing_return(f, self.ret_ty, false);
         if f.receiver.is_some() && companion_classifier.is_none() {
             self.extension_receiver_labels.pop();
@@ -53092,6 +53107,7 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
+        self.check_member_expect_actual_convention(f, stable_declaration);
         self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
         if f.receiver.is_some() {
             self.extension_receiver_labels.pop();

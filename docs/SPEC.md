@@ -10298,6 +10298,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an unannotated method, a parameterless method, byte-identical to kotlinc and run),
   `plugins::sam_with_receiver` and `plugins::registry` unit tests
   (`sam_with_receiver_resolves_to_native_and_rejects_its_unregistered_preset_option`).
+- **Fleet's `expects` plugin links a `linkToActual()` function to its `@Actual` function.**
+  `-Xplugin=<expects plugin>` (registrar `fleet.multiplatform.expects.ExpectsPluginRegistrar`, id
+  `expects-compiler-plugin`, no options) runs krusty's native convention. A top-level function whose
+  body is only a call of `fleet.util.multiplatform.linkToActual()` — `= linkToActual()` or
+  `{ return linkToActual() }` — gets the body `return <name>Jvm(<extension receiver>, <context and
+  value parameters>)` with its own type parameters as the call's type arguments. The callee is the
+  module's top-level function of the same package with that name, annotated
+  `@fleet.util.multiplatform.Actual` (whatever its `linkedTo` argument), whose signature equals the
+  function's under kotlinc's IR type equality: parameter count and kinds, each type's classifier,
+  nullability and arguments (type annotations such as a function type's receiver marker do not
+  count), the result, and type-parameter variance and bounds, the actual's type parameters renamed
+  by position (`<K, V>` links to `<A, B>`). The call has no source offsets: the method keeps its
+  `LocalVariableTable` and has no `LineNumberTable`; a `$default` stub keeps its declaration line,
+  and a suspend function passes its continuation straight through with no state machine. The
+  plugin's errors are frontend errors at the `fun` keyword (after annotations, modifiers and KDoc),
+  in source order, with kotlinc's messages: no `@Actual fun <pkg>.<name>Jvm()` found; none of the
+  `@Actual` candidates has a compatible signature, listing each with kotlinc's reason (parameter
+  count, type-parameter count, return type, parameters, type parameters; types rendered as IR
+  renders them, `T of <owner>`, `kotlin.Function1<…>`, `{T of x & Any}`); an `@Actual` function whose
+  name lacks the suffix; an `@Actual` function no `fun <name>()` calling `linkToActual()` matches; and,
+  because the plugin looks a member's counterpart up as a top-level function, every member using
+  either side. krusty links only to declarations of the module being compiled: a link or check that
+  would depend on a dependency's function is reported as unsupported, since the binary-retained
+  `@Actual` is not in Kotlin metadata, and a function with an unnamed context receiver is not linked.
+  Tests: `tests/fleet_expects_plugin_e2e.rs` (the plugin built from its sources and run by kotlinc;
+  expression and block bodies, generics, an extension, `Unit`, a default argument, a vararg, a
+  function-typed and a context parameter, suspend — byte-identical, and run except the context and suspend functions, whose call sites hit unrelated divergences; every error identical
+  in position, message and order), `plugins::fleet_expects` and `plugins::registry` unit tests
+  (`fleet_expects_resolves_to_native_and_declares_no_options`).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,

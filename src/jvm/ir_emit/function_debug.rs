@@ -25,7 +25,7 @@ pub(super) fn attach_declared_function_debug(
             let Some(&line) = ir.fn_decl_lines.get(&fid) else {
                 return;
             };
-            Some(line)
+            (!ir.fn_positionless_bodies.contains(&fid)).then_some(line)
         }
     };
     if function.body.is_none() {

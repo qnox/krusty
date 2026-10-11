@@ -53,6 +53,16 @@ impl ResolvedModuleIndex {
         self.sam_with_receiver_annotations = annotations.into();
     }
 
+    /// The suffix naming Fleet's `@Actual` functions on this compilation's platform, when its
+    /// `expects` plugin is enabled ([`crate::plugins::IrPlugin::links_actual_functions`]).
+    pub fn actual_function_suffix(&self) -> Option<&'static str> {
+        self.actual_function_suffix
+    }
+
+    pub fn publish_actual_function_suffix(&mut self, suffix: Option<&'static str>) {
+        self.actual_function_suffix = suffix;
+    }
+
     pub fn publish_no_arg_constructor(
         &mut self,
         classifier: DeclarationId,

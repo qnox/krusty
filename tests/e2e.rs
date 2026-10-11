@@ -910,6 +910,8 @@ mod feature_coverage_x_e2e;
 mod final_dead_code_e2e;
 #[path = "finally_e2e.rs"]
 mod finally_e2e;
+#[path = "fleet_expects_plugin_e2e.rs"]
+mod fleet_expects_plugin_e2e;
 #[path = "float_range_nan_e2e.rs"]
 mod float_range_nan_e2e;
 #[path = "float_rendering_e2e.rs"]

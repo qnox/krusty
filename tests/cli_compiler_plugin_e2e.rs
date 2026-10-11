@@ -4,8 +4,9 @@
 //! `-P plugin:<id>:<key>=<value>`. krusty cannot execute a JVM FIR/IR plugin, so it resolves each
 //! requested jar against its extension registry (`docs/PLUGIN_API.md`): kotlinx.serialization runs as
 //! krusty's native pass (with an `info:` line saying so), and so do all-open
-//! (`allopen_plugin_e2e`), no-arg (`noarg_plugin_e2e`) and sam-with-receiver
-//! (`sam_with_receiver_plugin_e2e`); every other plugin — Compose — fails the compile. Before, the CLI printed "ignoring unsupported option" and went on to
+//! (`allopen_plugin_e2e`), no-arg (`noarg_plugin_e2e`), sam-with-receiver
+//! (`sam_with_receiver_plugin_e2e`) and Fleet's `expects` (`fleet_expects_plugin_e2e`); every other
+//! plugin — Compose — fails the compile. Before, the CLI printed "ignoring unsupported option" and went on to
 //! emit a no-arg class with no no-arg constructor and an untransformed `@Composable` signature.
 //!
 //! The reverse holds too: with no plugin requested krusty synthesizes nothing, exactly like kotlinc.

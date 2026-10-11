@@ -23,9 +23,10 @@
 
 use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID,
-    SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, FLEET_EXPECTS_PLUGIN_ID, KSP_PLUGIN_ID,
+    NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
+use crate::plugins::fleet_expects::FleetExpectsPlugin;
 use crate::plugins::noarg::NoArgPlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
 use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
@@ -328,6 +329,15 @@ fn build_sam_with_receiver(
     Box::new(SamWithReceiverPlugin::from_options(options))
 }
 
+/// Build the native Fleet `expects` plugin, which has no options.
+fn build_fleet_expects(
+    _act: &Activation,
+    _release: Option<&str>,
+    _options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(FleetExpectsPlugin)
+}
+
 /// The set of extensions krusty knows about — independent of any compilation.
 #[derive(Default)]
 pub struct PluginRegistry {
@@ -339,8 +349,8 @@ impl PluginRegistry {
         Self::default()
     }
 
-    /// The extensions krusty ships with: serialization, all-open, no-arg and sam-with-receiver
-    /// (native reimplementations) and KSP (codegen host).
+    /// The extensions krusty ships with: serialization, all-open, no-arg, sam-with-receiver and
+    /// Fleet's `expects` (native reimplementations) and KSP (codegen host).
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         r.register(RegisteredExtension {
@@ -369,6 +379,13 @@ impl PluginRegistry {
             registrar: "org.jetbrains.kotlin.samWithReceiver.SamWithReceiverComponentRegistrar",
             kind: ExtensionKind::Native(build_sam_with_receiver),
             option_keys: Some(&["annotation"]),
+            unimplemented_options: &[],
+        });
+        r.register(RegisteredExtension {
+            plugin_id: FLEET_EXPECTS_PLUGIN_ID,
+            registrar: "fleet.multiplatform.expects.ExpectsPluginRegistrar",
+            kind: ExtensionKind::Native(build_fleet_expects),
+            option_keys: Some(&[]),
             unimplemented_options: &[],
         });
         r.register(RegisteredExtension {
@@ -630,12 +647,13 @@ mod tests {
     }
 
     #[test]
-    fn builtins_register_serialization_allopen_noarg_sam_with_receiver_and_ksp() {
+    fn builtins_register_serialization_allopen_noarg_sam_with_receiver_expects_and_ksp() {
         let r = PluginRegistry::with_builtins();
         assert!(r.is_registered(SERIALIZATION_PLUGIN_ID));
         assert!(r.is_registered(ALLOPEN_PLUGIN_ID));
         assert!(r.is_registered(NOARG_PLUGIN_ID));
         assert!(r.is_registered(SAM_WITH_RECEIVER_PLUGIN_ID));
+        assert!(r.is_registered(FLEET_EXPECTS_PLUGIN_ID));
         assert!(r.is_registered(KSP_PLUGIN_ID));
         assert!(!r.is_registered("androidx.compose.compiler.plugins.kotlin"));
     }
@@ -807,6 +825,40 @@ mod tests {
             .host("app")
             .sam_with_receiver_annotations()
             .contains(&crate::types::type_name("test/WithReceiver")));
+    }
+
+    /// Fleet's `expects` plugin jar, recognized by its registrar, runs natively; it declares no
+    /// command-line options, so any `-P` option for it is unsupported.
+    #[test]
+    fn fleet_expects_resolves_to_native_and_declares_no_options() {
+        let jar = plugin_jar(
+            "expects.jar",
+            &[registrar_of(FLEET_EXPECTS_PLUGIN_ID)],
+        );
+        let c = cfg(&[
+            &format!("-Xplugin={jar}"),
+            "-P",
+            "plugin:expects-compiler-plugin:suffix=Jvm",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(resolved.native.plugin_ids(), vec![FLEET_EXPECTS_PLUGIN_ID]);
+        assert_eq!(
+            resolved.diagnostics,
+            vec![
+                PluginDiagnostic::UnsupportedOption {
+                    option: PluginOption {
+                        id: FLEET_EXPECTS_PLUGIN_ID.to_string(),
+                        key: "suffix".to_string(),
+                        value: "Jvm".to_string(),
+                    },
+                },
+                PluginDiagnostic::NativeSubstitution {
+                    plugin_id: FLEET_EXPECTS_PLUGIN_ID.to_string(),
+                    jar: Some(jar),
+                },
+            ]
+        );
+        assert!(resolved.native.host("app").links_actual_functions());
     }
 
     /// `invokeInitializers=true` is a declared no-arg option whose behaviour krusty does not
@@ -1187,7 +1239,8 @@ mod tests {
                 SERIALIZATION_PLUGIN_ID,
                 ALLOPEN_PLUGIN_ID,
                 NOARG_PLUGIN_ID,
-                SAM_WITH_RECEIVER_PLUGIN_ID
+                SAM_WITH_RECEIVER_PLUGIN_ID,
+                FLEET_EXPECTS_PLUGIN_ID
             ]
         );
         assert_eq!(
@@ -1196,7 +1249,8 @@ mod tests {
                 "kotlinx.serialization",
                 "allopen",
                 "noarg",
-                "sam-with-receiver"
+                "sam-with-receiver",
+                "fleet-expects"
             ]
         );
     }

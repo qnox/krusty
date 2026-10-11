@@ -1431,6 +1431,8 @@ pub struct ResolvedModuleIndex {
     no_arg_constructors: HashMap<DeclarationId, NoArgSuperConstructor>,
     /// The annotations kotlinc's sam-with-receiver plugin is configured with.
     sam_with_receiver_annotations: Box<[TypeName]>,
+    /// The platform suffix of Fleet's `@Actual` functions, when its `expects` plugin is enabled.
+    actual_function_suffix: Option<&'static str>,
     /// Primary constructor of the custom serializer CLASS a source classifier's
     /// `@Serializable(with = …)` names, selected and validated by the serialization frontend, with
     /// the generated accessor's operand ordinal passed to each constructor parameter.
@@ -2617,6 +2619,7 @@ impl ResolvedModuleIndex {
             && self.serialization_companion_accessors.is_empty()
             && self.no_arg_constructors.is_empty()
             && self.sam_with_receiver_annotations.is_empty()
+            && self.actual_function_suffix.is_none()
             && self.serialization_custom_serializer_constructors.is_empty()
             && self
                 .serialization_type_use_serializer_constructors

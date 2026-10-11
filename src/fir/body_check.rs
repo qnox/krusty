@@ -51,6 +51,7 @@ mod iterators;
 mod lambda_tests;
 mod lambdas;
 mod library_constants;
+mod linked_actual;
 #[cfg(test)]
 mod local_class_tests;
 mod local_classes;
@@ -389,22 +390,7 @@ fn check_body_unit_with_parameters_and_defaults(
         .publish_inline_parameter_contract(inline_modifiers, inline_expansion_modes);
     bind_parameters_and_check_defaults(&mut checker, parameters, defaults, receiver_shape)?;
     if let Some(root) = root {
-        let origin = checker.expression_origin(root)?;
-        // Only the declaration driver knows whether this syntax root is a returned value or a
-        // block/delegate execution root. Publish that decision explicitly: FIR checking selects
-        // the semantic conversion, and lowering merely consumes it.
-        let named_unit_function_effect = root_value_target.is_some_and(|target| {
-            target.get().canonical_semantic() == Ty::Unit
-                && info.semantic_ty(root).canonical_semantic() == Ty::Unit
-                && index
-                    .declaration_anchor(DeclarationId::from_raw(owner.raw()))
-                    .is_some_and(|anchor| anchor.kind == DeclarationKind::Function)
-        });
-        let expression = match root_value_target {
-            Some(_) if named_unit_function_effect => checker.expression(root)?,
-            Some(target) => checker.value_at_selected_boundary(root, target)?,
-            None => checker.expression(root)?,
-        };
+        let (origin, expression) = checker.declaration_root(root, root_value_target)?;
         let statement = checker.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::Expression(expression),

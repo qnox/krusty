@@ -132,6 +132,37 @@ checker use carries them. `symbol_resolver::semantic_sam_signature` reads the de
 own annotations and sets `SamSignature::has_receiver`; every consumer already shapes the converted
 function type from that flag, so lambda typing, lowering and emission need no plugin knowledge.
 
+### Linked platform functions — Fleet `expects`
+
+JetBrains Fleet's `expects` plugin (`fleet.multiplatform.expects.ExpectsPluginRegistrar`, plugin id
+`expects-compiler-plugin`, no options; not part of the Kotlin distribution) replaces `expect`/`actual`
+in single-platform modules. A function whose whole body is `fleet.util.multiplatform.linkToActual()`
+(an expression body, or a block that only returns it) is implemented by the top-level function of the
+same package named like it plus the platform suffix (`Jvm`) and annotated
+`@fleet.util.multiplatform.Actual`, with the same parameters, result and type parameters. kotlinc's
+`IrGenerationExtension` replaces the body with `return <name>Jvm(<receiver>, <parameters>)`, built
+without source offsets, so the method has a `LocalVariableTable` and no `LineNumberTable`.
+
+The native port is a frontend decision plus a checked-FIR body. `IrPlugin::links_actual_functions`
+activates it; signature collection publishes the platform suffix into the module index.
+`resolve::plugin_expects` runs while a top-level function's body is checked: it recognizes the call by
+the declaration it resolved to (never by spelling), selects the module's `@Actual` function by the
+resolved annotation identity and by kotlinc's IR signature equality (parameter kinds and types,
+result, type-parameter variance and bounds, the actual's type parameters renamed by position), and
+records the selection in `TypeInfo::linked_actuals`. It also reports the plugin's five errors, with
+kotlinc's messages, at the `fun` keyword: no `@Actual` function; none with a compatible signature
+(with kotlinc's per-candidate reason); an `@Actual` function without the suffix; an `@Actual`
+function no `linkToActual()` function matches; and the member forms of both. Checked FIR
+(`fir::body_check::linked_actual`) builds the call from that decision with a positionless
+`SyntheticOriginKind::LinkedActual` origin, and lowering records the body in
+`IrFile::fn_positionless_bodies` so the JVM backend writes no declaration line for it. Inline
+preparation records the same decision, so an inline `linkToActual()` function's inlined body is the
+call too.
+
+Known limits, each a clear compile error rather than a guess: krusty links only to `@Actual` functions
+of the module being compiled (it cannot read the binary-retained `@Actual` on a dependency's
+function), and it does not link a function with an unnamed (`_`) or legacy context receiver.
+
 ### Reference plugin — `serialization`
 
 `@Serializable class Foo(val a: Int, val b: String)` → the PoC synthesizes the structure kotlinc's
@@ -278,7 +309,7 @@ silently dropping a plugin would emit wrong bytecode, each activated plugin gets
 
 | Situation | Diagnostic | Severity |
 |---|---|---|
-| native reimpl (serialization, all-open, no-arg, sam-with-receiver) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
+| native reimpl (serialization, all-open, no-arg, sam-with-receiver, Fleet `expects`) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
 | hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
 | hosted (KSP), from a driver with no codegen host (`Activation::codegen_host == false`) | `HostUnavailable` — reporting it hosted would drop its generated sources | **ERROR** (fails the compile) |
 | `-Xplugin` jar declaring a registrar no extension answers to (Compose, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
