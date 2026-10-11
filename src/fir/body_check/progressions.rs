@@ -7,6 +7,47 @@ use crate::libraries::CompilerIntrinsic;
 use crate::resolve::ResolvedCall;
 
 impl BodyFirChecker<'_> {
+    /// The fully checked comparison selected for direct range membership. Keep the conversion of
+    /// the provider-selected unsigned comparator beside the other checked progression contracts.
+    pub(super) fn in_range_comparison(
+        &self,
+        expression: ExprId,
+    ) -> Result<
+        (
+            crate::fir::FirRangeComparisonProvenance,
+            ResolvedTy,
+            Option<FirRuntimeFunction>,
+        ),
+        BodyCheckFailure,
+    > {
+        let comparison = self
+            .info
+            .resolved_in_range_comparisons
+            .get(&expression)
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::InRange),
+                )
+            })?;
+        let span = self
+            .file
+            .expr_span(expression)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        Ok((
+            comparison.provenance,
+            self.resolved_type(span, comparison.comparison)?,
+            comparison
+                .unsigned_compare
+                .as_ref()
+                .map(|function| FirRuntimeFunction {
+                    function: function.function,
+                    parameters: function.parameters.clone(),
+                    result: function.result,
+                }),
+        ))
+    }
+
     /// kotlinc's `HeaderInfoBuilder`: a loop whose iterable is a progression is counted. The
     /// iterable is matched as a `kotlin.ranges` builder (`downTo`, `until`, `step`, `reversed`), a
     /// range literal, or a progression value, in that order; `step` and `reversed` apply to the

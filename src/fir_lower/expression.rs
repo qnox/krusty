@@ -928,6 +928,7 @@ impl BodyLowering<'_> {
                 operation,
                 provenance: _,
                 comparison,
+                unsigned_compare,
                 value,
                 start,
                 end,
@@ -935,6 +936,7 @@ impl BodyLowering<'_> {
             } => self.in_range_expression(super::ranges::InRangeLowering::new(
                 *operation,
                 comparison.get(),
+                unsigned_compare.clone(),
                 [*value, *start, *end],
                 *negated,
                 origin,

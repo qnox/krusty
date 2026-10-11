@@ -1912,27 +1912,13 @@ impl BodyFirChecker<'_> {
                             BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::InRange),
                         ));
                     } else {
-                        let comparison = self
-                            .info
-                            .resolved_in_range_comparisons
-                            .get(&expression)
-                            .ok_or_else(|| {
-                            self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::UnsupportedExpression(
-                                    ExpressionForm::InRange,
-                                ),
-                            )
-                        })?;
+                        let (provenance, comparison, unsigned_compare) =
+                            self.in_range_comparison(expression)?;
                         FirExprKind::InRange {
                             operation: Self::range_operation(*kind),
-                            provenance: comparison.provenance,
-                            comparison: self.resolved_type(
-                                self.file.expr_span(expression).ok_or_else(|| {
-                                    self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                                })?,
-                                comparison.comparison,
-                            )?,
+                            provenance,
+                            comparison,
+                            unsigned_compare,
                             value: self.expression(*value)?,
                             start: self.expression(*start)?,
                             end: self.expression(*end)?,

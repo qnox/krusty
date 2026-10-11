@@ -37,7 +37,7 @@ pub(super) struct PackageInventory {
 
 impl PackageInventory {
     pub(super) fn from_packages(
-        packages: Vec<(Vec<String>, KotlinPackage)>,
+        packages: Vec<(Vec<String>, KotlinPackage, bool)>,
     ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
             functions: HashMap::new(),
@@ -53,7 +53,7 @@ impl PackageInventory {
         // publish the same declaration more than once; they must not become duplicate overload
         // candidates carrying one ExternalCallableId.
         let mut declared_signatures = HashSet::new();
-        for (segments, package) in packages {
+        for (segments, package, compiler_builtin_owner) in packages {
             let identity = inventory.declare_package(&segments);
             for alias in package
                 .type_aliases
@@ -75,7 +75,12 @@ impl PackageInventory {
                 // A private top-level function is visible only inside its own file; its library
                 // serializes it under a file-local identity, never a public one.
                 .filter(|function| function.visibility != Visibility::Private)
-                .map(|function| sign_package_function(&segments, function))
+                .map(|function| {
+                    sign_package_function(&segments, function).map(|mut signed| {
+                        signed.compiler_builtin_owner = compiler_builtin_owner;
+                        signed
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             for function in signed {
                 if !declared_signatures.insert(function.signature.clone()) {

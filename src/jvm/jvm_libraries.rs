@@ -52,7 +52,7 @@ use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::type_descriptor;
-use crate::libraries::builtin_top_level_realization::attach_function_realization;
+use crate::libraries::builtin_top_level_realization::attach_dependency_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
     FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind,
@@ -309,17 +309,12 @@ impl JvmLibraries {
         names
     }
 
-    /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg` —
-    /// `listOf`/`run`/`println`/… each with its inline/`@InlineOnly` flags and logical
-    /// (continuation-stripped) suspend signature. The building block `symbols` uses so a
-    /// top-level name resolves through the ONE fqn seam without the removed receiver-indexed
-    /// `functions()` query. Candidates come from the per-(jar, package) SOURCE-keyed member index
-    /// (`functions_in_scope`) — only the queried package's facades are consulted (never a whole-
-    /// classpath name index), the source-name keying finds a `@JvmName`-mangled declaration under
-    /// the name a caller writes, and a `$default`/synthetic static (absent from `@Metadata`) is
-    /// keyed by its literal JVM name. The index also surfaces an extension's compiled form; each
-    /// candidate is classified honestly by its metadata receiver, so the caller filters by
-    /// `FnKind` as needed.
+    /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg`, with
+    /// inline flags and logical suspend signatures. The per-(jar, package) SOURCE-keyed member index
+    /// consults only the queried package's facades; source-name keying finds a `@JvmName` declaration
+    /// under the name a caller writes, while `$default`/synthetic statics absent from metadata remain
+    /// keyed by their JVM name. The index also surfaces compiled extensions; metadata receiver facts
+    /// classify every candidate before the caller filters by [`FnKind`].
     fn top_level_overloads(&self, name: &str, pkg: TypeName) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         let cm = &self.common_expectations;
@@ -607,7 +602,6 @@ impl JvmLibraries {
                 return_value_status: None,
             };
             function.callable.annotations = builtin.annotations;
-            attach_function_realization(pkg, name, &mut function);
             overloads.push(function);
         }
         overloads
@@ -4293,7 +4287,8 @@ impl JvmLibraries {
         }
         if let SymbolNamespace::Package(package) = namespace {
             for overload in &mut overloads {
-                attach_function_realization(package, name, overload);
+                let stdlib = self.cp.common_metadata_owns(overload.callable.owner);
+                attach_dependency_function_realization(package, name, stdlib, overload);
             }
             for property in &mut props {
                 if let Some(intrinsic) =

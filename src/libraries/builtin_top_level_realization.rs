@@ -27,6 +27,24 @@ pub(crate) fn attach_function_realization(
     function.callable.semantic_role = normalized_function_semantic_role(package, name, function);
 }
 
+/// Attach package operations to a dependency declaration, admitting stdlib-only roles only when
+/// the provider has authenticated the containing library as its platform stdlib. Other normalized
+/// builtin operations retain their existing exact-signature rules.
+pub(crate) fn attach_dependency_function_realization(
+    package: TypeName,
+    name: &str,
+    compiler_builtin_owner: bool,
+    function: &mut FunctionInfo,
+) {
+    function.callable.compiler_intrinsic = normalized_function_realization_with_stdlib_owner(
+        package,
+        name,
+        function,
+        compiler_builtin_owner,
+    );
+    function.callable.semantic_role = normalized_function_semantic_role(package, name, function);
+}
+
 fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'static [Ty])> {
     let receiver = receiver.non_null();
     let internal = receiver.obj_internal()?;
@@ -630,8 +648,9 @@ pub(crate) fn runtime_function_declaration(
     }
 }
 
-pub(crate) fn function_realization(
+fn function_realization_with_stdlib_owner(
     facts: BuiltinFunctionDeclaration<'_>,
+    compiler_builtin_owner: bool,
 ) -> Option<CompilerIntrinsic> {
     if let Some(intrinsic) = with_index(&facts) {
         Some(intrinsic)
@@ -650,10 +669,20 @@ pub(crate) fn function_realization(
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
-        progression_builder(&facts).or_else(|| closed_range_contains(&facts))
+        progression_builder(&facts).or_else(|| {
+            compiler_builtin_owner
+                .then(|| closed_range_contains(&facts))
+                .flatten()
+        })
     } else {
         None
     }
+}
+
+pub(crate) fn function_realization(
+    facts: BuiltinFunctionDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    function_realization_with_stdlib_owner(facts, true)
 }
 
 /// Attach the common rule to an already-normalized provider callable without reopening provider
@@ -662,6 +691,15 @@ pub(crate) fn normalized_function_realization(
     package: TypeName,
     name: &str,
     function: &FunctionInfo,
+) -> Option<CompilerIntrinsic> {
+    normalized_function_realization_with_stdlib_owner(package, name, function, true)
+}
+
+fn normalized_function_realization_with_stdlib_owner(
+    package: TypeName,
+    name: &str,
+    function: &FunctionInfo,
+    compiler_builtin_owner: bool,
 ) -> Option<CompilerIntrinsic> {
     let params = function.semantic_params();
     let generic = function.generic_sig.as_ref();
@@ -679,7 +717,7 @@ pub(crate) fn normalized_function_realization(
         is_operator: function.flags.operator,
         is_infix: function.flags.infix,
     };
-    function_realization(facts)
+    function_realization_with_stdlib_owner(facts, compiler_builtin_owner)
 }
 
 /// Attach a semantic language role to an already-normalized provider callable. Unlike a compiler

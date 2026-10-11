@@ -200,9 +200,12 @@ mod tests {
 
     #[test]
     fn constructor_defaults_are_published_on_the_ordinary_callable() {
-        let mut inventory =
-            PackageInventory::from_packages(vec![(vec!["fixture".to_owned()], defaulted_box())])
-                .expect("the fixture is signable");
+        let mut inventory = PackageInventory::from_packages(vec![(
+            vec!["fixture".to_owned()],
+            defaulted_box(),
+            false,
+        )])
+        .expect("the fixture is signable");
         let identity = type_name("fixture/Box");
         let signature = inventory
             .classifier(identity)
@@ -227,9 +230,12 @@ mod tests {
 
     #[test]
     fn repeated_identity_keeps_the_first_librarys_defaults() {
-        let inventory =
-            PackageInventory::from_packages(vec![(vec!["fixture".to_owned()], defaulted_box())])
-                .expect("the fixture is signable");
+        let inventory = PackageInventory::from_packages(vec![(
+            vec!["fixture".to_owned()],
+            defaulted_box(),
+            false,
+        )])
+        .expect("the fixture is signable");
         let signature = KlibIrSignature::Public(
             inventory
                 .classifier(type_name("fixture/Box"))

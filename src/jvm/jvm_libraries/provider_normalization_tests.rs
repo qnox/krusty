@@ -6,6 +6,98 @@ fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> JvmLibrari
     JvmLibraries::new(classpath).expect("JVM provider initialization")
 }
 
+#[test]
+fn a_dependency_closed_range_lookalike_keeps_its_body() {
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-provider-range-origin-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let internal = "kotlin/ranges/DependencyRangesKt";
+    let descriptor = "(Lkotlin/ranges/IntRange;C)Z";
+    let function = crate::metadata::builder::FnMeta {
+        spellings: crate::spelling::DeclaredSpellings::default(),
+        annotations: Default::default(),
+        decl_order: 0,
+        jvm_name: None,
+        name: "contains".to_string(),
+        params: vec![("value".to_string(), Ty::Char)],
+        ret: Ty::Boolean,
+        receiver: Some(Ty::obj("kotlin/ranges/IntRange")),
+        param_modifiers: Vec::new(),
+        suspend: false,
+        jvm_desc: Some(descriptor.to_string()),
+        contract: None,
+        inline: false,
+        has_function_typed_parameter: false,
+        operator: true,
+        infix: false,
+        tailrec: false,
+        companion: false,
+        type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        context_count: 0,
+        context_parameter_kinds: Vec::new(),
+        vararg_index: None,
+        visibility: crate::types::Visibility::Public,
+        param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
+    };
+    let (d1, d2) =
+        crate::metadata::builder::build_package(&[function], &[], &[], (None, &[]), true);
+    let mut writer = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
+    let mut body = crate::jvm::classfile::CodeBuilder::new(2);
+    body.push_int(0, &mut writer);
+    body.ireturn();
+    writer.add_method(
+        crate::jvm::classfile::ACC_PUBLIC
+            | crate::jvm::classfile::ACC_STATIC
+            | crate::jvm::classfile::ACC_FINAL,
+        "contains",
+        descriptor,
+        &body,
+    );
+    writer.set_kotlin_metadata(
+        2,
+        crate::jvm::classfile::MetadataStamp {
+            version: [2, 2, 0],
+            pre_release: false,
+        },
+        48,
+        &crate::metadata::encoding::bytes_to_strings(&d1),
+        &d2,
+    );
+    let path = directory.join(format!("{internal}.class"));
+    std::fs::create_dir_all(path.parent().expect("package")).expect("create package");
+    std::fs::write(&path, writer.finish()).expect("write dependency facade");
+
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![directory.clone()],
+    )));
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/ranges")),
+        "contains",
+    );
+    let contains = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| {
+            function.receiver == Some(Ty::obj("kotlin/ranges/IntRange"))
+                && function.callable.params == [Ty::obj("kotlin/ranges/IntRange"), Ty::Char]
+        })
+        .expect("dependency extension");
+    assert_eq!(contains.callable.compiler_intrinsic, None);
+
+    drop(symbols);
+    drop(libraries);
+    std::fs::remove_dir_all(directory).expect("remove dependency facade");
+}
+
 /// Classpath records are shared across worker compilations, but `@SinceKotlin` filtering belongs to
 /// one provider's API version. An older compile must not leave its narrower normalized view behind.
 #[test]

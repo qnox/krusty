@@ -446,6 +446,111 @@ fn a_builtin_klib_function_carries_its_shared_compiler_operation() {
 }
 
 #[test]
+fn a_dependency_closed_range_lookalike_keeps_its_serialized_body() {
+    let mut contains = function(
+        "contains",
+        Some(class("kotlin/ranges/IntRange", false)),
+        vec![class("kotlin/Char", false)],
+    );
+    contains.ret = class("kotlin/Boolean", false);
+    contains.is_operator = true;
+    let libraries = KlibLibraries::from_packages(vec![(
+        segments(&["kotlin", "ranges"]),
+        package_of(vec![contains]),
+    )])
+    .expect("the same-package dependency is signable");
+
+    let contains = single_function(&libraries, "kotlin/ranges", "contains");
+    assert_eq!(contains.callable.compiler_intrinsic, None);
+    let realization = libraries
+        .external_callable(contains.callable.external_identity.expect("identity"))
+        .expect("the dependency body remains its realization");
+    assert_eq!(realization.callable.compiler_intrinsic, None);
+}
+
+#[test]
+fn a_dependency_cannot_claim_stdlib_authority_from_its_manifest() {
+    let declaration = crate::metadata::builder::FnMeta {
+        spellings: crate::spelling::DeclaredSpellings::default(),
+        annotations: Default::default(),
+        decl_order: 0,
+        jvm_name: None,
+        name: "contains".to_string(),
+        params: vec![("value".to_string(), Ty::Char)],
+        ret: Ty::Boolean,
+        receiver: Some(Ty::obj("kotlin/ranges/IntRange")),
+        param_modifiers: Vec::new(),
+        suspend: false,
+        jvm_desc: None,
+        contract: None,
+        inline: false,
+        has_function_typed_parameter: false,
+        operator: true,
+        infix: false,
+        tailrec: false,
+        companion: false,
+        type_params: Vec::new(),
+        semantic_type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        context_count: 0,
+        context_parameter_kinds: Vec::new(),
+        vararg_index: None,
+        visibility: Visibility::Public,
+        param_annotations: Vec::new(),
+        no_infer_params: Vec::new(),
+    };
+    let fragment = crate::metadata::klib_fragment::package_fragment(
+        &["kotlin", "ranges"],
+        &crate::metadata::klib_fragment::KlibFileMembers {
+            file_name: "dependency.kt".to_string(),
+            functions: vec![declaration],
+            properties: Vec::new(),
+            constants: Vec::new(),
+            aliases: Vec::new(),
+        },
+        &[],
+        true,
+    );
+    let stamp = crate::klib::write::KlibStamp::new(
+        crate::kotlin_version::KotlinVersion::V2_4_20,
+        crate::language_version::LanguageVersion::V2_4,
+    );
+    let mut writer = crate::klib::write::KlibWriter::new(
+        "stdlib",
+        stamp,
+        crate::klib::write::KlibPlatform::Native,
+    );
+    writer.add_fragment("kotlin.ranges", fragment);
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-spoofed-stdlib-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    writer
+        .write_directory(&directory)
+        .expect("write spoofed stdlib dependency");
+
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::dependency(directory.clone())])
+        .expect("the dependency archive opens");
+    let contains = single_function(&libraries, "kotlin/ranges", "contains");
+    assert_eq!(contains.callable.compiler_intrinsic, None);
+    assert_eq!(
+        libraries
+            .external_callable(contains.callable.external_identity.expect("identity"))
+            .expect("dependency realization")
+            .callable
+            .compiler_intrinsic,
+        None
+    );
+
+    drop(libraries);
+    std::fs::remove_dir_all(directory).expect("remove spoofed stdlib dependency");
+}
+
+#[test]
 fn a_klib_delegate_function_keeps_its_serialized_body_authoritative() {
     let libraries = KlibLibraries::from_packages(vec![(
         segments(&["kotlin"]),

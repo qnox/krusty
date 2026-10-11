@@ -188,6 +188,22 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
 }
 
 #[test]
+fn wasm_unsigned_range_membership_orders_high_bits_as_values() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    if (0x80000000u !in 0x7fffffffu..0xffffffffu) return "uint inside"
+    if (1u in 0x80000000u..0xffffffffu) return "uint outside"
+    if (0x8000000000000000uL !in 0x7fffffffffffffffuL..0xffffffffffffffffuL) return "ulong inside"
+    if (1uL in 0x8000000000000000uL..0xffffffffffffffffuL) return "ulong outside"
+    return "OK"
+}
+"#,
+        "wasmUnsignedRangeMembership",
+    );
+}
+
+#[test]
 fn kotlin_codegen_box_wasm_js_conformance() {
     box_lane::run(&WasmLane {
         target: WasmTarget::Js,

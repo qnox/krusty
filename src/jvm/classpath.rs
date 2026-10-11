@@ -1605,7 +1605,7 @@ impl Classpath {
     /// Whether `internal` is supplied by the JVM stdlib entry whose sibling common KLIB was selected
     /// for this classpath. This is dependency provenance, not an owner-name test: a copied or
     /// shadowing jar cannot actualize identities from a different library's KLIB.
-    fn common_metadata_owns(&self, internal: TypeName) -> bool {
+    pub(super) fn common_metadata_owns(&self, internal: TypeName) -> bool {
         let Some(klib) = self.common_expectation_klib.as_ref() else {
             return false;
         };

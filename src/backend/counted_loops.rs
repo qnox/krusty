@@ -127,8 +127,8 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
 }
 
 /// Realize every checked membership test in a signed, character or floating-point range literal
-/// as kotlinc's `RangeContainsLowering` does. An unsigned one compares through `compareTo`, which
-/// each target still realizes itself.
+/// as kotlinc's `RangeContainsLowering` does. An unsigned one uses the normalized ordering role
+/// authorized by the exact provider-selected comparison carried by checked IR.
 fn realize_memberships(ir: &mut IrFile, style: CounterLoopStyle, next_slot: &mut Option<u32>) {
     for expression in 0..ir.exprs.len() {
         let IrExpr::Checked(IrCheckedOperation::RangeContains {
@@ -138,13 +138,11 @@ fn realize_memberships(ir: &mut IrFile, style: CounterLoopStyle, next_slot: &mut
             end,
             negated,
             counter,
+            unsigned_compare,
         }) = ir.exprs[expression].clone()
         else {
             continue;
         };
-        if is_unsigned(counter) {
-            continue;
-        }
         let first_generated = ir.exprs.len();
         let mut realizer = Realizer {
             next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
@@ -152,7 +150,7 @@ fn realize_memberships(ir: &mut IrFile, style: CounterLoopStyle, next_slot: &mut
             style,
             inlining: HeaderInlining::None,
             until_steps: UntilSteps::Built,
-            unsigned_compare: None,
+            unsigned_compare,
             inlined_calls: Vec::new(),
             represented: Vec::new(),
         };

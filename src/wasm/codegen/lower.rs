@@ -194,8 +194,15 @@ struct FileContext<'a> {
 pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
     Ok(Some(match ty {
         Ty::Unit | Ty::Nothing => return Ok(None),
-        Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char | Ty::Int => ValType::I32,
-        Ty::Long => ValType::I64,
+        Ty::Boolean
+        | Ty::Byte
+        | Ty::Short
+        | Ty::Char
+        | Ty::Int
+        | Ty::UByte
+        | Ty::UShort
+        | Ty::UInt => ValType::I32,
+        Ty::Long | Ty::ULong => ValType::I64,
         Ty::Float => ValType::F32,
         Ty::Double => ValType::F64,
         Ty::String | Ty::Null => STRING,
@@ -206,6 +213,15 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         Ty::Nullable(Ty::Obj(..) | Ty::TyParam(..)) => REFERENCE,
         other => return Err(format!("the type `{}`", describe(other))),
     }))
+}
+
+/// Carrier admitted to the ordinary signed numeric instruction table. Unsigned values are carried
+/// only so a checked [`IrIntrinsic::UnsignedCompare`] can consume them explicitly.
+pub(super) fn ordinary_numeric_carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
+    if ty.is_unsigned() {
+        return Err(format!("an ordinary operator on `{}`", describe(ty)));
+    }
+    carrier(ty)
 }
 
 /// The string reference type. The runtime declares `$String` as type 1, after `$chars`; see
@@ -789,9 +805,10 @@ impl<'a> Body<'a> {
                 &mut self.code
             }
             IrConst::Null => self.code.ref_null(NULL),
-            IrConst::UByte(_) | IrConst::UShort(_) | IrConst::UInt(_) | IrConst::ULong(_) => {
-                return Err("an unsigned constant".to_string())
-            }
+            IrConst::UByte(value) => self.code.i32_const(i32::from(*value)),
+            IrConst::UShort(value) => self.code.i32_const(i32::from(*value)),
+            IrConst::UInt(value) => self.code.i32_const(*value as i32),
+            IrConst::ULong(value) => self.code.i64_const(*value as i64),
         };
         Ok(())
     }
@@ -933,7 +950,10 @@ impl<'a> Body<'a> {
         // The operator's checked result fixes the instruction's operand width; a comparison
         // compares at the wider of its operands' carriers.
         let operand = if is_comparison(op) {
-            let (Some(l), Some(r)) = (carrier(left)?, carrier(right)?) else {
+            let (Some(l), Some(r)) = (
+                ordinary_numeric_carrier(left)?,
+                ordinary_numeric_carrier(right)?,
+            ) else {
                 return Err("an operator on `Unit`".into());
             };
             match (rank(l), rank(r)) {
@@ -941,7 +961,7 @@ impl<'a> Body<'a> {
                 _ => return Err(format!("the operator {op:?} on references")),
             }
         } else {
-            carrier(result)?
+            ordinary_numeric_carrier(result)?
         };
         let Some(operand) = operand else {
             return Err("an operator on `Unit`".into());

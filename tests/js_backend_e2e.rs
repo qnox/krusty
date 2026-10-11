@@ -6,6 +6,8 @@
 //! dependency.
 
 use super::common;
+use krusty::ir::{Callee, EqualityMode, IrBinOp, IrConst, IrExpr, IrFile, IrFunction, IrIntrinsic};
+use krusty::types::Ty;
 
 /// Lower `src`, emit JS, append `console.log(box())`, run on Node. Returns Node's stdout, or `None`
 /// to skip only when Node is unavailable. A compiler rejection is a test failure.
@@ -26,6 +28,39 @@ fn check(src: &str, expected: &str) {
         Some(out) => assert_eq!(out, expected, "js output mismatch\n--- src ---\n{src}"),
         None => eprintln!("skipping js_backend_e2e: node is unavailable"),
     }
+}
+
+fn add_ir_function(ir: &mut IrFile, name: &str, value: u32, ret: Ty) {
+    let returned = ir.add_expr(IrExpr::Return(Some(value)));
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![returned],
+        value: None,
+    });
+    ir.add_fun(IrFunction {
+        name: name.to_string(),
+        params: Vec::new(),
+        ret,
+        body: Some(body),
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+}
+
+fn add_ulong_shift<'a>(
+    ir: &mut IrFile,
+    name: &'a str,
+    op: IrBinOp,
+    lhs: u64,
+    rhs: i32,
+    expected: &'a str,
+) -> (&'a str, &'a str) {
+    let lhs = ir.add_expr(IrExpr::Const(IrConst::ULong(lhs)));
+    let rhs = ir.add_expr(IrExpr::Const(IrConst::Int(rhs)));
+    let value = ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+    ir.logical_types.insert(value, Ty::ULong);
+    add_ir_function(ir, name, value, Ty::ULong);
+    (name, expected)
 }
 
 #[test]
@@ -49,6 +84,210 @@ fn checked_equality_mode_distinguishes_boxed_and_ieee_zero() {
          fun box(): String = if (!structural(-0.0, 0.0) && ieee(-0.0, 0.0)) \"OK\" else \"FAIL\"",
         "OK",
     );
+}
+
+#[test]
+fn ulong_conversion_and_literal_share_one_javascript_carrier() {
+    check(
+        "fun converted(x: Long): ULong = x.toULong()\n\
+         fun box(): String {\n\
+           val value = converted(5L)\n\
+           return if (value == 5uL && value + 1uL == 6uL) \"OK\" else \"FAIL\"\n\
+         }",
+        "OK",
+    );
+}
+
+#[test]
+fn nullable_ulong_equality_preserves_null() {
+    check(
+        "fun box(): String {\n\
+           val absent: ULong? = null\n\
+           return if (absent != 0uL && 0uL != absent && absent == null) \"OK\" else \"FAIL\"\n\
+         }",
+        "OK",
+    );
+}
+
+#[test]
+fn ulong_backend_ir_uses_one_node_carrier() {
+    let mut ir = IrFile::default();
+
+    let checks = [
+        add_ulong_shift(&mut ir, "shl64", IrBinOp::Shl, 1, 64, "1"),
+        add_ulong_shift(
+            &mut ir,
+            "shlNegative",
+            IrBinOp::Shl,
+            1,
+            -1,
+            "9223372036854775808",
+        ),
+        add_ulong_shift(
+            &mut ir,
+            "shr64",
+            IrBinOp::Ushr,
+            0x8000_0000_0000_0000,
+            64,
+            "9223372036854775808",
+        ),
+        add_ulong_shift(
+            &mut ir,
+            "shr65",
+            IrBinOp::Ushr,
+            0x8000_0000_0000_0000,
+            65,
+            "4611686018427387904",
+        ),
+    ];
+    let present_zero = ir.add_expr(IrExpr::Const(IrConst::ULong(0)));
+    ir.logical_types
+        .insert(present_zero, Ty::nullable(Ty::ULong));
+    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let present_is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Eq,
+        lhs: present_zero,
+        rhs: null,
+    });
+    add_ir_function(&mut ir, "presentIsNull", present_is_null, Ty::Boolean);
+    let absent = ir.add_expr(IrExpr::Const(IrConst::Null));
+    ir.logical_types.insert(absent, Ty::nullable(Ty::ULong));
+    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let absent_is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Eq,
+        lhs: absent,
+        rhs: null,
+    });
+    add_ir_function(&mut ir, "absentIsNull", absent_is_null, Ty::Boolean);
+    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let absent = ir.add_expr(IrExpr::Const(IrConst::Null));
+    ir.logical_types.insert(absent, Ty::nullable(Ty::ULong));
+    let null_is_absent = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Eq,
+        lhs: null,
+        rhs: absent,
+    });
+    add_ir_function(&mut ir, "nullIsAbsent", null_is_absent, Ty::Boolean);
+
+    let size = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let array = ir.add_expr(IrExpr::Call {
+        callee: Callee::Intrinsic {
+            operation: IrIntrinsic::PrimitiveArrayNew { element: Ty::ULong },
+            ret: Ty::array(Ty::ULong),
+        },
+        dispatch_receiver: None,
+        args: vec![size],
+    });
+    let index = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let erased_read = ir.add_expr(IrExpr::Call {
+        callee: Callee::Intrinsic {
+            operation: IrIntrinsic::ArrayGet,
+            ret: Ty::nullable(Ty::obj("kotlin/Any")),
+        },
+        dispatch_receiver: Some(array),
+        args: vec![index],
+    });
+    let zero = ir.add_expr(IrExpr::Const(IrConst::ULong(0)));
+    let erased_zero_equals_ulong = ir.add_expr(IrExpr::Equality {
+        op: IrBinOp::Eq,
+        mode: EqualityMode::Structural,
+        lhs: erased_read,
+        rhs: zero,
+    });
+    add_ir_function(
+        &mut ir,
+        "erasedZeroEqualsULong",
+        erased_zero_equals_ulong,
+        Ty::Boolean,
+    );
+    let size = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let array = ir.add_expr(IrExpr::NewArray {
+        array_type: Ty::array(Ty::ULong),
+        size,
+    });
+    let index = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let erased_read = ir.add_expr(IrExpr::Call {
+        callee: Callee::Intrinsic {
+            operation: IrIntrinsic::ArrayGet,
+            ret: Ty::nullable(Ty::obj("kotlin/Any")),
+        },
+        dispatch_receiver: Some(array),
+        args: vec![index],
+    });
+    let zero = ir.add_expr(IrExpr::Const(IrConst::ULong(0)));
+    let new_array_zero_equals_ulong = ir.add_expr(IrExpr::Equality {
+        op: IrBinOp::Eq,
+        mode: EqualityMode::Structural,
+        lhs: erased_read,
+        rhs: zero,
+    });
+    add_ir_function(
+        &mut ir,
+        "newArrayZeroEqualsULong",
+        new_array_zero_equals_ulong,
+        Ty::Boolean,
+    );
+
+    let max = ir.add_expr(IrExpr::Const(IrConst::ULong(u64::MAX)));
+    let as_int = ir.add_expr(IrExpr::TypeOp {
+        op: krusty::ir::IrTypeOp::ImplicitCoercion,
+        arg: max,
+        type_operand: Ty::Int,
+    });
+    add_ir_function(&mut ir, "ulongToInt", as_int, Ty::Int);
+    let wrapped = ir.add_expr(IrExpr::Const(IrConst::ULong(0x1_0000_0001)));
+    let as_uint = ir.add_expr(IrExpr::TypeOp {
+        op: krusty::ir::IrTypeOp::ImplicitCoercion,
+        arg: wrapped,
+        type_operand: Ty::UInt,
+    });
+    add_ir_function(&mut ir, "ulongToUInt", as_uint, Ty::UInt);
+    let high = ir.add_expr(IrExpr::Const(IrConst::ULong(0x8000_0000_0000_0000)));
+    let as_long = ir.add_expr(IrExpr::TypeOp {
+        op: krusty::ir::IrTypeOp::ImplicitCoercion,
+        arg: high,
+        type_operand: Ty::Long,
+    });
+    let zero = ir.add_expr(IrExpr::Const(IrConst::Long(0)));
+    let long_is_negative = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Lt,
+        lhs: as_long,
+        rhs: zero,
+    });
+    add_ir_function(
+        &mut ir,
+        "ulongToLongIsNegative",
+        long_is_negative,
+        Ty::Boolean,
+    );
+    let code_point = ir.add_expr(IrExpr::Const(IrConst::ULong(65)));
+    let as_char = ir.add_expr(IrExpr::TypeOp {
+        op: krusty::ir::IrTypeOp::ImplicitCoercion,
+        arg: code_point,
+        type_operand: Ty::Char,
+    });
+    add_ir_function(&mut ir, "ulongToChar", as_char, Ty::Char);
+    let not_exact_in_float = ir.add_expr(IrExpr::Const(IrConst::ULong(16_777_217)));
+    let as_float = ir.add_expr(IrExpr::TypeOp {
+        op: krusty::ir::IrTypeOp::ImplicitCoercion,
+        arg: not_exact_in_float,
+        type_operand: Ty::Float,
+    });
+    add_ir_function(&mut ir, "ulongToFloat", as_float, Ty::Float);
+
+    let mut js = krusty::js::emit_file(&ir);
+    let shift_checks = checks
+        .into_iter()
+        .map(|(name, expected)| format!("String({name}()) === \"{expected}\""))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    js.push_str(&format!(
+        "\nconsole.log(({shift_checks} && !presentIsNull() && absentIsNull() && nullIsAbsent() && erasedZeroEqualsULong() && newArrayZeroEqualsULong() && ulongToInt() === -1 && ulongToUInt() === 1 && ulongToLongIsNegative() && ulongToChar() === \"A\" && ulongToFloat() === 16777216) ? \"OK\" : \"FAIL\");\n"
+    ));
+    match common::run_js(&js) {
+        Some(out) => assert_eq!(out, "OK", "js output mismatch\n--- js ---\n{js}"),
+        None => eprintln!("skipping js_backend_e2e: node is unavailable"),
+    }
 }
 
 #[test]

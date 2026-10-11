@@ -3130,6 +3130,7 @@ fn unsigned_range_containment_stays_semantic_until_backend_realization() {
                 open_end: false,
             },
             comparison: resolved(Ty::UInt),
+            unsigned_compare: None,
             value,
             start,
             end,

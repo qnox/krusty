@@ -48,6 +48,12 @@ pub enum IrIntrinsic {
         operand: Ty,
         relational_operator: bool,
     },
+    /// Three-way ordering of the selected unsigned scalar (`-1`, `0`, or `1`). The provider's
+    /// exact `UnsignedCompare` identity authorized common lowering before this normalized role was
+    /// published; targets own the scalar's physical representation.
+    UnsignedCompare {
+        operand: Ty,
+    },
     /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
     /// this operation with the continuation parameter's `Continuation.getContext()` call.
     CoroutineContext,

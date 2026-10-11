@@ -21,6 +21,7 @@ fun nextLong(value: Long): Long {
 }
 
 operator fun IntRange.contains(value: Short): Boolean = value.toInt() == 7
+operator fun IntRange.contains(value: Byte): Boolean = value.toInt() == 1
 
 fun sameType(x: Int) = x in 1..10
 fun sameTypeLong(x: Long) = x in 1L..10L
@@ -53,6 +54,8 @@ fun valueEffect() = next(5) in next(1)..next(10)
 fun valueEffectConstantBounds() = next(5) in 1..10
 fun downTo(x: Int) = x in 10 downTo 1
 fun userExtension(x: Short) = x in 1..10
+fun uniformByte(value: Byte, start: Byte, end: Byte) = value in start..end
+fun uniformShort(value: Short, start: Short, end: Short) = value in start..end
 "#;
 
 const BOX: &str = r#"fun box(): String {
@@ -62,11 +65,11 @@ const BOX: &str = r#"fun box(): String {
         byteValue(1), byteBounds(3, 2, 4), floatValue(1.5f), longBounds(10), constantValue(),
         upperEffect(3), upperEffect(0), mutableValueReadPrecedesUpper(2), lowerEffect(3),
         bothEffects(3), valueEffect(), valueEffectConstantBounds(), downTo(10), userExtension(7),
-        userExtension(5),
+        userExtension(5), uniformByte(2, 1, 3), uniformShort(2, 1, 3),
     )
     return if (results == listOf(
             true, false, true, false, true, true, true, true, true, true, true, true, true, true,
-            true, true, false, true, true, true, true, true, true, true, false,
+            true, true, false, true, true, true, true, true, true, true, false, false, false,
         ) && log == "10110111011055") "OK" else "$results $log"
 }
 "#;
@@ -83,4 +86,36 @@ fn range_literal_membership_is_byte_identical_to_kotlinc() {
 #[test]
 fn range_literal_membership_runs_like_kotlinc() {
     common::expect_box_same_as_kotlinc(&format!("{FUNCTIONS}{BOX}"), "range_literal_membership");
+}
+
+#[test]
+fn platform_floating_nan_not_in_negates_the_positive_membership() {
+    let java = [(
+        "PlatformValue.java".to_string(),
+        "public final class PlatformValue {\
+            public static Double nan() { return Double.NaN; }\
+            public static Float nanFloat() { return Float.NaN; }\
+        }"
+        .to_string(),
+    )];
+    let (directory, _) = common::javac_compile(&java, &[]).expect("compile Java platform value");
+    let source = r#"
+fun platformDoubleNotIn(): Boolean = PlatformValue.nan() !in 1.0..2.0
+fun platformFloatNotIn(): Boolean = PlatformValue.nanFloat() !in 1.0f..2.0f
+fun box(): String = if (platformDoubleNotIn() && platformFloatNotIn()) "OK" else "FAIL"
+"#;
+    common::assert_class_code_matches_kotlinc_jdk_cp(
+        "PlatformFloatingRange",
+        source,
+        "PlatformFloatingRangeKt",
+        std::slice::from_ref(&directory),
+    );
+    common::expect_true_e2e(
+        "platform Float and Double NaN !in floating ranges",
+        source,
+        std::slice::from_ref(&directory),
+    );
+    if let Some(root) = directory.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

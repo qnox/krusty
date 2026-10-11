@@ -13,7 +13,7 @@
 //! the first comparison fails; `!in` negates it.
 
 use crate::fir::FirRangeOperation;
-use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr, IrTypeOp};
+use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
 
 use super::header::{moved_bound, Direction};
@@ -196,6 +196,32 @@ impl Realizer<'_> {
         // The operands are compared in the selected type; targets choose only its representation.
         self.ir.logical_types.insert(lhs, ty);
         self.ir.logical_types.insert(rhs, ty);
+        if ty.is_unsigned() {
+            assert!(
+                self.unsigned_compare.is_some(),
+                "checked unsigned membership carries its selected ordering"
+            );
+            let compared = self.add_checked(
+                IrExpr::Call {
+                    callee: Callee::Intrinsic {
+                        operation: IrIntrinsic::UnsignedCompare { operand: ty },
+                        ret: Ty::Int,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![lhs, rhs],
+                },
+                Ty::Int,
+            );
+            let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
+            return self.add_checked(
+                IrExpr::PrimitiveBinOp {
+                    op: operation,
+                    lhs: compared,
+                    rhs: zero,
+                },
+                Ty::Boolean,
+            );
+        }
         self.add_checked(
             IrExpr::PrimitiveBinOp {
                 op: operation,

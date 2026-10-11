@@ -7,6 +7,7 @@ use super::{BodyLowering, FirLoweringFailure};
 pub(super) struct InRangeLowering {
     operation: FirRangeOperation,
     comparison_ty: Ty,
+    unsigned_compare: Option<crate::fir::FirRuntimeFunction>,
     operands: [FirExprId; 3],
     negated: bool,
     origin: OriginId,
@@ -16,6 +17,7 @@ impl InRangeLowering {
     pub(super) fn new(
         operation: FirRangeOperation,
         comparison_ty: Ty,
+        unsigned_compare: Option<crate::fir::FirRuntimeFunction>,
         operands: [FirExprId; 3],
         negated: bool,
         origin: OriginId,
@@ -23,6 +25,7 @@ impl InRangeLowering {
         Self {
             operation,
             comparison_ty,
+            unsigned_compare,
             operands,
             negated,
             origin,
@@ -61,6 +64,7 @@ impl BodyLowering<'_> {
         let InRangeLowering {
             operation,
             comparison_ty,
+            unsigned_compare,
             operands: [value, start, end],
             negated,
             origin,
@@ -92,6 +96,13 @@ impl BodyLowering<'_> {
                     end,
                     negated,
                     counter: comparison_ty,
+                    unsigned_compare: unsigned_compare.map(|function| {
+                        crate::ir::IrRuntimeFunction {
+                            function: function.function,
+                            parameters: function.parameters.to_vec(),
+                            result: function.result,
+                        }
+                    }),
                 })));
         }
         let mut declarations = Vec::with_capacity(3);
@@ -170,6 +181,19 @@ impl BodyLowering<'_> {
         end_slot: u32,
         value_slot: u32,
     ) -> ExprId {
+        if negated && matches!(comparison_ty, Ty::Float | Ty::Double) {
+            // IEEE floating order is partial: neither `<` nor `>` holds for NaN. Negate the
+            // positive conjunction instead of applying the integral De Morgan rewrite.
+            let contained = self.range_membership(
+                operation,
+                comparison_ty,
+                false,
+                start_slot,
+                end_slot,
+                value_slot,
+            );
+            return self.ir.add_negation(contained);
+        }
         let (low, high, high_strict) = match operation {
             FirRangeOperation::Through => (start_slot, end_slot, false),
             FirRangeOperation::OpenEnd | FirRangeOperation::Until => (start_slot, end_slot, true),

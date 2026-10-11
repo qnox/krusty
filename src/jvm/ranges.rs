@@ -106,27 +106,6 @@ pub(super) fn realize(
     }
     for expression in 0..expression_count {
         match ir.exprs[expression].clone() {
-            IrExpr::Checked(IrCheckedOperation::RangeContains {
-                operation,
-                value,
-                start,
-                end,
-                negated,
-                counter,
-            }) => {
-                let replacement = unsigned_range_contains(
-                    ir, &runtime, operation, value, start, end, negated, counter,
-                )
-                .ok_or(RangeRealizationFailure::Operation(
-                    RangeOperationFailure {
-                        expression: expression as ExprId,
-                        operation,
-                        start: counter,
-                        end: counter,
-                    },
-                ))?;
-                ir.exprs[expression] = replacement;
-            }
             IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
                 ir.exprs[expression] = illegal_step(ir, expression as ExprId, step);
             }
@@ -142,9 +121,11 @@ pub(super) fn realize(
                 | IrCheckedOperation::ExternalPropertyWrite { .. }
                 | IrCheckedOperation::PropertyReference { .. },
             )
-            // The backend pass above realized every counted loop.
+            // The backend pass above realized every counted loop and range-membership test.
             | IrExpr::Checked(
-                IrCheckedOperation::RangeConstruction { .. } | IrCheckedOperation::RangeLoop { .. },
+                IrCheckedOperation::RangeConstruction { .. }
+                | IrCheckedOperation::RangeLoop { .. }
+                | IrCheckedOperation::RangeContains { .. },
             )
             | IrExpr::CallableReference(_)
             | IrExpr::Const(_)
@@ -208,104 +189,6 @@ pub(super) fn realize(
         }
     }
     Ok(())
-}
-
-fn unsigned_range_contains(
-    ir: &mut IrFile,
-    runtime: &JvmLibraries,
-    operation: FirRangeOperation,
-    value: ExprId,
-    start: ExprId,
-    end: ExprId,
-    negated: bool,
-    counter: Ty,
-) -> Option<IrExpr> {
-    let value_slot = ir.next_value_slot();
-    let start_slot = value_slot.checked_add(1)?;
-    let end_slot = value_slot.checked_add(2)?;
-    let declarations = vec![
-        ir.add_expr(IrExpr::Variable {
-            index: value_slot,
-            ty: counter,
-            init: Some(value),
-            named: false,
-        }),
-        ir.add_expr(IrExpr::Variable {
-            index: start_slot,
-            ty: counter,
-            init: Some(start),
-            named: false,
-        }),
-        ir.add_expr(IrExpr::Variable {
-            index: end_slot,
-            ty: counter,
-            init: Some(end),
-            named: false,
-        }),
-    ];
-    let (low, high, strict_high) = match operation {
-        FirRangeOperation::Through => (start_slot, end_slot, false),
-        FirRangeOperation::OpenEnd | FirRangeOperation::Until => (start_slot, end_slot, true),
-        FirRangeOperation::DownTo => (end_slot, start_slot, false),
-    };
-    let first = unsigned_compare_slots(
-        ir,
-        runtime,
-        value_slot,
-        low,
-        if negated {
-            crate::ir::IrBinOp::Lt
-        } else {
-            crate::ir::IrBinOp::Ge
-        },
-        counter,
-    )?;
-    let second = unsigned_compare_slots(
-        ir,
-        runtime,
-        value_slot,
-        high,
-        match (negated, strict_high) {
-            (true, true) => crate::ir::IrBinOp::Ge,
-            (true, false) => crate::ir::IrBinOp::Gt,
-            (false, true) => crate::ir::IrBinOp::Lt,
-            (false, false) => crate::ir::IrBinOp::Le,
-        },
-        counter,
-    )?;
-    let result = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: if negated {
-            crate::ir::IrBinOp::Or
-        } else {
-            crate::ir::IrBinOp::And
-        },
-        lhs: first,
-        rhs: second,
-    });
-    Some(IrExpr::Block {
-        stmts: declarations,
-        value: Some(result),
-    })
-}
-
-fn unsigned_compare_slots(
-    ir: &mut IrFile,
-    runtime: &JvmLibraries,
-    lhs: u32,
-    rhs: u32,
-    operation: crate::ir::IrBinOp,
-    counter: Ty,
-) -> Option<ExprId> {
-    let callable = runtime.unsigned_compare_callable(counter)?;
-    let lhs = ir.add_expr(IrExpr::GetValue(lhs));
-    let rhs = ir.add_expr(IrExpr::GetValue(rhs));
-    let compared = ir.add_expr(static_call(callable, lhs, rhs));
-    let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-    Some(ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: operation,
-        lhs: compared,
-        rhs: zero,
-    }))
 }
 
 /// `throw IllegalArgumentException("Step must be positive, was: $step.")`, as the stdlib's `step`
