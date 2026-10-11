@@ -1627,6 +1627,37 @@ impl BodyFirChecker<'_> {
             &context_arguments,
             &substitutions,
         );
+        // A postfix statement keeps kotlinc's shape `{ val t = read; write(t.inc()); t }`: the old
+        // value is stored in a temporary before the write, even though the value is discarded.
+        let mut statements = Vec::new();
+        let mut old_value = None;
+        let read = if prefix {
+            read
+        } else {
+            let temporary = self.allocate_local();
+            statements.push(self.body.add_statement(FirStatement {
+                origin,
+                kind: FirStatementKind::Local {
+                    target: temporary,
+                    ty: receiver_ty,
+                    mutable: false,
+                    lateinit: false,
+                    deferred: false,
+                    initializer: Some(read),
+                    conversion: None,
+                },
+            }));
+            old_value = Some(self.body.add_expr(FirExpr {
+                origin,
+                ty: receiver_ty,
+                kind: FirExprKind::ValueRead(temporary),
+            }));
+            self.body.add_expr(FirExpr {
+                origin,
+                ty: receiver_ty,
+                kind: FirExprKind::ValueRead(temporary),
+            })
+        };
         let convention = if dec { "dec" } else { "inc" };
         let updated_kind = if self
             .info
@@ -1659,8 +1690,34 @@ impl BodyFirChecker<'_> {
             conversion: None,
             substitutions: substitutions.clone(),
         };
-        if !prefix {
-            return Ok(Some(write));
+        if let Some(old_value) = old_value {
+            let write = self.body.add_expr(FirExpr {
+                origin,
+                ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+                kind: write,
+            });
+            statements.push(self.body.add_statement(FirStatement {
+                origin,
+                kind: FirStatementKind::Expression(write),
+            }));
+            // The discarded value is still the block's result, read and dropped: the temporary is
+            // read twice before the backend's peephole drops that read, so it is not folded away.
+            let update = self.body.add_expr(FirExpr {
+                origin,
+                ty: receiver_ty,
+                kind: FirExprKind::Block {
+                    statements: statements.into_boxed_slice(),
+                    result: Some(old_value),
+                },
+            });
+            let discarded = self.body.add_statement(FirStatement {
+                origin,
+                kind: FirStatementKind::Expression(update),
+            });
+            return Ok(Some(FirExprKind::Block {
+                statements: Box::new([discarded]),
+                result: None,
+            }));
         }
         // `++p` is `p = p.inc()` and THEN the value of `p`, which for a property is a fresh read
         // through its getter. The value is discarded in statement position, but the read is not

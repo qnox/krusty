@@ -54,6 +54,8 @@ mod abstract_member_check_e2e;
 mod abstract_member_shape_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
+#[path = "access_increment_shape_e2e.rs"]
+mod access_increment_shape_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
 mod adapted_callable_reference_equality_e2e;
 #[path = "allopen_plugin_e2e.rs"]
