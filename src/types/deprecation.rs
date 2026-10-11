@@ -158,3 +158,49 @@ pub struct DeprecatedDeclaration {
     pub deprecation: Deprecation,
     pub symbol: Box<str>,
 }
+
+/// A deprecation report kotlinc is migrating from a warning to its declared level. While the
+/// language feature that completes the migration is off, an `ERROR` or `HIDDEN` deprecation in
+/// that position only warns, with kotlinc's `toDeprecationWarningMessage` suffix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeprecationMigration {
+    /// A deprecated object or companion called through the `invoke` convention (`Obj()`).
+    ClassifierInImplicitInvoke,
+    /// A deprecated class enclosing the container of an imported declaration.
+    OuterImportedClass,
+    /// A deprecated companion reached implicitly through its class name as an augmented
+    /// assignment's target (`C += 1`).
+    CompanionInDelegation,
+}
+
+impl DeprecationMigration {
+    /// The kotlinc `LanguageFeature` that completes this migration.
+    pub fn feature(self) -> &'static str {
+        match self {
+            Self::ClassifierInImplicitInvoke => "ReportDeprecationsOfClassifiersInImplicitInvokes",
+            Self::OuterImportedClass => "ReportDeprecationsOfOuterImportedClasses",
+            Self::CompanionInDelegation => "ReportDeprecatedCompanionInDelegation",
+        }
+    }
+}
+
+/// Which [`DeprecationMigration`]s this compilation has completed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeprecationMigrations {
+    pub classifiers_in_implicit_invokes: bool,
+    pub outer_imported_classes: bool,
+    pub companion_in_delegation: bool,
+}
+
+impl DeprecationMigrations {
+    /// Whether `migration` reports at the declared level.
+    pub fn completed(self, migration: DeprecationMigration) -> bool {
+        match migration {
+            DeprecationMigration::ClassifierInImplicitInvoke => {
+                self.classifiers_in_implicit_invokes
+            }
+            DeprecationMigration::OuterImportedClass => self.outer_imported_classes,
+            DeprecationMigration::CompanionInDelegation => self.companion_in_delegation,
+        }
+    }
+}

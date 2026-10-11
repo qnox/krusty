@@ -138,6 +138,9 @@ const MODELED_FEATURES: &[&str] = &[
     "NameBasedDestructuring",
     "NestedTypeAliases",
     "PrioritizedEnumEntries",
+    "ReportDeprecatedCompanionInDelegation",
+    "ReportDeprecationsOfClassifiersInImplicitInvokes",
+    "ReportDeprecationsOfOuterImportedClasses",
     "UnitConversionsOnArbitraryExpressions",
     "WhenGuards",
 ];

@@ -32,5 +32,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.forbid_value_class_recursion_via_type_parameters =
         features.has("ForbidValueClassRecursionViaTypeParameters");
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
+    file.deprecation_migrations = crate::types::DeprecationMigrations {
+        classifiers_in_implicit_invokes: features
+            .has("ReportDeprecationsOfClassifiersInImplicitInvokes"),
+        outer_imported_classes: features.has("ReportDeprecationsOfOuterImportedClasses"),
+        companion_in_delegation: features.has("ReportDeprecatedCompanionInDelegation"),
+    };
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }

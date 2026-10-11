@@ -126,7 +126,7 @@ mod inner_constructor_calls;
 use inner_constructor_calls::BoundInnerConstruction;
 mod import_diagnostics;
 mod inspection_analysis;
-pub(crate) use import_diagnostics::check_module_import_paths;
+pub(crate) use import_diagnostics::{check_import_deprecations, check_module_import_paths};
 mod integer_constants;
 mod interface_delegate_calls;
 mod interface_delegation;

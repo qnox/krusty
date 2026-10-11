@@ -14,7 +14,7 @@ pub use classifier_declarations::{
 };
 pub use deprecation::{
     DeclaredDeprecation, DeprecatedDeclaration, DeprecatedSinceKotlin, Deprecation,
-    DeprecationLevel,
+    DeprecationLevel, DeprecationMigration, DeprecationMigrations,
 };
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::SemanticCallRole;

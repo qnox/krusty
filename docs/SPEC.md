@@ -12909,6 +12909,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level `const` properties; Java platform-type and substituted renderings; companion-block
   properties; and `hiddenSince` removing the candidate.
   Test: `tests/deprecation_classpath_e2e.rs`.
+- **Deprecation on imports, and the migrating deprecation positions.** An import never reports
+  the declaration it names. It reports the classes its path goes through, at the path's start,
+  innermost first. The container of the imported declaration (the class owning an imported
+  classifier, member or wildcard) reports at its level. Each class enclosing that container reports
+  through kotlinc's `ReportDeprecationsOfOuterImportedClasses` migration (KTLC-397). Two other
+  positions migrate the same way:
+  - an object called through `invoke` (`Obj()`; `ReportDeprecationsOfClassifiersInImplicitInvokes`,
+    KT-82456), reported at the object's name;
+  - a companion reached through its class name as an augmented assignment's target (`C += 1`;
+    `ReportDeprecatedCompanionInDelegation`, KTLC-408), reported at the written target.
+
+  Until its feature is on, an `ERROR` or `HIDDEN` deprecation in a migrating position warns, with
+  the `toDeprecationWarningMessage` suffix, and no `@Suppress` silences that warning. A `WARNING`
+  deprecation there is an ordinary warning. A companion called through its class name (`C()`) is
+  not reported, as in kotlinc. Delegation (`by C`) and callable references already report a
+  companion at its level. Not yet modeled: an `invoke` call on an object read from the classpath,
+  which krusty does not yet resolve.
+  Test: `tests/deprecation_migration_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
   `JvmPropertySignature` and interns none of the field's strings: `interface Holder { val count:
