@@ -28,7 +28,7 @@ pub(super) fn body_extension_receiver(
     }
 }
 
-fn function_at_anchor<'a>(file: &'a File, range: Span) -> Option<&'a FunDecl> {
+fn function_at_anchor(file: &File, range: Span) -> Option<&FunDecl> {
     file.decl_arena
         .iter()
         .find_map(|declaration| match declaration {
@@ -365,13 +365,15 @@ fn check_and_dispatch_body_in_session_with_source(
                     .ok_or(CheckedBodyDriverFailure::MissingBody)?;
                 let parameters = class_initialization_parameters(file, info, class, index, active)?;
                 let body = check_expression_body_with_parameters_in_session(
-                    file,
-                    info,
-                    source,
+                    BodyCheckUnit {
+                        file,
+                        info,
+                        source,
+                        index,
+                    },
                     work.owner,
                     root,
                     &parameters,
-                    index,
                     origins,
                     session,
                 )
@@ -412,13 +414,15 @@ fn check_and_dispatch_body_in_session_with_source(
                 .script_body
                 .ok_or(CheckedBodyDriverFailure::MissingBody)?;
             let body = check_expression_body_with_parameters_in_session(
-                file,
-                info,
-                source,
+                BodyCheckUnit {
+                    file,
+                    info,
+                    source,
+                    index,
+                },
                 work.owner,
                 root,
                 &[],
-                index,
                 origins,
                 session,
             )
@@ -542,7 +546,16 @@ fn check_and_dispatch_enum_entry(
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
 
     let mut checker = BodyFirChecker::new(
-        file, info, source, work.owner, entry.span, index, origins, session,
+        BodyCheckUnit {
+            file,
+            info,
+            source,
+            index,
+        },
+        work.owner,
+        entry.span,
+        origins,
+        session,
     );
     let cause = checker.origins.source(source, entry.span);
     let arguments = checker
@@ -702,52 +715,59 @@ fn check_and_dispatch_property_body(
                 .expect("checked explicit backing-field storage must be publishable")
         });
     let mut body = check_body_unit_with_parameters_and_defaults(
-        file,
-        info,
-        source,
-        work.owner,
-        file.expr_span(root)
-            .ok_or(CheckedBodyDriverFailure::MissingBody)?,
-        Some(root),
-        &parameters,
-        &[],
-        CheckedBodyReceiverShape {
-            context_receivers,
-            extension_receiver: body_extension_receiver(
-                index,
-                property_declaration,
-                property_header.extension_receiver,
-            ),
+        BodyCheckUnit {
+            file,
+            info,
+            source,
+            index,
         },
-        (work.kind == BodyKind::Initializer)
-            .then_some(property_storage_type)
-            .flatten(),
-        match work.kind {
-            BodyKind::Initializer => Some(property_storage_type.unwrap_or(signature.result)),
-            BodyKind::Getter if matches!(property.getter, Some(FunBody::Expr(_))) => {
-                Some(signature.result)
-            }
-            BodyKind::Setter
-                if property
-                    .setter
-                    .as_ref()
-                    .and_then(|setter| setter.body.as_ref())
-                    .is_some_and(|body| matches!(body, FunBody::Expr(_))) =>
-            {
-                Some(
-                    crate::fir::ResolvedTy::new(crate::types::Ty::Unit)
-                        .expect("Unit is a publishable FIR type"),
-                )
-            }
-            BodyKind::Delegate
-            | BodyKind::Getter
-            | BodyKind::Setter
-            | BodyKind::Function
-            | BodyKind::EnumEntry
-            | BodyKind::Constructor
-            | BodyKind::Script => None,
+        CheckedBodyRoot {
+            owner: work.owner,
+            span: file
+                .expr_span(root)
+                .ok_or(CheckedBodyDriverFailure::MissingBody)?,
+            expression: Some(root),
+            property_storage_type: (work.kind == BodyKind::Initializer)
+                .then_some(property_storage_type)
+                .flatten(),
+            value_target: match work.kind {
+                BodyKind::Initializer => Some(property_storage_type.unwrap_or(signature.result)),
+                BodyKind::Getter if matches!(property.getter, Some(FunBody::Expr(_))) => {
+                    Some(signature.result)
+                }
+                BodyKind::Setter
+                    if property
+                        .setter
+                        .as_ref()
+                        .and_then(|setter| setter.body.as_ref())
+                        .is_some_and(|body| matches!(body, FunBody::Expr(_))) =>
+                {
+                    Some(
+                        crate::fir::ResolvedTy::new(crate::types::Ty::Unit)
+                            .expect("Unit is a publishable FIR type"),
+                    )
+                }
+                BodyKind::Delegate
+                | BodyKind::Getter
+                | BodyKind::Setter
+                | BodyKind::Function
+                | BodyKind::EnumEntry
+                | BodyKind::Constructor
+                | BodyKind::Script => None,
+            },
         },
-        index,
+        CheckedBodySignature {
+            parameters: &parameters,
+            defaults: &[],
+            receiver_shape: CheckedBodyReceiverShape {
+                context_receivers,
+                extension_receiver: body_extension_receiver(
+                    index,
+                    property_declaration,
+                    property_header.extension_receiver,
+                ),
+            },
+        },
         origins,
         session,
     )
@@ -968,25 +988,31 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
         CheckedBodyDriverFailure::ParameterShapeMismatch
     })?;
     let mut body = check_body_unit_with_parameters_and_defaults(
-        file,
-        info,
-        source,
-        work.owner,
-        function.span,
-        root,
-        &parameters,
-        &[],
-        CheckedBodyReceiverShape {
-            context_receivers,
-            extension_receiver: body_extension_receiver(
-                index,
-                work.declaration,
-                callable.shape.extension_receiver,
-            ),
+        BodyCheckUnit {
+            file,
+            info,
+            source,
+            index,
         },
-        None,
-        matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
-        index,
+        CheckedBodyRoot {
+            owner: work.owner,
+            span: function.span,
+            expression: root,
+            property_storage_type: None,
+            value_target: matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
+        },
+        CheckedBodySignature {
+            parameters: &parameters,
+            defaults: &[],
+            receiver_shape: CheckedBodyReceiverShape {
+                context_receivers,
+                extension_receiver: body_extension_receiver(
+                    index,
+                    work.declaration,
+                    callable.shape.extension_receiver,
+                ),
+            },
+        },
         origins,
         session,
     )
@@ -1093,25 +1119,31 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
         .ok_or(CheckedBodyDriverFailure::ParameterShapeMismatch)?;
     let owner = BodyOwnerId::from_raw(work.target.raw());
     let mut body = check_body_unit_with_parameters_and_defaults(
-        file,
-        info,
-        source,
-        owner,
-        function.span,
-        None,
-        &parameters,
-        &defaults,
-        CheckedBodyReceiverShape {
-            context_receivers,
-            extension_receiver: body_extension_receiver(
-                index,
-                work.target,
-                callable.shape.extension_receiver,
-            ),
+        BodyCheckUnit {
+            file,
+            info,
+            source,
+            index,
         },
-        None,
-        None,
-        index,
+        CheckedBodyRoot {
+            owner,
+            span: function.span,
+            expression: None,
+            property_storage_type: None,
+            value_target: None,
+        },
+        CheckedBodySignature {
+            parameters: &parameters,
+            defaults: &defaults,
+            receiver_shape: CheckedBodyReceiverShape {
+                context_receivers,
+                extension_receiver: body_extension_receiver(
+                    index,
+                    work.target,
+                    callable.shape.extension_receiver,
+                ),
+            },
+        },
         origins,
         session,
     )
