@@ -103,7 +103,9 @@ pub fn krusty_binary() -> PathBuf {
     BINARY
         .get_or_init(|| {
             if let Some(path) = std::env::var_os("KRUSTY_BIN") {
-                return PathBuf::from(path);
+                // Scripts pass a path relative to the workspace; a test that runs the binary from
+                // another directory still needs to find it.
+                return std::path::absolute(&path).expect("resolve KRUSTY_BIN");
             }
 
             let current = std::env::current_exe().expect("locate current test executable");
