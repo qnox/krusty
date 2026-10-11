@@ -6,6 +6,7 @@
 use super::*;
 use crate::ir::ExprId;
 
+mod primitive_to_object;
 mod unsigned_equality;
 
 impl Emitter<'_> {
@@ -23,6 +24,9 @@ impl Emitter<'_> {
                         && !self.primitive_equality_uses_erased_wrapper(Some(*mode), *lhs, *rhs)
                         && matches!(op, Eq | Ne)
                         && self.value_ty(*lhs).is_jvm_scalar())
+                    || (*mode == crate::ir::EqualityMode::Structural
+                        && matches!(op, Eq | Ne)
+                        && self.is_primitive_to_object_comparison(*lhs, *rhs))
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
@@ -356,6 +360,12 @@ impl Emitter<'_> {
             } else {
                 code.if_acmpne(target);
             }
+            return true;
+        }
+        if matches!(op, Eq | Ne)
+            && recorded_structural
+            && self.emit_primitive_to_object_branch(op, lhs, rhs, target, jt, code)
+        {
             return true;
         }
         // A recorded structural equality stays `Intrinsics.areEqual` even when inline substitution

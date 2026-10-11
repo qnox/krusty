@@ -17034,6 +17034,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   brace line and the `return` shared one pc. The enum constructor now marks it the same way.
   Test: `tests/enum_init_block_line_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`,
   `enum/initEnumAfterObjectAccess.kt`.
+- **A primitive compared with a reference is not boxed; an equality with a safe call folds.**
+  A source `==` between a primitive and a nullable primitive stays one structural equality, both
+  operands evaluated in source order (common IR no longer spills the nullable operand first). The
+  JVM backend realizes it as kotlinc's `Equals` intrinsic does from the operands' JVM types: an
+  `int`-category or `long` value against any reference, or a boxed primitive against such a value,
+  is kotlinc's `PrimitiveToObjectComparison` — the reference is checked (`dup; ifnonnull` for a
+  box, `dup; instanceof` for anything else), both values are discarded on failure, and otherwise
+  the reference is unboxed and compared, with no `Boolean` materialized in a condition. A boxed
+  left operand keeps the right primitive in a temporary. `Boolean`, `Float` and `Double` keep
+  their own forms. A `Byte`/`Short` pair compares at `Int` as kotlinc's FIR2IR builds it: the
+  nullable side becomes the safe conversion `e?.toInt()`. kotlinc's
+  `JvmSafeCallChainFoldingLowering` then folds `safe?.x == p` and `p == safe?.x` (with `p` a
+  non-null primitive) into the safe call's guard, `false` on the null path, so the other operand
+  is not evaluated for a `null` receiver — JVM semantics, so the fold is a JVM pass; `!=` negates
+  the folded equality. A right-side fold reads an immutable receiver binding directly, as
+  `JvmOptimizationLowering` drops that temporary. Test: `tests/primitive_to_object_equality_e2e.rs`.
+  Corpus: `primitiveTypes/equalityWithObject/generated/*`, `binaryOp/eqNullableShortToShort.kt`,
+  `binaryOp/eqNullableToPrimitiveWithSideEffects.kt`, `safeCall/safeCallEqPrimitive.kt`,
+  `safeCall/safeCallNotEqPrimitive.kt`, `casts/literalExpressionAsGenericArgument/*`.
 - **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
   kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
   `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and
