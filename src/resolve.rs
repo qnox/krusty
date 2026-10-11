@@ -56,7 +56,7 @@ mod checked_constant_publication;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
-pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
+pub(crate) use checked_annotation_publication::publish_checked_declaration_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
 pub(crate) use lexical_policies::publish_file_lexical_policies;
 pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
@@ -97,8 +97,10 @@ pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
+mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
+mod deprecation_usage;
 mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
@@ -186,6 +188,7 @@ mod source_fragment;
 mod source_generic_signatures;
 mod source_signature_display;
 mod source_type_resolution;
+mod symbol_display;
 mod type_use_annotation_publication;
 use source_fragment::SourceFragmentMode;
 use source_generic_signatures::{
@@ -22046,13 +22049,19 @@ impl<'a> Checker<'a> {
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
             Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
-            Stmt::Assign { name, value } => self.stmt_assign(scope, s, name, value),
+            Stmt::Assign { name, value } => {
+                self.stmt_assign(scope, s, name, value);
+                self.check_property_write_deprecation(s);
+            }
             Stmt::AssignMember {
                 receiver,
                 name,
                 value,
                 safe,
-            } => self.stmt_assign_member(scope, s, receiver, name, value, safe),
+            } => {
+                self.stmt_assign_member(scope, s, receiver, name, value, safe);
+                self.check_property_write_deprecation(s);
+            }
             Stmt::AssignIndex {
                 array,
                 indices,
@@ -33384,6 +33393,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_default_member_calls: HashMap::new(),
         resolved_constants: HashMap::new(),
         constant_integer_coercion_reads: std::collections::HashSet::new(),
+        constant_property_reads: HashMap::new(),
         resolved_constant_receivers: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
@@ -34601,6 +34611,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.set_anonymous_lexical_class_context(d);
         if fragment.is_type_use_annotations() && !matches!(file.decl(d), Decl::Class(_)) {
             c.check_owned_type_use_annotations(scope, Some(d));
+            continue;
+        }
+        if fragment.is_declaration_annotations() && !matches!(file.decl(d), Decl::Class(_)) {
+            c.fold_top_level_declaration_annotations(scope, d);
             continue;
         }
         match file.decl(d) {
@@ -36025,6 +36039,9 @@ struct Checker<'a> {
     /// Constant folding removes the property-get lowering, so applicability keeps this compact fact
     /// independently and publishes the selected argument conversion through the resolved call.
     constant_integer_coercion_reads: std::collections::HashSet<ExprId>,
+    /// The source property each folded constant read selected. Folding removes the property-get
+    /// lowering; use-site checks still need the declaration the reference names.
+    constant_property_reads: HashMap<ExprId, crate::fir::DeclarationId>,
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
     resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
     resolved_call_arg_slots: HashMap<ExprId, SelectedArgumentCommitment>,
@@ -41825,6 +41842,9 @@ impl<'a> Checker<'a> {
         property: &crate::libraries::PropertyInfo,
     ) -> Option<Ty> {
         let constant = property.compile_time_constant.clone()?;
+        if let Some(declaration) = property.stable_declaration {
+            self.constant_property_reads.insert(expression, declaration);
+        }
         if property.is_const && property.implicit_integer_coercion {
             self.constant_integer_coercion_reads.insert(expression);
         }
@@ -49553,35 +49573,8 @@ impl<'a> Checker<'a> {
         // completes; member-specific suppressions nest inside it.
         let class_suppression_depth =
             self.push_declaration_policies(scope, &cl.annotations, &cl.annotation_args);
-        if self.fragment.is_classifier_annotations() {
-            for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
-                if self
-                    .module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-                    .is_some()
-                {
-                    self.check_annotation_application(scope, annotation, arguments);
-                }
-            }
-            // Method annotations are declaration facts for later candidate collection. Fold only
-            // those applications: this fragment retains their arguments and releases value-parameter
-            // annotations. The method's body unit checks the parameter applications, and a fold this
-            // restricted checker cannot complete is not a diagnostic.
-            let diagnostics_before_methods = self.diags.diags.len();
-            for method in &cl.methods {
-                if method.annotations.iter().any(|annotation| {
-                    self.module
-                        .legacy_symbols()
-                        .and_then(|symbols| {
-                            symbols.resolved_annotation(self.file_index, annotation)
-                        })
-                        .is_some()
-                }) {
-                    self.check_classifier_method_annotations(scope, method);
-                }
-            }
-            self.diags.diags.truncate(diagnostics_before_methods);
+        if self.fragment.is_declaration_annotations() {
+            self.fold_classifier_declaration_annotations(scope, cl);
             self.active_lexical_policies
                 .truncate(class_suppression_depth);
             return;
@@ -49691,7 +49684,7 @@ impl<'a> Checker<'a> {
         // declaration applications below belong to the passes that retain their arguments.
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
-            self.check_supertype_opt_in(cl, current_owner);
+            self.check_supertype_usage(cl, current_owner);
             for entry in &cl.enum_entries {
                 self.check_annotation_applications_in_declaration_scope(
                     scope,
@@ -55452,7 +55445,7 @@ impl<'a> Checker<'a> {
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
-        self.check_expression_opt_in(scope, e);
+        self.check_expression_usage(scope, e);
         self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();

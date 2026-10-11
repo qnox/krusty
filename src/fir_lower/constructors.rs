@@ -807,6 +807,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
             },
             facts: crate::types::AnnotationSemanticFacts {
                 deprecated_hidden: true,
+                deprecated_error: false,
                 optional_expectation: false,
             },
         };

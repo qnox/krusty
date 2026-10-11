@@ -704,15 +704,17 @@ pub fn analyze_source_set_with_features(
 ) -> SourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        SourceSetAnalysisOptions {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        false,
-        true,
     )
 }
 
@@ -804,15 +806,17 @@ pub fn analyze_source_set_prefix_with_features(
 ) -> SourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        checked_count,
-        inferred_count,
+        SourceSetAnalysisOptions {
+            checked_count,
+            inferred_count,
+            trim_support_bodies: false,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        false,
-        true,
     )
 }
 
@@ -827,15 +831,17 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
 ) -> SourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        checked_count,
-        inferred_count,
+        SourceSetAnalysisOptions {
+            checked_count,
+            inferred_count,
+            trim_support_bodies: true,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        true,
-        true,
     )
 }
 
@@ -878,15 +884,17 @@ where
 {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        SourceSetAnalysisOptions {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         prepare_symbols,
         diags,
-        false,
-        true,
     )
 }
 
@@ -909,15 +917,17 @@ pub fn analyze_source_set_streaming_with_module(
 ) -> StreamingSourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        SourceSetAnalysisOptions {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: false,
+        },
         platform.into(),
         project_features,
         module_name,
         |_, _| {},
         diags,
-        false,
-        false,
     )
     .into()
 }
@@ -930,15 +940,17 @@ pub fn analyze_source_set_streaming_with_features(
 ) -> StreamingSourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        SourceSetAnalysisOptions {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: false,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        false,
-        false,
     )
     .into()
 }
@@ -957,34 +969,46 @@ where
 {
     analyze_source_set_impl(
         sources,
-        checked_count,
-        inferred_count,
+        SourceSetAnalysisOptions {
+            checked_count,
+            inferred_count,
+            trim_support_bodies: false,
+            retain_inspection_analysis: false,
+        },
         platform,
         project_features,
         DEFAULT_MODULE_NAME,
         prepare_symbols,
         diags,
-        false,
-        false,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn analyze_source_set_impl<F>(
-    sources: &[SourceInput<'_>],
+/// Which leading sources one source-set analysis checks and infers, and what it keeps afterwards.
+struct SourceSetAnalysisOptions {
     checked_count: usize,
     inferred_count: usize,
+    trim_support_bodies: bool,
+    retain_inspection_analysis: bool,
+}
+
+fn analyze_source_set_impl<F>(
+    sources: &[SourceInput<'_>],
+    options: SourceSetAnalysisOptions,
     platform: PlatformProvider,
     project_features: &LangFeatures,
     module_name: &str,
     prepare_symbols: F,
     diags: &mut DiagSink,
-    trim_support_bodies: bool,
-    retain_inspection_analysis: bool,
 ) -> SourceSetAnalysis
 where
     F: FnOnce(&[File], &mut FrontendSymbols),
 {
+    let SourceSetAnalysisOptions {
+        checked_count,
+        inferred_count,
+        trim_support_bodies,
+        retain_inspection_analysis,
+    } = options;
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
@@ -1088,7 +1112,7 @@ where
             // editor queries while consuming declaration identities from the finalized index.
             let needs_bounded_pass_one_syntax = multiplatform
                 || has_signature_defaults(&file)
-                || retained_syntax::has_classifier_annotation_arguments(&file)
+                || retained_syntax::has_declaration_annotation_arguments(&file)
                 // File annotation policies are resolved once, after every header is collected.
                 || !file.file_annotations.is_empty()
                 || !file.type_annotation_arguments.is_empty()
@@ -1374,7 +1398,7 @@ where
         // override edges; those entries deliberately have no ordinary classifier header.
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
-        crate::resolve::publish_checked_classifier_annotations(
+        crate::resolve::publish_checked_declaration_annotations(
             &files[..inferred_end],
             &mut index,
             &mut symbols,

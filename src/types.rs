@@ -2,6 +2,7 @@
 //! shapes. Backend-specific names and descriptors are kept out of this module.
 
 mod classifier_declarations;
+mod deprecation;
 mod intersection;
 pub(crate) use intersection::declaration_approximation;
 mod overridden_declaration;
@@ -11,6 +12,7 @@ pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
 };
+pub use deprecation::{Deprecation, DeprecationLevel};
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::SemanticCallRole;
 pub use semantic_callable_owner::SemanticCallableOwner;
@@ -2200,7 +2202,10 @@ impl ResolvedAnnotation {
 /// of recovering semantics from an enum constant's source spelling or physical encoding.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AnnotationSemanticFacts {
+    /// `@kotlin.Deprecated(level = DeprecationLevel.HIDDEN)`.
     pub deprecated_hidden: bool,
+    /// `@kotlin.Deprecated(level = DeprecationLevel.ERROR)`.
+    pub deprecated_error: bool,
     /// An `@OptionalExpectation` without an actual here (see `ir::DeclarationAnnotations`).
     pub optional_expectation: bool,
 }

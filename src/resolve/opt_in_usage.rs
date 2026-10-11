@@ -55,52 +55,6 @@ impl Checker<'_> {
         Some(self.lookup(scope, name)?.declared_ty)
     }
 
-    /// The classifier qualifier `expression` is selected through (`Outer` in `Outer.Nested()`,
-    /// `Obj` in `Obj.f()`), with the classifier the selection proves it denotes. A qualifier is a
-    /// receiver that was never typed as a value, or an object's singleton.
-    fn classifier_qualifier(&self, expression: ExprId) -> Option<(ExprId, TypeName)> {
-        let (receiver, read) = match self.file.expr(expression) {
-            Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => (*receiver, false),
-                _ => return None,
-            },
-            Expr::Member { receiver, .. } => (*receiver, true),
-            _ => return None,
-        };
-        if !matches!(
-            self.file.expr(receiver),
-            Expr::Name(_) | Expr::Member { .. }
-        ) {
-            return None;
-        }
-        // An object qualifier is also its singleton value.
-        if let Some(ExprLowering::SingletonValue(singleton)) = self.expr_lowers.get(&receiver) {
-            return Some((receiver, singleton.classifier));
-        }
-        if self.expr_types[receiver.0 as usize] != Ty::Error {
-            return None;
-        }
-        let classifier = if read {
-            match self.expr_lowers.get(&expression)? {
-                ExprLowering::AssociatedPropertyRead { owner, .. }
-                | ExprLowering::ClassifierPropertyRead { owner, .. } => *owner,
-                ExprLowering::SingletonValue(singleton) => singleton.classifier.nested_owner()?,
-                _ => return None,
-            }
-        } else if let Some(constructor) = self.resolved_constructors.get(&expression) {
-            constructor.owner().nested_owner()?
-        } else {
-            match self.resolved_calls.get(&expression)? {
-                ResolvedCall::Member(selected) => {
-                    selected.receiver.non_null().kotlin_class_internal()?
-                }
-                ResolvedCall::Companion(member) => member.owner?,
-                _ => return None,
-            }
-        };
-        Some((receiver, classifier))
-    }
-
     /// Report the opt-in requirements of the classifier written type reference `reference` names.
     pub(super) fn check_type_reference_opt_in(&mut self, reference: &TypeRef, resolved: Ty) {
         if self.discover_anonymous_captures || reference.is_import() || reference.is_annotation() {
@@ -118,41 +72,39 @@ impl Checker<'_> {
         self.report_opt_in_requirements(reference.span, &requirements);
     }
 
-    /// Report the opt-in requirements of the supertypes class `class` lists, as their types were
-    /// published with the class header in Pass 1.
-    pub(super) fn check_supertype_opt_in(&mut self, class: &ClassDecl, owner: Option<TypeName>) {
-        if self.discover_anonymous_captures {
-            return;
-        }
+    /// The supertype references class `class` lists, each with its type as published with the
+    /// class header in Pass 1. Empty when the published supertypes do not pair with the written
+    /// references: an implicit superclass has no reference to report at.
+    pub(super) fn declared_supertype_references(
+        &self,
+        class: &ClassDecl,
+        owner: Option<TypeName>,
+    ) -> Vec<(TypeRef, Ty)> {
         let Some(header) = owner
             .and_then(|owner| self.resolver().classifier(owner))
             .and_then(|classifier| classifier.stable_declaration)
             .zip(self.resolved_index)
             .and_then(|(declaration, index)| index.classifier_header(declaration))
         else {
-            return;
+            return Vec::new();
         };
         let supertypes = header
             .declared_supertypes()
             .map(|supertype| supertype.get())
             .collect::<Vec<_>>();
-        let mut references = class.supertypes.iter().collect::<Vec<_>>();
-        let base = class.base_class.as_deref().map(|base| {
+        let mut references = class.supertypes.clone();
+        references.extend(class.base_class.as_deref().map(|base| {
             base_class_type_ref(
                 base,
                 &class.base_type_args,
                 class.base_class_span.unwrap_or(class.span),
             )
-        });
-        references.extend(base.as_ref());
+        }));
         references.sort_by_key(|reference| reference.span.lo);
-        // An implicit superclass has no reference to report at.
         if references.len() != supertypes.len() {
-            return;
+            return Vec::new();
         }
-        for (reference, supertype) in references.into_iter().zip(supertypes) {
-            self.check_finalized_type_reference_opt_in(reference, supertype);
-        }
+        references.into_iter().zip(supertypes).collect()
     }
 
     /// Report a declaration type finalized in Pass 1, and each type argument written in it, as
