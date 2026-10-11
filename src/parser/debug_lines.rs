@@ -199,8 +199,19 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     p.decl_line = line_at(p.span.lo);
                     p.accessor_lines = accessor_lines(p, line_at, body_lines);
                 }
+                // An entry's class body declares methods and properties of its own, with the same
+                // lines as a class member.
                 for e in &mut c.enum_entries {
                     e.decl_line = line_at(e.span.lo);
+                    for m in &mut e.methods {
+                        m.sig_line = line_at(m.span.lo);
+                        m.decl_line = body_line(&m.body, m.sig_line);
+                        m.body_lines = body_lines(&m.body);
+                    }
+                    for p in &mut e.props {
+                        p.decl_line = line_at(p.span.lo);
+                        p.accessor_lines = accessor_lines(p, line_at, body_lines);
+                    }
                 }
                 // A secondary constructor is a declaration of its own, and its lines are its own:
                 // kotlinc anchors the synthetic `$default` overload on the `constructor` keyword,

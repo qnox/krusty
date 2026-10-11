@@ -4078,7 +4078,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`LineNumberTable` for regular function bodies** (kotlinc parity, byte-verified): one entry per
   STATEMENT at its first pc (a block's TRAILING expression counts as a statement); an expression
   body maps to the expression's line; a `Unit` fn's implicit `return` maps to the closing-`}` line
-  (`FunDecl::body_close_line` → `IrFile::fn_close_lines`); the first entry of a guarded function
+  (`FunDecl::body_lines.close` → `IrFile::fn_close_lines`); the first entry of a guarded function
   starts where kotlinc's does relative to the `checkNotNullParameter` prologue. Plumbed as parser
   line vecs (`File::{expr,stmt}_lines`) → sparse `IrFile::expr_lines` noted on each statement's
   FIRST lowered root (`append_stmt`) and on trailing values (`note_expr_line`) → `CodeBuilder::
@@ -4088,6 +4088,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **An enum entry's class body has the same lines as a class body.** Its methods and
+  properties are members of the entry's own class, so the parser's line pass walks them as it walks
+  a class's members: an empty `fun foo() {}` in `A { … }` maps its `return` to the declaration
+  line, and a property accessor written there anchors on its own line, where krusty emitted no
+  `LineNumberTable` for them. Test: `tests/enum_entry_member_lines_e2e.rs`.
 - **An `init` block opens on `init` and closes on `}`.** Each of those lines is its own
   `LineNumberTable` entry, with a `nop` when no instruction of the block sits on that line. A
   property assigned inside the block is marked on the assignment statement, including the receiver
