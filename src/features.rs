@@ -435,8 +435,6 @@ mod tests {
             "ExplicitBackingFields",
             "MultiDollarInterpolation",
             "PrioritizedEnumEntries",
-            "ProhibitIntersectionReifiedTypeParameter",
-            "ReportReificationProblemsInDnnAndFlexible",
             "WhenGuards",
         ] {
             assert!(features.has(name), "{name} is stable in 2.4");
@@ -460,8 +458,6 @@ mod tests {
             "EnumEntries",
             "MultiDollarInterpolation",
             "PrioritizedEnumEntries",
-            "ProhibitIntersectionReifiedTypeParameter",
-            "ReportReificationProblemsInDnnAndFlexible",
             "WhenGuards",
         ] {
             assert!(features.has(name), "{name} is stable by 2.2");

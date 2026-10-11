@@ -2716,8 +2716,11 @@ fn selected_top_level_inline_run_rechecks_its_lambda_inside_the_loop_scope() {
 
 #[test]
 fn inline_array_constructor_break_keeps_its_enclosing_loop_coordinate() {
-    let (body, _) =
-        checked_function_body("fun run() { while (true) { Array(1) { break } } }\n", "run");
+    // The element type is written: kotlinc rejects an `Array<Nothing>` inferred from `break`.
+    let (body, _) = checked_function_body(
+        "fun run() { while (true) { Array<String>(1) { break } } }\n",
+        "run",
+    );
     let outer_target = (0..body.statement_count())
         .find_map(|raw| {
             let statement = body.statement(FirStatementId::from_raw(raw as u32))?;
