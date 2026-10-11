@@ -401,7 +401,13 @@ fn compile_source(
         &mut diags,
     );
     let backend = options.jvm_backend(cp);
-    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    let outputs = krusty::compiler::emit_analyzed(
+        analysis,
+        &stems,
+        &backend,
+        box_reference_classes::MAIN_MODULE,
+        &mut diags,
+    );
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     let classes = outputs
@@ -476,6 +482,7 @@ fn compile_multifile(
             }
             None => {
                 let sources = UnitSources {
+                    module: box_reference_classes::MAIN_MODULE,
                     kotlin: &blocks,
                     common: 0,
                     java: &java_blocks,
@@ -546,6 +553,7 @@ fn compile_blocks(
     compile_blocks_mixed(
         case,
         UnitSources {
+            module: box_reference_classes::MAIN_MODULE,
             kotlin: blocks,
             common: 0,
             java: &[],
@@ -562,6 +570,9 @@ fn compile_blocks(
 /// sources, exactly as `krusty::conformance::module_units` orders a unit's chain.
 #[derive(Clone, Copy)]
 struct UnitSources<'a> {
+    /// The unit's module name: kotlinc's `-module-name`, which the reference compile passes too. It
+    /// names the `.kotlin_module` file, suffixes `internal` members and is recorded in `@Metadata`.
+    module: &'a str,
     kotlin: &'a [(String, String)],
     common: usize,
     java: &'a [(String, String)],
@@ -578,6 +589,7 @@ fn compile_blocks_mixed(
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let UnitSources {
+        module,
         kotlin: blocks,
         java: java_blocks,
         ..
@@ -627,7 +639,7 @@ fn compile_blocks_mixed(
         &mut diags,
     );
     let backend = options.jvm_backend(cp);
-    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, module, &mut diags);
     let classes = outputs
         .into_iter()
         .filter_map(|(path, bytes)| {
@@ -736,6 +748,7 @@ fn compile_module_test(
         // The unit's `dependsOn` chain sources come first and are common sources, as in kotlinc's
         // `-Xcommon-sources` compilation of one platform module.
         let kotlin_only = UnitSources {
+            module: &m.name,
             kotlin: files,
             common: m.common_file_count,
             java: &[],
