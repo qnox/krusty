@@ -13725,6 +13725,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       alias-to-object qualifier written with arguments as `Unit` and then fails in its JVM backend,
       so the off-mode alias warnings are pinned against krusty's front end alone.
       (`tests/object_qualifier_type_arguments_e2e.rs`.)
+    - Class literals (`FirClassLiteralChecker`): `T<Int>::class` on a reified type parameter
+      reports "type arguments are not allowed for type parameters." on the list. A typealias written
+      with type arguments on a class literal's left-hand side is useless when its expansion has no
+      type arguments or is a reference array (`Str<Int>::class`, `Arr<Int>::class`). A count the
+      alias's formals do not take reports kotlinc's arity message, `one type argument expected for
+      'typealias Yes2<T> = String'.`, on the list; a fitting count reports "only classes are
+      allowed on the left-hand side of a class literal." on the literal. A useless form is a
+      deprecation warning until the feature, and any other alias (`Lst<Int>::class` for
+      `typealias Lst<T> = List<T>`) is always the error. A useless literal keeps its type, the
+      expansion with each formal star-projected, and a reified one keeps `KClass<T>`. Signature
+      solving types an implicitly typed property's class literal with the same rule and leaves
+      the diagnostic to the checker (`TrFlags::CLASS_LITERAL_LHS`).
+      (`tests/class_literal_type_arguments_e2e.rs`.)
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its

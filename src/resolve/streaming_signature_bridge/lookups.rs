@@ -482,6 +482,21 @@ impl ProductionSignatureSemantics<'_> {
                 },
             ));
         }
+        if formals.len() != reference.targs.len() && reference.is_class_literal_lhs() {
+            // The checker reports these arguments (`class_literal_type_arguments`). kotlinc types a
+            // literal whose arguments select nothing as the expansion, and rejects any other.
+            return Some(
+                super::super::class_literal_type_arguments::useless_alias_type(
+                    &formals,
+                    expansion,
+                    &mut |owner| {
+                        self.with_resolver(scope, |resolver| resolver.classifier(owner))
+                            .ok()
+                    },
+                )
+                .unwrap_or(Ty::Error),
+            );
+        }
         if formals.len() != reference.targs.len() {
             self.record_source_diagnostic_at(
                 scope.owner,
