@@ -22032,15 +22032,14 @@ impl<'a> Checker<'a> {
                         format!("krusty: conflicting local declaration '{name}'"),
                     );
                 }
-                // A `lateinit var`: a mutable local of the (non-null) annotation type, initialized later.
-                // No initializer to check; reads before assignment are allowed (they throw at runtime).
+                // A `lateinit var` is a non-null mutable local; reads before assignment may throw.
                 let prop_ty = self.type_ref_ty(scope, &ty);
-                // Same rule as `Stmt::Local`: an unresolved annotation errors, never a silent `Error`.
                 if prop_ty == Ty::Error {
                     self.report_unresolved_type_ref(&ty);
                 }
                 self.local_decl_types.insert(s, prop_ty);
-                self.declare(scope, &name, prop_ty, true);
+                let flow_identity = self.declare(scope, &name, prop_ty, true);
+                self.annotation_argument_locals.record(flow_identity);
             }
             Stmt::Destructure { entries, init } => self.stmt_destructure(scope, s, entries, init),
             Stmt::IncDec { name, dec, prefix } => self.stmt_inc_dec(scope, s, name, dec, prefix),
@@ -22421,11 +22420,8 @@ impl<'a> Checker<'a> {
         } else {
             bound_ty
         };
-        // A callable reference assigned to an explicitly declared function type has already been
-        // adapted to that type. Keep the declared semantic shape on the local: the reference's raw
-        // signature may spell a receiver as its first ordinary parameter (`Foo::Inner`), while the
-        // target type spells the same value as `Foo.() -> Inner`. Invocation must consume the binding's
-        // type, not reopen the initializer and silently undo that adaptation.
+        // An explicitly typed callable-reference local has already adapted to its target shape.
+        // Keep that shape instead of reopening the raw reference and undoing the adaptation.
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| matches!(ty, Ty::Fun(_)))
             .or_else(|| self.callable_reference_types.get(&init).copied())
@@ -22435,6 +22431,7 @@ impl<'a> Checker<'a> {
         } else {
             self.declare_inferred(scope, &name, bound_ty, is_var, error_provenance)
         };
+        self.annotation_argument_locals.record(flow_identity);
         if declared.is_none() {
             self.record_enhanced_local(flow_identity, init);
         }
@@ -22494,7 +22491,8 @@ impl<'a> Checker<'a> {
             self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty, site.clone());
         }
         self.local_decl_types.insert(s, prop_ty);
-        self.declare(scope, &name, prop_ty, site.is_var);
+        let flow_identity = self.declare(scope, &name, prop_ty, site.is_var);
+        self.annotation_argument_locals.record(flow_identity);
         let storage_ty = self
             .delegate_provide_targets
             .get(&delegate)
@@ -33354,6 +33352,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_selections: HashMap::new(),
         implicit_receiver_identities: HashMap::new(),
         read_flow_roots: HashMap::new(),
+        annotation_argument_locals: Default::default(),
         read_callable_reference_types: HashMap::new(),
         anonymous_super_read_provenance: HashMap::new(),
         stable_property_reads: std::collections::HashSet::new(),
@@ -35980,6 +35979,7 @@ struct Checker<'a> {
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
+    annotation_argument_locals: annotation_argument_constness::LocalPropertyIdentities,
     /// The exact function shape of a callable reference a checked name read is bound to.
     read_callable_reference_types: HashMap<ExprId, Ty>,
     /// Exact selected value/receiver identity for a bare read that an anonymous object's constructor

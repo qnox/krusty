@@ -4,16 +4,43 @@
 
 use super::*;
 
+/// Stable flow identities introduced by plain local-property declarations. A narrowing shadow
+/// preserves its identity, while parameters have distinct identities that are never recorded here.
+#[derive(Default)]
+pub(super) struct LocalPropertyIdentities(std::collections::HashSet<u32>);
+
+impl LocalPropertyIdentities {
+    pub(super) fn record(&mut self, identity: u32) {
+        self.0.insert(identity);
+    }
+
+    fn contains(&self, identity: &u32) -> bool {
+        self.0.contains(identity)
+    }
+}
+
 /// The diagnostic one non-constant annotation argument earns (kotlinc's `ConstantArgumentKind`).
+#[derive(Clone, Copy)]
 enum NonConstantArgument {
     /// `ANNOTATION_ARGUMENT_MUST_BE_CONST`.
     NotConst,
+    /// `ANNOTATION_ARGUMENT_MUST_BE_ENUM_CONST`: a property of enum type, not an entry.
+    NotEnumConstant,
     /// `ANNOTATION_ARGUMENT_MUST_BE_KCLASS_LITERAL`: a class literal of a value (`value::class`).
     NotKClassLiteral,
     /// `NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION`: a `val` that could have been `const`.
     NonConstVal,
     /// The argument already failed resolution, which is its only diagnostic.
     ResolutionError,
+}
+
+/// Whether a value stands directly in an annotation slot or inside a constant expression. Enum
+/// entries and class literals are legal in the former position, but are not scalar constants an
+/// operator or template can consume.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ConstantUse {
+    DirectAnnotationValue,
+    EmbeddedExpression,
 }
 
 impl Checker<'_> {
@@ -23,19 +50,17 @@ impl Checker<'_> {
         &mut self,
         arguments: &[ExprId],
     ) -> bool {
-        let mut leaves = Vec::new();
+        let mut diagnostics = Vec::new();
         for &argument in arguments {
-            self.annotation_argument_leaves(argument, &mut leaves);
+            self.annotation_argument_diagnostics(argument, &mut diagnostics);
         }
-        let mut classified = false;
-        for leaf in leaves {
-            let Some(kind) = self.non_constant_argument(leaf) else {
-                continue;
-            };
-            classified = true;
+        for (expression, kind) in &diagnostics {
             let message = match kind {
                 NonConstantArgument::NotConst => {
                     "annotation argument must be a compile-time constant."
+                }
+                NonConstantArgument::NotEnumConstant => {
+                    "enum annotation argument must be an enum constant."
                 }
                 NonConstantArgument::NotKClassLiteral => {
                     "annotation argument must be class literal (T::class)."
@@ -45,105 +70,271 @@ impl Checker<'_> {
                 }
                 NonConstantArgument::ResolutionError => continue,
             };
-            self.diags.error(self.span(leaf), message.to_string());
+            self.diags
+                .error(self.span(*expression), message.to_string());
         }
-        classified
+        !diagnostics.is_empty()
     }
 
-    /// The elements an argument's value is made of: an array literal or a vararg's elements are each
-    /// checked on their own.
-    fn annotation_argument_leaves(&self, argument: ExprId, leaves: &mut Vec<ExprId>) {
-        use crate::synthetics::SyntheticKind;
+    /// Collect kotlinc's diagnostics for one argument in emission order. Array literals report an
+    /// aggregate `NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION` before their element diagnostics when
+    /// any element is non-constant, except for dedicated enum/KClass and resolution-error cases.
+    /// Synthetic vararg calls only contribute their individual source elements.
+    fn annotation_argument_diagnostics(
+        &self,
+        argument: ExprId,
+        diagnostics: &mut Vec<(ExprId, NonConstantArgument)>,
+    ) {
+        if let Some(elements) = self.synthetic_vararg_elements(argument) {
+            for &element in elements {
+                self.annotation_argument_diagnostics(element, diagnostics);
+            }
+            return;
+        }
         match self.file.expr(argument) {
             Expr::AnnotationArrayLiteral(elements) => {
+                let first_element_diagnostic = diagnostics.len();
                 for &element in elements {
-                    self.annotation_argument_leaves(element, leaves);
+                    self.annotation_argument_diagnostics(element, diagnostics);
+                }
+                if diagnostics[first_element_diagnostic..]
+                    .iter()
+                    .any(|(_, kind)| {
+                        matches!(
+                            kind,
+                            NonConstantArgument::NotConst | NonConstantArgument::NonConstVal
+                        )
+                    })
+                {
+                    diagnostics.insert(
+                        first_element_diagnostic,
+                        (argument, NonConstantArgument::NonConstVal),
+                    );
                 }
             }
-            Expr::Call { args, .. }
-                if matches!(
-                    self.expr_lowers.get(&argument),
-                    Some(ExprLowering::CompilerSynthetic(
-                        SyntheticKind::PrimitiveVararg(_)
-                            | SyntheticKind::ReferenceVararg
-                            | SyntheticKind::EmptyReference,
-                    ))
-                ) =>
-            {
-                for &element in args {
-                    self.annotation_argument_leaves(element, leaves);
+            _ => {
+                if let Some(kind) = self.non_constant_argument(argument) {
+                    diagnostics.push((argument, kind));
                 }
             }
-            _ => leaves.push(argument),
         }
+    }
+
+    /// Source elements packed by an array-construction synthetic. The synthetic call itself has no
+    /// annotation diagnostic; its source elements retain their own order and kinds.
+    fn synthetic_vararg_elements(&self, argument: ExprId) -> Option<&[ExprId]> {
+        use crate::synthetics::SyntheticKind;
+        let Expr::Call { args, .. } = self.file.expr(argument) else {
+            return None;
+        };
+        matches!(
+            self.expr_lowers.get(&argument),
+            Some(ExprLowering::CompilerSynthetic(
+                SyntheticKind::PrimitiveVararg(_)
+                    | SyntheticKind::ReferenceVararg
+                    | SyntheticKind::EmptyReference,
+            ))
+        )
+        .then_some(args.as_slice())
+    }
+
+    /// The first non-constant source value inside one annotation slot. Nested annotations inherit
+    /// this kind at their own call span; unlike a direct array diagnostic, they do not inherit the
+    /// array's additional aggregate diagnostic.
+    fn first_non_constant_annotation_argument(
+        &self,
+        argument: ExprId,
+    ) -> Option<NonConstantArgument> {
+        if let Some(elements) = self.synthetic_vararg_elements(argument) {
+            return elements
+                .iter()
+                .find_map(|&element| self.first_non_constant_annotation_argument(element));
+        }
+        match self.file.expr(argument) {
+            Expr::AnnotationArrayLiteral(elements) => elements
+                .iter()
+                .find_map(|&element| self.first_non_constant_annotation_argument(element)),
+            _ => self.non_constant_argument(argument),
+        }
+    }
+
+    /// Whether `call` was checked as a nested annotation: a call the checker typed as an
+    /// annotation class without selecting a callable for it.
+    fn constructs_nested_annotation(&self, call: ExprId) -> bool {
+        !self.resolved_calls.contains_key(&call)
+            && self.expr_types[call.0 as usize]
+                .kotlin_class_internal()
+                .is_some_and(|annotation| self.annotation_shape(annotation).is_some())
     }
 
     /// A class literal folds only when its receiver selected a classifier. One whose receiver
     /// failed to resolve is not a constant; one whose receiver is a value is not a class literal.
     fn non_constant_argument(&self, leaf: ExprId) -> Option<NonConstantArgument> {
+        self.non_constant_argument_for(leaf, ConstantUse::DirectAnnotationValue)
+    }
+
+    fn non_constant_argument_for(
+        &self,
+        leaf: ExprId,
+        constant_use: ConstantUse,
+    ) -> Option<NonConstantArgument> {
         if let Expr::CallableRef {
             receiver: Some(receiver),
             name,
         } = self.file.expr(leaf)
         {
-            if name == "class" && !self.class_literal_targets.contains_key(&leaf) {
-                return Some(if self.expr_types[receiver.0 as usize] == Ty::Error {
-                    NonConstantArgument::NotConst
-                } else {
-                    NonConstantArgument::NotKClassLiteral
-                });
+            if name == "class" {
+                if !self.class_literal_targets.contains_key(&leaf) {
+                    let kind = if self.expr_types[receiver.0 as usize] == Ty::Error {
+                        NonConstantArgument::NotConst
+                    } else {
+                        NonConstantArgument::NotKClassLiteral
+                    };
+                    return Some(Self::kind_for_constant_use(kind, constant_use));
+                }
+                return (constant_use == ConstantUse::EmbeddedExpression)
+                    .then_some(NonConstantArgument::NotConst);
             }
         }
         if self.expr_types[leaf.0 as usize] == Ty::Error {
             return Some(NonConstantArgument::ResolutionError);
         }
-        self.non_constant_expression(leaf)
+        self.non_constant_expression(leaf, constant_use)
+            .map(|kind| Self::kind_for_constant_use(kind, constant_use))
+    }
+
+    /// Enum/KClass diagnostics describe values that stand directly in the annotation slot. Once
+    /// embedded in a scalar expression, either value makes that complete expression non-constant.
+    fn kind_for_constant_use(
+        kind: NonConstantArgument,
+        constant_use: ConstantUse,
+    ) -> NonConstantArgument {
+        match (constant_use, kind) {
+            (
+                ConstantUse::EmbeddedExpression,
+                NonConstantArgument::NotEnumConstant | NonConstantArgument::NotKClassLiteral,
+            ) => NonConstantArgument::NotConst,
+            _ => kind,
+        }
     }
 
     /// kotlinc's `computeConstantExpressionKind` for the expression forms krusty selects with a
-    /// known answer: an operator is as constant as its first non-constant operand, a lexical value
-    /// or a branch is never constant, a property read is constant only for a `const val`, and a
-    /// call of a module function is never constant. Other forms (library calls kotlinc may
-    /// evaluate) are not classified here.
-    fn non_constant_expression(&self, expression: ExprId) -> Option<NonConstantArgument> {
-        if self.resolved_constants.contains_key(&expression)
-            || self.resolved_enum_entries.contains_key(&expression)
-        {
+    /// known answer: a compiler-intrinsic operator is as constant as its first non-constant operand,
+    /// a lexical value or a branch is never constant, a property read is constant only for a `const
+    /// val`, a cast keeps its operand's kind, and an indexed read, type test, Elvis, branch,
+    /// selected constructor, or selected non-intrinsic call is never constant. Other forms
+    /// (compiler intrinsics kotlinc may evaluate) are not classified here.
+    fn non_constant_expression(
+        &self,
+        expression: ExprId,
+        constant_use: ConstantUse,
+    ) -> Option<NonConstantArgument> {
+        if self.resolved_constants.contains_key(&expression) {
             return None;
         }
+        if self.resolved_enum_entries.contains_key(&expression) {
+            return (constant_use == ConstantUse::EmbeddedExpression)
+                .then_some(NonConstantArgument::NotConst);
+        }
         match self.file.expr(expression) {
-            Expr::Binary { lhs, rhs, .. } => self
-                .non_constant_expression(*lhs)
-                .or_else(|| self.non_constant_expression(*rhs)),
-            Expr::Unary { operand, .. } => self.non_constant_expression(*operand),
-            Expr::If { .. } | Expr::When { .. } => Some(NonConstantArgument::NotConst),
-            Expr::Call { .. } => self
-                .resolved_calls
-                .get(&expression)
-                .is_some_and(|call| match call {
-                    ResolvedCall::TopLevel(call) => {
-                        call.stable_declaration.is_some() || call.source_decl.is_some()
-                    }
-                    ResolvedCall::Extension(call) => {
-                        call.stable_declaration.is_some() || call.source.is_some()
-                    }
-                    _ => false,
-                })
-                .then_some(NonConstantArgument::NotConst),
-            _ if matches!(
-                self.read_flow_roots.get(&expression),
-                Some(scope::PathRoot::Value(_))
-            ) =>
+            Expr::Binary { op, lhs, rhs, .. }
+                if self.operator_propagates_constant_kind(expression, *op) =>
             {
-                Some(NonConstantArgument::NotConst)
+                self.non_constant_argument_for(*lhs, ConstantUse::EmbeddedExpression)
+                    .or_else(|| {
+                        self.non_constant_argument_for(*rhs, ConstantUse::EmbeddedExpression)
+                    })
+            }
+            Expr::Binary { .. } => Some(NonConstantArgument::NotConst),
+            Expr::Unary { op, operand }
+                if self.unary_operator_propagates_constant_kind(expression, *op) =>
+            {
+                self.non_constant_argument_for(*operand, ConstantUse::EmbeddedExpression)
+            }
+            Expr::Unary { .. } => Some(NonConstantArgument::NotConst),
+            Expr::Template(parts) => parts.iter().find_map(|part| match part {
+                TemplatePart::Str(_) => None,
+                TemplatePart::Expr(expression) => {
+                    self.non_constant_argument_for(*expression, ConstantUse::EmbeddedExpression)
+                }
+            }),
+            Expr::As { operand, .. } => {
+                self.non_constant_argument_for(*operand, ConstantUse::EmbeddedExpression)
+            }
+            Expr::Index { .. }
+            | Expr::Is { .. }
+            | Expr::NotNull { .. }
+            | Expr::Elvis { .. }
+            | Expr::If { .. }
+            | Expr::When { .. } => Some(NonConstantArgument::NotConst),
+            // kotlinc reports a nested annotation at its call, with the kind of its first
+            // non-constant argument.
+            Expr::Call { args, .. } if self.constructs_nested_annotation(expression) => args
+                .iter()
+                .find_map(|&argument| self.first_non_constant_annotation_argument(argument)),
+            Expr::Call { .. } => (self.resolved_constructors.contains_key(&expression)
+                || self
+                    .resolved_calls
+                    .get(&expression)
+                    .is_some_and(|call| call.compiler_intrinsic().is_none()))
+            .then_some(NonConstantArgument::NotConst),
+            _ if let Some(scope::PathRoot::Value(identity)) =
+                self.read_flow_roots.get(&expression) =>
+            {
+                if self.annotation_argument_locals.contains(identity)
+                    && self.expression_has_enum_type(expression)
+                {
+                    Some(NonConstantArgument::NotEnumConstant)
+                } else {
+                    Some(NonConstantArgument::NotConst)
+                }
             }
             _ => self.non_constant_property_read(expression),
         }
     }
 
-    /// A selected non-`const` property read. Only a module `val` with a default getter and a
-    /// literal initializer could have been `const`; a dependency's declaration carries no
-    /// initializer, so its reads are simply not constant.
+    /// Builtin non-call operators have no selected-call entry. An overload-selected operator only
+    /// inherits an operand's diagnostic when the exact declaration carries a compiler intrinsic;
+    /// a source overload is an ordinary call and is non-constant as a whole.
+    fn operator_call_propagates_constant_kind(
+        &self,
+        expression: ExprId,
+        operator: SyntheticOperatorCall,
+    ) -> bool {
+        self.resolved_operator_calls
+            .get(&(expression, operator))
+            .or_else(|| self.resolved_calls.get(&expression))
+            .is_none_or(|call| call.compiler_intrinsic().is_some())
+    }
+
+    fn operator_propagates_constant_kind(&self, expression: ExprId, op: BinOp) -> bool {
+        let operator = match op {
+            BinOp::Add => SyntheticOperatorCall::Plus,
+            BinOp::Sub => SyntheticOperatorCall::Minus,
+            BinOp::Mul => SyntheticOperatorCall::Times,
+            BinOp::Div => SyntheticOperatorCall::Div,
+            BinOp::Rem => SyntheticOperatorCall::Rem,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => SyntheticOperatorCall::CompareTo,
+            BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or | BinOp::RefEq | BinOp::RefNe => {
+                return true;
+            }
+        };
+        self.operator_call_propagates_constant_kind(expression, operator)
+    }
+
+    fn unary_operator_propagates_constant_kind(&self, expression: ExprId, op: UnOp) -> bool {
+        let operator = match op {
+            UnOp::Neg => SyntheticOperatorCall::UnaryMinus,
+            UnOp::Plus => SyntheticOperatorCall::UnaryPlus,
+            UnOp::Not => SyntheticOperatorCall::Not,
+        };
+        self.operator_call_propagates_constant_kind(expression, operator)
+    }
+
+    /// A selected non-`const` property read. Enum and KClass results keep their type-specific
+    /// diagnostics. Otherwise only a module `val` with a default getter and a literal initializer
+    /// could have been `const`; a dependency's declaration carries no initializer, so its reads are
+    /// simply not constant.
     fn non_constant_property_read(&self, expression: ExprId) -> Option<NonConstantArgument> {
         let declaration = match self.expr_lowers.get(&expression)? {
             ExprLowering::TopLevelPropertyGet(access)
@@ -165,6 +356,13 @@ impl Checker<'_> {
             ExprLowering::ClassifierPropertyRead { .. } => None,
             _ => return None,
         };
+        let ty = self.expr_types[expression.0 as usize];
+        if ty.kotlin_class_internal() == Some(crate::types::wk::kclass()) {
+            return Some(NonConstantArgument::NotKClassLiteral);
+        }
+        if self.expression_has_enum_type(expression) {
+            return Some(NonConstantArgument::NotEnumConstant);
+        }
         let flags = declaration
             .and_then(|declaration| self.resolved_index?.declaration_header(declaration))
             .map(|header| header.flags);
@@ -181,5 +379,14 @@ impl Checker<'_> {
             }
             _ => NonConstantArgument::NotConst,
         })
+    }
+
+    /// Whether checking gave this expression an enum classifier. Source and dependency enums are
+    /// normalized by the symbol provider before this query; no declaration spelling is inspected.
+    fn expression_has_enum_type(&self, expression: ExprId) -> bool {
+        self.expr_types[expression.0 as usize]
+            .kotlin_class_internal()
+            .and_then(|classifier| self.resolver().classifier(classifier))
+            .is_some_and(|classifier| classifier.is_enum())
     }
 }

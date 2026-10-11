@@ -15,6 +15,175 @@ fun value(o: Any) { @C(o::class) val y = 1 }
     common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
 }
 
+/// A property whose semantic result is an enum or `KClass` is diagnosed by that type before its
+/// declaration flags: the property is neither an enum entry nor a class literal.
+#[test]
+fn typed_properties_keep_their_annotation_argument_diagnostics() {
+    let src = "annotation class EnumArg(val value: Choice)
+annotation class ClassArg(val value: kotlin.reflect.KClass<*>)
+enum class Choice { A }
+val choice = Choice.A
+val klass = String::class
+@EnumArg(choice) fun enumProperty() {}
+@ClassArg(klass) fun classProperty() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// Enum/KClass property reads keep their dedicated diagnostics only as direct annotation values.
+/// In a template or scalar operator, the complete expression receives the generic diagnostic.
+#[test]
+fn typed_properties_are_not_scalar_constant_operands() {
+    let src = "annotation class A(val value: String)
+annotation class EA(val value: E)
+annotation class KA(val value: kotlin.reflect.KClass<*>)
+enum class E { X }
+val moduleEnum = E.X
+val moduleKlass = String::class
+@EA(moduleEnum) fun directModuleEnum() {}
+@KA(moduleKlass) fun directModuleKlass() {}
+@A(\"${moduleEnum}\") fun templateModuleEnum() {}
+@A(\"x\" + moduleEnum) fun concatModuleEnum() {}
+@A(\"${moduleKlass}\") fun templateModuleKlass() {}
+@A(\"x\" + moduleKlass) fun concatModuleKlass() {}
+fun local() {
+    val localEnum = E.X
+    val localKlass = String::class
+    @EA(localEnum) val directEnum = 0
+    @KA(localKlass) val directKlass = 0
+    @A(\"${localEnum}\") val templateEnum = 0
+    @A(\"x\" + localEnum) val concatEnum = 0
+    @A(\"${localKlass}\") val templateKlass = 0
+    @A(\"x\" + localKlass) val concatKlass = 0
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// An enum-typed local property keeps the enum-constant diagnostic, while a function parameter of
+/// the same semantic type remains an ordinary non-constant value.
+#[test]
+fn a_local_enum_property_is_not_an_enum_constant() {
+    let src = "annotation class A(val value: Choice)
+enum class Choice { A }
+fun local() {
+    val choice = Choice.A
+    @A(choice) val use = 0
+}
+fun parameter(choice: Choice) {
+    @A(choice) val use = 0
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// Every local-property declaration shape carries the same stable provenance into annotation
+/// checking. Its enum-typed read is a property value, not an enum entry.
+#[test]
+fn local_property_forms_are_not_enum_constants() {
+    let src = "annotation class A(val value: Choice)
+enum class Choice { A }
+data class Box(val choice: Choice)
+fun forms() {
+    lateinit var late: Choice
+    val delegated: Choice by lazy { Choice.A }
+    val (destructured) = Box(Choice.A)
+    @A(late) val lateUse = 0
+    @A(delegated) val delegatedUse = 0
+    @A(destructured) val destructuredUse = 0
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A `for` variable is an immutable local property even though lowering may mutate its storage.
+/// Its stable flow identity therefore keeps the enum-property diagnostic.
+#[test]
+fn a_foreach_variable_is_not_an_enum_constant() {
+    let src = "annotation class A(val value: Choice)
+enum class Choice { A }
+fun use(values: Array<Choice>) {
+    for (choice in values) {
+        @A(choice) val use = 0
+    }
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// Unlike a module property, a local property or parameter of `KClass` type is an ordinary lexical
+/// value. Kotlinc diagnoses both generically rather than treating either read as a class literal.
+#[test]
+fn a_local_kclass_value_is_not_a_class_literal() {
+    let src = "annotation class K(val value: kotlin.reflect.KClass<*>)
+fun local() {
+    val klass: kotlin.reflect.KClass<*> = String::class
+    @K(klass) val use = 0
+}
+fun parameter(klass: kotlin.reflect.KClass<*>) {
+    @K(klass) val use = 0
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// An indexed read is a non-constant expression as a whole. Its generic diagnostic covers the
+/// complete index expression instead of falling through to the annotation-level folding error.
+#[test]
+fn an_indexed_argument_is_not_a_constant() {
+    let src = "annotation class A(val value: Int)
+fun indexed(values: IntArray) {
+    @A(values[0]) val use = 0
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A type test is a non-constant expression as a whole. Its generic diagnostic covers the complete
+/// `is` expression instead of falling through to the annotation-level folding error.
+#[test]
+fn a_type_test_argument_is_not_a_constant() {
+    let src = "annotation class A(val value: Boolean)
+fun typeTest(value: Any) {
+    @A(value is String) val use = 0
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// Elvis is a typed, non-constant expression of its own. Its diagnostic covers the complete Elvis
+/// expression rather than falling through to the annotation-level unsupported-constant error.
+#[test]
+fn an_elvis_argument_is_not_a_constant() {
+    let src = "annotation class A(val value: String)
+var nullable: String? = null
+@A(nullable ?: \"fallback\") fun use() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A not-null assertion is a non-constant expression of its own. The complete assertion receives
+/// the diagnostic rather than falling through to the annotation-level unsupported-constant error.
+#[test]
+fn a_not_null_argument_is_not_a_constant() {
+    let src = "annotation class A(val value: String)
+var text: String? = null
+@A(text!!) fun use() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// Unary plus is part of a numeric literal initializer, just like unary minus. A non-`const` `val`
+/// initialized by it therefore receives kotlinc's more specific constant-expression diagnostic.
+#[test]
+fn unary_plus_is_a_literal_initializer() {
+    let src = "annotation class A(val value: Int)
+val number = +1
+@A(number) fun use() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
 /// A module `val` with a default getter and a literal initializer could have been `const`, however
 /// it is reached: by name, through `this`, an instance, an object or a companion.
 #[test]
@@ -107,6 +276,164 @@ var mutable = \"a\"
 @A(mutable + text) fun a4() {}
 @A(\"a\" + s()) fun a5() {}
 @I(-KotlinVersion.CURRENT.major) fun a6() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// An operator expression only inherits an operand's constant-expression kind when overload
+/// selection chose a compiler intrinsic. A source operator call is an ordinary non-constant call,
+/// rather than the more specific kind one of its operands would earn on its own.
+#[test]
+fn a_source_operator_is_not_a_constant_intrinsic() {
+    let src = "annotation class A(val s: String)
+enum class E {
+    X;
+    operator fun unaryMinus(): String = \"x\"
+}
+operator fun Int.plus(marker: E): String = marker.name
+val number = 1
+@A(number + E.X) fun binary() {}
+@A(-E.X) fun unary() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A template reports its first non-constant interpolation's kind once, on the complete template.
+#[test]
+fn a_template_reports_its_first_non_constant_part() {
+    let src = "annotation class A(val s: String)
+const val constant = \"c\"
+val text = \"a\"
+var mutable = \"b\"
+enum class E { X }
+annotation class K(val e: E)
+@A(\"$constant$text$mutable\") fun ordered() {}
+@A(\"prefix ${text} suffix\") fun braced() {}
+@A(\"${E.X}\") fun enumEntry() {}
+@K(E.X) fun directEnumEntry() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A class literal is legal as a direct `KClass` annotation value, but it is not a scalar constant
+/// that a template or operator can consume. Embedded uses report on their complete expression.
+#[test]
+fn a_class_literal_is_not_a_constant_operand() {
+    let src = "annotation class A(val value: String)
+annotation class K(val value: kotlin.reflect.KClass<*>)
+@A(\"${String::class}\") fun template() {}
+@A(\"prefix \" + String::class) fun operator() {}
+@K(String::class) fun direct() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A typed expression wrapper reports its operand's constant-expression kind on the complete
+/// expression. This path has no property lowering of its own to classify.
+#[test]
+fn a_cast_reports_its_non_constant_operands_kind() {
+    let src = "annotation class A(val s: String)
+val immutable: Any = \"x\"
+var mutable: Any = \"x\"
+fun text(): Any = \"x\"
+@A(immutable as String) fun immutableUse() {}
+@A(mutable as String) fun mutableUse() {}
+@A(text() as String) fun callUse() {}
+fun local(value: Any) { @A(value as String) val use = 1 }
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// Every source-declared callable shape is an ordinary non-constant call. The diagnostic does not
+/// depend on whether selection represented it as a local, top-level extension, member, companion,
+/// or member extension.
+#[test]
+fn source_callable_shapes_are_not_annotation_constants() {
+    let src = "annotation class Inner(val s: String)
+annotation class Outer(val inner: Inner)
+fun String.topExtension(): String = this
+class C {
+    fun member(): String = \"m\"
+    fun String.extension(): String = this
+    companion object { fun companion(): String = \"c\" }
+
+    fun annotations() {
+        fun local(): String = \"l\"
+        @Outer(Inner(member())) val memberUse = 1
+        @Outer(Inner(\"e\".extension())) val extensionUse = 1
+        @Outer(Inner(local())) val localUse = 1
+    }
+}
+@Outer(Inner(C.companion())) fun companionUse() {}
+@Outer(Inner(\"t\".topExtension())) fun topExtensionUse() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A selected constructor is an ordinary non-constant call even though its semantic target is
+/// stored separately from function calls. The complete construction receives the diagnostic.
+#[test]
+fn a_constructor_call_is_not_an_annotation_constant() {
+    let src = "annotation class A(val value: String)
+@A(String(charArrayOf('x'))) fun use() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A dependency call has the same non-constant-call semantics as every source call; declaration
+/// provenance affects linkage, not its annotation diagnostic.
+#[test]
+fn a_dependency_call_is_not_an_annotation_constant() {
+    let library = common::compile_lib(
+        "annotation-argument-constness-dependency",
+        "package lib\nfun text(): String = \"x\"\n",
+    )
+    .expect("compile annotation-argument dependency");
+    let src = "import lib.text
+annotation class A(val s: String)
+@A(text()) fun use() {}
+";
+    let result =
+        common::compiler_diagnostics(&[("main.kt", src)], &[library, common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "dependency annotation argument call");
+}
+
+/// An array literal reports its aggregate non-const diagnostic before each non-constant element.
+/// A value KClass literal keeps only its dedicated element diagnostic, as kotlinc does.
+#[test]
+fn an_array_literal_retains_its_aggregate_diagnostic() {
+    let src = "annotation class A(val values: Array<String>)
+annotation class K(val values: Array<kotlin.reflect.KClass<*>>)
+val text = \"a\"
+var mutable = \"b\"
+@A([text]) fun one() {}
+@A([mutable]) fun two() {}
+fun values(o: Any) { @K([o::class]) val x = 1 }
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+#[test]
+fn a_nested_annotation_takes_its_first_non_constant_arguments_kind() {
+    let src = "annotation class Inner(val s: String, val t: String = \"\")
+annotation class Outer(val inner: Inner)
+annotation class Many(val values: Array<String>)
+annotation class ManyOuter(val inner: Many)
+annotation class Varargs(vararg val values: String)
+annotation class VarargOuter(val inner: Varargs)
+enum class E { X }
+annotation class EnumInner(val e: E, val s: String)
+annotation class EnumOuter(val inner: EnumInner)
+val text = \"a\"
+var mutable = \"a\"
+@Outer(Inner(text)) fun n1() {}
+@Outer(Inner(\"x\", mutable)) fun n2() {}
+@Outer(Inner(t = text, s = mutable)) fun n3() {}
+@ManyOuter(Many([text])) fun n4() {}
+@ManyOuter(Many([mutable])) fun n5() {}
+@VarargOuter(Varargs(text)) fun n6() {}
+@VarargOuter(Varargs(mutable)) fun n7() {}
+@EnumOuter(EnumInner(E.X, text)) fun n8() {}
 ";
     common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
 }

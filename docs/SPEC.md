@@ -12852,13 +12852,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   gets one diagnostic at its own position. A class literal whose receiver failed to resolve, and any
   other non-constant expression, is `annotation argument must be a compile-time constant.`; a class
   literal of a value is `annotation argument must be class literal (T::class).`; a read of a module
-  `val` with a default getter and a literal initializer (`"a"`, `-1`, `true`, through any receiver)
-  is `only 'const val' can be used in constant expressions.`. A `var`, a custom or delegated getter,
-  any other initializer, a dependency's property, a local or parameter, a branch and a call of a
-  module function are not constants; an operator takes its first non-constant operand's kind; an
-  argument that already failed to resolve gets nothing more. A library call or intrinsic member
-  kotlinc evaluates is not classified, so krusty's own fold message still covers those it cannot
-  fold yet. Verified against kotlinc 2.4.20. (`tests/annotation_argument_constness_e2e.rs`.)
+  `val` with a default getter and a literal initializer (`"a"`, `+1`, `-1`, `true`, through any
+  receiver) is `only 'const val' can be used in constant expressions.`. A `var`, a custom or
+  delegated getter, any other initializer, a dependency's property, a local or parameter, a branch
+  and any selected non-intrinsic call are not constants, independent of declaration provenance. A
+  property whose semantic result type is an enum or `KClass` keeps the more specific
+  `enum annotation argument must be an enum constant.` or
+  `annotation argument must be class literal (T::class).` diagnostic before
+  its initializer flags are considered. An enum-typed local property likewise keeps the enum
+  diagnostic, while a parameter of that type remains an ordinary non-constant value. Elvis and
+  not-null expressions are ordinary non-constant expressions diagnosed across the complete
+  expression. A compiler-intrinsic operator and a string template take their first non-constant
+  operand or interpolation's kind; a cast likewise takes its operand's kind but reports it on the
+  complete cast, while a source-overloaded operator is instead an ordinary non-constant call. A nested
+  annotation (`@Outer(Inner(text))`) likewise takes its
+  first non-constant source element's kind through array and vararg arguments and is reported at
+  its own call; an argument that already failed to resolve gets nothing more. Enum entries are
+  constants only as direct annotation values, not when embedded in a string template or another
+  constant expression. An array literal reports its aggregate
+  `only 'const val' can be used in constant expressions.` before its non-constant element
+  diagnostics; a value KClass literal keeps only its dedicated element diagnostic. A compiler
+  intrinsic kotlinc evaluates is not classified, so krusty's own fold message still covers an
+  intrinsic it cannot fold yet. Verified against kotlinc 2.4.20.
+  (`tests/annotation_argument_constness_e2e.rs`.)
 
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its

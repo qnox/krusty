@@ -109,7 +109,7 @@ impl DeclarationFlags {
     /// default when a compiler plugin changes the default modality (all-open) and must keep an
     /// explicit one. A function's written `final` is its `FINAL`.
     pub const FINAL_MODIFIER: u64 = 1 << 43;
-    /// The property's initializer is a literal (`"a"`, `1`, `-1`, `true`). kotlinc names a
+    /// The property's initializer is a literal (`"a"`, `1`, `+1`, `-1`, `true`). kotlinc names a
     /// non-`const` `val` of this shape `only 'const val' can be used in constant expressions.` when
     /// a constant expression reads it; any other non-constant read is not a compile-time constant.
     pub const LITERAL_INITIALIZER: u64 = 1 << 44;

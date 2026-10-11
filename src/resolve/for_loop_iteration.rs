@@ -246,7 +246,7 @@ impl Checker<'_> {
         };
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
-        self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
+        self.declare_loop_variable(scope, &name, elem, true); // mutated by the lowering
         self.check_loop_body(scope, body, &label);
     }
 
@@ -286,9 +286,23 @@ impl Checker<'_> {
         };
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
-        let flow_identity = self.declare(scope, &name, elem, false);
+        let flow_identity = self.declare_loop_variable(scope, &name, elem, false);
         self.record_enhanced_loop_variable(flow_identity, iterable);
         self.check_loop_body(scope, body, &label);
+    }
+
+    /// A source `for` variable is an immutable local property. The counted-loop lowering mutates
+    /// its slot internally, but both loop paths retain the same source-level property provenance.
+    fn declare_loop_variable(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        ty: Ty,
+        lowering_mutates: bool,
+    ) -> u32 {
+        let flow_identity = self.declare(scope, name, ty, lowering_mutates);
+        self.annotation_argument_locals.record(flow_identity);
+        flow_identity
     }
 
     pub(super) fn iterator_protocol_target(

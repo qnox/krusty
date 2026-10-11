@@ -2068,8 +2068,8 @@ impl File {
         id
     }
 
-    /// Whether `property` is initialized by a literal: a number (negated or not), string, char,
-    /// boolean or `null` written directly, as kotlinc's raw FIR keeps a literal expression.
+    /// Whether `property` is initialized by a literal: a number (with optional unary sign), string,
+    /// char, boolean or `null` written directly, as kotlinc's raw FIR keeps a literal expression.
     pub(crate) fn literal_initializer(&self, property: &PropDecl) -> bool {
         let number = |expression: ExprId| {
             matches!(
@@ -2089,7 +2089,7 @@ impl File {
         };
         match self.expr_arena.get(initializer.0 as usize) {
             Some(Expr::Unary {
-                op: UnOp::Neg,
+                op: UnOp::Plus | UnOp::Neg,
                 operand,
             }) => number(*operand),
             Some(Expr::StringLit(_) | Expr::CharLit(_) | Expr::BoolLit(_) | Expr::NullLit) => true,
