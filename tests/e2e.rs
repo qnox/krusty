@@ -2655,6 +2655,8 @@ mod suspend_when_branch_spill_e2e;
 mod suspend_withlock_nonlocal_return_e2e;
 #[path = "synthetic_accessor_e2e.rs"]
 mod synthetic_accessor_e2e;
+#[path = "synthetic_accessor_pool_e2e.rs"]
+mod synthetic_accessor_pool_e2e;
 #[path = "tailrec_e2e.rs"]
 mod tailrec_e2e;
 #[path = "test_harness_sharding_e2e.rs"]

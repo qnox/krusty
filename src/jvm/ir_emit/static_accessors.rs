@@ -1256,6 +1256,7 @@ impl Accessor<'_> {
         if write {
             let name = format!("access${}$p", property_setter_name(&property.name));
             let descriptor = format!("({})V", type_descriptor(ty));
+            reserve_signature(cw, &name, &descriptor);
             let words = slot_words(ty);
             let mut code = CodeBuilder::new(words);
             code.mark_line(self.declaration_line);
@@ -1264,6 +1265,7 @@ impl Accessor<'_> {
             let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
             code.putstatic(field_ref, slot_words(field_ty) as i32);
             code.ret_void();
+            cw.seed_utf8("<set-?>");
             code.ensure_locals(words);
             code.link();
             cw.add_method(self.flags, &name, &descriptor, &code);
@@ -1276,6 +1278,7 @@ impl Accessor<'_> {
         } else {
             let name = format!("access${}$p", property_getter_name(&property.name));
             let descriptor = format!("(){}", type_descriptor(ty));
+            reserve_signature(cw, &name, &descriptor);
             let mut code = CodeBuilder::new(0);
             code.mark_line(self.declaration_line);
             let field_ref = cw.fieldref(&internal, &physical, &field_descriptor);
@@ -1346,6 +1349,7 @@ impl Accessor<'_> {
         let field = self.field(index, ty, cw);
         code.putstatic(field, words as i32);
         code.ret_void();
+        cw.seed_utf8("<set-?>");
         code.ensure_locals(words);
         code.link();
         cw.add_method(self.flags, &name, &descriptor, &code);

@@ -6544,6 +6544,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
   argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
   a leaf there (varargs recurse into their elements). Test: `tests/suspend_collection_hof_e2e.rs`.
+- **A synthetic accessor's name and descriptor are interned before its body.** kotlinc's class
+  writer visits a method (its name and descriptor join the pool) before it writes the code, so a
+  protected member's `access$<name>` bridge and a private property's `access$get<X>$p` /
+  `access$set<X>$p` accessor have their name and descriptor ahead of the field or method reference
+  their body makes, and a setter's `<set-?>` after that body. krusty built those bodies before
+  naming the method. Test: `tests/synthetic_accessor_pool_e2e.rs`.
 - **A top-level default setter interns `<set-?>` as it finishes its body.** kotlinc writes each
   method's `LocalVariableTable` as the method ends, so a static default setter's value-parameter
   name joins the constant pool right after the body's own constants (the `putstatic` field
