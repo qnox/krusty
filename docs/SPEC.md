@@ -8299,6 +8299,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   test still skips the file: unsigned ORDERING differs from the signed compare above `Long.MAX`, and
   an unsigned `const val` comparand is not materialized yet. Test:
   `tests/feature_coverage_i_e2e.rs::unsigned_in_when`.
+- **A subject `when` over an enum switches through the emitting class's `$WhenMappings` table**
+  (kotlinc's `MappedEnumWhenLowering`). The JVM pass `jvm::enum_when_mappings`, run before
+  coroutine lowering, rewrites a subject block `{ val s = …; when { … } }` whose subject is an enum
+  (some clause compares it with one of its entries): `val ordinal = <mapping>[s.ordinal()]` is
+  declared right after `s`, and each `s == Entry` becomes `ordinal == <key of Entry>`. A nullable
+  subject reads `if (s == null) -1 else <mapping>[s.ordinal()]`, and a `null` clause compares the
+  ordinal with `-1`. A `when` with a condition kotlinc's `possibleToGenerateJumpTable` refuses (an
+  equality with an operand other than an entry, a constant or a read of a local, static or field;
+  anything but such an equality, an `||` chain, a type test or a `Boolean` local read) keeps its
+  reference comparisons.
+  - **Ownership and naming.** The table belongs to the class whose code the `when` is emitted into,
+    a JVM placement fact the emitter realizes: a top-level function's `when` uses the facade's
+    `FooKt$WhenMappings`, a member's its class's `K$WhenMappings`, an object expression's its own
+    anonymous class. The mapping class is `public final synthetic`, holds one `public static final
+    synthetic int[] $EnumSwitchMapping$N` per enum (`N` from 0, in the order the owner first claims
+    that enum), and its `<clinit>` sizes each table by `values().length` and stores every claimed
+    entry's key at that entry's `ordinal()` under a `NoSuchFieldError` handler, so an entry missing
+    from the enum the program runs against leaves its slot 0 (KT-38637). Owner and mapping class
+    both declare the `InnerClasses` row `WhenMappings` (`public static final synthetic`), and the
+    mapping class also declares its owner's nest row when the owner is nested. Mapping classes are
+    written after the pass's other classes, in first-claim order.
+  - **Key numbering.** Per owner and enum, an entry's key is its position in first-claim order,
+    counting from 1; 0 is the unfilled slot of an unknown ordinal, which reaches the default. Keys
+    are not ordinals, so a dependency adding entries does not change them.
+  - **Visiting order.** As kotlinc's `visitBlock`, children are visited first: every subject
+    `when` nested anywhere in a subject `when` claims its tables and keys before the `when` that
+    holds it, which then claims its own entries in branch and clause order. The lowering records
+    these claims on the outer mapping read, which replays them at emission.
+  - **Dispatch.** The rewritten `when` is an `Int` switch: `a, b ->` clauses (an `||` chain) share
+    one branch, a key repeated later is dropped and a branch left without a key is unreachable and
+    not emitted, and one key remains a comparison. An exhaustive switch without `else` throws
+    `NoWhenBranchMatchedException` from its default, marked with the `when`'s line when it has one.
+
+  Verified against kotlinc 2.4.20 by byte diff. Tests: `tests/enum_when_mappings_e2e.rs`
+  (`enum_when_reads_the_facade_mappings_like_kotlinc`,
+  `facade_when_mappings_class_is_byte_identical_to_kotlinc`,
+  `class_when_reads_its_own_mappings_like_kotlinc`,
+  `class_when_mappings_class_is_byte_identical_to_kotlinc`, `enum_when_mappings_execute`).
 - **An unsigned integer literal takes its EXPECTED type.** Kotlin types an integer literal from its
   context, unsigned exactly like signed: `val a: UByte = 200u` is a `UByte` the same way
   `val b: Byte = 100` is a `Byte`, and `val c: ULong = 7u` is a `ULong` (verified against the reference
