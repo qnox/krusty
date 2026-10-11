@@ -131,10 +131,11 @@ impl Emitter<'_> {
                 return false;
             }
         }
-        // Fuse `x is T` / `x !is T` (a reference target) into `instanceof; if{ne,eq}` — no 0/1 boolean is
-        // materialized (kotlinc's shape, e.g. a data class `equals`' `instanceof; ifne <ok>`).
-        // A nullable target materializes its null-accepting check as a value. Copy the operation
-        // out before naming its class: the recorded primitive-array role borrows the file.
+        // Fuse `x is T` / `x !is T` into `instanceof; if{ne,eq}` — no 0/1 boolean is materialized
+        // (kotlinc's shape, e.g. a data class `equals`' `instanceof; ifne <ok>`). A primitive
+        // target tests its wrapper class, as the unfused check does. A nullable target
+        // materializes its null-accepting check as a value. Copy the operation out before naming
+        // its class: the recorded primitive-array role borrows the file.
         let inst_fuse = match self.ir.expr(cond) {
             IrExpr::TypeOp {
                 op: to @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf),
@@ -143,12 +144,9 @@ impl Emitter<'_> {
             } if !type_operand.is_nullable() => Some((*to, *arg, *type_operand)),
             _ => None,
         };
-        let inst_fuse = inst_fuse.and_then(|(to, arg, type_operand)| {
-            let jvm_ty = ir_ty_to_jvm(&type_operand);
-            (!jvm_ty.is_jvm_scalar()).then(|| {
-                let internal = self.type_operation_class_name(cond, type_operand);
-                (to, arg, type_operand, internal)
-            })
+        let inst_fuse = inst_fuse.map(|(to, arg, type_operand)| {
+            let internal = self.type_operation_class_name(cond, type_operand);
+            (to, arg, type_operand, internal)
         });
         if let Some((to, arg, type_operand, internal)) = inst_fuse {
             let arg = self.instance_check_operand(arg);

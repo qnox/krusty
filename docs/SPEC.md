@@ -11457,6 +11457,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   separates nothing. Tests: the unit tests beside the pass, and
   `tests/redundant_checkcasts_before_aastore_e2e.rs` (the three methods' instructions against kotlinc,
   and the uncast store at run time).
+- **A type check used as a condition jumps on its `instanceof`, a primitive target included.**
+  kotlinc's `IrTypeOperatorCall` condition is `instanceof` followed directly by the branch, never a
+  materialized `0`/`1` tested again. `if (x !is Int) return …` is `instanceof java/lang/Integer;
+  ifne`, as `!is String` was already: the fused condition names the primitive's wrapper class
+  exactly as the value-producing check does. A nullable target still materializes its
+  null-accepting check. Test: `tests/primitive_type_check_condition_e2e.rs`.
 - **A null jump or `instanceof` on a value known to be `null`, or known not to be, folds as
   kotlinc's `RedundantNullCheckMethodTransformer` does.** The pass runs at kotlinc's position
   (step `RedundantNullCheck`, `bytecode_passes/redundant_null_checks/`). A value is known non-null
