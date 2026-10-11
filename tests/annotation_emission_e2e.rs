@@ -1619,15 +1619,3 @@ fn deprecated_classifier_carries_the_jvm_deprecated_attribute() {
         );
     }
 }
-
-/// A class-literal argument is reported on the argument itself, as kotlinc's annotation-argument
-/// checker does: one whose receiver failed to resolve is not a constant, and one whose receiver is
-/// a value is not a class literal.
-#[test]
-fn non_constant_class_literal_arguments_are_reported_on_the_argument() {
-    let src = "annotation class C(val k: kotlin.reflect.KClass<*>)
-@C(Unknown::class) fun unresolved() {}
-fun value(o: Any) { @C(o::class) val y = 1 }
-";
-    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
-}

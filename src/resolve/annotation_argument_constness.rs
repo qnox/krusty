@@ -10,6 +10,8 @@ enum NonConstantArgument {
     NotConst,
     /// `ANNOTATION_ARGUMENT_MUST_BE_KCLASS_LITERAL`: a class literal of a value (`value::class`).
     NotKClassLiteral,
+    /// `NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION`: a `val` that could have been `const`.
+    NonConstVal,
     /// The argument already failed resolution, which is its only diagnostic.
     ResolutionError,
 }
@@ -37,6 +39,9 @@ impl Checker<'_> {
                 }
                 NonConstantArgument::NotKClassLiteral => {
                     "annotation argument must be class literal (T::class)."
+                }
+                NonConstantArgument::NonConstVal => {
+                    "only 'const val' can be used in constant expressions."
                 }
                 NonConstantArgument::ResolutionError => continue,
             };
@@ -89,7 +94,92 @@ impl Checker<'_> {
                 });
             }
         }
-        (self.expr_types[leaf.0 as usize] == Ty::Error)
-            .then_some(NonConstantArgument::ResolutionError)
+        if self.expr_types[leaf.0 as usize] == Ty::Error {
+            return Some(NonConstantArgument::ResolutionError);
+        }
+        self.non_constant_expression(leaf)
+    }
+
+    /// kotlinc's `computeConstantExpressionKind` for the expression forms krusty selects with a
+    /// known answer: an operator is as constant as its first non-constant operand, a lexical value
+    /// or a branch is never constant, a property read is constant only for a `const val`, and a
+    /// call of a module function is never constant. Other forms (library calls kotlinc may
+    /// evaluate) are not classified here.
+    fn non_constant_expression(&self, expression: ExprId) -> Option<NonConstantArgument> {
+        if self.resolved_constants.contains_key(&expression)
+            || self.resolved_enum_entries.contains_key(&expression)
+        {
+            return None;
+        }
+        match self.file.expr(expression) {
+            Expr::Binary { lhs, rhs, .. } => self
+                .non_constant_expression(*lhs)
+                .or_else(|| self.non_constant_expression(*rhs)),
+            Expr::Unary { operand, .. } => self.non_constant_expression(*operand),
+            Expr::If { .. } | Expr::When { .. } => Some(NonConstantArgument::NotConst),
+            Expr::Call { .. } => self
+                .resolved_calls
+                .get(&expression)
+                .is_some_and(|call| match call {
+                    ResolvedCall::TopLevel(call) => {
+                        call.stable_declaration.is_some() || call.source_decl.is_some()
+                    }
+                    ResolvedCall::Extension(call) => {
+                        call.stable_declaration.is_some() || call.source.is_some()
+                    }
+                    _ => false,
+                })
+                .then_some(NonConstantArgument::NotConst),
+            _ if matches!(
+                self.read_flow_roots.get(&expression),
+                Some(scope::PathRoot::Value(_))
+            ) =>
+            {
+                Some(NonConstantArgument::NotConst)
+            }
+            _ => self.non_constant_property_read(expression),
+        }
+    }
+
+    /// A selected non-`const` property read. Only a module `val` with a default getter and a
+    /// literal initializer could have been `const`; a dependency's declaration carries no
+    /// initializer, so its reads are simply not constant.
+    fn non_constant_property_read(&self, expression: ExprId) -> Option<NonConstantArgument> {
+        let declaration = match self.expr_lowers.get(&expression)? {
+            ExprLowering::TopLevelPropertyGet(access)
+            | ExprLowering::ExtensionPropertyGet { access } => access.property.stable_declaration,
+            // kotlinc evaluates an intrinsic member (`"a".length`); folding it is krusty's gap.
+            ExprLowering::MemberPropertyRead {
+                compiler_intrinsic: Some(_),
+                ..
+            } => return None,
+            ExprLowering::MemberPropertyRead {
+                stable_declaration, ..
+            }
+            | ExprLowering::AssociatedPropertyRead {
+                stable_declaration, ..
+            }
+            | ExprLowering::MemberExtensionPropertyRead {
+                stable_declaration, ..
+            } => *stable_declaration,
+            ExprLowering::ClassifierPropertyRead { .. } => None,
+            _ => return None,
+        };
+        let flags = declaration
+            .and_then(|declaration| self.resolved_index?.declaration_header(declaration))
+            .map(|header| header.flags);
+        use crate::fir::DeclarationFlags as F;
+        Some(match flags {
+            Some(flags) if flags.has(F::CONST) => return None,
+            Some(flags)
+                if flags.has(F::LITERAL_INITIALIZER)
+                    && !flags.has(F::MUTABLE)
+                    && !flags.has(F::CUSTOM_GETTER)
+                    && !flags.has(F::DELEGATED) =>
+            {
+                NonConstantArgument::NonConstVal
+            }
+            _ => NonConstantArgument::NotConst,
+        })
     }
 }

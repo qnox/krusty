@@ -1079,6 +1079,10 @@ fn extract_file_stub_inventory(
                         .is_some_and(|setter| setter.body.is_some()),
                 )
                 .with(DeclarationFlags::HAS_INITIALIZER, property.init.is_some())
+                .with(
+                    DeclarationFlags::LITERAL_INITIALIZER,
+                    file.literal_initializer(property),
+                )
                 .with(DeclarationFlags::COMPANION, property.is_companion_extension)
                 .with(
                     DeclarationFlags::COMPANION_BLOCK_MEMBER,
