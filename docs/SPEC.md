@@ -12835,6 +12835,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, object member or parameter is "'R|pkg/NAME|' is not a valid invocation kind." (object
   members as `Q|Owner|.R|/Owner.NAME|`, parameters as `R|<local>/name|`). Verified against kotlinc
   2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)
+- **A library contract's `holdsIn` effect and class type parameters load.** kotlinc 2.4 accepts
+  `<condition> holdsIn lambda` with no opt-in, and libraries publish it (arrow-core 2.x's
+  `getOrElse`). A function whose metadata carries one loads with the effect decoded as
+  `Effect::HoldsIn`. The condition does not yet narrow inside the lambda, and a source `holdsIn` is
+  still reported as not part of the contracts DSL. A member's contract may name its class's type
+  parameters (`this@Either is Left<A>`, `o is Opt.Some<A>`), so they are in scope when its types
+  are read, ahead of the function's own. A contract shape the reader rejects makes the declaring
+  class unloadable, so neither shape may reject. (`src/metadata/contract_decoder.rs`
+  `a_holds_in_effect_names_its_lambda_and_condition`, `src/metadata/builder.rs`
+  `holds_in_contract_round_trips_through_metadata`, `tests/contract_metadata_roundtrip_e2e.rs`
+  `a_member_contract_naming_a_class_type_parameter_loads`.)
 - **An implicit extension call's not-null contract narrows that receiver.**
   `returns(true) implies (this@f != null)` on `fun T?.f()` applies when the call is written
   without a receiver (`f() && this.member`). The proof is the extension receiver the call

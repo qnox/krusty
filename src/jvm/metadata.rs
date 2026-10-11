@@ -2095,18 +2095,13 @@ fn decode_functions(
                         None,
                         function_type_table,
                     );
-                    let contract =
-                        contract::decode_function_contract(&pf, records, d2, function_type_table)?;
-                    if pf.contract_body.is_some() {
-                        crate::trace_compiler!(
-                            "metadata_contracts",
-                            "contract function={} value_params={} context_params={} context_receivers={}",
-                            kotlin_name,
-                            pf.value_params.len(),
-                            pf.context_params.len(),
-                            pf.context_receiver_bodies.len() + pf.context_receiver_type_ids.len(),
-                        );
-                    }
+                    let contract = contract::decode_function_contract(
+                        &kotlin_name,
+                        &pf,
+                        (class_tparams, class_tparam_bounds),
+                        (records, d2),
+                        function_type_table,
+                    )?;
                     // `JvmMethodSignature.desc` is optional when the physical descriptor is the
                     // default derived from the protobuf types. Omission therefore does not mean
                     // that the callable lacks a JVM realization. Materialize the default here,

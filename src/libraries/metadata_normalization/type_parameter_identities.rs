@@ -105,6 +105,13 @@ impl TypeParameterIdentities {
                         returns: *returns,
                         conclusion: condition(conclusion, &identities),
                     },
+                    Effect::HoldsIn {
+                        condition: holds,
+                        lambda,
+                    } => Effect::HoldsIn {
+                        condition: condition(holds, &identities),
+                        lambda: *lambda,
+                    },
                     other => other.clone(),
                 })
                 .collect(),
