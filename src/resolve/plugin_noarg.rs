@@ -107,13 +107,13 @@ impl NoArgConstructors {
             {
                 continue;
             }
-            // The super constructor the generated one calls as `<init>()`: one the superclass
-            // declares, else the one the plugin generates for a matched superclass.
+            // The superclass constructor the generated one calls with every argument omitted,
+            // else the no-arg constructor the plugin generates for a matched superclass.
             let target = match &super_constructors {
                 None => Some(NoArgSuperConstructor::Unrestricted),
                 Some(constructors) => constructors
                     .iter()
-                    .find(|constructor| constructor.zero_parameter())
+                    .find(|constructor| constructor.all_defaulted())
                     .and_then(|constructor| constructor.target.clone())
                     .or(superclass_matches.then_some(NoArgSuperConstructor::Unrestricted)),
             };

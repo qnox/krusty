@@ -80,6 +80,14 @@ open class Overloaded @JvmOverloads constructor(val o: Long = 9L)
 @NoArg
 class OfOverloaded(val v: Int) : Overloaded()
 
+open class SecondaryDefaulted {
+    val text: String
+    constructor(text: String = tag()) { this.text = text }
+}
+
+@NoArg
+class OfSecondaryDefaulted(val v: Int) : SecondaryDefaulted()
+
 fun <T : Any> make(type: Class<T>): T = type.getDeclaredConstructor().newInstance()
 
 fun box(): String {
@@ -97,6 +105,7 @@ fun box(): String {
     val defaulted = make(OfDefaulted::class.java)
     if (defaulted.tag != "tag" || defaulted.n != 4) return "defaulted"
     if (make(OfOverloaded::class.java).o != 9L) return "overloaded"
+    if (make(OfSecondaryDefaulted::class.java).text != "tag") return "secondary-defaulted"
     val secondary: String? = make(SecondaryOnly::class.java).made
     return if (secondary == null) "OK" else "secondary"
 }
@@ -106,8 +115,8 @@ fun box(): String {
 /// class with only secondary constructors; classes that already declare a constructor callable
 /// without arguments and get none; a data class, whose generated members follow the constructor; a
 /// nested class; a private primary constructor; a sealed superclass, whose constructor is reached
-/// through its marker accessor; superclass constructors whose parameters all default, called through
-/// their defaults constructor.
+/// through its marker accessor; primary and secondary superclass constructors whose parameters all
+/// default, called through their defaults constructor.
 #[test]
 fn no_arg_constructors_match_kotlinc() {
     let fixture = PluginFixture::new("noarg-same-module");

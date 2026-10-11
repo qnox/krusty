@@ -10219,8 +10219,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compiles as `false` in both. A sealed superclass is reached through its `DefaultConstructorMarker`
   constructor, the superclass constructor the frontend selected. A local class is not matched yet, as for all-open. Tests: `tests/noarg_plugin_e2e.rs`
   (direct, meta and supertype matches, secondary-only, data, nested and private-constructor classes,
-  a sealed superclass, source superclasses whose primary or `@JvmOverloads` constructor defaults
-  every parameter, declared no-arg constructors, mixed-case `invokeInitializers`, byte-identical to kotlinc and instantiated reflectively; the `jpa`
+  a sealed superclass, source superclasses whose primary, secondary, or `@JvmOverloads` constructor
+  defaults every parameter, declared no-arg constructors, mixed-case `invokeInitializers`, byte-identical to kotlinc and instantiated reflectively; the `jpa`
   preset through a dependency each compiler builds for itself, and a dependency superclass with a
   non-constant default; the plugin's errors against
   kotlinc's), `plugins::noarg` and `plugins::registry` unit tests
