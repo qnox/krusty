@@ -33,6 +33,7 @@ names! {
     continuation => "kotlin/coroutines/Continuation",
     function_root => "kotlin/Function",
     any => "kotlin/Any",
+    jvm_inline => "kotlin/jvm/JvmInline",
     kclass => "kotlin/reflect/KClass",
     comparable => "kotlin/Comparable",
     array => "kotlin/Array",

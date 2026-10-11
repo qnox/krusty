@@ -12686,6 +12686,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   feature that no stable language version has released and that forces pre-release binaries (before its
   `forcesPreReleaseBinariesBefore`, when it has one) gets kotlinc's "following manually enabled
   features will force generation of pre-release binaries" warning.
+- **Progressive-mode deprecations.** Most features `-progressive` turns on make an existing
+  diagnostic stricter. A `deprecationError` diagnostic is one report: while its feature is off it
+  is a warning whose message gains kotlinc's `toDeprecationWarningMessage` suffix ("This will
+  become an error in language version X. See https://youtrack.jetbrains.com/issue/ID."), read from
+  the feature's `sinceVersion` and YouTrack issue in `releases/<ver>.features.tsv`, and
+  `@Suppress("<NAME>_WARNING")` silences it; with the feature on it is the error with the plain
+  message. Modeled so far, each compared with kotlinc 2.4.20 with the feature off and on:
+  - `ForbidValueClassRecursionViaTypeParameters`: a value class whose underlying type reaches it
+    again through a type parameter's bound (`value class V<T : V<T>>(val x: T)`). The parameter
+    loop of `FirValueClassDeclarationChecker` runs with it: a parameter that is not a final
+    read-only property, an underlying type expanding to `Unit`/`Nothing`, and plain recursion are
+    errors. kotlinc follows declared underlying types without substituting type arguments, so
+    `value class V(val w: W<V>)` with `value class W<T>(val x: T)` is accepted. kotlinc's JVM
+    carrier for a class recursive through its type parameters is the boxed class itself, which
+    krusty does not model: such a declaration compiles with the warning in kotlinc and stops in
+    krusty's backend. (`tests/value_class_parameters_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and

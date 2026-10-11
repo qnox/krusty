@@ -102,6 +102,16 @@ impl LangFeatures {
     }
 }
 
+/// kotlinc's `toDeprecationWarningMessage` for a diagnostic the reference release's `feature` turns
+/// into an error.
+pub fn deprecation_warning_message(feature: &str, message: &str) -> String {
+    let release = crate::kotlin_version::target();
+    FeatureTable::for_version(release)
+        .and_then(|table| table.get(feature))
+        .unwrap_or_else(|| panic!("kotlinc {release} has no language feature '{feature}'"))
+        .deprecation_warning_message(message)
+}
+
 /// The kotlinc `LanguageFeature`s krusty's frontend or backend consumes, sorted by name, one per
 /// line. A feature is listed once some phase checks it (`LangFeatures::has`), so a command line may
 /// turn it on and get that behaviour.
@@ -119,6 +129,7 @@ const MODELED_FEATURES: &[&str] = &[
     "EnumEntries",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
+    "ForbidValueClassRecursionViaTypeParameters",
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",
     "JvmSupportRecursiveTypeOf",

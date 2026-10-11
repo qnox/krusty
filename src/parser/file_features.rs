@@ -29,6 +29,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
     file.full_value_classes = features.has("FullValueClasses");
+    file.forbid_value_class_recursion_via_type_parameters =
+        features.has("ForbidValueClassRecursionViaTypeParameters");
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }

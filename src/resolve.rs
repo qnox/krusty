@@ -98,6 +98,7 @@ pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
 mod dependency_platform;
+mod deprecation_phase;
 mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
@@ -246,6 +247,7 @@ mod superclass_validation;
 mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
+mod value_class_parameters;
 mod when_exhaustiveness;
 mod when_flow;
 
@@ -49947,6 +49949,9 @@ impl<'a> Checker<'a> {
             self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
         self.validate_class_superclass(d, cl, current_owner);
+        if !self.fragment.is_type_use_annotations() {
+            self.check_value_class_parameters(scope, cl, current_owner);
+        }
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
         // does a LOCAL class — it is entered from the body it was written in and captures the
         // enclosing instance, so the outer receivers and type parameters stay reachable.
