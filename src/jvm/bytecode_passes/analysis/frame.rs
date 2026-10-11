@@ -142,40 +142,6 @@ impl<V: Value> Frame<V> {
         Ok(())
     }
 
-    /// Replace this frame with `other`, keeping the local and stack allocations.
-    pub(crate) fn copy_from(&mut self, other: &Frame<V>) {
-        self.locals.clone_from(&other.locals);
-        self.stack.clone_from(&other.stack);
-        self.return_value.clone_from(&other.return_value);
-    }
-
-    /// Meet with an edge arriving in `other`; `true` when anything changed (ASM's `Frame.merge`).
-    pub(crate) fn merge<I: Interpreter<V = V>>(
-        &mut self,
-        other: &Frame<V>,
-        interpreter: &mut I,
-    ) -> Result<bool, String> {
-        if self.stack.len() != other.stack.len() {
-            return Err("incompatible stack heights".to_string());
-        }
-        let mut changed = false;
-        for (mine, theirs) in self.locals.iter_mut().zip(&other.locals) {
-            let met = interpreter.merge_local(mine, theirs);
-            if met != *mine {
-                *mine = met;
-                changed = true;
-            }
-        }
-        for (mine, theirs) in self.stack.iter_mut().zip(&other.stack) {
-            let met = interpreter.merge_stack(mine, theirs);
-            if met != *mine {
-                *mine = met;
-                changed = true;
-            }
-        }
-        Ok(changed)
-    }
-
     /// ASM's `Frame.execute`.
     pub(crate) fn execute<I: Interpreter<V = V>>(
         &mut self,

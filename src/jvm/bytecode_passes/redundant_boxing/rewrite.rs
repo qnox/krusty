@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::super::analysis::{analyze, AnalyzerError, Frame, Value};
+use super::super::analysis::{analyze, AnalyzerError, Frames, Value};
 use super::super::descriptors;
 use super::super::insn_list::{EditableMethod, NodeId};
 use super::super::opcodes::*;
@@ -57,7 +57,7 @@ pub(crate) fn eliminate(
 fn interpret_pops(
     interpreter: &mut BoxingInterpreter,
     method: &MethodNode,
-    frames: &[Option<Frame<BoxingValue>>],
+    frames: &Frames<BoxingValue>,
 ) {
     for (at, (node, frame)) in method.nodes.iter().zip(frames).enumerate() {
         let Some(op @ (POP | POP2)) = node_opcode(node) else {
@@ -89,14 +89,13 @@ fn values_of_variable<'f>(
     variable: &LocalVariable,
     method: &MethodNode,
     positions: &LabelPositions,
-    frames: &'f [Option<Frame<BoxingValue>>],
+    frames: &'f Frames<BoxingValue>,
 ) -> Vec<&'f BoxingValue> {
     let (start, end) = (positions.at(variable.start), positions.at(variable.end));
     let slot = usize::from(variable.slot);
     let mut values = Vec::new();
     if let Some(local) = frames
         .get(start)
-        .and_then(Option::as_ref)
         .and_then(|frame| frame.locals.get(slot))
     {
         values.push(local);
@@ -132,7 +131,7 @@ fn remove_values_clashing_with_variables(
     candidates: &mut Candidates,
     method: &MethodNode,
     positions: &LabelPositions,
-    frames: &[Option<Frame<BoxingValue>>],
+    frames: &Frames<BoxingValue>,
 ) -> bool {
     let mut repeat = false;
     for variable in method.local_variables.iter().filter(|v| is_object(v)) {
@@ -170,7 +169,7 @@ fn retype_local_variables(
     candidates: &Candidates,
     method: &mut MethodNode,
     positions: &LabelPositions,
-    frames: &[Option<Frame<BoxingValue>>],
+    frames: &Frames<BoxingValue>,
 ) {
     let mut retyped = Vec::new();
     for (index, variable) in method.local_variables.iter().enumerate() {

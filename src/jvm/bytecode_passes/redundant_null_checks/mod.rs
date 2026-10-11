@@ -206,7 +206,7 @@ fn analyze_nullabilities(
         let Node::Insn(insn) = node else {
             continue;
         };
-        let Some(frame) = &frames[assumed.moved_to[at]] else {
+        let Some(frame) = frames.get(assumed.moved_to[at]) else {
             continue;
         };
         let depth = if is_instance_of_or_null_check(insn) {
