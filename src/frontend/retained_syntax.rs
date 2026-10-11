@@ -1031,6 +1031,10 @@ pub(super) fn compact(file: &mut File) {
         std::mem::take(&mut file.exact_member_name_spans),
         &expressions,
     );
+    file.compound_assignment_targets = remap_u32_map(
+        std::mem::take(&mut file.compound_assignment_targets),
+        &expressions,
+    );
     file.operator_token_spans =
         remap_u32_map(std::mem::take(&mut file.operator_token_spans), &expressions);
     file.nullable_callable_ref_receivers = remap_u32_set(

@@ -1659,6 +1659,10 @@ pub struct File {
     /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
     /// expression node.
     pub exact_member_name_spans: std::collections::HashMap<u32, Span>,
+    /// The written target of each augmented assignment whose operand the parser re-reads
+    /// (`name += value` reads `name` again), keyed by that operand: the operand itself carries the
+    /// operator's span.
+    pub compound_assignment_targets: std::collections::HashMap<u32, Span>,
     /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
     /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
     /// sparse rather than widening those expression nodes.
@@ -1916,6 +1920,8 @@ pub struct File {
     /// `+ForbidValueClassRecursionViaTypeParameters`: a value class whose underlying type reaches
     /// itself through a type parameter's bound is an error rather than a deprecation warning.
     pub forbid_value_class_recursion_via_type_parameters: bool,
+    /// The deprecation reports whose migration to an error this compilation has completed.
+    pub deprecation_migrations: crate::types::DeprecationMigrations,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,
@@ -1962,6 +1968,7 @@ impl File {
         self.call_arg_name_spans = Default::default();
         self.empty_call_open_paren_spans = Default::default();
         self.exact_member_name_spans = Default::default();
+        self.compound_assignment_targets = Default::default();
         self.operator_token_spans = Default::default();
         self.binary_reference_tokens = Default::default();
         self.nullable_callable_ref_receivers = Default::default();
@@ -2042,6 +2049,13 @@ impl File {
         let id = ExprId(self.expr_arena.len() as u32);
         self.expr_arena.push(e);
         self.expr_spans.push(span);
+        id
+    }
+    /// Add the name `name op= value` re-reads as its operand: it carries the operator's span, and
+    /// the written name's span is kept beside it.
+    pub fn add_compound_name(&mut self, name: String, operator: Span, target: Span) -> ExprId {
+        let id = self.add_expr(Expr::Name(name), operator);
+        self.compound_assignment_targets.insert(id.0, target);
         id
     }
     pub fn add_stmt(&mut self, s: Stmt, span: Span) -> StmtId {

@@ -4,6 +4,9 @@
 
 use super::*;
 
+mod deprecation;
+pub(crate) use deprecation::check_import_deprecations;
+
 /// Validate an import from left to right and return its single source diagnostic, if any.
 fn import_path_diagnostic(
     import: &crate::ast::ImportPath,

@@ -20,7 +20,7 @@
 use super::symbol_display::source_declaration_display;
 use super::*;
 use crate::fir::DeclarationKind;
-use crate::types::{DeprecatedDeclaration, Deprecation, DeprecationLevel};
+use crate::types::{DeprecatedDeclaration, Deprecation, DeprecationLevel, DeprecationMigration};
 use std::sync::Arc;
 
 /// One deprecated declaration a reference uses, with the rendering its diagnostic names.
@@ -56,6 +56,7 @@ impl Checker<'_> {
                         .get(&expression)
                         .and_then(|call| self.call_deprecated_use(call)),
                 };
+                self.check_implicit_invoke_receiver_deprecation(expression);
                 (span, used)
             }
             Expr::SafeCall { name, args, .. } => {
@@ -72,7 +73,19 @@ impl Checker<'_> {
                 self.member_name_span(expression, name),
                 self.read_deprecated_use(expression),
             ),
-            Expr::Name(_) => (self.span(expression), self.read_deprecated_use(expression)),
+            Expr::Name(_) => {
+                let used = self.read_deprecated_use(expression);
+                // `C += 1` re-reads `C`; a companion it reaches implicitly reports at the written
+                // target, through its migration.
+                if let Some(target) = self.file.compound_assignment_targets.get(&expression.0) {
+                    let migration = self
+                        .implicit_companion_read(expression)
+                        .then_some(DeprecationMigration::CompanionInDelegation);
+                    self.report_deprecated_use_as(*target, used, migration);
+                    return;
+                }
+                (self.span(expression), used)
+            }
             Expr::CallableRef { name, .. } => {
                 let span = self.span(expression);
                 (
@@ -368,6 +381,17 @@ impl Checker<'_> {
     }
 
     fn report_deprecated_use(&mut self, span: Span, used: Option<DeprecatedUse>) {
+        self.report_deprecated_use_as(span, used, None);
+    }
+
+    /// Report `used` at `span`. In a position kotlinc is still migrating (`migration`), an `ERROR`
+    /// or `HIDDEN` deprecation only warns until the compilation completes that migration.
+    fn report_deprecated_use_as(
+        &mut self,
+        span: Span,
+        used: Option<DeprecatedUse>,
+        migration: Option<DeprecationMigration>,
+    ) {
         let Some(DeprecatedUse {
             symbol,
             deprecation,
@@ -379,14 +403,92 @@ impl Checker<'_> {
             "'{symbol}' is deprecated.{}",
             optional_sentence(deprecation.message.as_deref())
         );
-        match deprecation.level {
-            DeprecationLevel::Warning => {
+        match (deprecation.level, migration) {
+            (DeprecationLevel::Warning, _) => {
                 if !self.suppresses_diagnostic("DEPRECATION") {
                     self.diags.warning(span, message);
                 }
             }
-            DeprecationLevel::Error | DeprecationLevel::Hidden => self.diags.error(span, message),
+            // Like the error it stands for, the migration's warning cannot be suppressed.
+            (DeprecationLevel::Error | DeprecationLevel::Hidden, Some(migration))
+                if !self.file.deprecation_migrations.completed(migration) =>
+            {
+                self.diags.warning(
+                    span,
+                    crate::features::deprecation_warning_message(migration.feature(), &message),
+                );
+            }
+            (DeprecationLevel::Error | DeprecationLevel::Hidden, _) => {
+                self.diags.error(span, message)
+            }
         }
+    }
+
+    /// Report the classes an import directive at `span` goes through, given outermost first and
+    /// ending with the imported declaration's container: the container at its level, each
+    /// enclosing class through its migration, innermost first.
+    pub(super) fn report_import_deprecations(&mut self, span: Span, classes: &[TypeName]) {
+        let Some((&container, enclosing)) = classes.split_last() else {
+            return;
+        };
+        let used = self.classifier_deprecated_use(container);
+        self.report_deprecated_use_as(span, used, None);
+        for &class in enclosing.iter().rev() {
+            let used = self.classifier_deprecated_use(class);
+            self.report_deprecated_use_as(
+                span,
+                used,
+                Some(DeprecationMigration::OuterImportedClass),
+            );
+        }
+    }
+
+    /// Report the deprecated object an implicit `invoke` call (`Obj()`) is made on, at the written
+    /// object name. A companion reached through its class name (`C()`) is not reported.
+    fn check_implicit_invoke_receiver_deprecation(&mut self, call: ExprId) {
+        let Some(ExprLowering::Invoke { receiver, .. }) = self.expr_lowers.get(&call) else {
+            return;
+        };
+        let receiver = *receiver;
+        if !matches!(
+            self.file.expr(receiver),
+            Expr::Name(_) | Expr::Member { .. }
+        ) || self.implicit_companion_read(receiver)
+        {
+            return;
+        }
+        let Some(ExprLowering::SingletonValue(singleton)) = self.expr_lowers.get(&receiver) else {
+            return;
+        };
+        let used = self.classifier_deprecated_use(singleton.classifier);
+        let span = match self.file.expr(receiver) {
+            Expr::Member { name, .. } => self.member_name_span(receiver, name),
+            _ => self.span(receiver),
+        };
+        self.report_deprecated_use_as(
+            span,
+            used,
+            Some(DeprecationMigration::ClassifierInImplicitInvoke),
+        );
+    }
+
+    /// Whether `expression` reads a companion object through its class's name.
+    fn implicit_companion_read(&self, expression: ExprId) -> bool {
+        let Some(ExprLowering::SingletonValue(singleton)) = self.expr_lowers.get(&expression)
+        else {
+            return false;
+        };
+        singleton
+            .classifier
+            .nested_owner()
+            .and_then(|owner| self.resolver().classifier(owner))
+            .and_then(|owner| {
+                owner
+                    .companion_object
+                    .as_ref()
+                    .map(|(_, companion)| *companion)
+            })
+            == Some(singleton.classifier)
     }
 }
 
