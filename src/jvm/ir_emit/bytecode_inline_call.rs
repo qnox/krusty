@@ -14,6 +14,7 @@ use crate::fx_hash::HashMap;
 
 use super::*;
 
+mod default_bridge;
 mod lambda_node;
 mod lambda_route;
 use lambda_node::callable_reference_template;
@@ -91,6 +92,12 @@ enum Supply {
     CallerLocal,
     /// Evaluated and popped: the body does not read the parameter after its null check.
     Unread,
+    /// Omitted by a default bridge call: its temporary is reserved, and the bridge's default code
+    /// stores it.
+    Omitted,
+    /// A default bridge call's mask word or method handle: a constant that resolves the bridge's
+    /// header, never evaluated, and no parameter of the inlined body.
+    MaskOperand,
 }
 
 /// The clean failure of an inline callee whose code the MethodNode reader rejects.
@@ -143,8 +150,8 @@ impl Emitter<'_> {
                 name,
                 descriptor,
                 splice_desc: &splice_desc,
-                inline_only: declaration_is_inline_only(
-                    self.bodies,
+                inline_only: self.call_is_inline_only(
+                    call_expression,
                     owner,
                     name,
                     descriptor,
@@ -166,8 +173,8 @@ impl Emitter<'_> {
                 name,
                 descriptor,
                 splice_desc: descriptor,
-                inline_only: declaration_is_inline_only(
-                    self.bodies,
+                inline_only: self.call_is_inline_only(
+                    call_expression,
                     owner,
                     name,
                     descriptor,
@@ -258,6 +265,23 @@ impl Emitter<'_> {
         // high-water mark, so the spliced temporaries can never collide with a caller local (live
         // or reserved-but-unstored).
         let base = self.frame.size().max(code.max_locals);
+        // Descriptor compatibility is an eligibility check, before any literal is selected and
+        // this lowering owns the call. Suspend lowering can append a continuation to the physical
+        // call while the classpath body still has its declaration descriptor; a public inline
+        // method in that shape remains a legal real call. Once a matching call selects literals,
+        // every later missing fact or realization failure is an emission error.
+        let Some(physical) = parse_descriptor_params(splice_desc)
+            .filter(|parameters| parameters.len() == args.len())
+        else {
+            return InlineCallOutcome::NotApplicable;
+        };
+        let defaults = match self.default_bridge_masks(call_expression, args, &physical) {
+            Ok(defaults) => defaults,
+            Err(reason) => {
+                self.run.set_inline_bail(reason);
+                return InlineCallOutcome::HandledWithError;
+            }
+        };
         let inline_call = ClasspathInlineCall {
             call_expression,
             target: &target,
@@ -265,17 +289,8 @@ impl Emitter<'_> {
             leading_non_argument_operands,
             body: &body,
             reified,
+            defaults: defaults.as_ref(),
         };
-        // Descriptor compatibility is an eligibility check, before any literal is selected and
-        // this lowering owns the call. Suspend lowering can append a continuation to the physical
-        // call while the classpath body still has its declaration descriptor; a public inline
-        // method in that shape remains a legal real call. Once a matching call selects literals,
-        // every later missing fact or realization failure is an emission error.
-        if parse_descriptor_params(splice_desc)
-            .is_none_or(|parameters| parameters.len() != args.len())
-        {
-            return InlineCallOutcome::NotApplicable;
-        }
         let has_lambda_arg = args
             .iter()
             .any(|&argument| self.is_inline_lambda_shape(argument));
@@ -542,17 +557,16 @@ impl Emitter<'_> {
             call_expression,
             target,
             args,
-            leading_non_argument_operands,
-            body,
             reified,
+            ..
         } = *call;
         if code.is_dead() {
             return Some(());
         }
-        let callee = match MethodNode::read(ACC_STATIC, target.name, target.splice_desc, body) {
-            Ok(callee) => callee,
+        let (declared, callee) = match self.inline_callee_nodes(call) {
+            Ok(nodes) => nodes,
             Err(error) => {
-                crate::trace_compiler!("splice", "unified inliner cannot read the body: {error:?}");
+                crate::trace_compiler!("splice", "unified inliner cannot read the body: {error}");
                 return None;
             }
         };
@@ -564,14 +578,7 @@ impl Emitter<'_> {
         if physical.len() != args.len() {
             return None;
         }
-        let supplies = self.parameter_supplies(
-            call_expression,
-            target,
-            args,
-            leading_non_argument_operands,
-            &physical,
-            &callee,
-        );
+        let supplies = self.parameter_supplies(call, &physical, &callee, &declared);
         let Some(supplies) = supplies else {
             crate::trace_compiler!("splice", "unified inliner cannot bind the arguments");
             return None;
@@ -644,15 +651,10 @@ impl Emitter<'_> {
         }
         let physical = parse_descriptor_params(target.splice_desc)
             .ok_or("an inline callee's descriptor cannot be parsed")?;
+        let declared = MethodNode::read(ACC_STATIC, target.name, target.splice_desc, call.body)
+            .map_err(|_| UNREADABLE_INLINE_BODY)?;
         let supplies = self
-            .parameter_supplies(
-                call_expression,
-                target,
-                args,
-                leading_non_argument_operands,
-                &physical,
-                callee,
-            )
+            .parameter_supplies(call, &physical, callee, &declared)
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
@@ -722,7 +724,8 @@ impl Emitter<'_> {
             })
     }
 
-    /// Each parameter's binding: a lambda the callee invokes, a caller local, or a temporary.
+    /// Each parameter's binding: a lambda the callee invokes, a caller local, or a temporary. A
+    /// default bridge call's masks and method handle are none of the body's parameters.
     fn call_parameters(
         &self,
         supplies: &[Supply],
@@ -737,13 +740,19 @@ impl Emitter<'_> {
                 .zip(physical)
                 .zip(args)
                 .enumerate()
+                .filter(|(_, ((supply, _), _))| **supply != Supply::MaskOperand)
                 .map(|(index, ((supply, &ty), &argument))| Parameter {
                     category: Category::of_descriptor(&type_descriptor(ty)),
                     binding: match (lambda_bindings.get(&index), supply) {
                         (Some(&lambda), _) => Binding::Lambda(lambda),
                         (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
                         (None, Supply::Unread) => Binding::Unread,
-                        (None, Supply::Stored | Supply::InPlace) => Binding::Temporary,
+                        (None, Supply::Stored | Supply::InPlace | Supply::Omitted) => {
+                            Binding::Temporary
+                        }
+                        (None, Supply::MaskOperand) => {
+                            unreachable!("a mask operand is filtered out above")
+                        }
                     },
                 })
                 .collect(),
@@ -774,6 +783,7 @@ impl Emitter<'_> {
                     leading_non_argument_operands,
                     body,
                     reified,
+                    ..
                 },
             physical,
             supplies,
@@ -788,6 +798,11 @@ impl Emitter<'_> {
         let mut leases = Vec::new();
         let mut in_place = HashMap::default();
         for (index, _) in args.iter().enumerate() {
+            // A default bridge call's masks and method handle are constants the body was
+            // specialized for; they are not evaluated.
+            if supplies[index] == Supply::MaskOperand {
+                continue;
+            }
             // A parameter the body never reads is still evaluated, in order, then dropped. It
             // takes no temporary: the next parameter keeps the slot kotlinc gives it.
             if supplies[index] == Supply::Unread {
@@ -819,6 +834,16 @@ impl Emitter<'_> {
                 continue;
             }
             self.frame.reserve_through(slot);
+            // An omitted parameter's temporary is entered without a value: the bridge's default
+            // code stores it (`frameMap.enterTemp` for `DEFAULT_PARAMETER`).
+            if supplies[index] == Supply::Omitted {
+                let entered = self
+                    .frame
+                    .enter_temp(TempRole::InlineArgument, physical[index]);
+                debug_assert_eq!(entered.slot(), slot);
+                leases.push(self.lease_frame_temporary(entered, physical[index]));
+                continue;
+            }
             let operand_frame = self.frame.mark();
             self.mark_synthesized_operand_run(
                 Some((call_expression, &origins)),
@@ -1016,15 +1041,25 @@ impl Emitter<'_> {
     /// `None` only when a function-typed local has no provider-published `crossinline`/`noinline`
     /// modifier. An inline parameter, `crossinline` included, reads that local where it already
     /// lives; a `noinline` parameter is stored like an ordinary value.
+    ///
+    /// kotlinc asks whether arguments go in place of the body as the class file declares it
+    /// (`declared`), before a default bridge's mask header is resolved; every other question is
+    /// asked of the body that is inlined (`callee`).
     fn parameter_supplies(
         &self,
-        call_expression: u32,
-        target: &InlineStaticTarget<'_>,
-        args: &[u32],
-        leading_non_argument_operands: usize,
+        call: &ClasspathInlineCall<'_, '_>,
         physical: &[Ty],
         callee: &MethodNode,
+        declared: &MethodNode,
     ) -> Option<Vec<Supply>> {
+        let ClasspathInlineCall {
+            call_expression,
+            target,
+            args,
+            leading_non_argument_operands,
+            defaults,
+            ..
+        } = *call;
         let function_typed = |argument: u32| {
             let semantic = self
                 .ir
@@ -1037,7 +1072,7 @@ impl Emitter<'_> {
         let in_place = target.inline_only
             && !args.is_empty()
             && !args.iter().any(|&argument| function_typed(argument))
-            && inliner::can_inline_arguments_in_place(callee)
+            && inliner::can_inline_arguments_in_place(declared)
             && in_place_arguments::arguments_movable(self.ir, args, &|construction| {
                 !self
                     .sam_wrapper_realizations
@@ -1045,6 +1080,12 @@ impl Emitter<'_> {
             });
         let mut supplies = Vec::with_capacity(args.len());
         for (index, &argument) in args.iter().enumerate() {
+            if let Some(supply) =
+                defaults.and_then(|_| self.default_bridge_supply(call_expression, args, index))
+            {
+                supplies.push(supply);
+                continue;
+            }
             let evaluated = if in_place {
                 Supply::InPlace
             } else {
@@ -1559,6 +1600,8 @@ pub(super) struct ClasspathInlineCall<'a, 't> {
     pub leading_non_argument_operands: usize,
     pub body: &'a crate::jvm::classreader::MethodCode,
     pub reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
+    /// The masks of a default bridge call, which resolve the bridge's header before it is inlined.
+    pub defaults: Option<&'a inliner::DefaultMasks>,
 }
 
 /// A call on its way through the port, with what the call site decided per parameter.
