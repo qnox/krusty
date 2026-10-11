@@ -22,6 +22,7 @@ pub mod deps;
 pub mod ksp;
 pub mod noarg;
 pub mod registry;
+pub mod sam_with_receiver;
 pub mod serialization;
 
 use crate::ir::{ClassId, IrFile};
@@ -680,6 +681,13 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Annotations whose interfaces take a SAM conversion's first parameter as the converted
+    /// function's receiver, as kotlinc's sam-with-receiver plugin does. Only an annotation applied
+    /// directly to the interface that declares the abstract method counts.
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -1091,6 +1099,14 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].
+    pub fn sam_with_receiver_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.sam_with_receiver_annotations().iter().copied())
+            .collect()
     }
 
     /// Every registered plugin's [`IrPlugin::no_arg_constructor_annotations`].

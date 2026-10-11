@@ -142,6 +142,13 @@ impl SymbolSource for ResolverSource<'_> {
             Self::Memoized(source) => source.generated_serializer_singleton(classifier),
         }
     }
+
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        match self {
+            Self::Direct(source) => source.sam_with_receiver_annotations(),
+            Self::Memoized(source) => source.sam_with_receiver_annotations(),
+        }
+    }
 }
 
 #[cfg(test)]

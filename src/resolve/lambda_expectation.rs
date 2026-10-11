@@ -164,9 +164,12 @@ pub(super) struct FunctionalArgumentExpectation {
 
 /// Derive the expected shape of a lambda argument from its selected candidate parameter. Kotlin
 /// function types contribute context, receiver, value, and result types; Java SAMs contribute their
-/// single abstract method. Any other parameter gives no expectation.
+/// single abstract method, its first parameter as the receiver under kotlinc's sam-with-receiver
+/// convention, which `sam_source` (the federated module and dependency providers) carries. Any
+/// other parameter gives no expectation.
 pub(super) fn functional_argument_expectation(
     platform: &dyn SemanticPlatform,
+    sam_source: &dyn crate::symbol_source::SymbolSource,
     call_sig: &CallSig,
     inline: bool,
     index: usize,
@@ -244,7 +247,7 @@ pub(super) fn functional_argument_expectation(
                 inlined,
             })
         }
-        param => crate::symbol_resolver::semantic_sam_signature(platform, param).map(|sam| {
+        param => crate::symbol_resolver::semantic_sam_signature(sam_source, param).map(|sam| {
             let callable_type = Ty::fun_with_shape(
                 sam.params.clone(),
                 sam.ret,
@@ -252,10 +255,18 @@ pub(super) fn functional_argument_expectation(
                 sam.has_receiver,
                 sam.suspend,
             );
+            let (context_types, receiver, value_params) = if sam.has_receiver {
+                let mut params = sam.params;
+                let value_params = params.split_off(sam.context_count + 1);
+                let receiver = params.pop();
+                (params, receiver, value_params)
+            } else {
+                (Vec::new(), None, sam.params)
+            };
             FunctionalArgumentExpectation {
-                context_types: Vec::new(),
-                value_params: sam.params,
-                receiver: None,
+                context_types,
+                value_params,
+                receiver,
                 result: Some(sam.ret),
                 callable_type: Some(callable_type),
                 sam_conversion: true,
