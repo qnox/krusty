@@ -20,7 +20,7 @@ pub use metadata_declarations::{
     constructor_signature, enum_class_member_signatures, member_property_accessor_signature,
     member_signature, metadata_class_signature, metadata_enum_entry_signature,
     package_function_signature, package_property_accessor_signature, package_property_signature,
-    MetadataAccessor, MetadataClass, MetadataContainer,
+    EnumClassMemberSignatures, MetadataAccessor, MetadataClass, MetadataContainer,
 };
 
 /// One exact qualified path in a public KLIB signature.
@@ -137,6 +137,17 @@ impl KlibAccessorIdSignature {
     pub fn mask(&self) -> u64 {
         self.mask
     }
+}
+
+/// The exact serialized-IR identity of one dependency declaration a KLIB provider publishes.
+///
+/// A function, property, or class carries its public signature; a property accessor carries the
+/// accessor signature nested in its property's. This is the join key between a selected metadata
+/// declaration and its decoded IR body; it is never derived from a declaration spelling.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum KlibDeclarationSignature {
+    Public(KlibPublicIdSignature),
+    Accessor(KlibAccessorIdSignature),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

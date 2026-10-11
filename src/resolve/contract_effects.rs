@@ -119,18 +119,28 @@ impl Checker<'_> {
 
     /// The stable ACCESS PATH a contract parameter refers to at this call site: its argument
     /// expression when that is a plain name or a property path (`requireNotNull(a.b)`,
-    /// `a.p.isNullOrBlank()`), or the context source selection chose for a context parameter
-    /// supplied implicitly (`with("O") { validate1() }` → `this`).
+    /// `a.p.isNullOrBlank()`), the context source selection chose for a context parameter
+    /// supplied implicitly (`with("O") { validate1() }` → `this`), or the extension receiver
+    /// the call selected when the source writes no receiver (`ready() && this.length`).
     pub(super) fn contract_stable_arg_path(
         &self,
         scope: &CheckerScope<'_>,
         call: ExprId,
         param: crate::contracts::ParamRef,
     ) -> Option<NarrowPath> {
-        match self.contract_argument(call, param)? {
-            ContractArgument::Expression(expression) => self.expr_access_path(expression),
-            ContractArgument::Context(source) => self.context_argument_path(scope, source),
+        if let Some(argument) = self.contract_argument(call, param) {
+            return match argument {
+                ContractArgument::Expression(expression) => self.expr_access_path(expression),
+                ContractArgument::Context(source) => self.context_argument_path(scope, source),
+            };
         }
+        // `fun T?.ready()` called as `ready()` still selected the enclosing extension receiver.
+        // The contract's `this@ready` is that receiver, the same value a later `this` denotes.
+        if param == crate::contracts::ParamRef::Receiver {
+            let identity = self.implicit_receiver_identities.get(&call).copied()?;
+            return Some(NarrowPath::root_only(scope::PathRoot::Receiver(identity)));
+        }
+        None
     }
 
     /// Map a contract conclusion onto the call's actual arguments, producing `(path, Ty)`
@@ -189,9 +199,9 @@ impl Checker<'_> {
                 }
                 out.push((path, target));
             }
-            Condition::BoolParam(param) => {
+            Condition::BoolParam { param, negated } => {
                 if let Some(arg) = self.contract_arg_expr(call, *param) {
-                    self.collect_condition_narrowings(scope, arg, true, out, declined);
+                    self.collect_condition_narrowings(scope, arg, !negated, out, declined);
                 }
             }
             Condition::And(l, r) => {

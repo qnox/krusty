@@ -59,7 +59,10 @@ impl BodyLowering<'_, '_, '_> {
         value: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
-        let class = self.value_class(classifier)?;
+        let class = match self.value_class(classifier)? {
+            ValueClassHome::Here(class) => class,
+            ValueClassHome::Module => return self.module_box_value(value, classifier),
+        };
         let (offset, _) = self.file.value_storage(class)?;
         let descriptor = self.file.classes[class as usize].descriptor;
         let size = self.file.model.layout(class).instance_size;
@@ -74,21 +77,29 @@ impl BodyLowering<'_, '_, '_> {
         object: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
-        let class = self.value_class(classifier)?;
+        let class = match self.value_class(classifier)? {
+            ValueClassHome::Here(class) => class,
+            ValueClassHome::Module => return self.module_unbox_value(object, classifier),
+        };
         let (offset, ty) = self.file.value_storage(class)?;
         let clif = self.carrier(ty).clif().expect("a value is never `Unit`");
         Ok(self.builder.ins().load(clif, trusted(), object, offset))
     }
 
-    /// The class of this file a boxed value class is laid out by. A value class declared
-    /// somewhere else has no layout here, and boxing one declines.
-    fn value_class(&self, classifier: TypeName) -> Result<ClassId, Unsupported> {
-        self.file.ir.class_id_by_name(classifier).ok_or_else(|| {
-            format!(
-                "a boxed `{}`, a value class this file does not declare",
-                classifier.render().replace('/', ".")
-            )
-        })
+    /// Where a boxed value class is laid out: by a class of this file, or by another file of the
+    /// module, which boxes and unboxes it for every other. A value class declared outside the
+    /// module has no layout this program owns, and boxing one declines.
+    fn value_class(&self, classifier: TypeName) -> Result<ValueClassHome, Unsupported> {
+        if let Some(class) = self.file.ir.class_id_by_name(classifier) {
+            return Ok(ValueClassHome::Here(class));
+        }
+        if self.file.values.is_module_declared(classifier) {
+            return Ok(ValueClassHome::Module);
+        }
+        Err(declined!(
+            "a boxed `{}`, a value class this module does not declare",
+            classifier.render().replace('/', ".")
+        ))
     }
 
     /// A representation change between two SEMANTIC types.
@@ -203,7 +214,7 @@ impl BodyLowering<'_, '_, '_> {
                 match target.clif() {
                     Some(clif) if clif == actual => Ok(Some(value)),
                     None => Ok(None),
-                    Some(clif) => Err(format!(
+                    Some(clif) => Err(declined!(
                         "a value of undetermined type (carried as `{actual}`) where a `{clif}` is \
                          required"
                     )),
@@ -214,7 +225,7 @@ impl BodyLowering<'_, '_, '_> {
             (Some(Carrier::Scalar(_, _)), Carrier::Ref) => {
                 let ty = source.expect("known scalar");
                 let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!(
+                    return Err(declined!(
                         "a `{ty:?}` in a position that requires a reference"
                     ));
                 };
@@ -230,7 +241,7 @@ impl BodyLowering<'_, '_, '_> {
                 // a `UByte` from a `Boolean`, and each unboxes through its own descriptor.
                 let ty = target_ty.non_null();
                 let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!("an unboxing to `{ty:?}`"));
+                    return Err(declined!("an unboxing to `{ty:?}`"));
                 };
                 self.runtime_call(
                     &format!("kt_unbox_{suffix}"),
@@ -243,7 +254,13 @@ impl BodyLowering<'_, '_, '_> {
                 Ok(Some(self.resize(value, from, signed, to)))
             }
             (Some(_), Carrier::Void) => Ok(None),
-            (Some(Carrier::Void), _) => Err("a coercion from `Unit`".to_string()),
+            (Some(Carrier::Void), _) => Err("a coercion from `Unit`".into()),
         }
     }
+}
+
+/// The file whose layout a boxed value class has.
+enum ValueClassHome {
+    Here(ClassId),
+    Module,
 }

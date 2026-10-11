@@ -443,11 +443,9 @@ impl BodyLowering<'_> {
         });
         let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let next_index = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: index_read,
-            rhs: one,
-        });
+        let next_index = self
+            .ir
+            .add_arithmetic(IrBinOp::Add, index_read, one, Ty::Int);
         let update = self.ir.add_expr(IrExpr::SetValue {
             var: index_slot,
             value: next_index,
@@ -672,6 +670,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                overridden_declarations,
                 suspend,
                 can_inline,
                 inline_plan,
@@ -687,6 +686,7 @@ impl BodyLowering<'_> {
                     declared_result: *declared_result,
                     overridden_results,
                     semantic_role: *semantic_role,
+                    overridden_declarations,
                     suspend: *suspend,
                     can_inline: *can_inline,
                     inline_plan: inline_plan.as_deref(),

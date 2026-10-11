@@ -499,6 +499,9 @@ impl BodyLowering<'_> {
                             check: crate::ir::NullCheck::Source,
                         });
                         if operand_ty != target.get() {
+                            self.ir
+                                .logical_types
+                                .insert(asserted, operand_ty.non_null());
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: asserted,
@@ -622,11 +625,15 @@ impl BodyLowering<'_> {
                             crate::types::Ty::Double => IrConst::Double(delta.into()),
                             _ => IrConst::Int(delta.into()),
                         }));
-                        let updated = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Add,
-                            lhs: operand,
-                            rhs: delta,
-                        });
+                        // The addition is the signed one Kotlin promotes the operand to, at the
+                        // carrier the delta above was built for; the coercion below narrows it
+                        // back to the operator's own result (`Char.inc(): Char`).
+                        let sum = match result.non_null() {
+                            Ty::Long | Ty::ULong => Ty::Long,
+                            sum @ (Ty::Float | Ty::Double) => sum,
+                            _ => Ty::Int,
+                        };
+                        let updated = self.ir.add_arithmetic(IrBinOp::Add, operand, delta, sum);
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: updated,
@@ -644,11 +651,12 @@ impl BodyLowering<'_> {
                                 IrConst::Int(-1)
                             },
                         ));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::BitXor,
-                            lhs: operand,
-                            rhs: all_bits,
-                        })
+                        self.ir.add_arithmetic(
+                            IrBinOp::BitXor,
+                            operand,
+                            all_bits,
+                            expression.ty.get(),
+                        )
                     }
                 }
             }
@@ -702,11 +710,14 @@ impl BodyLowering<'_> {
                     | FirBinaryOperation::ShiftRight
                     | FirBinaryOperation::UnsignedShiftRight => {
                         let rhs = self.expression(*rhs)?;
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: lower_binary_operation(*operation),
-                            lhs,
-                            rhs,
-                        })
+                        let op = lower_binary_operation(*operation);
+                        if op.yields_boolean() {
+                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+                        } else {
+                            // The checked type of the operator call is the selected operator's
+                            // declared result: `Int.plus(Long): Long`, `Char.minus(Char): Int`.
+                            self.ir.add_arithmetic(op, lhs, rhs, expression.ty.get())
+                        }
                     }
                 }
             }
@@ -783,6 +794,7 @@ impl BodyLowering<'_> {
                 let comparison = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(is_null), fixed), (None, compared)],
                 });
+                self.ir.logical_types.insert(comparison, Ty::Boolean);
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(comparison),
@@ -867,6 +879,9 @@ impl BodyLowering<'_> {
                         (None, present_comparison),
                     ],
                 });
+                self.ir
+                    .logical_types
+                    .insert(lhs_present_result, Ty::Boolean);
                 let lhs_is_null = null_test(self, lhs_temporary);
                 let rhs_null_comparison = null_test(self, rhs_temporary);
                 let lhs_null_result = if *operation == FirBinaryOperation::Equal {
@@ -880,6 +895,7 @@ impl BodyLowering<'_> {
                         (None, lhs_present_result),
                     ],
                 });
+                self.ir.logical_types.insert(result, Ty::Boolean);
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![lhs_variable, rhs_variable],
                     value: Some(result),
@@ -1080,6 +1096,7 @@ impl BodyLowering<'_> {
                 let result = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
+                self.ir.logical_types.insert(result, expression.ty.get());
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
                 let over_safe_call = matches!(
@@ -1713,6 +1730,9 @@ impl BodyLowering<'_> {
                         check,
                     });
                     if source_type != to.get() {
+                        self.ir
+                            .logical_types
+                            .insert(asserted, source_type.non_null());
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: asserted,
@@ -1846,6 +1866,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::And);
+        self.ir.logical_types.insert(when, Ty::Boolean);
         when
     }
 
@@ -1857,6 +1878,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::Or);
+        self.ir.logical_types.insert(when, Ty::Boolean);
         when
     }
 
@@ -1865,10 +1887,12 @@ impl BodyLowering<'_> {
     /// that singleton and a statement-like Unit result are represented physically.
     fn unit_value_after_effect(&mut self, effect: ExprId) -> ExprId {
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
-        self.ir.add_expr(IrExpr::Block {
+        let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![effect],
             value: Some(unit),
-        })
+        });
+        self.ir.logical_types.insert(block, Ty::Unit);
+        block
     }
 
     fn call_argument_values(
@@ -1957,6 +1981,7 @@ impl BodyLowering<'_> {
         // common-IR `when`; a backend may choose its physical representation but must not
         // reconstruct `Nothing`, nullability, or another result from the branch instructions.
         self.ir.whens.exhaustive.insert(guarded, result_type);
+        self.ir.logical_types.insert(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],

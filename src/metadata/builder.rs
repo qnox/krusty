@@ -327,7 +327,10 @@ fn condition_expression(
             let id = st.type_id(&it).map_or_else(|| types.id(it), u64::from);
             p.field_varint(5, id); // Expression.is_instance_type_id
         }
-        Condition::BoolParam(param) => {
+        Condition::BoolParam { param, negated } => {
+            if *negated {
+                p.field_varint(1, 1); // flags: negated
+            }
             p.field_varint(2, param.to_wire());
         }
         Condition::Const(b) => {
@@ -637,11 +640,14 @@ fn function_pb(
                 st.put_type(&mut vp, 4, 6, &et); // ValueParameter.vararg_element_type(_id) = 4 / 6
             }
         }
+        // ValueParameter.annotation = 7, or `KlibMetadataProtoBuf.parameterAnnotation` = 170.
+        let annotation_field = if st.is_klib() { 170 } else { 7 };
         crate::metadata::class_builder::append_param_annotations(
             st,
             &mut vp,
             annotations,
             annotations_in_metadata,
+            annotation_field,
         );
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
@@ -951,11 +957,14 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
         parameter.field_varint(2, st.local(name) as u64); // ValueParameter.name = 2
         let ty = type_pb_declared(st, m.ty, &m.spellings.ret, &setter_tps);
         st.put_type(&mut parameter, 3, 5, &ty); // ValueParameter.type(_id) = 3 / 5
+                                                // ValueParameter.annotation = 7, or `KlibMetadataProtoBuf.parameterAnnotation` = 170.
+        let annotation_field = if st.is_klib() { 170 } else { 7 };
         crate::metadata::class_builder::append_param_annotations(
             st,
             &mut parameter,
             annotations,
             annotations_in_metadata,
+            annotation_field,
         );
         parameter
     });

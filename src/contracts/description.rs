@@ -425,7 +425,10 @@ impl<'a> Decoder<'a, '_> {
                 ty: ConditionType::Source(ty.clone()),
                 negated: *negated,
             }),
-            TermKind::Name(_) => Ok(Condition::BoolParam(self.reference(id)?)),
+            TermKind::Name(_) => Ok(Condition::BoolParam {
+                param: self.reference(id)?,
+                negated: false,
+            }),
             TermKind::Bool(value) => Ok(Condition::Const(*value)),
             _ => Err(None),
         }
@@ -464,4 +467,65 @@ fn reference_error(name: &str) -> String {
     } else {
         format!("'{name}' is not a value parameter.")
     }
+}
+
+/// Whether `callable`, declared in `package`, is the contract-declaration intrinsic itself:
+/// `kotlin.contracts.contract(builder: ContractBuilder.() -> Unit): Unit`, by its declaring
+/// package, name, and complete signature. An unrelated library callable never acquires intrinsic
+/// behavior because one component happens to match. Each provider supplies the package, since only
+/// it knows which physical owner realizes a top-level declaration.
+pub fn is_contract_intrinsic(
+    callable: &crate::libraries::LibraryCallable,
+    package: crate::types::TypeName,
+) -> bool {
+    use crate::types::Ty;
+    let builder = Ty::obj("kotlin/contracts/ContractBuilder");
+    let takes_builder = match callable.params.as_slice() {
+        [Ty::Fun(function)] => {
+            function.has_receiver
+                && function.context_count == 0
+                && !function.suspend
+                && function.params == [builder]
+                && function.ret == Ty::Unit
+        }
+        _ => false,
+    };
+    callable.name == "contract"
+        && callable.ret == Ty::Unit
+        && package.matches("kotlin/contracts")
+        && takes_builder
+}
+
+/// The contract-DSL member the selected declaration `callable` is, by its complete signature.
+pub fn dsl_member(callable: &SelectedDslCallable<'_>) -> Option<DslMember> {
+    use crate::types::Ty;
+    if !callable.dispatch_member || callable.context_parameters != 0 {
+        return None;
+    }
+    let contracts = |name: &str| Ty::obj(&format!("kotlin/contracts/{name}"));
+    let member = if callable.owner.matches("kotlin/contracts/ContractBuilder") {
+        match (callable.name, callable.params) {
+            ("returns", []) => (DslMember::Returns, contracts("Returns")),
+            ("returns", [value]) if *value == Ty::nullable(Ty::obj("kotlin/Any")) => {
+                (DslMember::ReturnsValue, contracts("Returns"))
+            }
+            ("returnsNotNull", []) => (DslMember::ReturnsNotNull, contracts("ReturnsNotNull")),
+            // `fun <R> callsInPlace(lambda: Function<R>, kind: InvocationKind)`: the lambda's
+            // `R` is the member's own type parameter, which selection may have specialized.
+            ("callsInPlace", [Ty::Obj(lambda, [_]), kind])
+                if lambda.matches("kotlin/Function") && *kind == contracts("InvocationKind") =>
+            {
+                (DslMember::CallsInPlace, contracts("CallsInPlace"))
+            }
+            _ => return None,
+        }
+    } else if callable.owner.matches("kotlin/contracts/SimpleEffect") {
+        match (callable.name, callable.params) {
+            ("implies", [Ty::Boolean]) => (DslMember::Implies, contracts("ConditionalEffect")),
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    (callable.ret == member.1).then_some(member.0)
 }

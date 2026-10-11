@@ -47,52 +47,81 @@ pub(super) fn named_classifiers(calls: &[FrontendSelectedCall]) -> HashSet<TypeN
     named
 }
 
-pub(super) fn classifier_annotations_for_calls(
-    inputs: ClassifierAnnotationInputs<'_>,
+/// The classifier annotations post-resolution planning reads for one checked body.
+///
+/// Source classifiers are answered per query from the module's finalized declarations; only the
+/// dependency classifiers the calls name are collected eagerly. Planning runs once per checked body,
+/// so materializing every source classifier here would make a module's planning quadratic in its
+/// size.
+pub(super) struct PlanningClassifierAnnotations<'a> {
+    source: SourceClassifierAnnotations<'a>,
+    dependencies: HashMap<TypeName, Vec<TypeName>>,
+}
+
+#[derive(Clone, Copy)]
+enum SourceClassifierAnnotations<'a> {
+    Resolved(&'a crate::fir::ResolvedModuleIndex),
+    Collected(&'a SymbolTable),
+}
+
+impl<'a> SourceClassifierAnnotations<'a> {
+    fn annotations(self, classifier: TypeName) -> Option<&'a [TypeName]> {
+        match self {
+            Self::Resolved(index) => {
+                let declaration = index.classifier_declaration(classifier)?;
+                index.classifier_header(declaration)?;
+                Some(index.declaration_annotations(declaration))
+            }
+            Self::Collected(symbols) => symbols
+                .classes
+                .get(&classifier)
+                .map(|class| class.annotations.as_slice()),
+        }
+    }
+}
+
+impl crate::plugins::FrontendClassifierAnnotations for PlanningClassifierAnnotations<'_> {
+    fn classifier_annotations(&self, classifier: TypeName) -> Option<&[TypeName]> {
+        self.source
+            .annotations(classifier)
+            .or_else(|| self.dependencies.get(&classifier).map(Vec::as_slice))
+    }
+}
+
+pub(super) fn classifier_annotations_for_calls<'a>(
+    inputs: ClassifierAnnotationInputs<'a>,
     calls: &[FrontendSelectedCall],
-) -> HashMap<TypeName, Vec<TypeName>> {
+) -> PlanningClassifierAnnotations<'a> {
     let ClassifierAnnotationInputs {
         resolved_index,
         pass_one_symbols,
         libraries,
     } = inputs;
-    let mut annotations: HashMap<TypeName, Vec<TypeName>> = if let Some(index) = resolved_index {
-        (0..index.declaration_count())
-            .filter_map(|raw| {
-                let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
-                let classifier = index.classifier_header(declaration)?.classifier;
-                Some((
-                    classifier,
-                    index.declaration_annotations(declaration).to_vec(),
-                ))
-            })
-            .collect()
-    } else {
-        pass_one_symbols
-            .expect("legacy analysis requires collected source symbols")
-            .classes
-            .iter()
-            .map(|(&classifier, class)| (classifier, class.annotations.clone()))
-            .collect()
+    let source = match resolved_index {
+        Some(index) => SourceClassifierAnnotations::Resolved(index),
+        None => SourceClassifierAnnotations::Collected(
+            pass_one_symbols.expect("legacy analysis requires collected source symbols"),
+        ),
     };
-
-    for classifier in named_classifiers(calls) {
-        let std::collections::hash_map::Entry::Vacant(entry) = annotations.entry(classifier) else {
-            continue;
-        };
-        let Some(shape) = crate::symbol_source::SymbolSource::classifier(libraries, classifier)
-        else {
-            continue;
-        };
-        entry.insert(
-            shape
-                .annotations
-                .iter()
-                .map(|annotation| annotation.annotation)
-                .collect(),
-        );
+    let dependencies = named_classifiers(calls)
+        .into_iter()
+        .filter(|&classifier| source.annotations(classifier).is_none())
+        .filter_map(|classifier| {
+            let shape = crate::symbol_source::SymbolSource::classifier(libraries, classifier)?;
+            Some((
+                classifier,
+                shape
+                    .annotations
+                    .iter()
+                    .map(|annotation| annotation.annotation)
+                    .collect(),
+            ))
+        })
+        .collect();
+    PlanningClassifierAnnotations {
+        source,
+        dependencies,
     }
-    annotations
 }
 
 #[cfg(test)]
@@ -117,8 +146,11 @@ mod tests {
             &[],
         );
         assert_eq!(
-            annotations.get(&crate::types::type_name("sample/Target")),
-            Some(&vec![crate::types::type_name("sample/Mark")])
+            crate::plugins::FrontendClassifierAnnotations::classifier_annotations(
+                &annotations,
+                crate::types::type_name("sample/Target"),
+            ),
+            Some([crate::types::type_name("sample/Mark")].as_slice())
         );
     }
 }

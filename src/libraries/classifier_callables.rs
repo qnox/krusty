@@ -94,6 +94,7 @@ impl FunctionInfo {
         callable.member_realization = member.realization;
         callable.compiler_intrinsic = member.realization.compiler_intrinsic();
         callable.semantic_role = member.semantic_role;
+        callable.overridden_declarations = member.overridden_declarations.clone();
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();

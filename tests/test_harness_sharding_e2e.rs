@@ -25,7 +25,7 @@ fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'a scored run has no deadline of its own' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_SCORED_CONFORMANCE_SHARDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'conformance shard settings must stay retired' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -41,7 +41,7 @@ fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 1800, 600, 4, 12]);
+    assert_eq!(values, [120, 120, 1800, 600, 1800]);
 }
 
 #[cfg(unix)]
@@ -76,18 +76,9 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
 
     assert_eq!(output.status.code(), Some(124));
     assert_eq!(output.stdout, b"");
-    let stderr = String::from_utf8(output.stderr).expect("deadline stderr is UTF-8");
-    assert!(
-        stderr.contains("conformance-run: phase start box-shard-1-of-12"),
-        "missing shard phase start: {stderr}"
-    );
-    assert!(
-        !stderr.contains("box-shard-2-of-12"),
-        "a later shard started after the deadline: {stderr}"
-    );
     assert_eq!(
-        without_phase_timing(&stderr),
-        "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/12\n"
+        without_phase_timing(&String::from_utf8(output.stderr).expect("deadline stderr is UTF-8")),
+        "conformance-run: timed out after 1s: Kotlin 2.4.10\n"
     );
     assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
     fs::remove_dir_all(temp).expect("remove conformance deadline test directory");
@@ -106,7 +97,7 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
     let binary = temp.join("conformance-bin");
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s|%s/%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" \"$KRUSTY_CONFORMANCE_SHARD_COUNT\" >&2\nprintf '62.5 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '25.0 1 4\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\n",
+        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" >&2\nprintf '62.5 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '25.0 1 4\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\n",
     )
     .expect("write reporting conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
@@ -122,65 +113,38 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .output()
         .expect("run reporting conformance fixture");
 
-    // The scored runner partitions by KRUSTY_SCORED_CONFORMANCE_SHARDS (default 12); each shard
-    // reports `62.5 5 8` passed/applicable cases and `25.0 1 4` matched/total bytes, so each
-    // report's integer counts sum over 12 shards before its percentage is derived.
-    let shards = 12;
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"62.5 60 96\n");
+    assert_eq!(output.stdout, b"62.5 5 8\n");
     let stderr = String::from_utf8(output.stderr).expect("report stderr is UTF-8");
-    for shard in 1..=shards {
-        assert!(
-            stderr.contains(&format!(
-                "conformance-run: phase start box-shard-{shard}-of-{shards}\n"
-            )),
-            "missing shard {shard} phase start: {stderr}"
-        );
-        assert!(
-            stderr.contains(&format!(
-                "conformance-run: phase box-shard-{shard}-of-{shards} "
-            )),
-            "missing shard {shard} phase duration: {stderr}"
-        );
-    }
-    assert!(
-        stderr.contains("conformance-run: phase total "),
-        "missing phase total: {stderr}"
+    assert_eq!(
+        without_phase_timing(&stderr),
+        format!(
+            "2.4.10|/bin/reference-kotlinc|{}|kotlin_codegen_box_conformance|--nocapture\n\
+             conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 25.0 1 4\n",
+            temp.display(),
+        )
     );
-    let expected_stderr: String = (0..shards)
-        .map(|index| {
-            format!(
-                "2.4.10|/bin/reference-kotlinc|{}|kotlin_codegen_box_conformance|--nocapture|{index}/{shards}\n",
-                temp.display(),
-            )
-        })
-        .chain(std::iter::once(
-            "conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 25.0 12 48\n".to_owned(),
-        ))
-        .collect();
-    assert_eq!(without_phase_timing(&stderr), expected_stderr);
     fs::remove_dir_all(temp).expect("remove conformance report test directory");
 }
 
 #[cfg(unix)]
 #[test]
-fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
+fn prebuilt_conformance_runner_preserves_reports_from_a_failing_process() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runner = root.join("scripts").join("conformance-run.sh");
     let temp = std::env::temp_dir().join(format!(
-        "krusty-conformance-run-failing-shard-{}",
+        "krusty-conformance-run-failing-process-{}",
         std::process::id()
     ));
-    fs::create_dir_all(&temp).expect("create failing-shard test directory");
+    fs::create_dir_all(&temp).expect("create failing-process test directory");
     let binary = temp.join("conformance-bin");
-    // Every shard reports; the second one then fails its expected-failure check.
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\nprintf 'shard %s\\n' \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" >&2\nprintf '50.0 1 2\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '10.0 1 10\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\n[ \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" != 1 ] || exit 101\n",
+        "#!/usr/bin/env bash\nprintf 'fixture failed after writing reports\\n' >&2\nprintf '50.0 1 2\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '10.0 1 10\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\nexit 101\n",
     )
-    .expect("write failing-shard conformance fixture");
+    .expect("write failing-process conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
-        .expect("make failing-shard conformance fixture executable");
+        .expect("make failing-process conformance fixture executable");
 
     let output = Command::new("bash")
         .arg(runner)
@@ -190,29 +154,17 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
         .output()
-        .expect("run failing-shard conformance fixture");
+        .expect("run failing-process conformance fixture");
 
-    // Every one of the scored run's 12 shards reports before the first failing status propagates:
-    // both reports' integer counts still sum across all shards (cases 1*12 / 2*12, bytes 1*12 /
-    // 10*12) even though shard 1 exits nonzero.
-    let shards = 12;
     assert_eq!(output.status.code(), Some(101));
-    assert_eq!(output.stdout, b"50.0 12 24\n");
-    let stderr = String::from_utf8(output.stderr).expect("failing-shard stderr is UTF-8");
-    assert!(
-        stderr.contains(&format!(
-            "conformance-run: phase box-shard-{shards}-of-{shards} "
-        )),
-        "the last shard's duration is missing after a failing shard: {stderr}"
+    assert_eq!(output.stdout, b"50.0 1 2\n");
+    let stderr = String::from_utf8(output.stderr).expect("failing-process stderr is UTF-8");
+    assert_eq!(
+        without_phase_timing(&stderr),
+        "fixture failed after writing reports\n\
+         conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 10.0 1 10\n"
     );
-    let expected_stderr: String = (0..shards)
-        .map(|index| format!("shard {index}\n"))
-        .chain(std::iter::once(
-            "conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 10.0 12 120\n".to_owned(),
-        ))
-        .collect();
-    assert_eq!(without_phase_timing(&stderr), expected_stderr);
-    fs::remove_dir_all(temp).expect("remove failing-shard test directory");
+    fs::remove_dir_all(temp).expect("remove failing-process test directory");
 }
 
 fn target_hygiene(function: &str, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
@@ -455,9 +407,12 @@ fn prebuilt_conformance_regressions_skip_the_box_suites() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
         ),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -502,9 +457,12 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
         ),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -535,7 +493,7 @@ fn prebuilt_conformance_regressions_keep_an_explicit_cli() {
         .output()
         .expect("run conformance regressions");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"bin=/opt/krusty\n");
+    assert_eq!(output.stdout, b"bin=/opt/krusty\nbin=/opt/krusty\n");
     fs::remove_dir_all(temp).expect("remove regressions fixture");
 }
 
@@ -604,8 +562,8 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     );
     assert!(
         workflow.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            && workflow.contains("target: [jvm, native]"),
-        "each exact Kotlin version must expose independent JVM and Native matrix rows"
+            && workflow.contains("target: [jvm, native, wasm]"),
+        "each exact Kotlin version must expose independent JVM, Native and Wasm matrix rows"
     );
     let box_run = workflow[matrix..]
         .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
@@ -621,7 +579,7 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]",
+            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
@@ -635,6 +593,7 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     for needle in [
         "- name: run box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
         "- name: run native box conformance ${{ matrix.version }}\n        if: matrix.target == 'native'",
+        "- name: run wasm box conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
         "- name: run non-box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
     ] {
         assert!(
@@ -651,12 +610,44 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         "the expanded corpus cache must not reuse the immutable box-only key"
     );
     assert!(
-        workflow.contains("kotlin-native-conformance-${{ matrix.version }}-"),
-        "a Native row must not race to publish the JVM row's broader immutable cache"
+        workflow.contains("kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-")
+            && workflow.contains("if: matrix.target != 'jvm'"),
+        "a Native or Wasm row must not race to publish the JVM row's broader immutable cache"
     );
+    for key in [
+        "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
+        "key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
+    ] {
+        assert!(
+            workflow.contains(key),
+            "every box corpus cache must use the key versioned for its mock JDK and CLI corpus inputs ({key})"
+        );
+    }
     assert!(
-        workflow.contains("box-corpus-mock-jdk-${{ matrix.version }}-"),
-        "the box corpus cache must not reuse an immutable key from before its mock JDK input"
+        !workflow.contains("box-corpus-mock-jdk-"),
+        "no box corpus cache may restore an immutable entry from before the CLI corpus input"
+    );
+    assert_eq!(
+        workflow.matches("path: target/cache/box-corpus").count(),
+        2,
+        "only the coverage and conformance lanes read the box and CLI corpus; the KLIB lane caches none"
+    );
+    let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
+    let klib_recipe = justfile
+        .split("\nklib-semantics ")
+        .nth(1)
+        .and_then(|recipe| recipe.split("\n\n").next())
+        .expect("justfile has a klib-semantics recipe");
+    assert!(
+        klib_recipe.contains("KRUSTY_PROVISION_BOX_CORPUS=0 "),
+        "the KLIB lane caches no corpus, so its harness run must not provision one"
+    );
+    assert_eq!(
+        workflow
+            .matches("if: steps.box-corpus.outputs.cache-hit == 'true'\n        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> \"$GITHUB_ENV\"")
+            .count(),
+        2,
+        "a restored box corpus must be complete, so every lane forbids fetching after a hit"
     );
     assert!(
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
@@ -667,7 +658,7 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         .expect("workflow has a JVM box conformance step")
         ..native_box_run];
     for needle in [
-        "KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: \"600\"",
+        "KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: \"1800\"",
         "KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps",
         "KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}",
         "KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}",

@@ -6,10 +6,15 @@ use std::path::{Path, PathBuf};
 
 mod box_jdk;
 mod codegen_modes;
+mod compiler_arguments;
 mod reference_jvm;
 
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
 pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
+pub use compiler_arguments::{
+    case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_compiler_configuration,
+    unit_kotlinc_arguments, UnitCompilerConfiguration,
+};
 pub use reference_jvm::{reference_jvm_acceptance, ReferenceJvmAcceptance};
 
 /// Recursively collect Kotlin sources in deterministic path order. A source file is also accepted as
@@ -121,6 +126,20 @@ private fun <T> checkTypeEquality(
 pub enum TestTarget {
     Jvm,
     Native,
+    WasmJs,
+    WasmWasi,
+}
+
+impl TestTarget {
+    /// The production source-semantics target represented by this corpus lane.
+    pub fn compilation_target(self) -> crate::compilation_target::CompilationTarget {
+        match self {
+            Self::Jvm => crate::compilation_target::CompilationTarget::Jvm,
+            Self::Native => crate::compilation_target::CompilationTarget::Native,
+            Self::WasmJs => crate::compilation_target::CompilationTarget::WasmJs,
+            Self::WasmWasi => crate::compilation_target::CompilationTarget::WasmWasi,
+        }
+    }
 }
 
 /// The `helpers` package source Kotlin's codegen runner injects for `// WITH_COROUTINES`.
@@ -177,7 +196,7 @@ class ResultContinuation : Continuation<Any?> {
 ///
 /// `OPTIONAL_JVM_INLINE_ANNOTATION` is the placeholder the corpus writes where a `value class`
 /// needs `@JvmInline`. The JVM runner inserts it only while `FullValueClasses` is disabled; Native
-/// always expands it to nothing because a Kotlin/Native `value class` needs no JVM annotation.
+/// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
 pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
     let full_value_classes =
         crate::features::LangFeatures::from_source(src).has("FullValueClasses");
@@ -185,6 +204,8 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
         TestTarget::Jvm if !full_value_classes => ("@JvmInline", "\"JVM_IR\""),
         TestTarget::Jvm => ("", "\"JVM_IR\""),
         TestTarget::Native => ("", "\"NATIVE\""),
+        TestTarget::WasmJs => ("", "\"WASM_JS\""),
+        TestTarget::WasmWasi => ("", "\"WASM_WASI\""),
     };
     let mut prepared = src
         .replace("OPTIONAL_JVM_INLINE_ANNOTATION", value_class_annotation)
@@ -193,21 +214,6 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
         prepared.push_str(EXACT_TYPE_HELPER);
     }
     prepared
-}
-
-/// Language features Kotlin's codegen-test runner supplies for one target, followed by the test's
-/// own ordered `// LANGUAGE:` overrides.
-///
-/// Kotlin/Native accepts full value classes without the JVM-only `@JvmInline` marker. Treating the
-/// absence of that annotation through the JVM feature baseline rejects the source before the
-/// Native backend can be tested.
-pub fn test_features(src: &str, target: TestTarget) -> crate::features::LangFeatures {
-    let mut features = crate::features::LangFeatures::new();
-    if target == TestTarget::Native {
-        features.enable("FullValueClasses");
-    }
-    features.apply_source_directives(src);
-    features
 }
 
 /// Whether a box test applies to the backend tokens `names`, per kotlinc's test-runner directives, for
@@ -1050,21 +1056,6 @@ mod tests {
         assert_eq!(
             prepare_test_source(source, TestTarget::Jvm),
             "@JvmInline\nvalue class V(val x: Int)\nval here = \"JVM_IR\""
-        );
-    }
-
-    #[test]
-    fn native_test_features_accept_unannotated_value_classes_and_keep_directive_overrides() {
-        assert!(
-            test_features("value class V(val x: Int)", TestTarget::Native).has("FullValueClasses")
-        );
-        assert!(!test_features(
-            "// LANGUAGE: -FullValueClasses\nvalue class V(val x: Int)",
-            TestTarget::Native,
-        )
-        .has("FullValueClasses"));
-        assert!(
-            !test_features("value class V(val x: Int)", TestTarget::Jvm).has("FullValueClasses")
         );
     }
 

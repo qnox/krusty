@@ -103,6 +103,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) declared_result: Option<ResolvedTy>,
     pub(super) overridden_results: &'a [ResolvedTy],
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
@@ -120,6 +121,8 @@ pub(super) struct ExternalCallRequest<'a> {
 
 pub(super) struct ModuleConstructorRequest<'a> {
     pub(super) classifier: crate::types::TypeName,
+    /// The checked constructor declaration the call selected.
+    pub(super) constructor: crate::fir::DeclarationId,
     pub(super) argument_parameter_types: &'a [Ty],
     pub(super) declaration_parameter_types: &'a [Ty],
     pub(super) primary_in_current_file: bool,
@@ -350,6 +353,7 @@ impl BodyLowering<'_> {
             declared_result,
             overridden_results,
             semantic_role,
+            overridden_declarations,
             suspend,
             can_inline,
             inline_plan,
@@ -434,6 +438,8 @@ impl BodyLowering<'_> {
         if let Some(role) = semantic_role {
             self.ir.semantic_call_roles.insert(call, role);
         }
+        self.ir
+            .record_external_overridden_declarations(target, overridden_declarations);
         if let Some(receiver) = source_receiver {
             self.ir
                 .ext_call_source_receiver
@@ -1406,6 +1412,7 @@ impl BodyLowering<'_> {
     ) -> Option<ExprId> {
         let ModuleConstructorRequest {
             classifier,
+            constructor,
             argument_parameter_types,
             declaration_parameter_types,
             primary_in_current_file,
@@ -1475,6 +1482,10 @@ impl BodyLowering<'_> {
             .construction_declared_params
             .insert(construction, declared_parameters);
         self.ir.construction_targets.insert(construction, target);
+        self.ir
+            .module_constructions
+            .selected
+            .insert(construction, constructor);
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }

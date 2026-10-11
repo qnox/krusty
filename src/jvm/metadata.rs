@@ -53,6 +53,7 @@ pub enum MetadataDecodeError {
     MalformedWire,
     MissingField(&'static str),
     InvalidVariance(u64),
+    InvalidContract,
 }
 
 impl From<ParameterDecodeError> for MetadataDecodeError {
@@ -2094,21 +2095,8 @@ fn decode_functions(
                         None,
                         function_type_table,
                     );
-                    let contract = pf.contract_body.as_deref().and_then(|body| {
-                        let tparams = type_parameter_context(
-                            &[],
-                            &[],
-                            &pf.type_params,
-                            records,
-                            d2,
-                            function_type_table,
-                        )
-                        .map(|c| c.names)
-                        .unwrap_or_default();
-                        // Function-level table wins if present; the container's otherwise.
-                        contract::decode_contract(body, records, d2, &tparams, function_type_table)
-                            .map(std::sync::Arc::new)
-                    });
+                    let contract =
+                        contract::decode_function_contract(&pf, records, d2, function_type_table)?;
                     if pf.contract_body.is_some() {
                         crate::trace_compiler!(
                             "metadata_contracts",
@@ -2634,32 +2622,13 @@ pub struct BuiltinMember {
     pub annotations: Vec<crate::types::TypeName>,
 }
 
-/// A top-level `.kotlin_builtins` function. It has no JVM facade method; resolution consumes its
-/// complete semantic signature and the backend supplies its physical realization.
-pub struct BuiltinFunction {
-    pub name: String,
-    pub receiver: Option<BuiltinTy>,
-    pub params: Vec<BuiltinTy>,
-    pub ret: BuiltinTy,
-    pub formals: Vec<BuiltinTypeParam>,
-    pub param_names: Vec<String>,
-    pub param_defaults: Vec<bool>,
-    pub vararg: Option<usize>,
-    pub visibility: crate::types::Visibility,
-    pub is_inline: bool,
-    pub has_reified_type_params: bool,
-    pub is_suspend: bool,
-    pub is_operator: bool,
-    pub is_infix: bool,
-    /// Leading unnamed context receivers followed by named context parameters.
-    pub context_count: usize,
-    pub annotations: Vec<crate::types::TypeName>,
-}
-
 #[derive(Default)]
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
-    pub functions: Vec<BuiltinFunction>,
+    /// Top-level functions in their common semantic shape. A builtin function has no JVM facade
+    /// method; resolution consumes this complete declaration and the backend supplies its physical
+    /// realization.
+    pub functions: Vec<crate::metadata::semantic::KotlinFunction>,
     pub properties: Vec<BuiltinProperty>,
 }
 
@@ -3007,7 +2976,7 @@ mod builtin_class_access_tests {
 mod module_reader_tests {
     use super::{
         builtin_bridge, decode_metadata_type, decode_properties, parse_function, parse_type_facts,
-        primary_erasure_bounds, read_kotlin_module, value_parameter_type, BuiltinTy, MetaCtx,
+        primary_erasure_bounds, read_kotlin_module, value_parameter_type, MetaCtx,
         ParsedValueParam,
     };
     use crate::metadata::module::build_kotlin_module;
@@ -3084,7 +3053,10 @@ mod module_reader_tests {
         assert!(
             req.effects.contains(&Effect::ConditionalReturns {
                 returns: ReturnsValue::Any,
-                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: false,
+                },
             }),
             "require contract effects: {:?}",
             req.effects
@@ -3661,7 +3633,13 @@ mod module_reader_tests {
         assert!(package.classes.is_empty());
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].name, "main");
-        assert_eq!(package.functions[0].params, Vec::<BuiltinTy>::new());
-        assert_eq!(package.functions[0].ret, BuiltinTy::class("kotlin/Unit"));
+        assert_eq!(
+            package.functions[0].params,
+            Vec::<crate::metadata::semantic::KotlinType>::new()
+        );
+        assert_eq!(
+            package.functions[0].ret,
+            crate::metadata::semantic::KotlinType::class("kotlin/Unit")
+        );
     }
 }

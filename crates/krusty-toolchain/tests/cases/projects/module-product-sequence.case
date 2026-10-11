@@ -1,0 +1,5 @@
+The product written as a sequence.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product: [jvm/lib]

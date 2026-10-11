@@ -13,6 +13,7 @@ use super::*;
 struct Unit {
     functions: Vec<(String, CallableId)>,
     entry: Option<ResolvedEntryPoint>,
+    box_entry: Option<CallableId>,
 }
 
 impl Unit {
@@ -48,7 +49,7 @@ fn analyze(sources: &[&str]) -> Vec<Unit> {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -94,6 +95,7 @@ fn analyze(sources: &[&str]) -> Vec<Unit> {
                     .map(|(_, name, callable)| (name, callable))
                     .collect(),
                 entry: index.source_entry_point(source),
+                box_entry: index.source_box_entry(source),
             }
         })
         .collect()
@@ -222,4 +224,56 @@ fn a_nullable_array_main_in_two_units_of_one_package_does_not_conflict() {
         units[1].entry,
         units[1].expected(0, MainEntryParameters::Arguments)
     );
+}
+
+#[test]
+fn a_parameterless_box_returning_a_string_is_the_box_entry() {
+    let unit = single("fun helper(): String = \"O\"\nfun box(): String = helper() + \"K\"\n");
+    assert_eq!(unit.names(), ["helper", "box"]);
+    assert_eq!(unit.box_entry, Some(unit.functions[1].1));
+    assert_eq!(unit.entry, None);
+}
+
+#[test]
+fn a_box_returning_a_nullable_string_is_the_box_entry() {
+    let unit = single("fun box(): String? = \"OK\"\n");
+    assert_eq!(unit.box_entry, Some(unit.functions[0].1));
+}
+
+#[test]
+fn each_unit_records_its_own_box_entry() {
+    let units = analyze(&[
+        "package a\nfun box(): String = \"OK\"\n",
+        "package b\nfun other() {}\nfun box(): String = \"OK\"\n",
+        "package c\nfun other() {}\n",
+    ]);
+    assert_eq!(units[0].box_entry, Some(units[0].functions[0].1));
+    assert_eq!(units[1].box_entry, Some(units[1].functions[1].1));
+    assert_eq!(units[2].box_entry, None);
+}
+
+#[test]
+fn a_box_of_another_shape_is_not_the_box_entry() {
+    for source in [
+        "fun box(x: Int): String = \"OK\"\n",
+        "fun box(): Int = 0\n",
+        "fun box(): Nothing = box()\n",
+        "fun box(): Nothing? = null\n",
+        "fun String.box(): String = this\n",
+        "fun <T> box(): String = \"OK\"\n",
+        "fun notBox(): String = \"OK\"\n",
+    ] {
+        assert_eq!(single(source).box_entry, None, "{source}");
+    }
+}
+
+#[test]
+fn member_and_local_boxes_are_not_the_box_entry() {
+    let unit = single(
+        "class Host { fun box(): String = \"OK\" }\n\
+         object Launcher { fun box(): String = \"OK\" }\n\
+         fun outer(): String { fun box(): String = \"OK\"; return box() }\n",
+    );
+    assert_eq!(unit.names(), ["outer"]);
+    assert_eq!(unit.box_entry, None);
 }

@@ -1,4 +1,5 @@
 import org.gradle.api.publish.maven.MavenPublication
+import org.gradle.api.tasks.Sync
 import org.gradle.api.tasks.bundling.AbstractArchiveTask
 
 plugins {
@@ -17,6 +18,21 @@ dependencies {
     // Compile against the oldest supported public API. The consuming build supplies and applies
     // its selected Kotlin/JVM plugin; the release JAR does not bundle a Kotlin Gradle plugin.
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")
+}
+
+// Package the compiler's vendored tables separately. The plugin selects the table for the exact
+// Kotlin Gradle plugin version; merging releases would let an option from one release consume a
+// plugin-owned token under another release's grammar.
+val kotlincArgumentResources = layout.buildDirectory.dir("generated/kotlinc-arguments")
+val kotlincArgumentTables = tasks.register<Sync>("kotlincArgumentTables") {
+    from("../../crates/krusty-cli/src/kotlinc_arguments/releases") {
+        include("*.tsv")
+        exclude("*.features.tsv")
+    }
+    into(kotlincArgumentResources.map { it.dir("krusty/kotlinc-arguments") })
+}
+sourceSets.main {
+    resources.srcDir(files(kotlincArgumentResources).builtBy(kotlincArgumentTables))
 }
 
 gradlePlugin {

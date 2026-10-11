@@ -45,6 +45,20 @@ fun box(): String = if (Env()[\"OK\"] == \"OK\") \"OK\" else \"no\"\n";
 }
 
 #[test]
+fn generic_member_get_publishes_its_reified_argument() {
+    const SRC: &str = "class Box {\n\
+    inline operator fun <reified T : Any> get(value: T): String =\n\
+        T::class.simpleName ?: \"missing\"\n\
+}\n\
+fun box(): String {\n\
+    val name = Box()[\"value\"]\n\
+    return if (name == \"String\") \"OK\" else name\n\
+}\n";
+    assert_kotlinc_accepts("GenericMemberGetReifiedArgument", SRC);
+    assert_eq!(run(SRC).expect("generic member get compiles + runs"), "OK");
+}
+
+#[test]
 fn function_value_is_a_function_classifier_map_key() {
     const SRC: &str = "import java.util.concurrent.ConcurrentHashMap\n\
 fun box(): String {\n\
@@ -98,4 +112,65 @@ fn function_value_is_not_a_different_function_classifier() {
                     .to_string(),
         }]
     );
+}
+
+/// A dependency's generic `get` operator extension read through a star-projected receiver:
+/// `operator fun <K, V> Table<out K, V>.get(key: K): V?` on `Table<*, *>`. The receiver alone binds
+/// `V` (to the star's `Any?`), exactly as the equivalent `t.get(key)` call does. The subscript form
+/// published no solved type arguments, so an expectation-free `val local = table["a"]` read its
+/// `Any?` result as the unsolved fallback and reported "cannot infer type for type parameter 'V'".
+/// The stdlib `Map<*, *>` subscript is the same extension shape, and a `vararg` index parameter
+/// (`Grid<out K, V>.get(vararg keys: K)`) solves through its own call shape the same way.
+const STAR_PROJECTED_LIB: &str = "package lib\n\
+    class Table<K, V>(private val keys: List<K>, private val values: List<V>) {\n\
+        fun find(key: Any?): V? = keys.indexOf(key).let { if (it < 0) null else values[it] }\n\
+    }\n\
+    operator fun <K, V> Table<out K, V>.get(key: K): V? = find(key)\n\
+    class Grid<K, V>(private val keys: List<K>, private val values: List<V>) {\n\
+        fun find(key: Any?): V? = keys.indexOf(key).let { if (it < 0) null else values[it] }\n\
+    }\n\
+    operator fun <K, V> Grid<out K, V>.get(vararg keys: K): V? = find(keys.firstOrNull())\n";
+
+const STAR_PROJECTED_MAIN: &str = "import lib.Grid\n\
+    import lib.Table\n\
+    import lib.get\n\
+    fun cell(table: Table<*, *>): Any? = table[\"b\"]\n\
+    fun entry(map: Map<*, *>): Any? = map[\"b\"]\n\
+    fun box(): String {\n\
+        val table: Table<*, *> = Table(listOf(\"a\", \"b\"), listOf(1, 2))\n\
+        val local = table[\"a\"]\n\
+        val map: Map<*, *> = mapOf(\"b\" to \"K\")\n\
+        val grid: Grid<*, *> = Grid(listOf(\"a\"), listOf(3))\n\
+        val slot = grid[\"a\"]\n\
+        return if (cell(table) == 2 && local == 1 && entry(map) == \"K\" && slot == 3) \"OK\" else \"FAIL\"\n\
+    }\n";
+
+#[test]
+fn a_star_projected_receiver_binds_an_indexed_extension_result() {
+    let Some(library) = common::kotlinc_library(STAR_PROJECTED_LIB) else {
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", STAR_PROJECTED_MAIN)],
+        &[library, common::stdlib_jar()],
+    );
+    assert_eq!(
+        result.reference_code, 0,
+        "kotlinc must accept the fixture: {}",
+        result.reference_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), []);
+    assert_eq!(
+        result.krusty_code, 0,
+        "krusty rejected the fixture: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    let Some(boxed) =
+        common::expect_box_run_against_kotlinc(STAR_PROJECTED_LIB, STAR_PROJECTED_MAIN)
+    else {
+        return;
+    };
+    assert_eq!(boxed, "OK");
 }

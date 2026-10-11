@@ -5,7 +5,7 @@
 //! that was prebuilt when krusty itself was built. A user's build touches no C toolchain. The one
 //! text artifact is the module's public C header: the names a C caller can link, not a program.
 //!
-//! **Why Cranelift, and what it owns.** `docs/BUILD_AND_NATIVE_PLAN.md`, *Decided: Cranelift, as a
+//! **Why Cranelift, and what it owns.** `docs/NATIVE.md`, *Decided: Cranelift, as a
 //! library*: Cranelift owns instruction selection and register allocation — and only those. The
 //! lowering below, the calling convention at every runtime boundary, object layout, collector
 //! integration and the linker are krusty's. The lowering sits behind this module's boundary so a
@@ -17,6 +17,7 @@
 //! taught declines with a diagnostic naming the construct — the same discipline the rest of the
 //! native track keeps. Nothing is ever emitted on a guess.
 
+use crate::compilation_target::CompilationTarget;
 mod lower;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
@@ -27,22 +28,7 @@ use super::target::NativeTarget;
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
 
-/// What a `box()` program prints before its answer. A harness requires exactly one occurrence and
-/// reads every byte after it, so an answer that spans lines is kept whole and an answer/program
-/// output containing the marker fails rather than spoofing a verdict. The NULs keep ordinary
-/// output from spelling it accidentally.
-pub const BOX_RESULT_FRAME: &str = "\u{0}krusty box result\u{0}";
-
-/// Which top-level function a program starts in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Entry {
-    /// Kotlin's `fun main()`.
-    Main,
-    /// A `codegen/box` conformance case: `fun box(): String`, whose result the entry prints after
-    /// [`BOX_RESULT_FRAME`] — so the case's verdict (`OK`, or what went wrong) is the program's
-    /// output, with no `main` written into the corpus.
-    Box,
-}
+pub use crate::backend::{Entry, BOX_RESULT_FRAME};
 
 pub struct CraneliftBackend {
     target: NativeTarget,
@@ -91,6 +77,10 @@ pub struct CodegenModule {
 impl Backend for CraneliftBackend {
     type State = CodegenModule;
 
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Native
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -129,7 +119,13 @@ impl Backend for CraneliftBackend {
             &file.ir,
             &file.classifiers,
         ) {
-            Ok(inventory) => inventory,
+            Ok(inventory) => inventory.declared_in_module(
+                file.classifiers
+                    .module()
+                    .source_value_classes()
+                    .keys()
+                    .copied(),
+            ),
             Err(unsupported) => {
                 diags.error(
                     crate::diag::Span::new(0, 0),
@@ -155,11 +151,8 @@ impl Backend for CraneliftBackend {
             self.verify,
         ) {
             Ok(lowered) => lowered,
-            Err(unsupported) => {
-                diags.error(
-                    crate::diag::Span::new(0, 0),
-                    format!("krusty: the native backend does not support {unsupported} yet"),
-                );
+            Err(declined) => {
+                report_decline(&declined, &file, diags);
                 return Vec::new();
             }
         };
@@ -184,6 +177,28 @@ impl Backend for CraneliftBackend {
         // linker supplies it. The header is the module's public C ABI, not a program to compile.
         let header = super::c_abi::header(module_name, &state.abi);
         vec![(format!("{module_name}.h"), header.into_bytes())]
+    }
+}
+
+/// Report a decline at the source span of the node it was declined at: in the file that node was
+/// written in, which an inlined body can make another file of the module. A decline no checked node
+/// claimed is a fact about the whole file and is reported at its start.
+fn report_decline(declined: &lower::Unsupported, file: &CheckedIrFile<'_>, diags: &mut DiagSink) {
+    let message = format!(
+        "krusty: the native backend does not support {} yet",
+        declined.construct()
+    );
+    match declined
+        .origin()
+        .and_then(|origin| file.origin_span(origin))
+    {
+        Some((source, span)) => {
+            let current = diags.current_file();
+            diags.set_file(source);
+            diags.error(span, message);
+            diags.set_file(current);
+        }
+        None => diags.error(crate::diag::Span::new(0, 0), message),
     }
 }
 

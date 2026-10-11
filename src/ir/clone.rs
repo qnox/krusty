@@ -389,6 +389,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(jvm_protected_dependency_calls);
     copy_map!(construction_declared_params);
     copy_map!(construction_targets);
+    if let Some(constructor) = ir.module_constructions.selected.get(&source).copied() {
+        ir.module_constructions.selected.insert(target, constructor);
+    }
     copy_map!(static_extension_receivers);
     copy_map!(call_inline_modifiers);
     copy_map!(suspend_calls);
@@ -725,6 +728,44 @@ mod tests {
         assert_eq!(ir.reified_call_subst.len(), 2);
         assert_eq!(ir.reified_call_subst.get(&source), Some(&reified));
         assert_eq!(ir.reified_call_subst.get(&target), Some(&reified));
+    }
+
+    #[test]
+    fn expression_clone_keeps_the_selected_dependency_declaration() {
+        // An inlined copy of a dependency call reaches its backend through the callee alone: the
+        // selected declaration identity is part of the node, so no call-site side table has to be
+        // copied for a target to realize the copy exactly as it realizes the original.
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(super::super::IrExpr::UnitInstance);
+        let callee = super::super::Callee::External {
+            target: crate::fir::ExternalCallableId::from_raw(7),
+            default_provider: None,
+            params: Vec::new(),
+            ret: Ty::String,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        };
+        let source = ir.add_expr(super::super::IrExpr::Call {
+            callee: callee.clone(),
+            dispatch_receiver: Some(receiver),
+            args: Vec::new(),
+        });
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        assert_ne!(source, target);
+        let super::super::IrExpr::Call {
+            callee: copied,
+            dispatch_receiver: Some(copied_receiver),
+            args,
+        } = ir.expr(target)
+        else {
+            panic!("the copy of a call is a call");
+        };
+        assert_eq!(copied, &callee);
+        assert_eq!(Some(copied_receiver), copies.get(&receiver));
+        assert!(args.is_empty());
     }
 
     #[test]

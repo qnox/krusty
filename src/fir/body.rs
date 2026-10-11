@@ -312,6 +312,10 @@ pub enum FirCallTarget {
         /// to the checked call, not to its provider-owned physical realization: a nearer override
         /// may inherit the role without changing its stable dependency identity.
         semantic_role: Option<crate::types::SemanticCallRole>,
+        /// Exact identities of the declarations the selected declaration overrides, as the member
+        /// hierarchy proved them. Lowering freezes them with the stable dependency identity, so a
+        /// target keys a specially implemented language declaration on them, never on the call.
+        overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
         suspend: bool,
         can_inline: bool,
         inline_plan: Option<Box<FirInlineBodyPlan>>,
@@ -848,6 +852,9 @@ pub enum FirCallableReferenceTarget {
         /// override. The generated adapter call preserves the same checked identity as a direct
         /// call and must not reconstruct it from owner or name spellings.
         semantic_role: Option<crate::types::SemanticCallRole>,
+        /// Exact declarations the referenced declaration overrides; see
+        /// [`FirCallTarget::External`]'s field of the same name.
+        overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
         /// The declaration itself is `suspend`; a suspend-converted reference to an ordinary
         /// function is not.
         suspend: bool,

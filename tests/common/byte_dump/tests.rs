@@ -374,6 +374,51 @@ fn a_published_miss_stores_the_live_invocation_and_a_private_miss_does_not() {
 }
 
 #[test]
+fn replayed_diagnostics_use_the_current_source_spelling() {
+    let root = temp_root("diagnostic-source");
+    let recorded = root.join("recorded/F.kt");
+    let current = root.join("current/F.kt");
+    for source in [&recorded, &current] {
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, "fun f() = 1\n").unwrap();
+    }
+    let out = root.join("out");
+    let args = |source: &Path| {
+        vec![
+            "-d".to_string(),
+            out.display().to_string(),
+            source.display().to_string(),
+        ]
+    };
+    let recorded_stderr = format!(
+        "error: warnings found and -Werror specified\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
+        recorded.display()
+    );
+    let release = version("2.4.20");
+    remember_live_compile(
+        &args(&recorded),
+        1,
+        &recorded_stderr,
+        &root,
+        Some(release),
+        true,
+    );
+
+    let replayed =
+        replay_class_dump_with_policy(&args(&current), &root, Some(release), false, false)
+            .expect("identical source bytes replay");
+    assert_eq!(replayed.code, 1);
+    assert_eq!(
+        replayed.stderr,
+        format!(
+            "error: warnings found and -Werror specified\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
+            current.display()
+        )
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn distinct_class_sets_do_not_share_a_dump_key() {
     assert_ne!(classes_suffix(&["pkg/A"]), classes_suffix(&["pkg/B"]));
     assert_eq!(classes_suffix(&["pkg/B", "pkg/A"]), "#pkg/A,pkg/B");

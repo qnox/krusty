@@ -68,7 +68,10 @@ mod callable_reference_lhs;
 mod callable_reference_prefilter;
 mod callable_reference_selection;
 mod candidate_display;
-use candidate_display::{ambiguous_classifier_message, classifier_access_display_from_shape};
+use candidate_display::{
+    ambiguous_classifier_message, classifier_access_display_from_shape,
+    inaccessible_classifier_message,
+};
 mod capture_analysis;
 mod capture_field_order;
 mod capture_storage;
@@ -141,10 +144,11 @@ mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
+mod missing_dependency_supertypes;
 mod named_class_constructors;
 mod operator_calls;
 mod opt_in_usage;
-use operator_calls::{range_operator, ResolvedInRangeComparison};
+use operator_calls::{range_operator, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess};
 mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
@@ -153,6 +157,7 @@ pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
+mod plugin_status;
 mod postponed_applicability;
 mod postponed_constraints;
 mod postponed_diagnostics;
@@ -234,6 +239,7 @@ mod streaming_signature_bridge;
 mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
+mod superclass_validation;
 mod tailrec_declarations;
 mod type_join;
 mod type_parameter_owners;
@@ -289,6 +295,7 @@ pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
+use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -1400,6 +1407,9 @@ pub struct ClassSig {
     /// Arena declaration that owns this source classifier. Synthetic companion classifiers have no
     /// independent class declaration and therefore leave this unset.
     pub source_decl: Option<DeclId>,
+    /// Whether the declaration is structurally owned by another classifier. This is captured from
+    /// the declaration graph while source ownership is live; an internal-name `$` is not ownership.
+    pub is_nested: bool,
     pub visibility: Visibility,
     /// Resolved classifier declaration annotations, projected to the stable module index before
     /// Pass 2 so plugins and semantic checks never revisit source occurrences.
@@ -1561,6 +1571,7 @@ struct DeclaredCallableClassHeader {
     stable_declaration: Option<crate::fir::DeclarationId>,
     source_file: u32,
     source_decl: DeclId,
+    is_nested: bool,
     visibility: Visibility,
     flags: ClassFlags,
     methods: MethodMap,
@@ -1586,6 +1597,7 @@ impl ClassSig {
             stable_declaration,
             source_file,
             source_decl,
+            is_nested,
             visibility,
             flags,
             methods,
@@ -1603,6 +1615,7 @@ impl ClassSig {
             stable_declaration,
             source_file,
             source_decl: Some(source_decl),
+            is_nested,
             visibility,
             annotations: Vec::new(),
             applied_annotations: Vec::new(),
@@ -2669,33 +2682,6 @@ enum PropertyReadSelection {
     /// The selected extension, with the actual receiver when it mentions a postponed call's type
     /// variables: reading the property adds that receiver constraint to the call.
     Extension(Box<ResolvedPropertyAccess>, Option<Ty>),
-}
-
-struct PropertyReadMemberSelection {
-    name: String,
-    ty: Ty,
-    owner: TypeName,
-    interface: bool,
-    getter: Option<crate::symbol_resolver::ResolvedMember>,
-    accessor: Option<Box<crate::libraries::LibraryCallable>>,
-    /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
-    producer: crate::libraries::PropertyProducer,
-    /// Provider-published constant-value expression fact for this selected read.
-    metadata_constant_read: bool,
-    context_access: Option<Box<ResolvedPropertyAccess>>,
-    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-    compile_time_constant: Option<crate::libraries::LibraryConst>,
-    source_member: Option<crate::libraries::SourceMember>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    access: Option<(Visibility, TypeName)>,
-    /// Whether a second read through the same receiver returns the same value.
-    stable_read: bool,
-}
-
-enum PropertyReadAmbiguity {
-    MemberExtension,
-    Extension,
-    MissingContext,
 }
 
 type ModuleSymbolCache = HashMap<
@@ -11648,6 +11634,9 @@ impl<'a> Checker<'a> {
                         })
                 });
             if let Some(selected) = declaration {
+                if !selected.competing_accessors.is_empty() {
+                    return Err(self.competing_accessor_ambiguity(name, &selected));
+                }
                 let owner = selected.owner;
                 let visibility = selected.visibility;
                 let mut selected_property = selected.property;
@@ -12528,6 +12517,12 @@ impl<'a> Checker<'a> {
                         diagnostic_span,
                         format!("No context argument for '{name}' found."),
                     );
+                }
+                return Ty::Error;
+            }
+            Err(PropertyReadAmbiguity::Accessors(candidates)) => {
+                if report_diagnostics {
+                    self.report_accessor_ambiguity(diagnostic_span, candidates);
                 }
                 return Ty::Error;
             }
@@ -21936,6 +21931,7 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, scope: &CheckerScope<'_>, s: StmtId) {
         let policy_depth = self.push_statement_policies(scope, s);
         self.stmt_inner(scope, s);
+        self.check_statement_missing_supertypes(s);
         self.active_lexical_policies.truncate(policy_depth);
     }
 
@@ -22548,6 +22544,9 @@ impl<'a> Checker<'a> {
                         missing.display(&names)
                     ),
                 ),
+                PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                    self.report_accessor_ambiguity(target_span, candidates)
+                }
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
                 | PropertyWriteSelection::Receiverless(_)
@@ -22825,6 +22824,9 @@ impl<'a> Checker<'a> {
                             target_span,
                             format!("No context argument for '{name}' found."),
                         ),
+                        PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                            self.report_accessor_ambiguity(target_span, candidates)
+                        }
                         PropertyWriteSelection::None => self
                             .diags
                             .error(span, format!("unresolved reference '{name}'.")),
@@ -23041,6 +23043,13 @@ impl<'a> Checker<'a> {
                     })
             })
             .flatten();
+        if let Some(candidates) = selected_member_property
+            .as_ref()
+            .and_then(|selected| self.competing_accessor_candidates(&name, selected))
+        {
+            self.report_accessor_ambiguity(self.assignment_target_span(s), candidates);
+            return;
+        }
         let accessor_member_property = selected_member_property.as_ref().and_then(|selected| {
             let property = selected.property.as_ref()?;
             Some((selected.owner, selected.interface, property.clone()))
@@ -23247,152 +23256,6 @@ impl<'a> Checker<'a> {
             self.report_assignability_error(expected, Ty::Unit, span, "return");
         }
         expected
-    }
-
-    fn stmt_for(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: StmtId,
-        name: String,
-        range: ForRange,
-        body: ExprId,
-        label: Option<String>,
-    ) {
-        let st = self.expr(scope, range.start);
-        let et = self.expr(scope, range.end);
-        let semantic_st = self.builtin_operator_operand(scope, st);
-        let semantic_et = self.builtin_operator_operand(scope, et);
-        // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
-        // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
-        // A `Byte`/`Short` range widens to an `IntRange` (kotlinc's `Short.rangeTo(Short): IntRange`),
-        // so the counter is `Int` and the bounds coerce up — exactly like a range *value*.
-        let counter = if st == Ty::Nothing {
-            semantic_et.range_counter_type()
-        } else if et == Ty::Nothing {
-            semantic_st.range_counter_type()
-        } else {
-            Ty::range_counter_type_for(semantic_st, semantic_et)
-        };
-        let elem = if let Some(counter) = counter {
-            // The loop counts over a range class's selected members and helpers.
-            self.record_progression_plans();
-            counter
-        } else {
-            let convention = range_operator(range.kind);
-            let span = self.file.stmt_spans[statement.0 as usize];
-            match self.operator_call_ret(
-                scope,
-                range.start,
-                st,
-                convention.name,
-                &[et],
-                &[range.end],
-                span,
-                None,
-            ) {
-                Some((range_ty, range_call)) if range_ty != Ty::Error => {
-                    match self.iterator_protocol_target(
-                        scope,
-                        Some(statement),
-                        range_ty,
-                        span,
-                        true,
-                    ) {
-                        Ok(Some(protocol)) => {
-                            let elem = protocol.elem_ty;
-                            self.resolved_stmt_operator_calls
-                                .insert((statement, convention.key), range_call.clone());
-                            self.resolved_stmt_operator_arg_slots
-                                .insert((statement, convention.key), vec![Some(range.end)]);
-                            self.for_range_iterator_protocols.insert(
-                                statement,
-                                ForRangeIteratorTarget {
-                                    range: Box::new(range_call),
-                                    protocol,
-                                },
-                            );
-                            elem
-                        }
-                        Ok(None) => {
-                            self.diags.error(
-                                span,
-                                format!(
-                                    "krusty: 'for' over '{}' is not supported (missing iterator convention)",
-                                    range_ty.source_name()
-                                ),
-                            );
-                            Ty::Error
-                        }
-                        Err(()) => Ty::Error,
-                    }
-                }
-                Some(_) => Ty::Error,
-                None => {
-                    self.diags.error(
-                        span,
-                        format!(
-                            "operator '{}' cannot be applied to '{}' and '{}'",
-                            convention.name,
-                            st.source_name(),
-                            et.source_name()
-                        ),
-                    );
-                    Ty::Error
-                }
-            }
-        };
-        {
-            let body_scope = scope.child(ScopeKind::Block);
-            let scope = &body_scope;
-            self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
-            self.check_loop_body(scope, body, &label);
-        }
-    }
-
-    fn stmt_for_each(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: StmtId,
-        name: String,
-        iterable: ExprId,
-        body: ExprId,
-        label: Option<String>,
-    ) {
-        let it = self.expr(scope, iterable);
-        self.record_iteration_plans(scope, statement, iterable);
-        // Java collection accessors yield flexible platform types (`Set<E>!`). A `for` loop is a
-        // value-consuming operation, so it selects the non-null lower bound exactly as a member call
-        // would; source `Set<E>?` remains nullable and is still rejected.
-        let iteration_ty = it.platform_lower_bound();
-        // An array element type covers primitive arrays and a boxed `Array<T>`
-        // (`Obj("kotlin/Array", [T])`) — iterate either as an array. The variable is a read of
-        // that element: `Array<out T>` and `Array<*>` yield `T`, not the projection wrapper.
-        let elem = if let Some(e) = iteration_ty.array_read_elem() {
-            e
-        } else {
-            if iteration_ty == Ty::String {
-                Ty::Char // iterating a String yields its chars
-            } else if iteration_ty == Ty::Error {
-                Ty::Error
-            } else {
-                match self.record_iterator_protocol(scope, Some(statement), iterable, iteration_ty)
-                {
-                    Ok(Some(elem)) => elem,
-                    Ok(None) => {
-                        self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
-                        Ty::Error
-                    }
-                    Err(()) => Ty::Error,
-                }
-            }
-        };
-        {
-            let body_scope = scope.child(ScopeKind::Block);
-            let scope = &body_scope;
-            let flow_identity = self.declare(scope, &name, elem, false);
-            self.record_enhanced_loop_variable(flow_identity, iterable);
-            self.check_loop_body(scope, body, &label);
-        }
     }
 
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
@@ -23929,26 +23792,11 @@ impl<'a> Checker<'a> {
     }
 }
 
-fn inaccessible_classifier_message(
-    name: &str,
-    access: crate::symbol_source::ClassifierAccess,
-) -> String {
-    use crate::symbol_source::ClassifierAccess;
-
-    let kind = match access {
-        ClassifierAccess::Private => "private",
-        ClassifierAccess::Protected => "protected",
-        ClassifierAccess::Internal => "internal",
-        ClassifierAccess::PackagePrivate => "package-private",
-        ClassifierAccess::Public => "public",
-    };
-    format!("cannot access '{name}': it is {kind}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::LangFeatures;
+    use crate::frontend::{PlatformLibraries, PlatformProvider};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features};
 
@@ -23970,6 +23818,10 @@ mod tests {
     ) -> crate::jvm::jvm_libraries::JvmLibraries {
         crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization")
+    }
+
+    fn jvm_platform(libraries: impl Into<PlatformLibraries>) -> PlatformProvider {
+        PlatformProvider::jvm(libraries)
     }
 
     #[test]
@@ -24829,7 +24681,8 @@ val result = object { fun value(): String = captured }
         platform: Box<dyn crate::libraries::SemanticPlatform>,
     ) -> (File, TypeInfo, DiagSink) {
         let mut diagnostics = DiagSink::new();
-        let (file, _, info) = crate::frontend::analyze_source(src, platform, &mut diagnostics);
+        let (file, _, info) =
+            crate::frontend::analyze_source(src, jvm_platform(platform), &mut diagnostics);
         let info = info.expect("production frontend must retain checked platform analysis");
         (file, info, diagnostics)
     }
@@ -24849,7 +24702,7 @@ val result = object { fun value(): String = captured }
             .collect::<Vec<_>>();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             prepare_symbols,
             &mut diagnostics,
@@ -24889,7 +24742,7 @@ val result = object { fun value(): String = captured }
         ];
         let mut analysis = crate::frontend::analyze_source_set(
             &sources,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &mut diagnostics,
         );
         let info = analysis.types.get_mut(3).and_then(Option::take);
@@ -27958,7 +27811,7 @@ fun box(): String {
              }";
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[crate::source::SourceInput::kotlin(source).with_file_stem("Diamond")],
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &crate::features::LangFeatures::new(),
             &mut diagnostics,
         );
@@ -28260,10 +28113,10 @@ fun box(): String {
         let source = "val String.length: String get() = \"bad\"\n\
              fun len(s: String, n: String?): Int = s.length + (n?.length ?: 0)";
         let mut diagnostics = DiagSink::new();
-        let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
+        let cp = std::rc::Rc::new(crate::toolchain::stdlib_and_jdk_classpath());
         let (file, symbols, info) = crate::frontend::analyze_source(
             source,
-            Box::new(initialized_jvm_libraries(cp)),
+            jvm_platform(Box::new(initialized_jvm_libraries(cp))),
             &mut diagnostics,
         );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
@@ -28339,8 +28192,9 @@ fun box(): String {
         let source = "enum class Direct { VALUE }\n\
              class Owner { enum class Nested { VALUE } }\n\
              fun inspect() { Direct.entries; Owner.Nested.entries }";
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
+            crate::toolchain::stdlib_and_jdk_classpath(),
+        ));
         let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         let reads = file
             .expr_arena
@@ -28409,8 +28263,9 @@ fun box(): String {
     fn enum_name_and_ordinal_are_ordinary_inherited_properties() {
         let source = "enum class State { READY }\n\
              fun inspect(state: State): String = state.name + state.ordinal";
-        let platform =
-            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
+            crate::toolchain::stdlib_and_jdk_classpath(),
+        ));
         let (file, info, diagnostics) = retained_platform_analysis(source, Box::new(platform));
         assert_no_diags(&diagnostics);
 
@@ -29593,8 +29448,11 @@ fun box(): String {
                  if ((PREFIX as String?) == \"ignored\") return \"early\"\n\
                  return consume(PREFIX)\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert_no_diags(&diagnostics);
     }
 
@@ -29666,7 +29524,7 @@ fun box(): String {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features(
             &inputs,
-            Box::new(platform),
+            jvm_platform(Box::new(platform)),
             &LangFeatures::from_source(source),
             &mut diagnostics,
         );
@@ -30541,8 +30399,11 @@ fun use() {
                  execute(Command::Add); execute(Command(), Command::InnerAdd)\n\
                  use0(o::Inner).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30555,8 +30416,11 @@ fun use() {
              fun withO(block: (String) -> String): String = \"\"\n\
              object Host { fun hostFoo(vararg values: String): String = \"\" }\n\
              fun use() { consume(::of); withO(::hostFoo) }";
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let _ = info.expect("production frontend must check the source");
         let files = vec![file];
@@ -30616,8 +30480,11 @@ fun use() {
                  use0(o::Inner1).result; use1(o::Inner1).result\n\
                  use0(o::Inner2).result; use1(o::Inner2).result\n\
              }";
-        let _ =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
     }
 
@@ -30703,8 +30570,11 @@ fun use() {
     fn unannotated_delegated_properties_infer_classpath_extension_getvalue_return() {
         let source = "package test\nclass Delegate\nval prop by Delegate()";
         let mut diagnostics = DiagSink::new();
-        let (file, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let (file, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(FakeMemberPlatform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         let info = info.expect("production frontend must check the source");
         assert!(
@@ -31849,7 +31719,7 @@ fun use(counter: Counter) {
         let inputs = [crate::frontend::SourceInput::kotlin(source)];
         let mut analysis = crate::frontend::analyze_source_set_with_features_and_prepare_retained(
             &inputs,
-            Box::new(crate::libraries::EmptySymbolSource),
+            jvm_platform(Box::new(crate::libraries::EmptySymbolSource)),
             &LangFeatures::new(),
             |_, symbols| {
                 // Keep interface search active when superclass metadata is external.
@@ -32044,8 +31914,11 @@ fun use(counter: Counter) {
         let mut diagnostics = DiagSink::new();
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
         let platform = initialized_jvm_libraries(classpath);
-        let (_, symbols, info) =
-            crate::frontend::analyze_source(source, Box::new(platform), &mut diagnostics);
+        let (_, symbols, info) = crate::frontend::analyze_source(
+            source,
+            jvm_platform(Box::new(platform)),
+            &mut diagnostics,
+        );
         let symbols = symbols.expect("production frontend must retain finalized symbols");
         assert!(info.is_some(), "production frontend must check the source");
         {
@@ -33419,8 +33292,10 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
         resolved_operator_calls: HashMap::new(),
+        resolved_builtin_operator_accesses: HashMap::new(),
         resolved_in_range_comparisons: HashMap::new(),
         resolved_stmt_operator_calls: HashMap::new(),
+        resolved_stmt_builtin_operator_accesses: HashMap::new(),
         resolved_stmt_operator_arg_slots: HashMap::new(),
         indexed_operator_ambiguous: false,
         resolved_inc_dec: HashMap::new(),
@@ -34795,11 +34670,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 // lose nested classifiers and violate bind-once resolution.
                 continue;
             }
-            if reference.is_annotation() {
-                // Annotation occurrences are retained by their owning declaration and checked in
-                // that declaration's lexical scope. `detached_type_refs` carries the same reference
-                // only so Pass 1 can bind its identity for compact-header projection; rechecking it
-                // here from file scope loses local/nested scope and declaration suppressions.
+            if reference.is_annotation() || reference.is_superclass() {
+                // Annotation and superclass occurrences are checked by their owning declaration (a
+                // superclass by signature solving); the detached copy only lets Pass 1 bind it, and
+                // rechecking it from file scope loses its declaration's lexical policies.
                 continue;
             }
             c.type_ref_ty(scope, reference);
@@ -36043,8 +35917,15 @@ struct Checker<'a> {
     extension_receiver_expr_uses: Vec<Vec<Span>>,
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
     resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
+    /// Builtin scalar operators lower without a callable target, but checking still records
+    /// their exact semantic dispatch classifier for qualified-access diagnostics.
+    resolved_builtin_operator_accesses:
+        HashMap<(ExprId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
     resolved_in_range_comparisons: HashMap<ExprId, ResolvedInRangeComparison>,
     resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    /// Statement counterpart of [`Self::resolved_builtin_operator_accesses`].
+    resolved_stmt_builtin_operator_accesses:
+        HashMap<(StmtId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
     indexed_operator_ambiguous: bool,
@@ -46372,6 +46253,8 @@ impl<'a> Checker<'a> {
         let checked = self.type_ref_ty(scope, bound);
         if checked.contains_error() {
             self.report_unresolved_type_ref(bound);
+        } else {
+            self.check_bound_missing_supertypes(bound, checked);
         }
         let bound_is_interface =
             crate::fir::ResolvedTypeParameterBound::is_interface_type(checked, |owner| {
@@ -49882,6 +49765,19 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        if let Some((span, superclass)) = cl.base_class_span.zip(
+            current_classifier
+                .as_ref()
+                .and_then(|classifier| classifier.stable_declaration)
+                .and_then(|declaration| {
+                    self.resolved_index?
+                        .classifier_header(declaration)?
+                        .superclass
+                })
+                .map(|superclass| superclass.get()),
+        ) {
+            self.record_finalized_superclass_type(span, superclass);
+        }
         if !body_local_class && self.active_declarations.is_none() {
             // The retained inspection pipeline keeps the original declaration AST so editor
             // navigation can point from each header occurrence to the declaration selected by the
@@ -49892,12 +49788,11 @@ impl<'a> Checker<'a> {
             let header_scope = scope.child(ScopeKind::Block);
             header_scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
             if let Some(base) = cl.base_class.as_deref() {
-                let reference = base_class_type_ref(
-                    base,
-                    &cl.base_type_args,
-                    cl.base_class_span.unwrap_or(cl.span),
-                );
-                self.type_ref_ty(&header_scope, &reference);
+                let span = cl.base_class_span.unwrap_or(cl.span);
+                let reference = base_class_type_ref(base, &cl.base_type_args, span);
+                if !self.resolved_type_tys.contains_key(&(span.lo, span.hi)) {
+                    self.type_ref_ty(&header_scope, &reference);
+                }
             }
             for reference in &cl.supertypes {
                 self.type_ref_ty(&header_scope, reference);
@@ -49943,76 +49838,10 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
-            cl.base_class.as_ref()?;
-            self.resolved_body_local_supertypes
-                .get(&owner)
-                .and_then(|supertypes| supertypes.first())
-                .and_then(|supertype| supertype.kotlin_class_internal())
-                .or_else(|| self.direct_superclass_name(owner))
-                .map(|superclass| {
-                    (
-                        owner,
-                        superclass,
-                        self.resolved_type_name(superclass)
-                            .is_none_or(|class| class.source_file != Some(self.file_index)),
-                    )
-                })
-        }) {
-            let inheritance = self
-                .resolver()
-                .classifier(superclass)
-                .map(|shape| shape.inheritance);
-            crate::trace_compiler!(
-                "resolve",
-                "superclass capability class={} declaration={d:?} superclass={} separate_emission={separate_emission} inheritance={inheritance:?}",
-                cl.name,
-                superclass.render(),
-            );
-            let cyclic_header = self.diags.diags.iter().any(|diagnostic| {
-                diagnostic.file == self.file_index
-                    && cl.span.lo <= diagnostic.span.lo
-                    && diagnostic.span.hi <= cl.span.hi
-                    && diagnostic
-                        .msg
-                        .contains("cycle in supertypes and/or containing declarations")
-            });
-            let diagnostic = match inheritance {
-                _ if cyclic_header => None,
-                _ if cl.is_enum() => None,
-                None => None,
-                Some(shape) if !shape.is_extensible => Some("it is not extensible"),
-                _ => None,
-            };
-            if let Some(reason) = diagnostic {
-                self.diags.error(
-                    cl.span,
-                    format!(
-                        "krusty: superclass '{}' cannot be subclassed: {reason}",
-                        superclass.render()
-                    ),
-                );
-            }
-            // `sealed` is abstract: its own subclasses discharge members the sealed class leaves
-            // open, including members inherited from a superclass emitted in another unit.
-            let leaves_abstract_members = !cl.is_enum()
-                && separate_emission
-                && inheritance.is_some_and(|shape| shape.is_abstract)
-                && !cl.modality.is_abstract()
-                && !self.has_no_unimplemented_abstract_members(owner);
-            if leaves_abstract_members {
-                // This is a Kotlin declaration error, not an emitter capability gate. Diagnose it
-                // while the complete semantic hierarchy is live so an invalid concrete class can
-                // never reach common lowering.
-                self.diags.error(
-                    cl.span,
-                    format!(
-                        "class '{}' is not abstract and does not implement all abstract members",
-                        cl.name
-                    ),
-                );
-            }
+        if !self.fragment.is_type_use_annotations() {
+            self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
+        self.validate_class_superclass(d, cl, current_owner);
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
         // does a LOCAL class — it is entered from the body it was written in and captures the
         // enclosing instance, so the outer receivers and type parameters stay reachable.
@@ -55576,6 +55405,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         self.check_expression_opt_in(scope, e);
+        self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;
@@ -56356,16 +56186,14 @@ impl<'a> Checker<'a> {
                     trailing_lambda,
                     &candidate.call_sig,
                 )?;
+                let whole_array =
+                    named_whole_array_varargs(&argument_parameters, arg_names, &candidate.call_sig);
                 self.lambda_overload_partially_applicable(
+                    scope,
                     &candidate,
                     None,
                     (args, partial),
-                    &argument_parameters,
-                    &named_whole_array_varargs(
-                        &argument_parameters,
-                        arg_names,
-                        &candidate.call_sig,
-                    ),
+                    (&argument_parameters, &whole_array),
                     type_args,
                 )
                 .then_some((candidate, argument_parameters))
@@ -57885,7 +57713,9 @@ impl<'a> Checker<'a> {
                                 receiver_depth: label_depth,
                             },
                         };
-                        self.mark_implicit_receiver_selection(e, receiver);
+                        let ty = self
+                            .select_labeled_receiver(scope, e, receiver, idx == top)
+                            .unwrap_or(ty);
                         if idx == top {
                             self.expr_lowers.insert(e, ExprLowering::LabeledThisInner);
                         } else {
@@ -57910,7 +57740,9 @@ impl<'a> Checker<'a> {
                                     )
                             });
                         if let Some(receiver) = receiver {
-                            self.mark_implicit_receiver_selection(e, receiver);
+                            let ty = self
+                                .select_labeled_receiver(scope, e, receiver, receiver.current)
+                                .unwrap_or(receiver.ty);
                             self.expr_lowers.insert(
                                 e,
                                 if receiver.current {
@@ -57919,7 +57751,7 @@ impl<'a> Checker<'a> {
                                     ExprLowering::LabeledThisDispatch
                                 },
                             );
-                            receiver.ty
+                            ty
                         } else {
                             self.diags
                                 .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -58299,7 +58131,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             });
-            if let Some((selected, params, ret)) = selected_get {
+            if let Some((selected, params, ret, bindings)) = selected_get {
                 let vararg = selected
                     .call_sig
                     .vararg_index
@@ -58310,12 +58142,7 @@ impl<'a> Checker<'a> {
                     return self.set(e, Ty::Error);
                 }
                 if !self.commit_indexed_operator_arguments(
-                    e,
-                    &selected.call_sig.param_defaults,
-                    selected.context_count,
-                    &params,
-                    vararg,
-                    &indices,
+                    e, &selected, &bindings, &params, vararg, &indices,
                 ) {
                     return self.set(e, Ty::Error);
                 }
@@ -58809,9 +58636,13 @@ impl<'a> Checker<'a> {
             IncDecSite::Expression(expression) => {
                 self.resolved_operator_calls
                     .remove(&(expression, operator_key));
+                self.resolved_builtin_operator_accesses
+                    .remove(&(expression, operator_key));
             }
             IncDecSite::Statement(statement) => {
                 self.resolved_stmt_operator_calls
+                    .remove(&(statement, operator_key));
+                self.resolved_stmt_builtin_operator_accesses
                     .remove(&(statement, operator_key));
             }
         }
@@ -58829,6 +58660,18 @@ impl<'a> Checker<'a> {
         let mut selected = None;
         for receiver_ty in receivers {
             if let Some(updated_ty) = builtin_inc_dec_result(receiver_ty) {
+                if let Some(access) = SelectedBuiltinOperatorAccess::member(receiver_ty) {
+                    match site {
+                        IncDecSite::Expression(expression) => {
+                            self.resolved_builtin_operator_accesses
+                                .insert((expression, operator_key), access);
+                        }
+                        IncDecSite::Statement(statement) => {
+                            self.resolved_stmt_builtin_operator_accesses
+                                .insert((statement, operator_key), access);
+                        }
+                    }
+                }
                 selected = Some((receiver_ty, updated_ty, None));
                 break;
             }
@@ -58976,6 +58819,9 @@ impl<'a> Checker<'a> {
                                 self.span(target),
                                 format!("No context argument for '{name}' found."),
                             ),
+                            PropertyWriteSelection::AccessorAmbiguous(candidates) => {
+                                self.report_accessor_ambiguity(self.span(target), candidates)
+                            }
                             PropertyWriteSelection::None
                             | PropertyWriteSelection::Implicit(_)
                             | PropertyWriteSelection::Receiverless(_)
@@ -60534,6 +60380,17 @@ impl<'a> Checker<'a> {
             operator_span,
             prepared_lhs,
         } = operands;
+        let operator_key = match op {
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(SyntheticOperatorCall::CompareTo),
+            _ => op
+                .arith_operator_name()
+                .and_then(SyntheticOperatorCall::from_name),
+        };
+        if let Some(operator) = operator_key {
+            self.resolved_operator_calls.remove(&(e, operator));
+            self.resolved_builtin_operator_accesses
+                .remove(&(e, operator));
+        }
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
                 let lt = match prepared_lhs {
@@ -60843,7 +60700,17 @@ impl<'a> Checker<'a> {
             }
             let builtin_lt = self.builtin_operator_operand(scope, lt);
             let builtin_rt = self.builtin_operator_operand(scope, rt);
-            self.check_binary(op, builtin_lt, builtin_rt, self.span(e))
+            let result = self.check_binary(op, builtin_lt, builtin_rt, self.span(e));
+            if result != Ty::Error {
+                if let (Some(operator), Some(access)) = (
+                    operator_key,
+                    SelectedBuiltinOperatorAccess::member(builtin_lt),
+                ) {
+                    self.resolved_builtin_operator_accesses
+                        .insert((e, operator), access);
+                }
+            }
+            result
         };
         self.set(e, t)
     }
@@ -63561,10 +63428,18 @@ impl<'a> Checker<'a> {
         // Expected-type checking may revisit the same arena node.
         self.resolved_operator_calls
             .remove(&(expression, target_key));
+        self.resolved_builtin_operator_accesses
+            .remove(&(expression, target_key));
         // Treat boxed Kotlin primitives as built-in unary operands.
         let semantic_operand = self.builtin_operator_operand(scope, ot);
         match builtin_unary_result(self.libraries, semantic_operand, op) {
-            Some(result) => result,
+            Some(result) => {
+                if let Some(access) = SelectedBuiltinOperatorAccess::member(semantic_operand) {
+                    self.resolved_builtin_operator_accesses
+                        .insert((expression, target_key), access);
+                }
+                result
+            }
             _ if ot == Ty::Error => Ty::Error,
             _ => {
                 let operator_span = Span::new(span.lo, span.lo.saturating_add(1));

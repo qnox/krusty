@@ -98,8 +98,10 @@ impl Classpath {
         }
         {
             let mut resolved = self.resolved_types.borrow_mut();
-            for classifier in &classifiers {
-                resolved.remove(classifier);
+            for types in resolved.values_mut() {
+                for classifier in &classifiers {
+                    types.remove(classifier);
+                }
             }
         }
         let mut symbols = self.symbols_memo.borrow_mut();
@@ -114,12 +116,10 @@ impl Classpath {
             }
             packages.insert(outermost.namespace());
         }
-        for package in packages {
-            symbols.remove(&SymbolNamespace::Package(package));
-        }
-        for classifier in classifier_namespaces {
-            symbols.remove(&SymbolNamespace::Classifier(classifier));
-        }
+        symbols.retain(|(_, namespace), _| match namespace {
+            SymbolNamespace::Package(package) => !packages.contains(package),
+            SymbolNamespace::Classifier(classifier) => !classifier_namespaces.contains(classifier),
+        });
     }
 
     /// Remove all in-memory classes.

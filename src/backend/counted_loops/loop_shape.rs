@@ -205,11 +205,18 @@ impl Realizer<'_> {
     /// `inductionVar += step`; a `Char` induction variable is narrowed back after the `Int` add.
     fn increment_induction_variable(&mut self, variables: &LoopVariables, ty: Ty) -> ExprId {
         let current = self.add(IrExpr::GetValue(variables.induction));
-        let stepped = self.add(IrExpr::PrimitiveBinOp {
+        let step = IrExpr::PrimitiveBinOp {
             op: IrBinOp::Add,
             lhs: current,
             rhs: variables.step,
-        });
+        };
+        // The signed addition Kotlin promotes the variable to: an unsigned progression steps its
+        // signed carrier, as `UInt.plus` adds the `Int` it wraps.
+        let sum = match ty {
+            Ty::Long | Ty::ULong => Ty::Long,
+            _ => Ty::Int,
+        };
+        let stepped = self.add_checked(step, sum);
         let stepped = if ty == Ty::Char {
             self.range_bound(stepped, ty)
         } else {

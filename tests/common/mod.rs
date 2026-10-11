@@ -1,5 +1,6 @@
 //! Shared test helpers.
 
+use krusty::compilation_target::CompilationTarget;
 pub(crate) mod byte_dump;
 pub(crate) mod conformance_report;
 pub(crate) mod kotlin_metadata;
@@ -7,7 +8,7 @@ pub(crate) mod kotlinc_lib;
 pub(crate) mod kotlinc_server;
 pub mod language_directives;
 mod metadata_diff;
-mod native_backend;
+pub mod native_backend;
 pub(crate) mod producing_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
@@ -26,7 +27,7 @@ pub mod source_set_compile;
 #[allow(unused_imports)]
 pub use native_backend::{
     expect_native_box, expect_native_decline, expect_native_exit, expect_native_sources,
-    native_sys_header, write_native_runtime_headers,
+    native_analysis, native_analysis_with_plugins, native_sys_header, write_native_runtime_headers,
 };
 pub use source_set_compile::compile_in_process_files;
 
@@ -393,13 +394,15 @@ struct InProcessEmissionReport {
     has_errors: bool,
 }
 
-/// What in-process compiles analyze against: `platform` plus every native compiler plugin krusty
-/// ships — the configuration a build applying the kotlinx.serialization plugin selects with
-/// `-Xplugin`. Without a selection no plugin runs, as with kotlinc (`cli_compiler_plugin_e2e`).
+/// What in-process compiles analyze against: `target`'s rules over `platform`'s declarations, plus
+/// every native compiler plugin krusty ships — the configuration a build applying the
+/// kotlinx.serialization plugin selects with `-Xplugin`. Without a selection no plugin runs, as with
+/// kotlinc (`cli_compiler_plugin_e2e`).
 pub fn with_native_plugins(
-    platform: impl Into<krusty::frontend::PlatformProvider>,
+    target: krusty::compilation_target::CompilationTarget,
+    platform: impl Into<krusty::frontend::PlatformLibraries>,
 ) -> krusty::frontend::PlatformProvider {
-    platform.into().with_native_plugins(
+    krusty::frontend::PlatformProvider::new(target, platform).with_native_plugins(
         krusty::plugins::registry::PluginRegistry::with_builtins().every_native_extension(),
     )
 }
@@ -421,9 +424,10 @@ fn emit_in_process<B: krusty::compiler::Backend>(
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let features = krusty::features::LangFeatures::from_source(src);
+    // The backend names the target; the analysis it consumes is checked under the same rules.
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(backend.compilation_target(), platform),
         &features,
         &mut diags,
     );
@@ -452,6 +456,10 @@ pub fn capture_common_ir(
 
     impl krusty::compiler::Backend for CaptureBackend {
         type State = ();
+
+        fn compilation_target(&self) -> krusty::compilation_target::CompilationTarget {
+            CompilationTarget::Jvm
+        }
 
         fn lower_ir_file(
             &self,
@@ -574,7 +582,14 @@ pub fn compile_in_process_metadata_cp_module_target(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
+    // kotlinc's reference compile has its stdlib and the JDK on its classpath by default.
+    let mut jars = cp_jars.to_vec();
+    for default in [stdlib_jar(), jdk_modules()] {
+        if !jars.contains(&default) {
+            jars.push(default);
+        }
+    }
+    let cp = std::rc::Rc::new(Classpath::new(jars));
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),
@@ -584,7 +599,7 @@ pub fn compile_in_process_metadata_cp_module_target(
     let features = krusty::features::LangFeatures::from_source(src);
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(CompilationTarget::Jvm, platform),
         &features,
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
@@ -798,7 +813,7 @@ where
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::new(),
         prepare,
         &mut diags,
@@ -1166,6 +1181,47 @@ pub fn java_home() -> String {
              There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
         )
     })
+}
+
+/// Start `main_class` in its own `java` process with `arguments` as raw bytes and `input` on its
+/// standard input, and wait for it. The persistent runners cannot do this: a program's arguments and
+/// standard input belong to its process, and theirs carry the runner protocol. The locale is UTF-8
+/// so the launcher decodes the arguments as UTF-8, and the environment is otherwise empty, so
+/// nothing the host exports (a `JAVA_TOOL_OPTIONS` banner) reaches the program's output. `None` when
+/// no JDK is there.
+pub fn run_jvm_main(
+    classpath: &[PathBuf],
+    main_class: &str,
+    arguments: &[&std::ffi::OsStr],
+    input: &[u8],
+) -> Option<std::process::Output> {
+    let java = Path::new(&java_home()).join("bin/java");
+    if !java.is_file() {
+        return None;
+    }
+    let classpath = std::env::join_paths(classpath).expect("build the class path");
+    let mut child = Command::new(java)
+        .env_clear()
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .arg("-cp")
+        .arg(classpath)
+        .arg(main_class)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // Written on its own thread: a program may print before it has read all of its input.
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let output = child.wait_with_output().ok()?;
+    writer.join().expect("the input writer");
+    Some(output)
 }
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
@@ -2099,7 +2155,7 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::default(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
@@ -2554,7 +2610,12 @@ pub fn inspect_checker_with_classpath<T>(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
     );
     let inputs = [SourceInput::kotlin(main)];
-    let analysis = analyze_source_set_with_features(&inputs, platform, &features, &mut diags);
+    let analysis = analyze_source_set_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(platform),
+        &features,
+        &mut diags,
+    );
     let file = analysis
         .files
         .first()

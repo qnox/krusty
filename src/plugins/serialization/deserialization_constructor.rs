@@ -134,11 +134,12 @@ fn multi_mask_check(
         let expected = ir.add_expr(IrExpr::Const(IrConst::Int(*required)));
         let mask = ir.add_expr(IrExpr::Const(IrConst::Int(*required)));
         let seen = ir.add_expr(IrExpr::GetValue(word as u32 + 1));
-        let masked = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitAnd,
-            lhs: mask,
-            rhs: seen,
-        });
+        let masked = ir.add_arithmetic(
+            crate::ir::IrBinOp::BitAnd,
+            mask,
+            seen,
+            crate::types::Ty::Int,
+        );
         missing_conditions.push(ir.add_expr(IrExpr::PrimitiveBinOp {
             op: crate::ir::IrBinOp::Ne,
             lhs: expected,
@@ -150,11 +151,13 @@ fn multi_mask_check(
         .next()
         .expect("multi-mask constructor has masks");
     for rhs in missing_conditions {
-        missing = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitOr,
-            lhs: missing,
+        // Kotlin's non-short-circuit `Boolean.or(Boolean): Boolean`.
+        missing = ir.add_arithmetic(
+            crate::ir::IrBinOp::BitOr,
+            missing,
             rhs,
-        });
+            crate::types::Ty::Boolean,
+        );
     }
 
     let array_ty = class_ty("kotlin/IntArray");
@@ -199,13 +202,102 @@ fn multi_mask_check(
 /// Kotlin's source-level name for the generated constructor's trailing disambiguating parameter.
 const MARKER_PARAMETER: &str = "serializationConstructorMarker";
 
-/// Add the deserialization constructor for a plain serializable data class. It is synthetic in the
-/// class file but published as an internal Kotlin secondary constructor.
+/// The deserialization constructor's mask parameter count: kotlinc keeps one mask slot past every
+/// complete 32-element group.
+fn mask_count(elements: usize) -> usize {
+    elements / 32 + 1
+}
+
+/// Declare the deserialization constructor for a plain serializable data class. It is synthetic in
+/// the class file but published as an internal Kotlin secondary constructor.
 ///
-/// It takes one argument per serial element and initializes every backing field in declaration
-/// order: an element from its argument (or its default when the element was absent), and a
-/// `@Transient` property — which is not an element — from its initializer, as kotlinc does.
-pub(super) fn add_deserialization_constructor(
+/// It takes one argument per serial element after the seen-element masks, and a trailing
+/// `SerializationConstructorMarker`. Its body is realized by
+/// [`complete_deserialization_constructor`].
+pub(super) fn declare_deserialization_constructor(
+    ir: &mut IrFile,
+    class_id: ClassId,
+    named_fields: &[(String, Ty)],
+    elements: &SerialElements,
+) {
+    let element_fields = elements.select(named_fields);
+    // The deserialization ABI retains a value-class field's BOXED source type. The extra default
+    // marker below disambiguates this constructor from the physical primary constructor; the body
+    // performs the representation conversion when storing the field.
+    let mask_count = mask_count(element_fields.len());
+    let mut params = vec![Ty::Int; mask_count];
+    params.extend(element_fields.iter().map(|(_, ty)| *ty));
+    params.push(class_ty(
+        "kotlinx/serialization/internal/SerializationConstructorMarker",
+    ));
+    let super_owner = ir.classes[class_id as usize].superclass;
+    // kotlinc delegates to the superclass's no-argument constructor. A class whose own `super()`
+    // passes no arguments selected exactly that one, so the call reuses its target and reaches a
+    // sealed or private constructor through the accessor. One that passes arguments selected a
+    // different constructor; the plugin does not select the no-argument one for it yet.
+    let super_target = {
+        let class = &ir.classes[class_id as usize];
+        if class.super_args.is_empty() && class.super_ctor_params.is_empty() {
+            class.super_ctor
+        } else {
+            crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY
+        }
+    };
+    let owner_start_line = ir.classes[class_id as usize].decl_start_line;
+    let ordinal = u32::try_from(ir.classes[class_id as usize].secondary_ctors.len())
+        .expect("too many secondary constructors for an IR identity");
+    ir.classes[class_id as usize]
+        .secondary_ctors
+        .push(IrSecondaryCtor {
+            // Generated: its debug identity is `generated_debug`, not a source line.
+            lines: crate::ir::IrSecondaryCtorLines::default(),
+            annotations: DeclarationAnnotations::default(),
+            source_order: u32::MAX,
+            prefix_params: Vec::new(),
+            vararg_index: None,
+            params,
+            declared_spellings: Default::default(),
+            named_params: (0..mask_count)
+                .map(|word| (format!("seen{word}"), Ty::Int))
+                .chain(element_fields.iter().cloned())
+                .chain(std::iter::once((
+                    MARKER_PARAMETER.to_string(),
+                    Ty::nullable(class_ty(
+                        "kotlinx/serialization/internal/SerializationConstructorMarker",
+                    )),
+                )))
+                .collect(),
+            metadata_visibility: Some(crate::types::Visibility::Internal),
+            generated_debug: crate::ir::IrGeneratedDeclarationDebug::declaration_line(
+                owner_start_line,
+            ),
+            defaults: vec![],
+            delegate_prelude: Vec::new(),
+            delegate_args: vec![],
+            default_parameters: Vec::new(),
+            body: None,
+            delegate: CtorDelegateTarget::Super {
+                owner: super_owner,
+                target_params: vec![],
+                target: super_target,
+                default_masks: vec![],
+            },
+            synthetic: true,
+            vc_params: false,
+            param_checks: Vec::new(),
+        });
+    ir.record_generated_secondary_constructor(
+        class_id,
+        IrSecondaryConstructorRole::SerializationDeserialization,
+        ordinal,
+    );
+}
+
+/// Realize the body [`declare_deserialization_constructor`] left out: it initializes every
+/// backing field in declaration order, an element from its argument (or its default when the
+/// element was absent), and a `@Transient` property — which is not an element — from its
+/// initializer, as kotlinc does.
+pub(super) fn complete_deserialization_constructor(
     ir: &mut IrFile,
     class_id: ClassId,
     serializer_id: ClassId,
@@ -213,22 +305,17 @@ pub(super) fn add_deserialization_constructor(
     elements: &SerialElements,
     cached_descriptor: Option<u32>,
 ) {
+    let ordinal = ir
+        .generated_secondary_constructor(
+            class_id,
+            IrSecondaryConstructorRole::SerializationDeserialization,
+        )
+        .expect("a plain serializable class has its declared deserialization constructor");
     let element_fields = elements.select(named_fields);
-    // The deserialization ABI retains a value-class field's BOXED source type. The extra default
-    // marker below disambiguates this constructor from the physical primary constructor; the body
-    // performs the representation conversion when storing the field.
-    let field_tys = element_fields.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
-    // kotlinc keeps one mask slot past every complete 32-element group.
-    let mask_count = element_fields.len() / 32 + 1;
-    let mut params = vec![Ty::Int; mask_count];
-    params.extend(field_tys.iter().copied());
-    params.push(class_ty(
-        "kotlinx/serialization/internal/SerializationConstructorMarker",
-    ));
-    let has_value_field = field_tys
+    let mask_count = mask_count(element_fields.len());
+    let has_value_field = element_fields
         .iter()
-        .any(|ty| value_class_underlying(ir, ty).is_some());
-
+        .any(|(_, ty)| value_class_underlying(ir, ty).is_some());
     // An element is optional when its property declares a default: a constructor parameter's
     // default or a body property's initializer.
     let optional = elements
@@ -247,11 +334,12 @@ pub(super) fn add_deserialization_constructor(
         let required = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
         let and_lhs = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
         let seen = ir.add_expr(IrExpr::GetValue(1));
-        let masked = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitAnd,
-            lhs: and_lhs,
-            rhs: seen,
-        });
+        let masked = ir.add_arithmetic(
+            crate::ir::IrBinOp::BitAnd,
+            and_lhs,
+            seen,
+            crate::types::Ty::Int,
+        );
         let missing = ir.add_expr(IrExpr::PrimitiveBinOp {
             op: crate::ir::IrBinOp::Ne,
             lhs: required,
@@ -296,8 +384,9 @@ pub(super) fn add_deserialization_constructor(
             if value_class_underlying(ir, field_ty).is_some() {
                 // Unlike ordinary source-constructor parameters, this ABI slot carries the
                 // value-class BOX. Publish that exact expression representation so JVM lowering
-                // inserts `unbox-impl` at the erased backing-field store.
-                ir.physical_types.insert(argument, *field_ty);
+                // inserts `unbox-impl` at the erased backing-field store. The slot holds the box
+                // reference itself, so a nullable property's `X?` is still physically `X`.
+                ir.physical_types.insert(argument, field_ty.non_null());
             }
             ir.add_expr(IrExpr::SetField {
                 receiver: this,
@@ -370,11 +459,8 @@ pub(super) fn add_deserialization_constructor(
         let bit = ir.add_expr(IrExpr::Const(IrConst::Int(
             1i32.wrapping_shl((element % 32) as u32),
         )));
-        let masked = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::BitAnd,
-            lhs: seen,
-            rhs: bit,
-        });
+        let masked =
+            ir.add_arithmetic(crate::ir::IrBinOp::BitAnd, seen, bit, crate::types::Ty::Int);
         let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let absent = ir.add_expr(IrExpr::PrimitiveBinOp {
             op: crate::ir::IrBinOp::Eq,
@@ -398,70 +484,16 @@ pub(super) fn add_deserialization_constructor(
         stmts: body_stmts,
         value: None,
     });
-    let super_owner = ir.classes[class_id as usize].superclass;
-    // kotlinc delegates to the superclass's no-argument constructor. A class whose own `super()`
-    // passes no arguments selected exactly that one, so the call reuses its target and reaches a
-    // sealed or private constructor through the accessor. One that passes arguments selected a
-    // different constructor; the plugin does not select the no-argument one for it yet.
-    let super_target = {
-        let class = &ir.classes[class_id as usize];
-        if class.super_args.is_empty() && class.super_ctor_params.is_empty() {
-            class.super_ctor
-        } else {
-            crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY
-        }
-    };
-    let owner_start_line = ir.classes[class_id as usize].decl_start_line;
-    let ordinal = u32::try_from(ir.classes[class_id as usize].secondary_ctors.len())
-        .expect("too many secondary constructors for an IR identity");
-    ir.classes[class_id as usize]
-        .secondary_ctors
-        .push(IrSecondaryCtor {
-            // Generated: its debug identity is `generated_debug`, not a source line.
-            lines: crate::ir::IrSecondaryCtorLines::default(),
-            annotations: DeclarationAnnotations::default(),
-            source_order: u32::MAX,
-            prefix_params: Vec::new(),
-            vararg_index: None,
-            params,
-            declared_spellings: Default::default(),
-            named_params: (0..mask_count)
-                .map(|word| (format!("seen{word}"), Ty::Int))
-                .chain(element_fields.iter().cloned())
-                .chain(std::iter::once((
-                    MARKER_PARAMETER.to_string(),
-                    Ty::nullable(class_ty(
-                        "kotlinx/serialization/internal/SerializationConstructorMarker",
-                    )),
-                )))
-                .collect(),
-            metadata_visibility: Some(crate::types::Visibility::Internal),
-            generated_debug: crate::ir::IrGeneratedDeclarationDebug::declaration_line(
-                owner_start_line,
-            ),
-            defaults: vec![],
-            delegate_prelude,
-            delegate_args: vec![],
-            default_parameters: Vec::new(),
-            body: Some(body),
-            delegate: CtorDelegateTarget::Super {
-                owner: super_owner,
-                target_params: vec![],
-                target: super_target,
-                default_masks: vec![],
-            },
-            synthetic: true,
-            // The JVM value-class pass makes this constructor private and emits the ordinary public
-            // `DefaultConstructorMarker` accessor. The serialization constructor itself retains
-            // only `SerializationConstructorMarker`, matching kotlinc's nestmate call target.
-            vc_params: has_value_field,
-            param_checks: Vec::new(),
-        });
-    ir.record_generated_secondary_constructor(
-        class_id,
-        IrSecondaryConstructorRole::SerializationDeserialization,
-        ordinal,
+    let constructor = &mut ir.classes[class_id as usize].secondary_ctors[ordinal as usize];
+    assert!(
+        constructor.body.replace(body).is_none(),
+        "a declared deserialization constructor receives one body"
     );
+    constructor.delegate_prelude = delegate_prelude;
+    // The JVM value-class pass makes this constructor private and emits the ordinary public
+    // `DefaultConstructorMarker` accessor. The serialization constructor itself retains
+    // only `SerializationConstructorMarker`, matching kotlinc's nestmate call target.
+    constructor.vc_params = has_value_field;
 }
 
 /// Store property `field`'s default. kotlinc attributes the DEFAULT VALUE to the property's own

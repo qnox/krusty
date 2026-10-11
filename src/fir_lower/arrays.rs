@@ -199,11 +199,7 @@ impl BodyLowering<'_> {
         });
         let index = self.ir.add_expr(IrExpr::GetValue(index_slot));
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let increment = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: index,
-            rhs: one,
-        });
+        let increment = self.ir.add_arithmetic(IrBinOp::Add, index, one, Ty::Int);
         let update = self.ir.add_expr(IrExpr::SetValue {
             var: index_slot,
             value: increment,

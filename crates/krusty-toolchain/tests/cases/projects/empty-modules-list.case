@@ -1,0 +1,3 @@
+An empty modules list and no root module.
+--- project.yaml
+modules: []

@@ -272,7 +272,7 @@ KByteArray *kt_bytes_new(kt_int length) {
 
 static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
-KT_TYPE_WITH(kt_type_string, "kotlin.", "String", sizeof(KObject), 1, kt_string_references, kt_text_interfaces)
+KT_TYPE_WITH(kt_type_string, "kotlin.", "String", sizeof(KString), 1, kt_string_references, kt_text_interfaces)
 KT_TYPE_WITH(kt_type_byte, "kotlin.", "Byte", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE_WITH(kt_type_short, "kotlin.", "Short", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE_WITH(kt_type_int, "kotlin.", "Int", sizeof(KObject), 0, NULL, kt_number_interfaces)
@@ -300,10 +300,12 @@ KRef kt_new(const KType *type) { return (KRef)kt_gc_allocate(type, sizeof(KObjec
 /* ---- strings ------------------------------------------------------------------------------- */
 
 KRef kt_string_of(KRef storage, const char *bytes, kt_int byte_length) {
-    KRef object = kt_new(&kt_type_string);
+    KRef object = (KRef)kt_gc_allocate(&kt_type_string, sizeof(KString));
     object->as.string.storage = storage;
     object->as.string.bytes = bytes;
     object->as.string.byte_length = byte_length;
+    object->as.string.units_plus_one = 0;
+    ((KString *)object)->cursor = 0;
     return object;
 }
 
@@ -323,14 +325,18 @@ static const char *kt_text_of(KRef self, kt_int *byte_length);
    points; of those, only the ones a four-byte sequence starts (`11110xxx`, i.e. above U+FFFF) are
    written as a SURROGATE PAIR in UTF-16 and contribute two units. Everything else contributes one.
 
-   This walks the bytes on every call, which is what a string that stores UTF-8 costs; it is also
-   what makes the answer right for text a JVM-shaped length would have to be stored alongside. */
+   This walks the bytes, which is what a string that stores UTF-8 costs; a `String` keeps the count
+   once made, because its text never changes. A builder's text does, so it is walked each time. */
 kt_int kt_string_length(KRef self) {
     /* Text the PROGRAM wrote: a class implementing `kotlin.CharSequence`, whose own `length` its
        descriptor records. Asked first, because `kt_text_of` reads a string's own storage and an
        object of the program's holds none. */
     if (self != NULL && self->header.type->walk_length != NULL) {
         return self->header.type->walk_length(self);
+    }
+    bool string = self != NULL && self->header.type == &kt_type_string;
+    if (string && self->as.string.units_plus_one != 0) {
+        return self->as.string.units_plus_one - 1;
     }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
@@ -342,6 +348,11 @@ kt_int kt_string_length(KRef self) {
         }
         units += (byte >= 0xF0u) ? 2 : 1;
     }
+    /* `units_plus_one` is signed. An all-ASCII string may legitimately have INT32_MAX units, so
+       leave that one uncached rather than overflowing while encoding the zero sentinel. */
+    if (string && units < INT32_MAX) {
+        self->as.string.units_plus_one = units + 1;
+    }
     return units;
 }
 
@@ -349,9 +360,9 @@ kt_int kt_string_length(KRef self) {
 
    The text is stored as UTF-8, and Kotlin indexes by UTF-16 unit, so this walks the bytes the same
    way `kt_string_length` counts them: a byte that is not a continuation byte starts one code point,
-   and one above U+FFFF occupies TWO units. Walking per access is what a string that stores UTF-8
-   costs, and it is the same cost `length` already pays; a program that wants to iterate cheaply
-   iterates the string rather than its indices. */
+   and one above U+FFFF occupies TWO units. A string's walk resumes from its cursor (see
+   `KString`) when the index lies at or past it, so an ascending scan by index walks the text once;
+   an index before the cursor walks from the start. */
 kt_char kt_string_get(KRef self, kt_int index) {
     if (self != NULL && self->header.type->walk_char_at != NULL) {
         return self->header.type->walk_char_at(self, index);
@@ -363,14 +374,40 @@ kt_char kt_string_get(KRef self, kt_int index) {
         kt_text_index_out_of_bounds(self, index, kt_string_length(self));
         return 0;
     }
+    /* All-ASCII text is indexed directly: counting it once (see `kt_string_length`) is what
+       tells the two apart, and costs no more than the first walk would have. */
+    if (self != NULL && self->header.type == &kt_type_string) {
+        kt_int units = kt_string_length(self);
+        if (units == self->as.string.byte_length) {
+            if (index >= units) {
+                kt_text_index_out_of_bounds(self, index, units);
+                return 0;
+            }
+            return (kt_char)(unsigned char)self->as.string.bytes[index];
+        }
+    }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int unit = 0;
-    for (kt_int at = 0; at < byte_length;) {
+    kt_int at = 0;
+    uint64_t *cursor = NULL;
+    if (self != NULL && self->header.type == &kt_type_string) {
+        cursor = &((KString *)self)->cursor;
+        uint64_t resumed = __atomic_load_n(cursor, __ATOMIC_RELAXED);
+        if ((kt_int)(uint32_t)resumed <= index) {
+            unit = (kt_int)(uint32_t)resumed;
+            at = (kt_int)(resumed >> 32);
+        }
+    }
+    while (at < byte_length) {
         unsigned char lead = (unsigned char)bytes[at];
         kt_int width = lead < 0x80u ? 1 : lead < 0xE0u ? 2 : lead < 0xF0u ? 3 : 4;
         kt_int units = width == 4 ? 2 : 1;
         if (index < unit + units) {
+            if (cursor != NULL) {
+                __atomic_store_n(cursor, ((uint64_t)(uint32_t)at << 32) | (uint32_t)unit,
+                                 __ATOMIC_RELAXED);
+            }
             uint32_t code = lead;
             if (width == 2) {
                 code = ((uint32_t)(lead & 0x1Fu) << 6) | ((unsigned char)bytes[at + 1] & 0x3Fu);

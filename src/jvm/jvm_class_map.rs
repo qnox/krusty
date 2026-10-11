@@ -415,6 +415,9 @@ struct ErasureGroup {
     jvm_name: &'static str,
     scope: BuiltinScopeProvenance,
     maps_java_source_to_kotlin: bool,
+    /// The mapped JVM realization implements `java.io.Serializable`. This is a platform-mapping
+    /// fact used by the JVM builtins customizer even when the compile classpath omits the JDK.
+    java_serializable: bool,
     /// For a collection group, which Kotlin collection it maps and the index into `kotlin_names`
     /// where the mutable face's spellings begin (the read-only face's spellings come first).
     collection: Option<(CollectionKind, usize)>,
@@ -431,6 +434,7 @@ impl ErasureGroup {
             jvm_name,
             scope,
             maps_java_source_to_kotlin: true,
+            java_serializable: false,
             collection: None,
         }
     }
@@ -446,6 +450,7 @@ impl ErasureGroup {
             jvm_name,
             scope: BuiltinScopeProvenance::KotlinDeclaration,
             maps_java_source_to_kotlin: true,
+            java_serializable: false,
             collection: Some((kind, mutable_from)),
         }
     }
@@ -460,8 +465,14 @@ impl ErasureGroup {
             jvm_name,
             scope,
             maps_java_source_to_kotlin: false,
+            java_serializable: false,
             collection: None,
         }
+    }
+
+    const fn java_serializable(mut self) -> Self {
+        self.java_serializable = true;
+        self
     }
 }
 
@@ -478,7 +489,8 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
         &["kotlin/String"],
         "java/lang/String",
         BuiltinScopeProvenance::KotlinDeclaration,
-    ),
+    )
+    .java_serializable(),
     ErasureGroup::mapped(
         &["kotlin/CharSequence"],
         "java/lang/CharSequence",
@@ -488,7 +500,8 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
         &["kotlin/Throwable"],
         "java/lang/Throwable",
         BuiltinScopeProvenance::JoinedWithJvm,
-    ),
+    )
+    .java_serializable(),
     ErasureGroup::mapped(
         &["kotlin/Cloneable"],
         "java/lang/Cloneable",
@@ -498,7 +511,8 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
         &["kotlin/Number"],
         "java/lang/Number",
         BuiltinScopeProvenance::JoinedWithJvm,
-    ),
+    )
+    .java_serializable(),
     ErasureGroup::mapped(
         &["kotlin/Comparable"],
         "java/lang/Comparable",
@@ -508,7 +522,8 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
         &["kotlin/Enum"],
         "java/lang/Enum",
         BuiltinScopeProvenance::JoinedWithJvm,
-    ),
+    )
+    .java_serializable(),
     ErasureGroup::mapped(
         &["kotlin/Annotation"],
         "java/lang/annotation/Annotation",
@@ -601,6 +616,8 @@ struct BuiltinIds {
     collection_groups: u32,
     /// Groups whose Kotlin metadata declaration replaces, rather than joins, the JVM source scope.
     authoritative_scope_groups: u32,
+    /// Erasure groups whose JVM realization implements `java.io.Serializable`.
+    java_serializable_groups: u32,
     coll_to_kotlin: FxHashMap<TypeName, TypeName>,
     coll_to_kotlin_mutable: FxHashMap<TypeName, TypeName>,
     wrapper_prim: FxHashMap<TypeName, &'static str>,
@@ -626,6 +643,7 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut source_to_kotlin = FxHashMap::default();
         let mut collection_groups = 0u32;
         let mut authoritative_scope_groups = 0u32;
+        let mut java_serializable_groups = 0u32;
         let mut coll_to_kotlin = FxHashMap::default();
         let mut coll_to_kotlin_mutable = FxHashMap::default();
         let mut with_members = FxHashMap::default();
@@ -637,6 +655,7 @@ fn builtin_ids() -> &'static BuiltinIds {
                 jvm_name,
                 scope,
                 maps_java_source_to_kotlin,
+                java_serializable,
                 collection,
             } = mapping;
             if let Some((kind, mutable_from)) = collection {
@@ -683,6 +702,9 @@ fn builtin_ids() -> &'static BuiltinIds {
             }
             if *scope == BuiltinScopeProvenance::KotlinDeclaration {
                 authoritative_scope_groups |= 1 << group;
+            }
+            if *java_serializable {
+                java_serializable_groups |= 1 << group;
             }
             if let Some(kotlin) = jvm_collection_to_kotlin(jvm_name) {
                 coll_to_kotlin.insert(jvm_id, tn(kotlin));
@@ -736,6 +758,7 @@ fn builtin_ids() -> &'static BuiltinIds {
             source_to_kotlin,
             collection_groups,
             authoritative_scope_groups,
+            java_serializable_groups,
             coll_to_kotlin,
             coll_to_kotlin_mutable,
             wrapper_prim,
@@ -775,6 +798,16 @@ pub fn mapped_builtin_has_authoritative_kotlin_scope(internal: TypeName) -> bool
     let ids = builtin_ids();
     jvm_erasure_group(internal)
         .is_some_and(|group| ids.authoritative_scope_groups & (1 << group) != 0)
+}
+
+/// Whether the JVM realization in the authoritative Kotlin/JVM builtin map implements
+/// `java.io.Serializable`. Signed primitives inherit the fact from their mapped wrapper; unsigned
+/// inline classes are not JVM-mapped builtins and therefore do not.
+pub(super) fn mapped_builtin_is_java_serializable(internal: TypeName) -> bool {
+    let ids = builtin_ids();
+    jvm_erasure_group(internal)
+        .is_some_and(|group| ids.java_serializable_groups & (1 << group) != 0)
+        || is_boxed_primitive_classifier(internal)
 }
 
 fn jvm_erasure_group(internal: TypeName) -> Option<u8> {
@@ -986,10 +1019,10 @@ mod tests {
         is_boxed_primitive_classifier, is_kotlin_collection_type_name, is_mapped_collection_face,
         jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_declarations,
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
-        mapped_builtin_has_authoritative_kotlin_scope, mapped_collection,
-        maps_to_distinct_jvm_internal, platform_flexible_upper_bound, to_jvm_classfile_type_name,
-        to_jvm_internal, to_jvm_type_name, to_kotlin_internal, to_kotlin_type_name,
-        wrapper_internal, wrapper_to_kotlin_prim_name, wrapper_type_name,
+        mapped_builtin_has_authoritative_kotlin_scope, mapped_builtin_is_java_serializable,
+        mapped_collection, maps_to_distinct_jvm_internal, platform_flexible_upper_bound,
+        to_jvm_classfile_type_name, to_jvm_internal, to_jvm_type_name, to_kotlin_internal,
+        to_kotlin_type_name, wrapper_internal, wrapper_to_kotlin_prim_name, wrapper_type_name,
     };
     use crate::types::{type_name, CollectionKind, MappedCollection, Ty};
 
@@ -1066,6 +1099,25 @@ mod tests {
         assert_eq!(kotlin_prim_to_wrapper("kotlin/String"), None);
         assert_eq!(kotlin_prim_to_wrapper("demo/Foo"), None);
         assert_eq!(wrapper_internal(Ty::String), None);
+    }
+
+    #[test]
+    fn builtin_mapping_publishes_java_serializable_realizations() {
+        let cases = [
+            ("kotlin/String", true),
+            ("kotlin/Throwable", true),
+            ("kotlin/Number", true),
+            ("kotlin/Enum", true),
+            ("kotlin/Int", true),
+            ("java/lang/Integer", true),
+            ("kotlin/CharSequence", false),
+            ("kotlin/collections/List", false),
+            ("kotlin/UInt", false),
+        ];
+        assert_eq!(
+            cases.map(|(name, _)| mapped_builtin_is_java_serializable(type_name(name))),
+            cases.map(|(_, expected)| expected),
+        );
     }
 
     #[test]

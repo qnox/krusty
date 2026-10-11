@@ -11,6 +11,7 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod anonymous_functions;
+mod class_recovery;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
@@ -30,11 +31,17 @@ mod lexical_type_parameters;
 mod nesting;
 mod properties;
 mod return_labels;
+mod superclass_references;
+mod type_parameters;
 mod value_parameters;
-use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
+use class_recovery::error_class_decl;
+use declaration_modifiers::{
+    function_flags, has_visibility_modifier, modality_from_modifiers, modality_of, visibility_of,
+};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
 use lexical_type_parameters::LexicalTypeParameters;
+use superclass_references::fixup_parenless_base_classes;
 
 /// Parse with the default language feature set.
 pub fn parse(src: &str, tokens: &[Token], diags: &mut DiagSink) -> File {
@@ -106,6 +113,8 @@ fn parse_with_features_and_script(
     hoist_local_classes(&mut p.file, script_scope);
     fixup_parenless_base_classes(&mut p.file);
     debug_lines::attach(&mut p.file, src);
+    p.file.binary_reference_tokens =
+        crate::ast::BinaryReferenceTokens::new(tokens, std::mem::take(&mut p.function_spans));
     if !p.diags.has_errors() {
         if let Err(error) = p.file.validate_integrity(src) {
             p.diags
@@ -113,77 +122,6 @@ fn parse_with_features_and_script(
         }
     }
     p.file
-}
-
-/// Map the parsed class modifiers to a [`Modality`]. `sealed` wins (it implies abstract+open), then
-/// `abstract`, then `open`, else `final`.
-fn modality_of(is_open: bool, is_abstract: bool, is_sealed: bool) -> crate::ast::Modality {
-    use crate::ast::Modality;
-    if is_sealed {
-        Modality::Sealed
-    } else if is_abstract {
-        Modality::Abstract
-    } else if is_open {
-        Modality::Open
-    } else {
-        Modality::Final
-    }
-}
-
-fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
-    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
-    modality_of(
-        sealed || modifiers.iter().any(|modifier| modifier == "open"),
-        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
-        sealed,
-    )
-}
-
-/// The degraded result of a tripped declaration-nesting guard: an empty final class named
-/// `<error>`. That source-impossible synthetic name cannot collide with a declared class, and the
-/// empty body gives the later passes nothing to recurse over.
-fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
-    ClassDecl {
-        name_span: span,
-        primary_ctor_visibility: Visibility::Public,
-        name: "<error>".to_string(),
-        visibility: Visibility::Public,
-        annotations: Vec::new(),
-        annotation_args: Vec::new(),
-        type_parameters: crate::ast::ClassTypeParameters::new(Vec::new(), Vec::new(), Vec::new()),
-        context_params: Vec::new(),
-        lexical_type_parameter_captures: Vec::new(),
-        props: Vec::new(),
-        methods: Vec::new(),
-        companion: None,
-        body_props: Vec::new(),
-        init_order: Vec::new(),
-        is_data: false,
-        is_value: false,
-        value_modifier_span: None,
-        kind: ClassKind::Class,
-        singleton: false,
-        enum_entries: Vec::new(),
-        is_fun_interface: false,
-        modality: crate::ast::Modality::Final,
-        inner_of: None,
-        supertypes: Vec::new(),
-        interface_delegations: Vec::new(),
-        base_class: None,
-        base_class_span: None,
-        base_type_args: Vec::new(),
-        base_args: Vec::new(),
-        primary_ctor_annotations: Some(Vec::new()),
-        primary_ctor_annotation_args: Vec::new(),
-        secondary_ctors: Vec::new(),
-        type_aliases: Vec::new(),
-        span,
-        ctor_close_line: 0,
-        companion_block_members: Vec::new(),
-        decl_line: 0,
-        decl_start_line: 0,
-        decl_end_line: 0,
-    }
 }
 
 /// A non-nullable, non-generic type reference.
@@ -586,54 +524,6 @@ fn local_class_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
     out
 }
 
-/// A class with NO primary constructor names its base class WITHOUT parentheses (`class A : B { …
-/// constructor(): super(…) }`) — the base arguments come from each secondary `super(…)`, not a
-/// `: Base(args)` supertype entry. The parser can't tell a parenless class supertype from an interface
-/// syntactically, so it parks every parenless supertype in `supertypes`; here, with the whole file
-/// visible, we move a supertype that names a concrete file class into `base_class` for such classes.
-fn fixup_parenless_base_classes(file: &mut File) {
-    use crate::ast::{CtorDelegation, Decl};
-    let base_candidates: std::collections::HashSet<String> = file
-        .decl_arena
-        .iter()
-        .filter_map(|d| match d {
-            Decl::Class(c) if c.kind == ClassKind::Class || c.is_annotation() => {
-                Some(c.name.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    let mut detached = Vec::new();
-    for d in file.decl_arena.iter_mut() {
-        if let Decl::Class(c) = d {
-            if c.primary_ctor_annotations.is_some() || c.base_class.is_some() {
-                continue;
-            }
-            let super_delegates = c.secondary_ctors.iter().any(|sc| {
-                matches!(
-                    sc.delegation,
-                    CtorDelegation::Super(_) | CtorDelegation::None
-                )
-            });
-            if !super_delegates {
-                continue;
-            }
-            if let Some(pos) = c
-                .supertypes
-                .iter()
-                .position(|s| base_candidates.contains(&s.name))
-            {
-                let base = c.supertypes.remove(pos);
-                detached.push(base.clone());
-                c.base_class_span = Some(base.span);
-                c.base_class = Some(base.name);
-                c.base_type_args = base.targs;
-            }
-        }
-    }
-    file.detached_type_refs.extend(detached);
-}
-
 type TypeAliasShapes = std::collections::HashMap<String, (Vec<String>, TypeRef)>;
 
 /// Replace every leaf reference to one of `params` in `ty` with the corresponding use-site type
@@ -794,6 +684,9 @@ struct Parser<'a> {
     /// about a declaration as a whole point at its name rather than at its keyword.
     declaration_name_span: Span,
     declaration_prefix: declaration_modifiers::PrefixInProgress,
+    /// The type parameters of the declaration whose `<…>` list was parsed last, with their spans,
+    /// so its `where` clause can name the parameter each bound constrains.
+    type_parameter_spans: Vec<(String, crate::diag::Span)>,
     is_script: bool,
     script_stmts: Vec<StmtId>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -818,6 +711,8 @@ struct Parser<'a> {
     /// (a trailing argument of `f`) from `(f()) { ... }` (an `invoke` on the value returned by
     /// `f`). This state is parser-local and disappears with the parser.
     parenthesized_expressions: std::collections::HashSet<u32>,
+    /// Each function parsed so far in this unit, for [`crate::ast::BinaryReferenceTokens`].
+    function_spans: Vec<Span>,
     lambda_label_scopes: lambda_literals::LambdaLabelScopes,
 }
 
@@ -913,6 +808,7 @@ impl<'a> Parser<'a> {
             member_declaration_prefix: None,
             declaration_name_span: Span::new(0, 0),
             declaration_prefix: Default::default(),
+            type_parameter_spans: Vec::new(),
             is_script,
             script_stmts: Vec::new(),
             expr_depth: 0,
@@ -920,6 +816,7 @@ impl<'a> Parser<'a> {
             stmt_depth: 0,
             parsing_anonymous_function_receiver: false,
             parenthesized_expressions: Default::default(),
+            function_spans: Vec::new(),
             lambda_label_scopes: Default::default(),
         }
     }
@@ -1320,6 +1217,7 @@ impl<'a> Parser<'a> {
                     let value_modifier_span = self.take_value_modifier_span(&mods);
                     let mut d = self.parse_class();
                     d.modality = modality_from_modifiers(&mods);
+                    d.final_modifier = mods.iter().any(|modifier| modifier == "final");
                     d.is_value = is_value;
                     d.value_modifier_span = value_modifier_span;
                     self.register_top_level_classifier(d, &mods, decls_before);
@@ -2198,9 +2096,11 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -2284,6 +2184,7 @@ impl<'a> Parser<'a> {
                     is_property,
                     is_actual: epmods.iter().any(|modifier| modifier == "actual"),
                     is_override: epmods.iter().any(|modifier| modifier == "override"),
+                    is_final: epmods.iter().any(|modifier| modifier == "final"),
                     is_open: !epmods.iter().any(|modifier| modifier == "final")
                         && epmods
                             .iter()
@@ -2585,11 +2486,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes: enum_supertypes,
             interface_delegations: Vec::new(),
@@ -2612,61 +2515,6 @@ impl<'a> Parser<'a> {
             decl_start_line: 0,
             decl_end_line: 0,
         }
-    }
-
-    /// Parse an optional generic constraint clause `where T : Bound, U : Bound2` after a function or
-    /// class signature, returning the `(type parameter, bound)` pairs it declares.
-    ///
-    /// A `where` bound is the SAME constraint as the inline `<T : Bound>` form — Kotlin offers both
-    /// spellings, and the second is required once a parameter has more than one bound. The pairs join
-    /// the declaration's `type_param_bounds` so every consumer (erasure, member resolution on a value
-    /// of the parameter's type) sees one list regardless of spelling; previously the clause was parsed
-    /// for its diagnostics and then discarded, so `where T : Named` resolved no members at all while
-    /// `<T : Named>` did.
-    ///
-    /// `where` may sit on a following line, so newlines are skipped only when the clause is actually
-    /// present (otherwise the position is restored). Physical specialization of a bound belongs to
-    /// emission; the parser retains every source-valid bound unchanged.
-    fn parse_where_clause(
-        &mut self,
-        declared_type_params: &[String],
-        declaration_name: &str,
-    ) -> Vec<(String, TypeRef)> {
-        let mut bounds: Vec<(String, TypeRef)> = Vec::new();
-        let save = self.i;
-        self.skip_newlines();
-        if !(self.at(TokenKind::Ident) && self.keyword_text("where")) {
-            self.i = save;
-            return bounds;
-        }
-        self.bump(); // 'where'
-        loop {
-            self.skip_newlines();
-            let mut tp_name = String::new();
-            let type_parameter_span = self.tok().span;
-            if self.at(TokenKind::Ident) {
-                tp_name = self.text().to_string();
-                self.bump(); // type-parameter name
-            }
-            if !tp_name.is_empty() && !declared_type_params.iter().any(|name| name == &tp_name) {
-                self.diags.error(
-                    type_parameter_span,
-                    format!(
-                        "'{tp_name}' does not refer to a type parameter of '{declaration_name}'."
-                    ),
-                );
-            }
-            if self.eat(TokenKind::Colon) {
-                let bound = self.parse_type();
-                if !tp_name.is_empty() {
-                    bounds.push((tp_name.clone(), bound));
-                }
-            }
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-        }
-        bounds
     }
 
     fn parse_qualified_name(&mut self) -> String {
@@ -2762,6 +2610,7 @@ impl<'a> Parser<'a> {
         };
         let end = self.t[self.i.saturating_sub(1)].span;
         self.pop_lexical_type_params(lexical_type_param_lens);
+        self.function_spans.push(Span::new(start.lo, end.hi));
         FunDecl {
             name,
             receiver,
@@ -3060,6 +2909,7 @@ impl<'a> Parser<'a> {
 
         if matches!(nested.kind, ClassKind::Class | ClassKind::Interface) {
             nested.modality = modality_from_modifiers(modifiers);
+            nested.final_modifier = modifiers.iter().any(|modifier| modifier == "final");
             // `value class` (and the legacy `inline class` spelling) — like top-level registration,
             // `value`/`inline` is a MODIFIER consumed into `modifiers` before the `class` keyword.
             // Without this a nested value class registers as a PLAIN class and miscompiles: a public
@@ -3157,7 +3007,9 @@ impl<'a> Parser<'a> {
         }
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
+        let primary_ctor_open = self.tok().span.lo;
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
+        let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
             self.skip_newlines();
@@ -3211,6 +3063,7 @@ impl<'a> Parser<'a> {
                     is_property,
                     is_actual: cpmods.iter().any(|modifier| modifier == "actual"),
                     is_override: cpmods.iter().any(|modifier| modifier == "override"),
+                    is_final: cpmods.iter().any(|modifier| modifier == "final"),
                     is_open: !cpmods.iter().any(|modifier| modifier == "final")
                         && cpmods
                             .iter()
@@ -3230,7 +3083,10 @@ impl<'a> Parser<'a> {
             // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
             // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
             ctor_close_lo = self.tok().span.lo;
-            self.expect(TokenKind::RParen, "')'");
+            let close = self.tok().span;
+            if self.expect(TokenKind::RParen, "')'") {
+                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
+            }
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
@@ -3338,11 +3194,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -3459,7 +3317,13 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
-                let name = self.parse_qualified_name();
+                let segments = self.parse_qualified_name_segments();
+                let callee_span = segments.last().map(|(_, span)| *span);
+                let name = segments
+                    .into_iter()
+                    .map(|(segment, _)| segment)
+                    .collect::<Vec<_>>()
+                    .join(".");
                 let simple = name.rsplit('.').next().unwrap_or(&name).to_string();
                 // Fully-qualified name (e.g. java.util.RandomAccess) → JVM internal format.
                 let effective = if name.contains('.') {
@@ -3523,7 +3387,13 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RParen, "')'");
                     let mut reference = simple_type_ref(&name, sup_span);
                     reference.targs = targs.clone();
+                    reference.flags = reference.flags.with_superclass(true);
                     self.file.detached_type_refs.push(reference);
+                    if let Some(callee) = callee_span {
+                        self.file
+                            .base_class_callee_spans
+                            .insert(sup_span.lo, callee);
+                    }
                     base = Some(effective.clone());
                     base_span = Some(sup_span);
                     base_type_args = targs;
@@ -3691,11 +3561,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations: Vec::new(),
@@ -3804,11 +3676,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -3939,11 +3813,13 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
+            primary_constructor_parameters_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
+            final_modifier: false,
             inner_of: None,
             supertypes,
             interface_delegations,
@@ -4372,107 +4248,6 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Parse a `<T, reified U : Bound, out V>` type-parameter list, returning the parameter names,
-    /// the `: Any`-bounded (non-null) names, and the `reified` names (which an `inline` function may
-    /// use concretely — `is T`, `as T`, `T::class` — and which codegen specializes per call site).
-    #[allow(clippy::type_complexity)]
-    fn parse_type_params(
-        &mut self,
-        declaration_start: u32,
-    ) -> (
-        Vec<String>,
-        std::collections::HashSet<String>,
-        std::collections::HashSet<String>,
-        Vec<(String, TypeRef)>,
-        Vec<crate::types::TypeVariance>,
-    ) {
-        let mut names = Vec::new();
-        let mut non_null = std::collections::HashSet::new();
-        let mut reified = std::collections::HashSet::new();
-        let mut bounds: Vec<(String, TypeRef)> = Vec::new();
-        let mut variances = Vec::new();
-        if !self.eat(TokenKind::Lt) {
-            return (names, non_null, reified, bounds, variances);
-        }
-        loop {
-            self.skip_plain_newlines();
-            // Annotations and variance/reified modifiers may be interleaved. `in` is a keyword;
-            // `out`/`reified` are idents.
-            let mut is_reified = false;
-            let mut variance = crate::types::TypeVariance::Invariant;
-            let mut annotations = Vec::new();
-            let mut annotation_args = Vec::new();
-            loop {
-                self.skip_plain_newlines();
-                if self.at(TokenKind::At) {
-                    let (annotation, args) = self.parse_annotation();
-                    if let Some(annotation) = annotation {
-                        annotations.push(annotation);
-                        annotation_args.push(args);
-                    }
-                } else if self.at(TokenKind::Ident) && self.keyword_text("reified") {
-                    is_reified = true;
-                    self.bump();
-                } else if self.at(TokenKind::Ident) && self.keyword_text("out") {
-                    variance = crate::types::TypeVariance::Out;
-                    self.bump();
-                } else if self.at(TokenKind::KwIn) {
-                    variance = crate::types::TypeVariance::In;
-                    self.bump();
-                } else {
-                    break;
-                }
-            }
-            let (tname, tname_span) = if self.at(TokenKind::Ident) {
-                let span = self.tok().span;
-                let n = self.text().to_string();
-                self.bump();
-                (n, span)
-            } else {
-                (String::new(), self.tok().span)
-            };
-            if !tname.is_empty() {
-                names.push(tname.clone());
-                variances.push(variance);
-                if is_reified {
-                    reified.insert(tname.clone());
-                }
-                if !annotations.is_empty() {
-                    self.file
-                        .declaration_type_parameter_annotations
-                        .entry(declaration_start)
-                        .or_default()
-                        .push(AnnotatedTypeParameter {
-                            name: tname.clone(),
-                            span: tname_span,
-                            annotations,
-                            annotation_args,
-                        });
-                }
-            }
-            self.skip_plain_newlines();
-            if self.eat(TokenKind::Colon) {
-                self.skip_plain_newlines();
-                let bound = self.parse_type();
-                // `T: Any` → the type param can't be null (erased to Object but non-null).
-                if bound.name == "Any" && !bound.nullable() && !tname.is_empty() {
-                    non_null.insert(tname.clone());
-                }
-                // Retain the semantic bound. JVM specialization/boxing is not syntax validity.
-                // Retain explicit bounds independently of erasure.
-                if !tname.is_empty() {
-                    bounds.push((tname.clone(), bound));
-                }
-            }
-            self.skip_plain_newlines();
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(TokenKind::Gt, "'>'");
-        (names, non_null, reified, bounds, variances)
-    }
-
     // ---- statements ----
     fn parse_block_expr(&mut self, trailing_is_value: bool) -> ExprId {
         let start = self.tok().span;
@@ -4777,6 +4552,7 @@ impl<'a> Parser<'a> {
                 // Preserves the prior behavior: this path applied open/abstract but left `is_sealed`
                 // at its default `false` (so a local `sealed` class never reported `is_sealed`).
                 d.modality = modality_of(is_open, is_abstract, false);
+                d.final_modifier = mods.iter().any(|modifier| modifier == "final");
                 let nested: Vec<crate::ast::DeclId> = self.file.decls[nested_start..].to_vec();
                 let classifier = d.name.clone();
                 let stmt = self.finish_stmt(Stmt::LocalClass(d), start);

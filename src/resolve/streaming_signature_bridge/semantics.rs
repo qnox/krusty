@@ -6,90 +6,11 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 
 mod cast_narrowing;
 mod constructor_expectations;
+mod result_approximation;
 mod scoped_constraint_frames;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
-
-/// Remove solver-local projection captures from an inferred declaration result. A capture is
-/// readable through its upper bound at the result root; inside a generic argument it is exposed as
-/// a star projection so the published signature does not claim an invariant type that callers
-/// could never name.
-fn denotable_signature_result(
-    ty: Ty,
-    denotable_parameters: &std::collections::HashSet<String>,
-) -> Ty {
-    fn result(
-        ty: Ty,
-        denotable: &std::collections::HashSet<String>,
-        visiting: &mut std::collections::HashSet<&'static str>,
-    ) -> Ty {
-        match ty {
-            // `Null` is the solver's literal-only bottom marker. A declaration inferred from that
-            // expression publishes Kotlin's denotable `Nothing?`; the literal marker must never
-            // cross into checked declaration headers, metadata, common lowering, or a backend.
-            Ty::Null => Ty::nullable(Ty::Nothing),
-            Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                if !visiting.insert(name) {
-                    return Ty::nullable(Ty::obj("kotlin/Any"));
-                }
-                let approximated = result(bound.projection_read_ty(), denotable, visiting);
-                visiting.remove(name);
-                approximated
-            }
-            Ty::TyParam(..) => ty,
-            Ty::Obj(owner, arguments) if !arguments.is_empty() => Ty::obj_args_name(
-                owner,
-                &arguments
-                    .iter()
-                    .map(|argument| match *argument {
-                        Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                            Ty::star_projection(result(
-                                bound.projection_read_ty(),
-                                denotable,
-                                visiting,
-                            ))
-                        }
-                        Ty::InProjection(inner) => {
-                            Ty::in_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::OutProjection(inner) => {
-                            Ty::out_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::StarProjection(inner) => {
-                            Ty::star_projection(result(*inner, denotable, visiting))
-                        }
-                        argument => result(argument, denotable, visiting),
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            Ty::Fun(signature) => Ty::fun_with_shape(
-                signature
-                    .params
-                    .iter()
-                    .map(|parameter| result(*parameter, denotable, visiting))
-                    .collect(),
-                result(signature.ret, denotable, visiting),
-                signature.context_count,
-                signature.has_receiver,
-                signature.suspend,
-            ),
-            Ty::Nullable(inner) => Ty::nullable(result(*inner, denotable, visiting)),
-            Ty::PlatformNullable(inner) => {
-                Ty::platform_nullable(result(*inner, denotable, visiting))
-            }
-            Ty::InProjection(inner) => Ty::in_projection(result(*inner, denotable, visiting)),
-            Ty::OutProjection(inner) => Ty::out_projection(result(*inner, denotable, visiting)),
-            Ty::StarProjection(inner) => Ty::star_projection(result(*inner, denotable, visiting)),
-            _ => ty,
-        }
-    }
-
-    result(
-        ty,
-        denotable_parameters,
-        &mut std::collections::HashSet::new(),
-    )
-}
+use result_approximation::denotable_signature_result;
 
 /// Select the language-defined SAM construction for a classifier call. Qualified and unqualified
 /// classifier spellings share this path; the qualifier affects only how the classifier was found,
@@ -1333,6 +1254,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
+        qualified_namespace: bool,
         expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -1417,28 +1339,30 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     demand,
                 );
             }
-            if let Some(receiver) =
-                self.qualified_value_receiver(scope, qualifier, origin, demand)?
-            {
-                return self
-                    .select_member_call(
-                        scope,
-                        name,
-                        origin,
-                        receiver,
-                        arguments,
-                        type_arguments,
-                        trailing_lambda,
-                        expected,
-                        demand,
-                    )
-                    .and_then(|selection| selection.ty.ok_or_else(Self::failure));
+            if !qualified_namespace {
+                if let Some(receiver) =
+                    self.qualified_value_receiver(scope, qualifier, origin, demand)?
+                {
+                    return self
+                        .select_member_call(
+                            scope,
+                            name,
+                            origin,
+                            receiver,
+                            arguments,
+                            type_arguments,
+                            trailing_lambda,
+                            expected,
+                            demand,
+                        )
+                        .and_then(|selection| selection.ty.ok_or_else(Self::failure));
+                }
             }
             // A dotted callee is either PACKAGE-qualified (`kotlin.collections.listOf`) or a member
             // call on a qualified RECEIVER (`E.valueOf`, `E.OK.toString`, `C.Companion.of`). The
-            // value-root form was committed above. With no value root, package and classifier
-            // namespace interpretations remain; associated values reached through those namespaces
-            // are folded into a receiver only after namespace resolution.
+            // compact graph has already committed an ordinary value-root form before this call.
+            // Package and classifier namespace interpretations remain; associated values reached
+            // through those namespaces are folded into a receiver only after namespace resolution.
             let package_call = self.select_qualified_package_call(
                 scope,
                 spelling,
@@ -1946,12 +1870,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         let scoped_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
         let selected = self.with_resolver(scope, |resolver| {
-            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
-            let candidates = if include_invisible {
-                resolver.top_level_candidates(spelling)
-            } else {
-                resolver.accessible_top_level_candidates(spelling)
-            };
+            let candidates = resolver.accessible_top_level_candidates(spelling);
             crate::trace_compiler!(
                 "signature",
                 "top-level candidates spelling={spelling} arguments={argument_types:?} candidates={:?}",
@@ -1971,23 +1890,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments,
                 trailing_lambda,
             ) {
-                let (selected, callable) = if include_invisible {
-                        resolver.select_top_level_function_candidates_with_expected_ignoring_visibility(
-                            spelling,
-                            explicit.candidates,
-                            &explicit.arguments,
-                            &resolved_type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )?
-                } else {
-                    resolver.select_top_level_function_candidates_with_expected(
+                let (selected, callable) = resolver
+                    .select_top_level_function_candidates_with_expected(
                         spelling,
                         explicit.candidates,
                         &explicit.arguments,
                         &resolved_type_arguments,
                         expected.map(crate::fir::ResolvedTy::get),
-                    )?
-                };
+                    )?;
                 return Some((
                     SelectedTopLevelCall::Callable {
                         parameter_by_argument: Self::selected_argument_parameters(
@@ -2017,36 +1927,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let (selected_arguments, selected_argument_types) = mapped
                 .clone()
                 .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
-            if include_invisible {
-                let all_top_level = candidates
-                    .iter()
-                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if let Some((selected, callable)) = resolver
-                    .select_top_level_function_candidates_with_expected_ignoring_visibility(
-                        spelling,
-                        all_top_level,
-                        &selected_arguments,
-                        &resolved_type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )
-                {
-                    return Some((
-                        SelectedTopLevelCall::Callable {
-                            parameter_by_argument: Self::selected_argument_parameters(
-                                &selected,
-                                arguments,
-                                trailing_lambda,
-                            ),
-                            callable: Box::new(callable),
-                            source: selected.source_key,
-                            declaration: selected.stable_declaration,
-                        },
-                        selected_argument_types,
-                    ));
-                }
-            }
             let selected_top_level = resolver.select_top_level_function_candidates_with_expected(
                 spelling,
                 candidates.clone(),
@@ -2087,27 +1967,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                 .filter(|candidate| {
                     let family = vec![(*candidate).clone()];
-                    if include_invisible {
-                        resolver
-                            .select_top_level_function_candidates_with_expected_ignoring_visibility(
-                                spelling,
-                                family,
-                                &selected_arguments,
-                                &resolved_type_arguments,
-                                expected.map(crate::fir::ResolvedTy::get),
-                            )
-                            .is_some()
-                    } else {
-                        resolver
-                            .select_top_level_function_candidates_with_expected(
-                                spelling,
-                                family,
-                                &selected_arguments,
-                                &resolved_type_arguments,
-                                expected.map(crate::fir::ResolvedTy::get),
-                            )
-                            .is_some()
-                    }
+                    resolver
+                        .select_top_level_function_candidates_with_expected(
+                            spelling,
+                            family,
+                            &selected_arguments,
+                            &resolved_type_arguments,
+                            expected.map(crate::fir::ResolvedTy::get),
+                        )
+                        .is_some()
                 })
                 .take(2)
                 .count();
@@ -2370,6 +2238,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
+        qualified: bool,
         _expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -2385,30 +2254,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // after materialization. Repeating a partial lookup here both wastes work and can reject a
         // valid later tower rung (callable properties, member extensions, header-only declarations)
         // which final selection already handles through the shared resolver.
-        if arguments
+        let all_typed = arguments
             .iter()
-            .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)))
-        {
+            .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)));
+        // A nested generic call is typed provisionally before its selected outer parameter is
+        // known. Only a structurally qualified namespace call reaches this operation with every
+        // argument typed but still needing contextual re-entry; value-root calls are represented
+        // by `MemberCall` and use `member_call_argument_expectations` directly.
+        let has_contextual_call = arguments.iter().any(|argument| {
+            matches!(argument, crate::fir::SigCallArgumentProbe::Typed(argument)
+                if argument.contextual_call)
+        });
+        if all_typed && !(qualified && has_contextual_call) {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         }
-        if spelling.contains('.') {
-            if let Some((qualifier, member)) = spelling.rsplit_once('.') {
-                if let Some(receiver) =
-                    self.qualified_value_receiver(scope, qualifier, origin, demand)?
-                {
-                    return self.member_call_argument_expectations(
-                        scope,
-                        member,
-                        origin,
-                        receiver,
-                        arguments,
-                        type_arguments,
-                        trailing_lambda,
-                        None,
-                        demand,
-                    );
-                }
-            }
+        if qualified {
             if let Ok(expectations) = self.qualified_package_call_argument_expectations(
                 scope,
                 spelling,
@@ -2460,12 +2320,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             (Vec<Ty>, Vec<Option<usize>>, crate::libraries::CallSig),
             _,
         > = self.with_resolver(scope, |resolver| {
-            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
-            let candidates = if include_invisible {
-                resolver.top_level_candidates(spelling)
-            } else {
-                resolver.accessible_top_level_candidates(spelling)
-            };
+            let candidates = resolver.accessible_top_level_candidates(spelling);
             let argument_names = arguments
                 .iter()
                 .map(|argument| match argument {
@@ -2499,22 +2354,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             );
             let (kinds, slots) =
                 Self::probe_call_arguments(&candidates, arguments, trailing_lambda)?;
-            let visibility_override = include_invisible
-                .then(|| {
-                    resolver.select_top_level_function_candidates_ignoring_visibility(
-                        spelling,
-                        candidates
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.kind == crate::libraries::FnKind::TopLevel
-                            })
-                            .cloned()
-                            .collect(),
-                        &kinds,
-                        &resolved_type_arguments,
-                    )
-                })
-                .flatten()
+            let (selected, specialized_parameters) = resolver
+                .select_top_level_function_candidates(
+                    spelling,
+                    candidates.clone(),
+                    &kinds,
+                    &resolved_type_arguments,
+                )
                 .and_then(|(selected, _)| {
                     let parameters = crate::symbol_resolver::specialized_function_params(
                         &selected,
@@ -2523,27 +2369,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
                     let value_parameters = parameters.get(selected.context_count..)?.to_vec();
                     Some((selected, Some(value_parameters)))
-                });
-            let (selected, specialized_parameters) = visibility_override
-                .or_else(|| {
-                    resolver
-                        .select_top_level_function_candidates(
-                            spelling,
-                            candidates.clone(),
-                            &kinds,
-                            &resolved_type_arguments,
-                        )
-                        .and_then(|(selected, _)| {
-                            let parameters =
-                                crate::symbol_resolver::specialized_function_params(
-                                    &selected,
-                                    &kinds,
-                                    &resolved_type_arguments,
-                                );
-                            let value_parameters =
-                                parameters.get(selected.context_count..)?.to_vec();
-                            Some((selected, Some(value_parameters)))
-                        })
                 })
                 .or_else(|| {
                     let mut visible = candidates.iter().filter(|candidate| {

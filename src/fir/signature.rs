@@ -8,18 +8,20 @@ use super::header::{
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
     DeferredValueSelectionId, DiagnosticId, ExternalCallableId, HeaderDeclaration,
     HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames,
-    OriginId, PropertyId, SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap,
-    StableDeclarationAnchor, TypeParameterId,
+    OriginId, PropertyId, QualifiedCallCoordinateId, SigExprId, SigNameId, SignatureScopeId,
+    SourceFileId, SourceMap, StableDeclarationAnchor, TypeParameterId,
 };
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 
 mod call_arguments;
+mod expressions;
 mod resolved_types;
 mod selections;
 pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
+pub use expressions::*;
 pub use resolved_types::*;
 pub use selections::*;
 mod classifier_headers;
@@ -78,165 +80,6 @@ pub struct SigSubstitution {
 pub struct SignatureScope {
     pub owner: DeclarationId,
     pub source: SourceFileId,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SigBinaryOperator {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Remainder,
-    Equal,
-    NotEqual,
-    Less,
-    LessOrEqual,
-    Greater,
-    GreaterOrEqual,
-    BooleanAnd,
-    BooleanOr,
-    ReferentialEqual,
-    ReferentialNotEqual,
-}
-
-/// Temporary signature expression. Every variant is `Copy` and owns no allocation; variable-length
-/// operands, substitutions, names, scopes, and deferred lookups live in packed side arenas owned by
-/// [`SignatureGraph`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SigExpr {
-    Known(ResolvedTy),
-    /// An `Int` literal keeps its value until compact semantic evaluation. This is not a published
-    /// type or a retained body: it is temporary literal provenance used by Kotlin's integer-
-    /// constant adaptation during overload selection, and is destroyed with the signature graph.
-    IntegerLiteral(i32),
-    /// An unsigned integer literal (`0u`, `2147483648u`). The payload is the full `UInt` magnitude,
-    /// including values above `i32::MAX`, until a sibling primitive adapts it.
-    UnsignedIntegerLiteral(u64),
-    DeclarationType(DeclarationId),
-    ClassifierType {
-        declaration: DeclarationId,
-        scope: SignatureScopeId,
-    },
-    Parameter {
-        declaration: DeclarationId,
-        index: u32,
-    },
-    Type {
-        syntax: HeaderTypeId,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    ContextualType {
-        expected: SigExprId,
-        syntax: HeaderTypeId,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Value(DeferredValueSelectionId),
-    Call {
-        target: DeferredCallableSelectionId,
-        arguments: CallArgumentRange,
-    },
-    CallableReference(DeferredCallableSelectionId),
-    BoundCallableReference {
-        receiver: SigExprId,
-        classifier: Option<SigExprId>,
-        scope: SignatureScopeId,
-        root: Option<SigNameId>,
-        target: DeferredCallableSelectionId,
-    },
-    ClassLiteral {
-        receiver: SigExprId,
-        classifier: Option<SigExprId>,
-        scope: SignatureScopeId,
-        root: Option<SigNameId>,
-    },
-    Member {
-        receiver: SigExprId,
-        lookup: DeferredMemberSelectionId,
-        origin: OriginId,
-    },
-    MemberCall {
-        receiver: SigExprId,
-        target: DeferredMemberSelectionId,
-        arguments: CallArgumentRange,
-        origin: OriginId,
-    },
-    Binary {
-        operator: SigBinaryOperator,
-        lhs: SigExprId,
-        rhs: SigExprId,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Invoke {
-        callee: SigExprId,
-        arguments: CallArgumentRange,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Function {
-        parameters: OperandRange,
-        result: SigExprId,
-        context_count: u32,
-        has_receiver: bool,
-        suspend: bool,
-    },
-    ContextualParameter(DeclarationId),
-    ContextualFunction {
-        parameters: OperandRange,
-        result: SigExprId,
-        scope: SignatureScopeId,
-        implicit_it: bool,
-        suspend: bool,
-    },
-    ScopedReceiver {
-        receiver: SigExprId,
-        result: SigExprId,
-        scope: SignatureScopeId,
-    },
-    /// Evaluate nested executable effects in source order before yielding the signature result.
-    Sequence {
-        effects: OperandRange,
-        result: SigExprId,
-    },
-    Delegate {
-        delegate: SigExprId,
-        expected: Option<SigExprId>,
-        scope: SignatureScopeId,
-        site: SignatureDelegateSiteId,
-    },
-    Join {
-        operands: OperandRange,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Nullable(SigExprId),
-    NonNullable(SigExprId),
-    /// A value read after an expression-statement call whose contract proves it non-null for the
-    /// rest of the block (`assertNotNull(x)`, `requireNotNull(x)`, a same-module
-    /// `returns() implies (x != null)`). The callee is only known once `call` is selected, so the
-    /// proof is deferred to evaluation; without it the read keeps `value`'s type.
-    ContractNarrowed {
-        value: SigExprId,
-        call: SigExprId,
-        argument: u32,
-        /// The argument is the CONDITION `value != null` rather than the value itself: the proof
-        /// is a `returns() implies <argument>` effect (`assertTrue(x != null)`).
-        condition: bool,
-    },
-    /// A lexical value after a successful non-null `as` cast that has already run. Evaluation
-    /// keeps `value`'s type when it is already `target` or a subtype, and uses `target` only
-    /// when the cast actually narrows.
-    CastNarrowed {
-        value: SigExprId,
-        target: SigExprId,
-        scope: SignatureScopeId,
-    },
-    Substitute {
-        base: SigExprId,
-        substitutions: SubstitutionRange,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -306,6 +149,7 @@ pub struct SignatureGraph {
     callable_selections: Vec<DeferredCallableSelection>,
     member_selections: Vec<DeferredMemberSelection>,
     value_selections: Vec<DeferredValueSelection>,
+    qualified_call_coordinates: Vec<QualifiedCallCoordinate>,
     delegate_sites: Vec<SignatureDelegateSite>,
     type_syntax: HeaderSyntaxArena,
     type_names: LookupNames,
@@ -484,6 +328,27 @@ impl SignatureGraph {
         self.value_selections.get(id.raw() as usize).copied()
     }
 
+    pub fn add_qualified_call_coordinate(
+        &mut self,
+        coordinate: QualifiedCallCoordinate,
+    ) -> QualifiedCallCoordinateId {
+        let id = QualifiedCallCoordinateId::from_raw(next_id(
+            self.qualified_call_coordinates.len(),
+            "qualified call coordinates",
+        ));
+        self.qualified_call_coordinates.push(coordinate);
+        id
+    }
+
+    pub fn qualified_call_coordinate(
+        &self,
+        id: QualifiedCallCoordinateId,
+    ) -> Option<QualifiedCallCoordinate> {
+        self.qualified_call_coordinates
+            .get(id.raw() as usize)
+            .copied()
+    }
+
     /// Add the graph root extracted for an inferred declaration stub. Explicit signatures and
     /// ordinary/default bodies cannot enter through this API because their stubs carry no inference
     /// kind.
@@ -622,6 +487,7 @@ impl SignatureGraph {
             + self.callable_selections.len() * std::mem::size_of::<DeferredCallableSelection>()
             + self.member_selections.len() * std::mem::size_of::<DeferredMemberSelection>()
             + self.value_selections.len() * std::mem::size_of::<DeferredValueSelection>()
+            + self.qualified_call_coordinates.len() * std::mem::size_of::<QualifiedCallCoordinate>()
             + self.delegate_sites.len() * std::mem::size_of::<SignatureDelegateSite>()
             + self.type_syntax.storage_payload_bytes()
             + self.type_names.storage_payload_bytes()
@@ -825,6 +691,9 @@ pub trait SignatureSemantics {
         arguments: &[ResolvedSigCallArgument<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
+        // The compact graph already bound a syntactically qualified call's root as a namespace.
+        // Final selection must not retry that root as a value.
+        qualified_namespace: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
@@ -838,6 +707,9 @@ pub trait SignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
+        // The parser supplied a qualified callee and its root was bound as a namespace, not a
+        // value. This is graph structure, not a fact reconstructed from `spelling`.
+        qualified: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
@@ -884,6 +756,19 @@ pub trait SignatureSemantics {
         scope: SignatureScope,
         root: &str,
     ) -> Result<bool, DiagnosticId>;
+
+    /// Decide whether a syntactically qualified call's first segment binds a value before the same
+    /// spelling can be considered as a package or classifier. `first_selector` is the next parser
+    /// segment, allowing a singleton classifier's nested classifier to stay a namespace while an
+    /// ordinary singleton member call uses the value interpretation.
+    fn qualified_call_receiver_is_value(
+        &self,
+        scope: SignatureScope,
+        root: &str,
+        first_selector: &str,
+    ) -> Result<bool, DiagnosticId> {
+        self.callable_reference_receiver_is_value(scope, root, first_selector)
+    }
 
     /// Decide whether the root of a qualified callable reference denotes a value. Unlike a class
     /// literal, the referenced declaration participates: a singleton classifier is a value in
@@ -1490,6 +1375,8 @@ pub struct ResolvedModuleIndex {
     source_packages: HashMap<SourceFileId, TypeName>,
     /// Each source unit's Kotlin `main`, selected once by the frontend (`fir::entry_point`).
     pub(super) source_entry_points: HashMap<SourceFileId, super::ResolvedEntryPoint>,
+    /// Each source unit's `fun box(): String` test entry, selected with its `main`.
+    pub(super) source_box_entries: HashMap<SourceFileId, CallableId>,
     /// Every package some source unit publishes, with all of its enclosing packages: the
     /// namespaces the source module contributes. Derived from `source_packages` as each identity
     /// is published, so a package-child probe is one lookup instead of a walk of every source
@@ -3160,6 +3047,7 @@ impl ResolvedModuleIndex {
             + self.source_package_namespaces.len() * std::mem::size_of::<TypeName>()
             + self.source_entry_points.len()
                 * std::mem::size_of::<(SourceFileId, super::ResolvedEntryPoint)>()
+            + self.source_box_entries.len() * std::mem::size_of::<(SourceFileId, CallableId)>()
             + self.source_inventory.len()
                 * (std::mem::size_of::<SourceFileId>()
                     + std::mem::size_of::<Box<[DeclarationId]>>())

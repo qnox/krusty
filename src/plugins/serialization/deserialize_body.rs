@@ -184,11 +184,8 @@ impl ElementDecode<'_> {
             let bit = ir.add_expr(IrExpr::Const(IrConst::Int(
                 1i32.wrapping_shl((k % 32) as u32),
             )));
-            let marked = ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::BitOr,
-                lhs: seen,
-                rhs: bit,
-            });
+            let marked =
+                ir.add_arithmetic(crate::ir::IrBinOp::BitOr, seen, bit, crate::types::Ty::Int);
             decoded_stmts.push(ir.add_expr(IrExpr::SetValue {
                 var: seen_local,
                 value: marked,
@@ -273,7 +270,7 @@ impl DeserializeBody<'_> {
                 stmts: vec![ret],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
             return;
         }
 
@@ -300,7 +297,7 @@ impl DeserializeBody<'_> {
                 stmts: vec![ret],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
             return;
         }
         let decodable = fields.iter().all(|(pname, t)| {
@@ -341,7 +338,7 @@ impl DeserializeBody<'_> {
                 stmts: vec![throw],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
             return;
         }
         // Semantic locals, declared in kotlinc's order. Their identities are independent of JVM
@@ -643,6 +640,6 @@ impl DeserializeBody<'_> {
             stmts.push(ir.add_expr(IrExpr::Return(Some(new))));
             ir.add_expr(IrExpr::Block { stmts, value: None })
         };
-        ir.functions[fid as usize].body = Some(body);
+        super::complete_generated_body(ir, fid, body);
     }
 }

@@ -21,7 +21,11 @@ fn diagnostics_files(sources: &[&str]) -> Vec<String> {
 
 fn diagnostics_with_spans(sources: &[&str]) -> Vec<(u32, u32, u32, String)> {
     let mut diagnostics = DiagSink::new();
-    analyze_source_set(sources, Box::new(EmptySymbolSource), &mut diagnostics);
+    analyze_source_set(
+        sources,
+        krusty::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &mut diagnostics,
+    );
     diagnostics
         .diags
         .into_iter()

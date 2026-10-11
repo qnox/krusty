@@ -120,3 +120,31 @@ fn a_cast_statement_on_this_narrows_to_its_explicit_type_arguments() {
     );
     common::expect_box_same_as_kotlinc(CAST_STATEMENT, "ThisCastStatementRun");
 }
+
+const LABELED_THIS: &str = "open class Shape\n\
+class Circle(val r: Int) : Shape()\n\
+class Left(val v: String)\n\
+class Right(val v: Int)\n\
+fun Left?.plain(): Int = if (this@plain != null) this@plain.v.length else -1\n\
+fun Left?.bare(): Int = if (this != null) this@bare.v.length else -1\n\
+fun Left?.outer(inner: Right?): Int = inner.run {\n\
+\x20   if (this@outer != null && this != null) this@outer.v.length + this.v else -1\n\
+}\n\
+fun Shape.radius(): Int = with(\"x\") {\n\
+\x20   if (this@radius is Circle) this@radius.r + length else -1\n\
+}\n\
+fun box(): String {\n\
+\x20   val result = listOf(\n\
+\x20       Left(\"ab\").plain(), (null as Left?).plain(), Left(\"abc\").bare(),\n\
+\x20       Left(\"abcd\").outer(Right(10)), Left(\"a\").outer(null),\n\
+\x20       Circle(5).radius(), Shape().radius(),\n\
+\x20   )\n\
+\x20   return if (result == listOf(2, -1, 3, 14, -1, 6, -1)) \"OK\" else \"FAIL $result\"\n\
+}\n";
+
+/// A proof about a receiver (`this@f != null`, `this != null`, `this@f is Circle`) narrows a later
+/// labeled read of that same receiver, including an outer receiver read from a receiver lambda.
+#[test]
+fn a_labeled_this_reads_the_narrowed_receiver() {
+    common::expect_box_same_as_kotlinc(LABELED_THIS, "LabeledThisNarrowing");
+}

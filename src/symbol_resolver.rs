@@ -14,6 +14,7 @@ use crate::libraries::{
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
+mod access_site;
 mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
@@ -90,8 +91,9 @@ pub(crate) use member_specialization::{
     UnboundSpecialization,
 };
 use member_specialization::{
-    specialize_call_sig, specialize_callable, specialize_final_signature_output_type,
-    specialize_member_type,
+    bind_member_return, bind_member_return_from_call_args_tracking,
+    preserve_receiver_identity_bindings, specialize_call_sig, specialize_callable,
+    specialize_final_signature_output_type, specialize_member_type,
 };
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
@@ -384,134 +386,6 @@ fn top_level_exact_parameters_admit(
                 argument.ty(),
             )
         })
-}
-
-fn bind_member_return(
-    source: &dyn SymbolSource,
-    gsig: &GenericSig,
-    receiver: Ty,
-    args: &[Ty],
-    type_args: &[Ty],
-    provider_ret: Ty,
-) -> Ty {
-    let args = args
-        .iter()
-        .copied()
-        .map(CallArgKind::Typed)
-        .collect::<Vec<_>>();
-    bind_member_return_from_call_args(
-        source,
-        gsig,
-        receiver,
-        &args,
-        type_args,
-        None,
-        &[],
-        provider_ret,
-    )
-}
-
-fn bind_member_return_from_call_args(
-    source: &dyn SymbolSource,
-    gsig: &GenericSig,
-    receiver: Ty,
-    args: &[CallArgKind],
-    type_args: &[Ty],
-    vararg_index: Option<usize>,
-    no_infer_params: &[bool],
-    provider_ret: Ty,
-) -> Ty {
-    let mut binds = seeded_gsig_binds(gsig, type_args);
-    if let Ty::Obj(owner, arguments) = receiver.non_null() {
-        if let Some(classifier) = source.classifier(owner) {
-            for (formal, argument) in classifier.type_params.iter().zip(arguments) {
-                if !gsig.formals.iter().any(|method| method == formal) {
-                    binds.entry(formal.clone()).or_insert(*argument);
-                }
-            }
-        }
-    }
-    if let Some(declared_receiver) = gsig.receiver {
-        unify_ty_from_symbols(source, declared_receiver, receiver, &mut binds);
-        preserve_receiver_identity_bindings(declared_receiver, receiver, &mut binds);
-    } else {
-        seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
-    }
-    let receiver_bindings = binds.clone();
-    let inferred = infer_generic_call_bindings_from_symbols(
-        source,
-        gsig,
-        gsig.params.iter().zip(args).enumerate().filter_map(
-            |(parameter, (&declared, argument))| {
-                (!no_infer_params.get(parameter).copied().unwrap_or(false)
-                    && !argument.is_omitted_default()
-                    && (!argument.is_expected_type_callable()
-                        || argument.result_is_input_constrained()))
-                .then_some((
-                    parameter,
-                    argument.inference_type(source, declared),
-                    argument.is_spread(),
-                ))
-            },
-        ),
-        vararg_index,
-    );
-    merge_call_argument_bindings(
-        source,
-        gsig,
-        type_args,
-        &receiver_bindings,
-        &mut binds,
-        inferred,
-    );
-    crate::trace_compiler!(
-        "expected_call",
-        "bind member return declared={:?} provider={provider_ret:?} bindings={binds:?}",
-        gsig.ret,
-    );
-    let ret = instantiate_slot(
-        source,
-        Some(gsig),
-        gsig.ret,
-        &binds,
-        TypePosition::Out,
-        UnboundSpecialization::UseUpperBound,
-    );
-    // A direct METHOD-owned return variable specializes to the inferred argument even when its
-    // erased provider return is a non-top upper bound (`<A : Annotation> … : A` physically returns
-    // `Annotation`). Owner variables are deliberately excluded: their provider-specialized return
-    // is the receiver binding that `seed_undeclared_return_bindings` recovered above.
-    let direct_method_return = gsig
-        .ret
-        .non_null()
-        .ty_param_name()
-        .is_some_and(|name| gsig.formals.iter().any(|formal| formal == name));
-    if direct_method_return {
-        ret
-    } else {
-        merge_specialized_return(provider_ret, ret)
-    }
-}
-
-/// Receiver substitution must preserve a caller's still-symbolic type parameter. General call
-/// inference intentionally ignores `T = T`, but a selected member on `Owner<T>` returning that same
-/// `T` must not erase it to its upper bound while the enclosing generic declaration is being checked.
-fn preserve_receiver_identity_bindings(declared: Ty, actual: Ty, bindings: &mut GSigBinds) {
-    match (declared.non_null(), actual.non_null()) {
-        (Ty::TyParam(declared, _), actual @ Ty::TyParam(found, _)) if declared == found => {
-            bindings.entry(declared.to_string()).or_insert(actual);
-        }
-        (Ty::Obj(declared, declared_args), Ty::Obj(found, actual_args)) if declared == found => {
-            for (&declared, &actual) in declared_args.iter().zip(actual_args) {
-                preserve_receiver_identity_bindings(declared, actual, bindings);
-            }
-        }
-        (Ty::InProjection(declared), Ty::InProjection(actual))
-        | (Ty::OutProjection(declared), Ty::OutProjection(actual)) => {
-            preserve_receiver_identity_bindings(*declared, *actual, bindings);
-        }
-        _ => {}
-    }
 }
 
 pub(crate) enum CandidateSelection<T> {
@@ -907,6 +781,10 @@ pub struct SymbolResolver<'a> {
     access_package: Option<TypeName>,
     /// Current source file, for top-level `private` declarations in this compilation module.
     access_file: Option<u32>,
+    /// The access site's lexical `@Suppress("INVISIBLE_REFERENCE")`/`("INVISIBLE_MEMBER")` policy.
+    /// Every access predicate of this resolver consumes it, so candidate collection, overload
+    /// applicability, and classifier access diagnostics read one decision.
+    visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
     type_variables: &'a [String],
 }
@@ -1102,129 +980,6 @@ impl<'a> SymbolResolver<'a> {
 
     fn receiver_mro(&self, receiver: Ty) -> ReceiverMro {
         ReceiverMro::new(&self.src, receiver).with_type_variables(self.type_variables)
-    }
-
-    pub(crate) fn with_access_context(
-        mut self,
-        package: TypeName,
-        file: u32,
-        classes: Vec<TypeName>,
-    ) -> Self {
-        self.access_package = Some(package);
-        self.access_file = Some(file);
-        self.lexical_classes = classes;
-        self
-    }
-
-    fn classifier_accessible(&self, internal: TypeName) -> bool {
-        let Some(classifier) = self.src.classifier(internal) else {
-            return false;
-        };
-        // A companion's physical nested classifier may be non-public even though source code exposes
-        // it through the outer classifier's public companion value (`Double.Companion`). Admit exactly
-        // that metadata edge; an arbitrary internal nested classifier remains inaccessible.
-        if let Some(owner) = internal.nested_owner() {
-            let exposed_companion = self
-                .src
-                .classifier(owner)
-                .and_then(|outer| outer.companion_object.as_ref().map(|(_, name)| *name))
-                .is_some_and(|companion| companion == internal);
-            if exposed_companion && self.classifier_accessible(owner) {
-                return true;
-            }
-        }
-        let visibility = classifier.access.visibility();
-        if classifier.access == crate::libraries::ClassifierAccess::Public
-            || (classifier.access == crate::libraries::ClassifierAccess::Internal
-                && (self
-                    .module
-                    .is_some_and(|module| module.classifier(internal).is_some())
-                    || self.lib.internal_accessible(internal)))
-        {
-            return true;
-        }
-        if classifier.access == crate::libraries::ClassifierAccess::PackagePrivate
-            && self.package_private_member_accessible(internal)
-        {
-            return true;
-        }
-        if classifier.access == crate::libraries::ClassifierAccess::Private
-            && !internal.contains("$")
-            && classifier.source_file == self.access_file
-        {
-            return true;
-        }
-        // A private/protected nested classifier is a member of its enclosing classifier. Module
-        // lookup therefore needs the lexical owner stack: code in `Outer` (or one of its nested
-        // classes) may name `Outer$Hidden` / `Outer$Stage` directly. Protected access from a
-        // subclass is handled by the inherited-classifier walk below; this arm covers the declaring
-        // class itself, which does not inherit from itself. The module source separately handles
-        // top-level file-private declarations.
-        if matches!(
-            visibility,
-            crate::types::Visibility::Private | crate::types::Visibility::Protected
-        ) && self
-            .module
-            .is_some_and(|module| module.classifier(internal).is_some())
-        {
-            // A private member of a companion object is visible throughout the class that owns the
-            // companion (kotlinc's private visibility treats the companion's containing class as
-            // the declaring scope), so `Outer` may name `Outer$Companion$Hidden`.
-            let declaring_owner = internal.nested_owner().map(|declaring_owner| {
-                match declaring_owner.nested_owner() {
-                    Some(outer)
-                        if visibility == crate::types::Visibility::Private
-                            && self.src.classifier(outer).and_then(|outer| {
-                                outer.companion_object.as_ref().map(|(_, name)| *name)
-                            }) == Some(declaring_owner) =>
-                    {
-                        outer
-                    }
-                    _ => declaring_owner,
-                }
-            });
-            if declaring_owner.is_some_and(|declaring_owner| {
-                self.lexical_classes
-                    .iter()
-                    .copied()
-                    .any(|lexical| lexical.same_or_nested_within(declaring_owner))
-            }) {
-                return true;
-            }
-        }
-        if internal.nested_owner().is_none() {
-            return false;
-        }
-        let simple = internal.nested_segment_ref();
-        self.lexical_classes.iter().copied().any(|owner| {
-            inherited_nested_classifier_name(
-                simple,
-                direct_supertypes(&self.src, Ty::obj_name(owner))
-                    .into_iter()
-                    .filter_map(Ty::kotlin_class_internal)
-                    .collect(),
-                |candidate_owner| {
-                    direct_supertypes(&self.src, Ty::obj_name(candidate_owner))
-                        .into_iter()
-                        .filter_map(Ty::kotlin_class_internal)
-                        .collect()
-                },
-                |candidate| inherited_classifier_shape(&self.src, candidate, owner).is_some(),
-            ) == InheritedNestedClassifier::Found(internal)
-        })
-    }
-
-    pub(crate) fn inaccessible_classifier_access(
-        &self,
-        internal: TypeName,
-    ) -> Option<crate::symbol_source::ClassifierAccess> {
-        let access = self.src.classifier(internal)?.access;
-        (!self.classifier_accessible(internal)).then_some(access)
-    }
-
-    fn package_private_member_accessible(&self, owner: TypeName) -> bool {
-        self.access_package
-            .is_some_and(|package| package == owner.namespace())
     }
 
     /// Whether the type named `internal` — or anything in its (classpath) supertype chain — declares a
@@ -1480,7 +1235,7 @@ impl<'a> SymbolResolver<'a> {
         args: &[CallArgKind],
         type_args: &[Ty],
         callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
+    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty, GSigBinds)> {
         let selected = match select_receiver_overload_from_functions_tracking(
             self.lib,
             receiver,
@@ -1509,38 +1264,38 @@ impl<'a> SymbolResolver<'a> {
         if selected.call_sig.vararg_index.is_none() {
             let params =
                 logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            let resolved = if selected.is_extension() {
+            // The bindings are published with the call; the receiver binds `V` of `Map.get`.
+            let (resolved, bindings) = if selected.generic_sig.is_some() && selected.is_extension()
+            {
                 let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-                selected.generic_sig.as_ref().map_or(
-                    selected.ret.apply(selected.callable.ret),
-                    |signature| {
-                        specialized_extension_return(
-                            self.lib,
-                            &selected,
-                            bind_ext_ret(
-                                &self.src,
-                                signature,
-                                binding_receiver,
-                                &arg_tys,
-                                type_args,
-                            ),
-                        )
-                    },
+                let semantic = selected.semantic_signature();
+                let (ret, bindings) = bind_ext_ret_tracking(
+                    &self.src,
+                    &semantic,
+                    binding_receiver,
+                    &arg_tys,
+                    type_args,
+                );
+                (
+                    specialized_extension_return(self.lib, &selected, ret),
+                    bindings,
                 )
+            } else if selected.is_extension() {
+                (selected.ret.apply(selected.callable.ret), GSigBinds::new())
             } else {
-                resolved_member_from_info(
+                let (member, bindings) = resolved_member_from_info_tracking(
                     self.lib,
                     &self.src,
                     receiver,
                     args,
                     type_args,
                     selected.clone(),
-                )
-                .ret
+                );
+                (member.ret, bindings)
             };
-            return CandidateSelection::Selected((selected, params, resolved));
+            return CandidateSelection::Selected((selected, params, resolved, bindings));
         }
-        let Some((params, ret)) = indexed_call_shape(
+        let Some((params, ret, bindings)) = indexed_call_shape(
             self.lib,
             &self.src,
             &selected,
@@ -1551,7 +1306,7 @@ impl<'a> SymbolResolver<'a> {
         ) else {
             return CandidateSelection::None;
         };
-        CandidateSelection::Selected((selected, params, ret))
+        CandidateSelection::Selected((selected, params, ret, bindings))
     }
 
     /// Select the `set` convention used by indexed assignment. The assignment RHS binds the final
@@ -1628,7 +1383,7 @@ impl<'a> SymbolResolver<'a> {
             let ret = selected.ret.apply(inferred_ret);
             return CandidateSelection::Selected((selected, params, ret));
         }
-        let Some((params, ret)) = indexed_call_shape(
+        let Some((params, ret, _)) = indexed_call_shape(
             self.lib,
             &self.src,
             &selected,
@@ -1770,7 +1525,8 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
         selected: FunctionInfo,
     ) -> ResolvedMember {
-        resolved_member_from_info(self.lib, &self.src, receiver, args, type_args, selected)
+        resolved_member_from_info_tracking(self.lib, &self.src, receiver, args, type_args, selected)
+            .0
     }
 
     /// Convert an already-specialized overload selection into the checker/lowering handoff. The
@@ -1840,7 +1596,7 @@ impl<'a> SymbolResolver<'a> {
         let receiver_mro = self.receiver_mro(receiver);
         let mut candidates = properties
             .filter(|property| property.kind == PropKind::Extension)
-            .filter(|property| source_property_visible(self.lib, property))
+            .filter(|property| self.property_visible(property))
             .filter(|property| {
                 generic_bounds_admit(
                     &self.src,
@@ -2180,10 +1936,11 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
-    /// Select from a caller-provided family when Kotlin's `INVISIBLE_REFERENCE` or
-    /// `INVISIBLE_MEMBER` suppression makes otherwise hidden declarations applicable. Visibility
-    /// is the only relaxed predicate; argument mapping, applicability, generic inference and
-    /// specificity remain the ordinary top-level algorithm.
+    /// Select from a caller-provided family without the source visibility gate, for a
+    /// compiler-selected runtime callable that no source reference names. Visibility is the only
+    /// relaxed predicate; argument mapping, applicability, generic inference and specificity
+    /// remain the ordinary top-level algorithm. A source site under a lexical visibility
+    /// suppression installs that policy with [`Self::with_visibility_suppression`] instead.
     pub(crate) fn select_top_level_function_candidates_ignoring_visibility(
         &self,
         name: &str,
@@ -2193,19 +1950,6 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<(FunctionInfo, LibraryCallable)> {
         self.select_top_level_function_candidates_with_visibility(
             name, candidates, args, type_args, None, true,
-        )
-    }
-
-    pub(crate) fn select_top_level_function_candidates_with_expected_ignoring_visibility(
-        &self,
-        name: &str,
-        candidates: Vec<FunctionInfo>,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        expected: Option<Ty>,
-    ) -> Option<(FunctionInfo, LibraryCallable)> {
-        self.select_top_level_function_candidates_with_visibility(
-            name, candidates, args, type_args, expected, true,
         )
     }
 
@@ -2472,7 +2216,7 @@ impl<'a> SymbolResolver<'a> {
                             .into_iter()
                             .flat_map(|symbols| property_overloads(&symbols.callables))
                             .filter(|property| property.kind == PropKind::TopLevel)
-                            .filter(|property| source_property_visible(self.lib, property))
+                            .filter(|property| self.property_visible(property))
                             .collect::<Vec<_>>()
                     })
                     .find(|properties| !properties.is_empty())
@@ -3988,6 +3732,9 @@ pub struct SelectedMemberProperty {
     pub visibility: crate::types::Visibility,
     /// The selected Kotlin declaration. Target storage realization remains opaque on its accessors.
     pub property: Option<PropertyInfo>,
+    /// Synthetic accessor properties of the same classifier that tie with `property` through a
+    /// different getter method (`isX()` and `getIsX()`). Non-empty means the read is ambiguous.
+    pub competing_accessors: Vec<PropertyInfo>,
 }
 
 impl SelectedMemberProperty {
@@ -4007,19 +3754,18 @@ impl SelectedMemberProperty {
 /// Resolve an instance member and carry the logical return selected for this call. Generic member
 /// returns may bind from the receiver (`List<Int>.get(Int): Int`) or, for erased-`Any` returns, from
 /// the call arguments (`decodeFromString(serializer, text): T`).
-fn resolved_member_from_info(
+fn resolved_member_from_info_tracking(
     lib: &dyn SemanticPlatform,
     source: &dyn SymbolSource,
     recv: Ty,
     args: &[CallArgKind],
     type_args: &[Ty],
     o: FunctionInfo,
-) -> ResolvedMember {
-    let ret = o
-        .generic_sig
-        .as_ref()
-        .map(|gsig| {
-            bind_member_return_from_call_args(
+) -> (ResolvedMember, GSigBinds) {
+    let (ret, bindings) = o.generic_sig.as_ref().map_or_else(
+        || (o.callable.ret, GSigBinds::new()),
+        |gsig| {
+            bind_member_return_from_call_args_tracking(
                 source,
                 gsig,
                 recv,
@@ -4029,24 +3775,27 @@ fn resolved_member_from_info(
                 &o.call_sig.no_infer_params,
                 o.callable.ret,
             )
-        })
-        .unwrap_or(o.callable.ret);
+        },
+    );
     let ret = o.ret.apply(
         o.generic_sig
             .as_ref()
             .map_or(ret, |sig| sig.apply_return_policy(lib, ret)),
     );
     let member = o.member_with_return(o.callable.ret);
-    ResolvedMember {
-        receiver: recv,
-        ret,
-        member,
-        physical_params: o.callable.physical_params.clone(),
-        context_args: Vec::new(),
-        projected_return_hazard: o.projected_return_hazard,
-        suspend: o.flags.suspend,
-        origin: o.callable.origin.clone(),
-    }
+    (
+        ResolvedMember {
+            receiver: recv,
+            ret,
+            member,
+            physical_params: o.callable.physical_params.clone(),
+            context_args: Vec::new(),
+            projected_return_hazard: o.projected_return_hazard,
+            suspend: o.flags.suspend,
+            origin: o.callable.origin.clone(),
+        },
+        bindings,
+    )
 }
 
 fn member_property_from_callables(callables: &Callables) -> Option<PropertyInfo> {

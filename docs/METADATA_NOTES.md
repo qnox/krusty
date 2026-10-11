@@ -189,7 +189,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   on members such as `MutableCollection.add`; a Java declaration records none and is skipped, so an
   override of `java.util.ArrayList.add` records 2. The same status resolution gives an override the
   `operator` (bit 8) and `infix` (bit 9) modifiers when any declaration it overrides has them. Test:
-  `tests/metadata_return_value_status_e2e.rs`.
+  `tests/metadata_return_value_status_e2e.rs`. KLIB package functions and properties carry these
+  same status bits through target-neutral normalization rather than dropping them at the provider
+  boundary.
 - Field order and type-parameter references (kotlinc 2.4.0, 2.4.10, 2.4.20): the protoc-generated
   `writeTo` emits every message's fields in ascending field-number order, repeated fields together
   and extensions last, so `Type.flags` (f1, e.g. `SUSPEND_TYPE`) comes first and a function's
@@ -593,3 +595,26 @@ wrong shifts every abbreviation onto the neighbouring supertype.
 Both lists lead with the superclass. The emitter then moves it to the slot that resolution recorded
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
+
+## Compiler-plugin declarations in a KLIB
+
+kotlinx.serialization is split like kotlinc's plugin: its frontend part declares what Kotlin code
+can name, and its IR part fills bodies and adds IR-only helpers. krusty declares the frontend part
+at the backend handoff, before the declaration records are built, so every target describes the
+same declarations; each backend completes them afterwards.
+
+For `@Serializable class Foo(val a: Int, val b: String = "x")` kotlinc-native 2.4.20 writes, beside
+`Foo`'s own members:
+
+- `Foo`: an `internal` secondary constructor `(seen0: Int, a: Int, b: String?,
+  serializationConstructorMarker: SerializationConstructorMarker?)`;
+- `Foo.$serializer`: a `@Deprecated(HIDDEN)` object implementing `GeneratedSerializer<Foo>` with a
+  private constructor, `childSerializers`, `deserialize`, `serialize` and `val descriptor`;
+- `Foo.Companion`: a private constructor and `serializer(): KSerializer<Foo>`.
+
+`nestedClassName` lists `$serializer` before `Companion`, and the fragment's classes follow that
+order. A plugin-generated class and its members carry no file extension (`classFile` 175,
+`functionFile` 172, `propertyFile` 176): no source file declares them. `write$Self` is not a
+declaration: the JVM adds it to its own `@Metadata` record after the handoff.
+`klib_class_surface_e2e::serialization_plugin_declarations_match_kotlinc_native` compares the whole
+fragment with kotlinc-native's bytes.

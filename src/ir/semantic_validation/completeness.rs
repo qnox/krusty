@@ -1,9 +1,11 @@
 //! Common-IR facts a backend consumes as complete.
 //!
-//! A backend realizes a property from its layout and a captured mutable local from its recorded
-//! holder parameter. It does not look for either anywhere else: not by an accessor's or field's
-//! spelling, and not by scanning a body for the holder operations it happens to perform. So common
-//! IR proves both tables complete before it crosses into a backend.
+//! A backend realizes a property from its layout, a captured mutable local from its recorded
+//! holder parameter, and an arithmetic operator's answer at its recorded result type. It does not
+//! look for any of them anywhere else: not by an accessor's or field's spelling, not by scanning a
+//! body for the holder operations it happens to perform, and not by re-deriving Kotlin's numeric
+//! promotion from the operands. So common IR proves all three complete before it crosses into a
+//! backend.
 
 use crate::fir::{FirPropertyReferenceTarget, PropertyId, SourceFileId};
 
@@ -18,15 +20,22 @@ pub enum IncompleteIrFact {
     /// reading or writing through it, but is not recorded as one in
     /// `IrFile::shared_capture_parameters`.
     SharedCaptureParameter { function: FunId, parameter: u32 },
+    /// An arithmetic, bitwise or shift `PrimitiveBinOp` has no recorded result type.
+    ArithmeticResult(ExprId),
 }
 
 impl IrFile {
     /// Prove that every property this file declares or references from its own declarations has a
-    /// layout, and that every parameter a function uses as a shared capture holder is recorded.
+    /// layout, that every parameter a function uses as a shared capture holder is recorded, and
+    /// that every arithmetic operator has its selected result type recorded.
     /// `source` is the file this common IR was lowered from.
     pub fn validate_complete_facts(&self, source: SourceFileId) -> Result<(), IncompleteIrFact> {
         self.validate_property_layouts(source)?;
-        self.validate_shared_capture_parameters()
+        self.validate_shared_capture_parameters()?;
+        match self.unrecorded_arithmetic_result() {
+            Some(expression) => Err(IncompleteIrFact::ArithmeticResult(expression)),
+            None => Ok(()),
+        }
     }
 
     fn validate_property_layouts(&self, source: SourceFileId) -> Result<(), IncompleteIrFact> {

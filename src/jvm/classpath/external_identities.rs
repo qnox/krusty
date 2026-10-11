@@ -68,6 +68,7 @@ impl Classpath {
             kind,
             declaration_owner,
             parameter_identities: Box::new([]),
+            declaration_signature: None,
         });
         self.external_callable_ids
             .borrow_mut()
@@ -174,6 +175,9 @@ impl Classpath {
         }
         if stored.callable.declared_ret.is_none() {
             stored.callable.declared_ret = callable.declared_ret;
+        }
+        if stored.callable.generic_sig.is_none() {
+            stored.callable.generic_sig = callable.generic_sig.clone();
         }
         if stored.callable.declared_params.is_none() {
             stored.callable.declared_params = callable.declared_params.clone();
@@ -285,6 +289,46 @@ mod tests {
                 .callable
                 .semantic_role,
             enriched.semantic_role
+        );
+    }
+
+    /// A member reached first through a partial view has no generic signature yet. Its declaration
+    /// supplies one later, and the backend names a reified argument by that signature's formals.
+    #[test]
+    fn reinterning_a_physical_callable_takes_the_later_generic_signature() {
+        let cp = Classpath::new(vec![]);
+        let partial = LibraryCallable::library(
+            type_name("review/Holder"),
+            "name",
+            vec![],
+            Ty::String,
+            Ty::String,
+            "()Ljava/lang/String;",
+        );
+        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
+
+        let mut declared = partial.clone();
+        let signature = crate::libraries::GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: Vec::new(),
+            ret: Ty::String,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        };
+        declared.generic_sig = Some(Box::new(signature.clone()));
+
+        assert_eq!(
+            cp.intern_external_callable(&declared, ExternalCallableKind::Member, None),
+            identity
+        );
+        assert_eq!(
+            cp.external_callable(identity)
+                .expect("the enriched callable")
+                .callable
+                .generic_sig
+                .as_deref(),
+            Some(&signature)
         );
     }
 

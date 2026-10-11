@@ -6,6 +6,7 @@ use super::common;
 
 const LIB: &str = "package lib\n\
                    internal class Hidden(val value: Int)\n\
+                   internal open class HiddenBase(val value: Int)\n\
                    internal val hiddenProperty: Int = 7\n\
                    internal fun hiddenFun(value: Int): Int = value\n\
                    private fun hiddenPrivate(value: Int): Int = value\n\
@@ -484,6 +485,36 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
                  }\n",
         ),
         (
+            "MemberSignatureSuppressed.kt",
+            "package membersignaturecase\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 class Holder {\n\
+                 internal fun inner(): lib.Hidden = lib.Hidden(1)\n\
+                 }\n",
+        ),
+        (
+            "NestedSuppressed.kt",
+            "package nestedcase\n\
+                 class Outer {\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 internal class Nested : lib.HiddenBase(1)\n\
+                 }\n",
+        ),
+        (
+            "OuterSuppressed.kt",
+            "package outercase\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 internal class Outer {\n\
+                 class Nested : lib.HiddenBase(1)\n\
+                 }\n",
+        ),
+        (
+            "SupertypeSuppressed.kt",
+            "package supertypecase\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 internal class Child : lib.HiddenBase(1)\n",
+        ),
+        (
             "LocalBackingFieldSuppressed.kt",
             "// LANGUAGE: +ExplicitBackingFields\n\
                  package localbackingfieldcase\n\
@@ -603,6 +634,24 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
                 message: warning.to_string(),
             },
             ObservedDiagnostic {
+                file: "MemberSignatureSuppressed.kt".to_string(),
+                line: 2,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
+                file: "NestedSuppressed.kt".to_string(),
+                line: 3,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
+                file: "OuterSuppressed.kt".to_string(),
+                line: 2,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
                 file: "PrimaryConstructorSuppressed.kt".to_string(),
                 line: 2,
                 column: 21,
@@ -623,6 +672,12 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
             ObservedDiagnostic {
                 file: "SecondaryConstructorSuppressed.kt".to_string(),
                 line: 3,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
+                file: "SupertypeSuppressed.kt".to_string(),
+                line: 2,
                 column: 11,
                 message: warning.to_string(),
             },
@@ -706,4 +761,68 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
             },
         ]
     );
+}
+
+#[test]
+fn signature_visibility_without_suppression_matches_kotlinc_exactly() {
+    let fixture = Fixture::new();
+    let sources = [
+        (
+            "NestedUnsuppressed.kt",
+            "package nestedunsuppressed\n\
+             class Outer {\n\
+             internal class Nested : lib.HiddenBase(1)\n\
+             }\n",
+        ),
+        (
+            "SupertypeUnsuppressed.kt",
+            "package supertypeunsuppressed\n\
+             internal class Child : lib.HiddenBase(1)\n",
+        ),
+    ];
+    let result = common::compiler_diagnostics(&sources, &fixture.classpath);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    // Each compiler reports the supertype reference and the constructor call's callee, at the same
+    // positions and in the same order; krusty spells the classifier by its qualified name.
+    let expected = |message: &str| {
+        [
+            ("NestedUnsuppressed.kt", 3, 25),
+            ("NestedUnsuppressed.kt", 3, 29),
+            ("SupertypeUnsuppressed.kt", 2, 24),
+            ("SupertypeUnsuppressed.kt", 2, 28),
+        ]
+        .map(|(file, line, column)| common::CompilerError {
+            file: file.to_string(),
+            line,
+            column,
+            message: message.to_string(),
+        })
+    };
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        expected("cannot access 'class HiddenBase : Any': it is internal in file.")
+    );
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        expected("cannot access 'lib.HiddenBase': it is internal")
+    );
+}
+
+#[test]
+fn invisible_reference_suppression_keeps_the_final_supertype_error() {
+    let fixture = Fixture::new();
+    let source = "package finalcase\n\
+                  @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                  class FinalChild : lib.Visible(1)\n";
+    let result =
+        common::compiler_diagnostics(&[("FinalSuppressed.kt", source)], &fixture.classpath);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let expected = [common::CompilerError {
+        file: "FinalSuppressed.kt".to_string(),
+        line: 3,
+        column: 20,
+        message: "this type is final, so it cannot be extended.".to_string(),
+    }];
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), expected);
 }

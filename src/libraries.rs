@@ -19,6 +19,7 @@ mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
@@ -29,8 +30,8 @@ pub use annotation_application::{
 };
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, NonvirtualCallRealization, OverriddenCallKind,
-    OverriddenCallRealization,
+    ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
+    NonvirtualCallRealization, OverriddenCallKind, OverriddenCallRealization,
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
@@ -58,6 +59,16 @@ pub use inline_body::{
     InlineBodyRecovery, InlineBodySource, InlineBodyValue, InlineCollectionAppend,
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
+};
+pub(crate) use metadata_normalization::{
+    associated_function_parameter_identities, associated_property_parameter_identities,
+    classifier_shape, constructor_parameter_identities, constructor_parameter_list,
+    declared_constructor, declared_function, declared_property, declared_retention,
+    declared_targets, declared_type_alias, enum_entries_getter, enum_value_of, enum_values,
+    function_generic_sig, function_parameter_identities, member_record, only_input_type_formals,
+    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
+    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
+    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -250,6 +261,8 @@ pub struct LibraryMember {
     /// Exact language-level role retained from the selected declaration. Providers assign this at
     /// their boundary; checked FIR carries it without re-identifying the member from its spelling.
     pub semantic_role: Option<SemanticCallRole>,
+    /// See [`LibraryCallable::overridden_declarations`].
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// Exact singleton instance that dispatches this selected object member. This is a semantic
     /// call-shape fact: checked FIR materializes the value as its dispatch receiver, while lowering
     /// only consumes that receiver and the already-selected callable identity.
@@ -665,19 +678,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         &[]
     }
 
-    /// Platform spellings for physical zero-arg getters when declaration metadata is unavailable.
-    /// Common resolution asks for a semantic property name; the target returns every physical spelling
-    /// as one provider result because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
-    /// The candidates are most-conventional first
-    /// (`id` → `getId`, `getID`; `urlPath` → `getUrlPath`, `getURLPath`) — the inverse of
-    /// Kotlin's decapitalize-smart getter-to-property mapping.
-    fn physical_property_getter_names(&self, _property: &str) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Project accessor methods inherited through a foreign classifier into semantic Kotlin
     /// properties. Core supplies the federated declaration source so a provider can pair methods
-    /// across module/library boundaries; the returned values are ordinary [`PropertyInfo`] records.
+    /// across module/library boundaries; the provider derives each property from the methods the
+    /// hierarchy declares, and the returned values are ordinary [`PropertyInfo`] records.
     /// Targets without accessor-property interop return an empty set.
     fn inherited_accessor_properties(
         &self,
@@ -718,6 +722,7 @@ impl LibraryMember {
             external_default_provider: None,
             external_property_identity: None,
             semantic_role: None,
+            overridden_declarations: Box::new([]),
             singleton_dispatch: None,
             name,
             owner: None,
@@ -887,6 +892,10 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// Exact identities of the declarations this callable overrides, as the core member hierarchy
+    /// proved them while normalizing the selected family; empty for a declaration that overrides
+    /// nothing or was not reached through a hierarchy walk.
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// JVM collection barrier role of this exact decoded builtin declaration.
     pub collection_barrier: Option<CollectionBarrierOutcome>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
@@ -1937,6 +1946,7 @@ impl FunctionInfo {
         member.external_identity = self.callable.external_identity;
         member.external_property_identity = self.callable.external_property_identity;
         member.semantic_role = self.callable.semantic_role;
+        member.overridden_declarations = self.callable.overridden_declarations.clone();
         member.singleton_dispatch = self.callable.singleton_dispatch.clone();
         member.stable_declaration = self.stable_declaration;
         member.source_member = self.source_member;

@@ -34,6 +34,12 @@ pub fn stdlib_jar() -> Option<PathBuf> {
     (!cp.scan_types().is_empty()).then_some(jar)
 }
 
+/// A `Classpath` containing the located stdlib jar and the JDK, as kotlinc compiles against them
+/// without `-no-jdk`.
+pub fn stdlib_and_jdk_classpath() -> Classpath {
+    Classpath::new(stdlib_jar().into_iter().chain(jdk_modules()).collect())
+}
+
 /// A `Classpath` containing the located stdlib jar, or empty if none was found.
 pub fn stdlib_classpath() -> Classpath {
     match stdlib_jar() {
@@ -162,6 +168,41 @@ pub fn kotlinc_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The reference stdlib KLIB a compilation for `target` is analyzed against. The JS and Wasm ones
+/// ship in the kotlinc distribution; Native's is the Kotlin/Native distribution's. `None` for the
+/// JVM, whose stdlib is a jar, and for a distribution that is not provisioned.
+pub fn kotlin_stdlib_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
+    use crate::compilation_target::CompilationTarget;
+    match target {
+        CompilationTarget::Jvm => None,
+        CompilationTarget::Js => dist_jar("kotlin-stdlib-js.klib"),
+        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib"),
+        CompilationTarget::WasmWasi => dist_jar("kotlin-stdlib-wasm-wasi.klib"),
+        CompilationTarget::Native => kotlin_native_stdlib_klib(),
+    }
+}
+
+/// The common stdlib KLIB of the reference Kotlin/Native distribution. `KRUSTY_KOTLIN_NATIVE`
+/// names a distribution root; otherwise `just kotlin-native` provisions this host's distribution
+/// under `target/cache/kotlin-native/<version>/`.
+fn kotlin_native_stdlib_klib() -> Option<PathBuf> {
+    let host = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("macos", "x86_64") => "macos-x86_64",
+        ("macos", "aarch64") => "macos-aarch64",
+        _ => return None,
+    };
+    let version = reference_version();
+    let root = toolchain_path(
+        std::env::var_os("KRUSTY_KOTLIN_NATIVE"),
+        "kotlin-native",
+        &format!("kotlin-native-prebuilt-{host}-{version}"),
+    )?;
+    let stdlib = root.join("klib/common/stdlib");
+    stdlib.join("default/manifest").is_file().then_some(stdlib)
+}
+
 /// The `lib/` dir of the reference kotlinc dist we differential-test against — its jars are the
 /// exact ones the reference compiler ships. `KRUSTY_KOTLINC` overrides the provisioned dist.
 pub fn kotlinc_lib_dir() -> Option<PathBuf> {
@@ -278,6 +319,24 @@ pub fn box_mock_jdk_rt_jar(box_dir: &Path) -> Result<PathBuf, String> {
 /// download fails (offline) or the process's download budget is spent (see `maven_download`). Cached
 /// under `~/.cache/krusty-deps` (overridable via `KRUSTY_DEPS_CACHE`).
 pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBuf> {
+    ensure_maven_artifact(group, artifact, version, "jar")
+}
+
+/// A Maven Central artifact with an explicit extension, cached and atomically published like
+/// [`ensure_maven`]. This is used for Kotlin/Native `.klib` dependencies as well as JVM jars.
+pub fn ensure_maven_artifact(
+    group: &str,
+    artifact: &str,
+    version: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    if extension.is_empty()
+        || !extension
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
     let cache = std::env::var("KRUSTY_DEPS_CACHE")
         .ok()
         .filter(|s| !s.is_empty())
@@ -288,13 +347,13 @@ pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBu
                 .map(|h| PathBuf::from(h).join(".cache/krusty-deps"))
         })?;
     let _ = std::fs::create_dir_all(&cache);
-    let file = cache.join(format!("{artifact}-{version}.jar"));
+    let file = cache.join(format!("{artifact}-{version}.{extension}"));
     if file.is_file() {
         return Some(file);
     }
     let url = format!(
-        "https://repo1.maven.org/maven2/{}/{artifact}/{version}/{artifact}-{version}.jar",
-        group.replace('.', "/")
+        "https://repo1.maven.org/maven2/{}/{artifact}/{version}/{artifact}-{version}.{extension}",
+        group.replace('.', "/"),
     );
     let download = maven_download_path(&file);
     let completed = maven_download::process_budget()
@@ -342,6 +401,15 @@ fn publish_maven_download(download: &Path, file: &Path) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// The classpath kotlinc compiles a box test's source against: its [`classpath_jars_for`] jars and
+/// the JDK, which kotlinc adds unless `-no-jdk` is given. Without the JDK, `java.io.Serializable`
+/// and every other JDK supertype is a missing dependency.
+pub fn jvm_classpath_jars_for(src: &str) -> Vec<PathBuf> {
+    let mut jars = classpath_jars_for(src);
+    jars.extend(jdk_modules());
+    jars
 }
 
 /// The set of `-classpath` jars a box test needs, formed from its directives — mirroring kotlinc's

@@ -358,7 +358,7 @@ pub(super) fn emit_suspend_lambda_class(
     };
     cw.set_kotlin_metadata(
         3,
-        &opts.metadata_version(),
+        opts.metadata_stamp(),
         synthetic_class_xi(SYNTHETIC_LOCAL),
         &d1,
         &d2,
@@ -396,8 +396,8 @@ fn lambda_metadata(
         .map(String::as_str)
         .zip(values.iter().copied())
         .collect();
-    let local_classifiers = crate::jvm::local_classifiers::names(ir);
-    let enum_entry_bodies = crate::jvm::local_classifiers::enum_entry_bodies(ir);
+    let local_classifiers = crate::metadata::local_classifiers::names(ir);
+    let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {

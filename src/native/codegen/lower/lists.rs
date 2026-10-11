@@ -23,6 +23,7 @@
 //! Keying on the receiver is sound for the same reason it is for ranges — a file declaring a class
 //! that implements one of these interfaces overrides a dependency method, and is declined whole.
 
+use super::implementor_dispatch::ImplementorArm;
 use super::*;
 use crate::types::CollectionKind;
 
@@ -401,7 +402,7 @@ impl BodyLowering<'_, '_, '_> {
                 let Some(text) = self.property_reference_name(*property) else {
                     return Some(Err(
                         "a delegated property read through a `KProperty` this file did not build"
-                            .to_string(),
+                            .into(),
                     ));
                 };
                 Some(self.delegate_read(receiver, *this_ref, *property, &text, ret))
@@ -445,12 +446,9 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let declared = self.file.implementors_of(internal);
-        let implementors: Vec<(ClassId, u32, Vec<Ty>, Ty)> = declared
+        let implementors: Vec<ImplementorArm> = declared
             .iter()
-            .filter_map(|&class| {
-                self.external_override_slot(class, target)
-                    .map(|(slot, params, supplied)| (class, slot, params, supplied))
-            })
+            .filter_map(|&class| self.external_override_slot(class, target, signature.params))
             .collect();
         // A class whose `getValue` this generator cannot place leaves the set short, and a
         // dispatch missing an arm would answer the wrong body for it.
@@ -462,7 +460,7 @@ impl BodyLowering<'_, '_, '_> {
 
     fn read_only_property_dispatch(
         &mut self,
-        implementors: &[(ClassId, u32, Vec<Ty>, Ty)],
+        implementors: &[ImplementorArm],
         receiver: u32,
         args: &[u32],
         ret: Ty,
@@ -1216,12 +1214,9 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let declared = self.file.implementors_of(internal);
-        let implementors: Vec<(ClassId, u32, Vec<Ty>, Ty)> = declared
+        let implementors: Vec<ImplementorArm> = declared
             .iter()
-            .filter_map(|&class| {
-                self.external_override_slot(class, target)
-                    .map(|(slot, params, supplied)| (class, slot, params, supplied))
-            })
+            .filter_map(|&class| self.external_override_slot(class, target, signature.params))
             .collect();
         if implementors.is_empty() || implementors.len() != declared.len() {
             return None;
@@ -1237,7 +1232,7 @@ impl BodyLowering<'_, '_, '_> {
     /// One of those, with the runtime entry point as the last arm.
     fn member_by_implementor(
         &mut self,
-        implementors: &[(ClassId, u32, Vec<Ty>, Ty)],
+        implementors: &[ImplementorArm],
         runtime: RuntimeEntry<'_>,
         receiver: u32,
         args: &[u32],
@@ -1322,7 +1317,7 @@ impl BodyLowering<'_, '_, '_> {
         let mut operands = vec![self.reference(receiver)?];
         for (argument, ty) in args.iter().zip(&carried[1..]) {
             let Some(value) = self.coerce(*argument, *ty)? else {
-                return Err(format!("a `Unit` operand of `{symbol}`"));
+                return Err(declined!("a `Unit` operand of `{symbol}`"));
             };
             operands.push(value);
         }

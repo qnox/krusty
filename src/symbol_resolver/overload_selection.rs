@@ -652,7 +652,7 @@ pub(super) fn select_overload_tracking_with_functions(
     });
     for (priority, scope_rank, receiver_rank, binding_receiver, o) in ranked {
         let lp = if indexed != IndexedConvention::Ordinary && o.call_sig.vararg_index.is_some() {
-            let Some((params, _)) = indexed_call_shape(
+            let Some((params, _, _)) = indexed_call_shape(
                 lib,
                 src,
                 o,
@@ -1108,7 +1108,7 @@ pub(super) fn indexed_call_shape(
     arguments: &[CallArgKind],
     type_arguments: &[Ty],
     set: bool,
-) -> Option<(Vec<Ty>, Ty)> {
+) -> Option<(Vec<Ty>, Ty, GSigBinds)> {
     let signature = overload.semantic_signature();
     let value_start = overload.context_count.min(signature.params.len());
     let vararg = overload.call_sig.vararg_index?;
@@ -1192,7 +1192,7 @@ pub(super) fn indexed_call_shape(
             .ret
             .apply(signature.apply_return_policy(lib, inferred_ret))
     };
-    Some((params, ret))
+    Some((params, ret, bindings))
 }
 
 /// Assignability through the SOURCE symbol federation (module classes first): a module-declared

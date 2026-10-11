@@ -652,6 +652,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                overridden_declarations,
                 suspend,
                 can_inline,
                 inline_plan,
@@ -668,6 +669,7 @@ impl BodyLowering<'_> {
                     declared_result: *declared_result,
                     overridden_results,
                     semantic_role: *semantic_role,
+                    overridden_declarations,
                     suspend: *suspend,
                     can_inline: *can_inline,
                     inline_plan: inline_plan.as_deref(),
@@ -922,6 +924,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::MissingCallable(*target))?;
                 self.module_constructor_call(ModuleConstructorRequest {
                     classifier: classifier.classifier,
+                    constructor: callable.declaration,
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,

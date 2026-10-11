@@ -1011,7 +1011,8 @@ fun measure(text: String, values: IntArray, ch: Char): Int =
     text.length + values.size + ch.code
 "#,
         &[],
-        None,
+        // The JDK supplies `java.io.Serializable`, a supertype of each of these builtins.
+        Some(&common::jdk_modules()),
     );
     assert_eq!(diagnostics, Vec::<String>::new());
 }
