@@ -9426,7 +9426,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   finalized is not resolved again; the checker walks its written syntax beside the finalized type
   and the alias spellings Pass 1 recorded for it. That includes the header of an abstract or
   interface member, which has no body to check. A builtin classifier's bounds come from its
-  `.kotlin_builtins` declaration, so `Enum<String>` is an error (`E : Enum<E>`). Tests:
+  `.kotlin_builtins` declaration, so `Enum<String>` is an error (`E : Enum<E>`).
+
+  A call's explicit type arguments (`g<String>()`, `B<String>()`) are checked against the
+  candidate's own bounds, a constructor's being its classifier's; when the call also passes value
+  arguments kotlinc first reports `inapplicable candidate(s): fun <T : Number> f(x: T): Unit` (a
+  constructor as `constructor<T : Number>(t: T): Box<T>`) at the callee. A constructor's explicit
+  type arguments are fixed before its arguments are inferred, so `Box<String>("")` rejects the
+  constructor its arguments select for the bound, not for the argument. The left side of a
+  callable reference (`B<String>::toString`) is a checked application. Tests:
   `tests/upper_bound_violations_e2e.rs`.
 - **A value of a class that implements a function type is invoked through its own member.** `f(x)`
   and `f.invoke(x)` on `f: F` with `class F : (Token) -> Token` select `F`'s `invoke` member, and

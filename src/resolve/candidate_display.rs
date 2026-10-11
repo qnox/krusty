@@ -95,6 +95,22 @@ impl Checker<'_> {
         )
     }
 
+    /// kotlinc's rendering of a generic classifier's constructor,
+    /// `constructor<T : Number>(t: T): Box<T>`: the classifier's type parameters follow the keyword.
+    pub(super) fn generic_constructor_display(
+        signature: &crate::libraries::GenericSig,
+        member: &crate::libraries::LibraryMember,
+    ) -> String {
+        let type_parameters = type_parameters_display(signature, false);
+        let parameters = parameters_display(signature, &member.call_sig);
+        let parameters = parameters[member.context_count.min(parameters.len())..].join(", ");
+        format!(
+            "constructor{}({parameters}): {}",
+            type_parameters.trim_end(),
+            signature.ret.source_name()
+        )
+    }
+
     pub(super) fn semantic_callable_display(
         name: &str,
         signature: &crate::libraries::GenericSig,

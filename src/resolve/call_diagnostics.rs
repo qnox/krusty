@@ -484,6 +484,42 @@ impl Checker<'_> {
         }
     }
 
+    /// Report a rejected sole candidate's explicitly written type arguments against its bounds,
+    /// adding kotlinc's candidate diagnostic when the call also has value arguments.
+    pub(super) fn report_rejected_explicit_type_argument_bounds(
+        &mut self,
+        call: ExprId,
+        candidate: &crate::libraries::FunctionInfo,
+        has_value_arguments: bool,
+        explicit: &[Ty],
+    ) -> bool {
+        let Some(signature) = candidate.generic_sig.as_ref() else {
+            return false;
+        };
+        let checkpoint = self.diags.diags.len();
+        let bindings = crate::symbol_resolver::seeded_gsig_binds(signature, explicit);
+        self.report_explicit_type_argument_bound_errors(
+            call,
+            &candidate.callable.name,
+            candidate,
+            signature,
+            &bindings,
+        );
+        if self.diags.diags.len() == checkpoint {
+            return false;
+        }
+        if has_value_arguments {
+            let display = self.source_callable_display(candidate).unwrap_or_else(|| {
+                Self::callable_candidate_display(&candidate.callable.name, candidate)
+            });
+            self.diags.error(
+                self.call_callee_name_span(call),
+                format!("inapplicable candidate(s): {display}"),
+            );
+        }
+        true
+    }
+
     /// Retain upper-bound diagnostics when a rejected call still has one shape-matching candidate.
     /// Recovery uses the declaration's result so enclosing expressions remain typed, but an
     /// explicitly written invalid type argument remains an error owned by its source occurrence.
