@@ -198,6 +198,7 @@ mod receiver_flow;
 use receiver_flow::CompletedFlow;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
+mod package_qualifier_type_arguments;
 mod receiver_tower;
 mod receiver_uses;
 mod reflection_locals;
@@ -45864,8 +45865,11 @@ impl<'a> Checker<'a> {
                             applied.ty
                         })
                     } else {
-                        typeref_classifier(r, Some(internal))
-                            .map(|internal| self.obj_with_targs_name(scope, internal, r))
+                        let without_package_arguments =
+                            self.check_package_type_arguments(r, internal);
+                        let reference = without_package_arguments.as_ref().unwrap_or(r);
+                        typeref_classifier(reference, Some(internal))
+                            .map(|internal| self.obj_with_targs_name(scope, internal, reference))
                     }
                 }
                 InheritedNestedClassifier::Ambiguous => {

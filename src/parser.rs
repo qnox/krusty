@@ -138,6 +138,7 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
         span,
         fun_params: Vec::new(),
         fun_context_count: 0,
+        qualifier_arguments: Vec::new(),
     }
 }
 
@@ -1575,7 +1576,12 @@ impl<'a> Parser<'a> {
     /// resolver commits the exact annotation identity for this occurrence.
     fn parse_annotation_reference(&mut self) -> (String, Span) {
         let annotation_span = self.tok().span;
-        let qname = self.parse_qualified_name();
+        let (qname, qualifier_arguments) = self.parse_annotation_name();
+        if !qualifier_arguments.is_empty() {
+            self.file
+                .annotation_qualifier_arguments
+                .insert(annotation_span.lo, qualifier_arguments);
+        }
         if !qname.is_empty() {
             let mut reference = simple_type_ref(&qname, annotation_span);
             reference.flags = reference.flags.with_annotation(true);
@@ -1601,8 +1607,36 @@ impl<'a> Parser<'a> {
                     .insert(annotation_span.lo, suppressions);
             }
         }
-        self.parse_type_args(); // `@Foo<Bar>` (rare) — real type-arg parse
         (qname, annotation_span)
+    }
+
+    /// An annotation's qualified classifier name, with the `<…>` lists written on its segments
+    /// before the last one (`@part1<Int>.part2.Anno`). A list on the last segment (`@Foo<Bar>`) is
+    /// parsed and dropped.
+    fn parse_annotation_name(&mut self) -> (String, Vec<QualifierSegmentArguments>) {
+        let mut segments = Vec::new();
+        let mut lists = Vec::new();
+        if self.at(TokenKind::Ident) {
+            segments.push(self.text().to_string());
+            self.bump();
+            loop {
+                let segment = segments.len() as u32 - 1;
+                self.parse_segment_type_arguments(segment, &mut lists);
+                if !self.at(TokenKind::Dot) {
+                    break;
+                }
+                self.bump();
+                if self.at(TokenKind::Ident) {
+                    segments.push(self.text().to_string());
+                    self.bump();
+                }
+            }
+        } else {
+            self.parse_type_args();
+        }
+        let last = segments.len().saturating_sub(1) as u32;
+        lists.retain(|list: &QualifierSegmentArguments| list.segment != last);
+        (segments.join("."), lists)
     }
 
     /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar. Values
@@ -3276,6 +3310,7 @@ impl<'a> Parser<'a> {
                             span: sup_span,
                             fun_params: ft.fun_params.clone(),
                             fun_context_count: ft.fun_context_count,
+                            qualifier_arguments: Vec::new(),
                         });
                     }
                     if let Some(delegation) = self.parse_interface_delegation(
@@ -3387,6 +3422,7 @@ impl<'a> Parser<'a> {
                         span: sup_span,
                         fun_params: Vec::new(),
                         fun_context_count: 0,
+                        qualifier_arguments: Vec::new(),
                     });
                     delegation_supertype = u32::try_from(ifaces.len() - 1).ok();
                 }
@@ -3947,6 +3983,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params,
                     fun_context_count,
+                    qualifier_arguments: Vec::new(),
                 }
             } else if let [_] = params.as_slice() {
                 // A PARENTHESIZED type used for grouping (no `->` follows the `)`), most commonly to make
@@ -3989,7 +4026,9 @@ impl<'a> Parser<'a> {
             }
             // Every classifier uses the same type-argument structure. Projection semantics belong to
             // resolution; the parser retains exactly what was written.
-            let mut targs = self.parse_type_args();
+            let mut segment = name.matches('.').count() as u32;
+            let mut qualifier_arguments = Vec::new();
+            let mut targs = self.parse_segment_type_arguments(segment, &mut qualifier_arguments);
             let arg = None;
             // A generic-qualified nested type `Outer<A>.Inner<B>.Innermost<C>`: the dotted-path loop
             // above stops at the `<` after `Outer`, so continue consuming `.Nested` segments. The
@@ -4006,14 +4045,14 @@ impl<'a> Parser<'a> {
                 name.push('.');
                 name.push_str(self.text());
                 self.bump(); // nested type name
-                let mut segment_targs = if self.at(TokenKind::Lt) {
-                    self.parse_type_args()
-                } else {
-                    Vec::new()
-                };
+                segment += 1;
+                let mut segment_targs =
+                    self.parse_segment_type_arguments(segment, &mut qualifier_arguments);
                 segment_targs.extend(targs);
                 targs = segment_targs;
             }
+            // The last segment's list is the classifier's own.
+            qualifier_arguments.retain(|list: &QualifierSegmentArguments| list.segment != segment);
             let nullable = self.eat_type_nullable(); // `T?`
             let base = TypeRef {
                 name,
@@ -4025,6 +4064,7 @@ impl<'a> Parser<'a> {
                 span,
                 fun_params: Vec::new(),
                 fun_context_count: 0,
+                qualifier_arguments,
             };
             // Receiver (extension) function type `Recv.() -> R` ≡ `Function1<Recv, R>`, and
             // `Recv.(A) -> R` ≡ `Function2<Recv, A, R>`. The receiver folds in as the first function
@@ -4062,6 +4102,27 @@ impl<'a> Parser<'a> {
             return (false, true, Some(span));
         }
         (false, false, None)
+    }
+
+    /// The type arguments written after segment `segment` of a qualified name, recording their
+    /// list in `lists`.
+    fn parse_segment_type_arguments(
+        &mut self,
+        segment: u32,
+        lists: &mut Vec<QualifierSegmentArguments>,
+    ) -> Vec<TypeRef> {
+        if !self.at(TokenKind::Lt) {
+            return Vec::new();
+        }
+        let (arguments, span) = self.parse_type_argument_list();
+        if !arguments.is_empty() {
+            lists.push(QualifierSegmentArguments {
+                segment,
+                count: arguments.len() as u32,
+                span,
+            });
+        }
+        arguments
     }
 
     /// Parse a generic type-argument list `< (variance? type | *),+ >` via the real grammar
@@ -4107,6 +4168,7 @@ impl<'a> Parser<'a> {
                     span,
                     fun_params: Vec::new(),
                     fun_context_count: 0,
+                    qualifier_arguments: Vec::new(),
                 });
             } else {
                 let mut argument = self.parse_type();
@@ -4197,6 +4259,7 @@ impl<'a> Parser<'a> {
                 span: Span::new(receiver_start, receiver_hi),
                 fun_params: Vec::new(),
                 fun_context_count: 0,
+                qualifier_arguments: Vec::new(),
             }),
             declaration_name,
         )

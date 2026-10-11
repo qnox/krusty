@@ -297,6 +297,12 @@ impl ProductionSignatureSemantics<'_> {
                     })
             })
         {
+            // The checker reports arguments written on package segments; they select nothing.
+            let without_package_arguments =
+                super::super::package_qualifier_type_arguments::without_package_arguments(
+                    reference, internal,
+                );
+            let reference = without_package_arguments.as_ref().unwrap_or(reference);
             let access = self
                 .with_resolver(scope, |resolver| {
                     resolver.inaccessible_classifier_access(internal)

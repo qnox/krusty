@@ -366,6 +366,12 @@ impl Checker<'_> {
                 span: annotation.span,
                 fun_params: Vec::new(),
                 fun_context_count: 0,
+                qualifier_arguments: self
+                    .file
+                    .annotation_qualifier_arguments
+                    .get(&annotation.span.lo)
+                    .cloned()
+                    .unwrap_or_default(),
             };
             self.type_ref_ty_reported(scope, &reference)
                 .kotlin_class_internal()?

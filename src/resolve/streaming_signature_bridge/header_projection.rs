@@ -913,6 +913,7 @@ pub(in crate::resolve) fn legacy_classifier_header(class: &ClassDecl) -> Streame
             span: class.base_class_span.unwrap_or(class.span),
             fun_params: Vec::new(),
             fun_context_count: 0,
+            qualifier_arguments: Vec::new(),
         }),
         delegated_interfaces: class
             .interface_delegations

@@ -117,6 +117,7 @@ impl TypeRef {
             span: annotation.span,
             fun_params: Vec::new(),
             fun_context_count: 0,
+            qualifier_arguments: Vec::new(),
         }
     }
 

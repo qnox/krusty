@@ -1665,6 +1665,8 @@ mod outcome_lists_guard_e2e;
 mod override_default_stub_e2e;
 #[path = "override_formal_identity_e2e.rs"]
 mod override_formal_identity_e2e;
+#[path = "package_qualifier_type_arguments_e2e.rs"]
+mod package_qualifier_type_arguments_e2e;
 #[path = "primary_constructor_newline_e2e.rs"]
 mod primary_constructor_newline_e2e;
 #[path = "primitive_explicit_equals_e2e.rs"]

@@ -37,6 +37,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), declaration);
         self.check_finalized_type_reference_usage(reference, declaration);
         self.check_finalized_type_bounds(reference, declaration, spelled);
+        self.check_finalized_package_type_arguments(reference, declaration);
         semantic
     }
 
@@ -55,6 +56,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), semantic);
         self.check_finalized_type_reference_usage(reference, semantic);
         self.check_finalized_type_bounds(reference, semantic, spelled);
+        self.check_finalized_package_type_arguments(reference, semantic);
         semantic
     }
 }

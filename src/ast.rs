@@ -576,6 +576,21 @@ pub struct TypeRef {
     pub fun_params: Vec<TypeRef>,
     /// Leading physical parameters that bind as context receivers in a lambda.
     pub fun_context_count: u32,
+    /// The `<…>` lists written on a qualifier segment before the last one (`part1<Int>.part2.Cls`,
+    /// `Outer<A>.Inner`). Their arguments are also in `targs`, after the arguments of every later
+    /// segment; resolution decides which segments are packages.
+    pub qualifier_arguments: Vec<QualifierSegmentArguments>,
+}
+
+/// One `<…>` list written on a segment of a qualified type or annotation reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QualifierSegmentArguments {
+    /// The zero-based segment of the written name the list follows.
+    pub segment: u32,
+    /// How many arguments the list holds.
+    pub count: u32,
+    /// The list, from `<` through `>`.
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -1788,6 +1803,10 @@ pub struct File {
     /// whether the access is a deprecated or invalid singleton value access.
     pub standalone_type_argument_qualifiers: crate::fx_hash::HashSet<u32>,
     pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
+    /// The `<…>` lists written on an annotation name's segments before the last one
+    /// (`@part1<Int>.part2.Anno`), keyed by the annotation reference's start.
+    pub annotation_qualifier_arguments:
+        crate::fx_hash::HashMap<u32, Vec<QualifierSegmentArguments>>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
         crate::fx_hash::HashMap<DeclId, AnonymousEnclosingFunction>,
@@ -2105,6 +2124,7 @@ impl File {
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
+        self.annotation_qualifier_arguments = Default::default();
         self.standalone_type_argument_qualifiers = Default::default();
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();

@@ -266,6 +266,10 @@ pub struct HeaderSyntaxArena {
     /// Both keys and values are compact header identities. The parser's span-keyed rewrite table is
     /// consumed while one source AST is live and never becomes cross-pass state.
     source_spellings: crate::fx_hash::HashMap<HeaderTypeId, HeaderTypeId>,
+    /// The `<…>` lists a qualified classifier type wrote on its segments before the last one
+    /// (`TypeRef::qualifier_arguments`), by compact type.
+    qualifier_arguments:
+        crate::fx_hash::HashMap<HeaderTypeId, Box<[crate::ast::QualifierSegmentArguments]>>,
     classifier_types: Vec<HeaderClassifierType>,
     type_operands: Vec<HeaderTypeId>,
     path_segments: Vec<LookupNameId>,
@@ -405,11 +409,16 @@ impl HeaderSyntaxArena {
                 abbreviated_argument,
             }
         };
-        self.push_type(HeaderType {
+        let id = self.push_type(HeaderType {
             kind,
             flags,
             span: ty.span,
-        })
+        });
+        if !ty.qualifier_arguments.is_empty() {
+            self.qualifier_arguments
+                .insert(id, ty.qualifier_arguments.clone().into_boxed_slice());
+        }
+        id
     }
 
     /// Consume the parser's temporary alias-rewrite sidecar for the compact types added since
@@ -677,6 +686,11 @@ impl HeaderSyntaxArena {
             span: ty.span,
             fun_params,
             fun_context_count,
+            qualifier_arguments: self
+                .qualifier_arguments
+                .get(&id)
+                .map(|lists| lists.to_vec())
+                .unwrap_or_default(),
         })
     }
 

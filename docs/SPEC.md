@@ -13796,6 +13796,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       solving follows the same rule for an implicitly typed property
       (`TrFlags::CLASS_LITERAL_LHS`).
       (`tests/class_literal_type_arguments_e2e.rs`.)
+    - Package segments (`TypeArgumentsInPackagesTypeRefChecker`): a `<…>` list written on a package
+      segment of a qualified type or annotation reference (`part1<Int>.part2.part3.Cls`,
+      `@part1.part2<Int>.part3.Anno`) reports "type arguments are not allowed for packages." on the
+      list. The parser records each list written before the last segment
+      (`TypeRef::qualifier_arguments`, `File::annotation_qualifier_arguments` for an annotation);
+      the segments before the resolved classifier's outermost enclosing classifier are packages.
+      A list on the last package segment was always the error; an earlier one is a deprecation
+      warning until the feature. The package arguments are dropped before the classifier is
+      applied, by the checker and by signature solving alike, so `part1<Int>.part2.part3.Cls`
+      types as `Cls` and `part1<Int>.part2.part3.Outer<String>.Inner` keeps its captured
+      `String`. A declaration type finalized in Pass 1 is checked where its occurrence is
+      published. (`tests/package_qualifier_type_arguments_e2e.rs`.)
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its

@@ -924,6 +924,7 @@ impl SignatureConstraintExtractor {
             span: class.base_class_span.unwrap_or(class.span),
             fun_params: Vec::new(),
             fun_context_count: 0,
+            qualifier_arguments: Vec::new(),
         });
         let superclass = superclass
             .as_ref()
@@ -1182,6 +1183,7 @@ impl SignatureConstraintExtractor {
                 span: file.expr_spans[literal.0 as usize],
                 fun_params: Vec::new(),
                 fun_context_count: 0,
+                qualifier_arguments: Vec::new(),
             },
             root,
         ))
@@ -1408,6 +1410,7 @@ impl SignatureConstraintExtractor {
                         span: classifier.base_class_span.unwrap_or(classifier.span),
                         fun_params: Vec::new(),
                         fun_context_count: 0,
+                        qualifier_arguments: Vec::new(),
                     };
                     self.compact_type(&supertype, scope, origin)
                 } else if let [supertype] = classifier.supertypes.as_slice() {
