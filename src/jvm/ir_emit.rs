@@ -70,6 +70,7 @@ use field_nullability::{
     field_nullability_kind, is_nonnull_reference_field, nullability_annotation,
 };
 mod discarding;
+use discarding::discard;
 mod diverging_value_type;
 mod emit_options;
 pub(super) mod enclosure;
@@ -5470,6 +5471,9 @@ struct Emitter<'a> {
     /// The comparison being emitted and its source line. The jump carries that line, mapped when
     /// the comparison is a copied inline expression.
     comparison_line: Option<(ExprId, u32)>,
+    /// A `try` a local declaration stores: kotlinc's `visitVariable` marks the initializer's line
+    /// before it loads the `try`'s saved value.
+    declared_try: Option<ExprId>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
     /// The source class whose primary-constructor property initializers and `init` blocks are
@@ -5580,6 +5584,7 @@ impl<'a> Emitter<'a> {
             block_depth: 0,
             statement_line: None,
             comparison_line: None,
+            declared_try: None,
             record_locals: false,
             constructor_initializer_class: None,
             render_initializer_boundaries: false,
@@ -7296,14 +7301,6 @@ fn emit_return(t: Ty, code: &mut CodeBuilder) {
         t if is_jvm_int_category(t) => code.ireturn(),
         Ty::Unit | Ty::Nothing => code.ret_void(),
         _ => code.areturn(),
-    }
-}
-
-fn discard(t: Ty, code: &mut CodeBuilder) {
-    match slot_words(t) {
-        2 => code.pop2(),
-        1 => code.pop(),
-        _ => {}
     }
 }
 

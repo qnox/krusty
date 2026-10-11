@@ -2918,6 +2918,8 @@ mod reified_value_class_splice_e2e;
 
 #[path = "conditional_branch_expectation_e2e.rs"]
 mod conditional_branch_expectation_e2e;
+#[path = "declared_try_line_e2e.rs"]
+mod declared_try_line_e2e;
 #[path = "default_impls_forward_lines_e2e.rs"]
 mod default_impls_forward_lines_e2e;
 #[path = "file_private_extension_scope_e2e.rs"]

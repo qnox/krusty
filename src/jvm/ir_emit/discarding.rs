@@ -3,7 +3,7 @@
 //! Common IR keeps expression values even where Kotlin source discards them. This boundary chooses
 //! the JVM statement shape, including control flow whose branches must discard independently.
 
-use super::{bottom_values, discard, CodeBuilder, Emitter, IrExpr, Ty};
+use super::{bottom_values, slot_words, CodeBuilder, Emitter, IrExpr, Ty};
 
 impl Emitter<'_> {
     pub(super) fn emit_discarding(&mut self, expression: u32, code: &mut CodeBuilder) {
@@ -220,5 +220,14 @@ impl Emitter<'_> {
         self.ir.declaration_result_coercions.contains(&coercion)
             || (matches!(self.ir.expr(arg), IrExpr::Call { .. })
                 && self.ir.physical_types.contains_key(&arg))
+    }
+}
+
+/// Pop a value of type `t` (two words for `long`/`double`, none for `void`).
+pub(super) fn discard(t: Ty, code: &mut CodeBuilder) {
+    match slot_words(t) {
+        2 => code.pop2(),
+        1 => code.pop(),
+        _ => {}
     }
 }

@@ -4162,6 +4162,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   to link. The same site covers a secondary constructor. Test:
   `tests/constructor_continuation_e2e.rs`; corpus
   `coroutines/featureIntersection/callableReference/function/adapted.kt`.
+- **A declared `try` reloads its value on the initializer's line.** kotlinc's `visitVariable`
+  visits the initializer, marks the initializer's start line, materializes the value, then marks
+  the declaration and stores. A `try` is the one initializer whose value is still unread at that
+  point: its promised value loads the result temporary in `materializeAt`. So
+  `val x = try { … } catch (…) { … }` marks the `try`'s line on the `iload`/`aload` of the
+  temporary (after the catch body's line), and `val y =\n try { … }` marks the store on `y`'s
+  line after it. Only a `try` that is the initializer itself counts; an assignment
+  (`visitSetValue` marks before visiting its value) and any other consumer read the temporary on
+  the line already in effect. Test: `tests/declared_try_line_e2e.rs`.
 - **A local variable's slot is entered before its initializer**, as kotlinc's `visitVariable`
   enters it before visiting the initializer: every local and temporary the initializer declares
   sits above the variable and is free again for the statements after it

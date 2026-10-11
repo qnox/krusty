@@ -137,7 +137,11 @@ impl Emitter<'_> {
                     // later migration changes which lowering pass creates them.
                     if named {
                         let previous = self.enter_declared_initializer(initializer);
+                        let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
+                            .then_some(initializer);
+                        let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
                         let source = self.emit_consumed_operand(initializer, code);
+                        self.declared_try = outer_try;
                         self.leave_declared_initializer(previous);
                         source
                     } else {
