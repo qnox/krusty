@@ -33,6 +33,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("ForbidValueClassRecursionViaTypeParameters");
     file.forbid_operator_equals_in_enum_entries_and_anonymous_objects =
         features.has("ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects");
+    file.forbid_annotations_type_arguments_and_parentheses_for_package_qualifier =
+        features.has("ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier");
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }

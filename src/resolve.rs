@@ -132,6 +132,7 @@ mod intersection_receiver_selection;
 mod invoke_selection;
 mod lambda_call_shapes;
 mod operator_declarations;
+mod package_qualifier_parentheses;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
 use lexical_policies::LexicalPolicy;
@@ -16602,6 +16603,7 @@ impl<'a> Checker<'a> {
                 // or retry its root in another namespace.
                 let receiver_qualifier =
                     self.qualifier(scope, QualifierInput::Expression(receiver));
+                self.check_parenthesized_package_qualifier(scope, receiver);
                 let mut member_qualifier = receiver_qualifier.clone().and_then(|prefix| {
                     let source = self.fed_source();
                     walk_qualifier(&source, prefix, &[(Some(callee), name.clone())])
@@ -22995,6 +22997,7 @@ impl<'a> Checker<'a> {
         // accessor, selected in that package's scope alone (a fully-qualified reference names one
         // declaration, so this file's imports must neither shadow nor widen it).
         let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
+        self.check_parenthesized_package_qualifier(scope, receiver);
         if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
             // Associated properties precede the members of the companion-object value.
             let associated = self.select_qualified_associated_property(scope, owner, &name);
@@ -60893,6 +60896,7 @@ impl<'a> Checker<'a> {
             // package-property and ordinary value handling below all consume this one scope-tower
             // decision instead of reopening the receiver expression for each possible terminal facet.
             let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
+            self.check_parenthesized_package_qualifier(scope, receiver);
             // Library companion constants: `Int.MAX_VALUE`, `Double.NaN`, etc.
             if let Expr::Name(type_name) = self.file.expr(receiver).clone() {
                 if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Value)) {

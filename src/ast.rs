@@ -1680,6 +1680,12 @@ pub struct File {
     /// the last slot, not the next free positional one (`f("x") { }` on `f(a, m = d, builder)` ⇒ `m`
     /// defaults, the lambda fills `builder`).
     pub call_has_trailing_lambda: std::collections::HashSet<u32>,
+    /// The source span, parentheses included, of each parenthesized expression. Nested parentheses
+    /// record the outermost pair.
+    pub parenthesized_expression_spans: std::collections::HashMap<ExprId, Span>,
+    /// The source span, angle brackets included, of the type arguments written on a segment of a
+    /// dotted chain (`p1<Int>.p2`), keyed by that segment's expression.
+    pub qualifier_type_argument_spans: std::collections::HashMap<ExprId, Span>,
     /// End offset of the parenthesized portion of calls with trailing lambdas.
     pub trailing_call_close_paren_ends: std::collections::HashMap<u32, u32>,
     /// `ExprId`s of `Expr::Call`s produced from infix-call syntax (`a foo b`). The callee is still the
@@ -1919,6 +1925,9 @@ pub struct File {
     /// `+ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: an `operator fun equals` in an enum
     /// entry or anonymous object is an error rather than a deprecation warning.
     pub forbid_operator_equals_in_enum_entries_and_anonymous_objects: bool,
+    /// `+ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier`: a parenthesized package
+    /// qualifier is an error rather than a deprecation warning.
+    pub forbid_annotations_type_arguments_and_parentheses_for_package_qualifier: bool,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,
@@ -1971,6 +1980,8 @@ impl File {
         self.class_literal_references = Default::default();
         self.non_adjacent_member_dot_spans = Default::default();
         self.call_has_trailing_lambda = Default::default();
+        self.parenthesized_expression_spans = Default::default();
+        self.qualifier_type_argument_spans = Default::default();
         self.trailing_call_close_paren_ends = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();

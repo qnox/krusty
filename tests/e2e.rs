@@ -1594,6 +1594,8 @@ mod outcome_lists_guard_e2e;
 mod override_default_stub_e2e;
 #[path = "override_formal_identity_e2e.rs"]
 mod override_formal_identity_e2e;
+#[path = "package_qualifier_parentheses_e2e.rs"]
+mod package_qualifier_parentheses_e2e;
 #[path = "primitive_explicit_equals_e2e.rs"]
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]

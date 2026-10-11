@@ -535,6 +535,8 @@ impl Parser<'_> {
         // Explicit type arguments parsed just before a call paren (`foo<Int>(…)`), attached to the
         // call once it is built so a constructor instantiation (`ArrayList<Int>()`) keeps its args.
         let mut pending_targs: Vec<TypeRef> = Vec::new();
+        // The source span of `pending_targs`, angle brackets included.
+        let mut pending_targs_span = None;
         // Labels consumed just before a trailing lambda (`run outer@{ … }`), attached to the lambda
         // once it is parsed so a `return@outer` inside it finds its target.
         let mut pending_lambda_labels: Vec<String> = Vec::new();
@@ -733,6 +735,9 @@ impl Parser<'_> {
                         self.file
                             .call_type_args
                             .insert(lhs.0, std::mem::take(&mut pending_targs));
+                        if let Some(span) = pending_targs_span.take() {
+                            self.file.qualifier_type_argument_spans.insert(lhs, span);
+                        }
                     }
                     let member = self.file.add_expr(
                         Expr::Member {
@@ -999,7 +1004,10 @@ impl Parser<'_> {
                 // `>` is immediately followed by `(`, `{`, or `.` (call-like context).
                 TokenKind::Lt if self.lookahead_is_type_args_call() => {
                     // Capture the explicit type arguments for the call that follows.
+                    let open = self.tok().span;
                     pending_targs = self.parse_type_args();
+                    let close = self.t[self.i.saturating_sub(1)].span;
+                    pending_targs_span = Some(Span::new(open.lo, close.hi));
                 }
                 _ => break,
             }
@@ -1176,15 +1184,21 @@ impl Parser<'_> {
                 self.file.add_expr(Expr::Name(n), span)
             }
             TokenKind::LParen => {
+                let open = self.tok().span;
                 self.bump();
                 self.skip_newlines();
                 let e = self.parse_expr();
                 self.skip_newlines();
+                let close = self.tok().span;
                 self.expect(TokenKind::RParen, "')'");
                 // Parentheses end a safe selector. The index becomes an ordinary subscript of the
                 // nullable safe call, so a later update selects the nullable operator.
                 let e = self.reopen_parenthesized_safe_index(e);
                 self.parenthesized_expressions.insert(e.0);
+                // Nested parentheses leave the outermost pair.
+                self.file
+                    .parenthesized_expression_spans
+                    .insert(e, Span::new(open.lo, close.hi));
                 e
             }
             TokenKind::KwIf => self.parse_if(),

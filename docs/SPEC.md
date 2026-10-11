@@ -12706,6 +12706,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     overriding `Any.equals`, reported at the `operator` keyword; one that does not override it in
     an enum entry or an anonymous object is the warning `INAPPLICABLE_OPERATOR_MODIFIER_WARNING`
     (`tests/operator_equals_declarations_e2e.rs`).
+  - `ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier`: parentheses around part of a
+    package qualifier, type arguments on one of its segments, and an annotated part. Each package
+    qualifier (the longest package prefix of a selection chain) is reported once, at its outermost
+    parenthesized receiver or else at the first parenthesized part or segment type-argument list in
+    source order; type arguments on its last segment are the error "type arguments are not allowed
+    for packages." With the feature on, resolution stops at a segment with type arguments or an
+    annotated part, which is unresolved (`tests/package_qualifier_parentheses_e2e.rs`).
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
