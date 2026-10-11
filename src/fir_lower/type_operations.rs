@@ -17,23 +17,31 @@ fn admits_null_at_runtime(ty: Ty) -> bool {
     ty.admits_null() || (ty.is_ty_param() && ty.upper_bound_admits_null())
 }
 
+/// The classifier an erased type stands for at run time. A function type stands for its
+/// `FunctionN`/`SuspendFunctionN` classifier, identified by its arity and suspend-ness.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErasedBound {
+    Classifier(Ty),
+    Function { arity: usize, suspend: bool },
+}
+
 /// kotlinc's `erasedUpperBound`: the classifier a type stands for once erased, through type
-/// parameter bounds and nullability. A function type stands for its `FunctionN` classifier.
-fn erased_upper_bound(ty: Ty) -> Option<Ty> {
+/// parameter bounds and nullability.
+fn erased_upper_bound(ty: Ty) -> Option<ErasedBound> {
     let mut current = ty.non_null();
     let mut seen = std::collections::HashSet::new();
     loop {
         match current {
             Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
             Ty::DefinitelyNotNull(inner) => current = inner.non_null(),
-            Ty::Obj(name, _) => return Some(Ty::obj_name(name).canonical_semantic()),
+            Ty::Obj(name, _) => {
+                return Some(ErasedBound::Classifier(Ty::obj_name(name).canonical_semantic()))
+            }
             Ty::Fun(signature) => {
-                return Some(Ty::obj_name(
-                    crate::libraries::function_classifiers::function_classifier_identity(
-                        signature.params.len(),
-                        signature.suspend,
-                    ),
-                ))
+                return Some(ErasedBound::Function {
+                    arity: signature.params.len(),
+                    suspend: signature.suspend,
+                })
             }
             Ty::TyParam(..)
             | Ty::Nullable(_)
@@ -46,7 +54,7 @@ fn erased_upper_bound(ty: Ty) -> Option<Ty> {
             | Ty::OutProjection(_)
             | Ty::StarProjection(_)
             | Ty::Intersection(_) => return None,
-            builtin => return Some(builtin),
+            builtin => return Some(ErasedBound::Classifier(builtin)),
         }
     }
 }
