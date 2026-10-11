@@ -1641,6 +1641,8 @@ mod reference_carrier_cast_e2e;
 mod result_generic_override_argument_e2e;
 #[path = "safe_call_null_line_e2e.rs"]
 mod safe_call_null_line_e2e;
+#[path = "sam_lambda_parameter_inference_e2e.rs"]
+mod sam_lambda_parameter_inference_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
 #[path = "serialization_explicit_companion_e2e.rs"]
