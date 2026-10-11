@@ -1053,8 +1053,14 @@ impl Emitter<'_> {
             // kotlinc never stores an inline suspend callee's continuation: the body reads the
             // caller's own continuation local, as every suspension point in the caller does. A
             // suspend lambda's continuation is the lambda itself, `this` cast where it is read.
-            let lambda_continuation = self.transformed_result(call_expression).is_some()
-                && index + 1 == args.len()
+            // Suspend lowering records the operand it inserted; with an omitted default argument
+            // that is before the `$default` mask and marker, not the last operand.
+            let lambda_continuation = index
+                .checked_sub(leading_non_argument_operands)
+                .is_some_and(|argument_index| {
+                    self.default_call_operands
+                        .is_continuation(call_expression, argument_index)
+                })
                 && self.cast_local_operand(argument).is_some();
             if self.reads_continuation_local(argument) || lambda_continuation {
                 supplies.push(Supply::CallerLocal);

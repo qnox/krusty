@@ -78,6 +78,37 @@ fun suspended(): suspend () -> Int = { suspendCoroutine { holder.c = it } }\n";
     common::assert_classes_identical_to_kotlinc("SlnInline", src, &["SlnInlineKt$suspended$1"]);
 }
 
+/// A dependency's inline suspend callee with a default parameter. Being reified, it has no callable
+/// `$default` to fall back to: the call must splice it.
+const AWAITING: &str = r#"package awaiting
+
+import kotlin.coroutines.*
+
+var parked: Continuation<Int>? = null
+
+suspend inline fun <reified T> await(tag: String = "t"): Int =
+    suspendCoroutine { parked = it; tag.length + (T::class.java.hashCode() and 0) }
+"#;
+
+#[test]
+fn a_defaulted_inline_suspend_callee_reads_the_lambda_as_its_continuation() {
+    // An omitted default argument puts the continuation before the `$default` mask and marker,
+    // not last; the spliced callee still reads the lambda where it loads its continuation, so
+    // nothing but the default value is spilled. kotlinc also folds the constant mask out of the
+    // spliced `$default` prologue, which krusty does not yet, so the member tables are compared
+    // rather than the bytes.
+    let src = "import awaiting.*\n\
+fun suspended(): suspend () -> Int = { await<String>() }\n";
+    let classes =
+        common::classes_against_kotlinc_lib("SlnDefaultInline", &[("Lib.kt", AWAITING)], src)
+            .expect("reference toolchain is provisioned");
+    let class = "SlnDefaultInlineKt$suspended$1";
+    assert_eq!(
+        common::member_table(&classes.krusty[class]),
+        common::member_table(&classes.reference[class])
+    );
+}
+
 #[test]
 fn lifted_declarations_run_from_the_class() {
     let src = "import kotlin.coroutines.*\n\
