@@ -534,6 +534,8 @@ mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
+#[path = "constructor_locals_pool_e2e.rs"]
+mod constructor_locals_pool_e2e;
 #[path = "constructor_signature_e2e.rs"]
 mod constructor_signature_e2e;
 #[path = "consumer_materialized_result_e2e.rs"]

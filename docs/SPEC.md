@@ -6620,13 +6620,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/method_pool_order_e2e.rs::an_inherited_forwarder_interns_its_annotations_before_its_body`,
   `::an_anonymous_object_constructor_interns_this_before_its_members` and
   `::a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes`.
-- **A constructor owns the locals seeded after its method is added.** `add_method_sig` closes the
-  constructor's constant-pool range before `seed_plain_constructor_tail` interns `this`, the
-  constructor's type, and each parameter local (`$receiver`, `$super_call_param$N`). Those strings
-  are the constructor's: the range is extended through them. Otherwise the next method's range
-  begins in that gap, and a rewrite of that method (a safe call such as `eldest?.value?.close()`)
-  owns the locals. The layout then moves one the rewritten body no longer names to that method's
-  first remaining use, after `LocalVariableTable`. Test:
+- **A constructor's locals intern before its frames' classes.** kotlinc's class writer interns a
+  method's `LocalVariableTable` strings as the method ends, and only then computes its
+  `StackMapTable`, whose frames intern each `Class` they name. A constructor whose super argument
+  or property initializer branches (`Base("O" + if (i == 23) "K" else "fail")`) therefore lists
+  `this`, the constructor's type and each parameter local (`$receiver`, `$super_call_param$N`)
+  before a frame's `java/lang/String`. krusty seeded those locals after `add_method_sig`, which had
+  already written the frames. They are now seeded (`seed_plain_constructor_locals`) after the body
+  and before `add_method_sig`, inside the constructor's constant-pool range; only the `$default`
+  marker descriptor is left to `seed_plain_constructor_tail`, which extends that range through it.
+  Otherwise the next method's range would begin in that gap, and a rewrite of that method (a safe
+  call such as `eldest?.value?.close()`) would own the strings and move one its body no longer names
+  after its own `LocalVariableTable`. Tests:
+  `tests/constructor_locals_pool_e2e.rs::constructor_locals_precede_frame_classes_in_the_pool` and
   `tests/method_pool_order_e2e.rs::an_anonymous_object_keeps_constructor_locals_when_the_next_method_is_rewritten`.
 - **A synthesized data-class member writes its locals with its body.** kotlinc gives `equals`,
   `hashCode`, `toString`, `componentN` and `copy` a `LocalVariableTable` (receiver and parameters)

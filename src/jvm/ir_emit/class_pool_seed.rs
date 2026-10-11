@@ -74,8 +74,15 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
     );
 }
 
-/// Seed what kotlinc interns once the primary constructor's body is done: its local-variable
-/// strings and `$default` overload, then a data class's synthesized members.
+/// Seed the primary constructor's local-variable strings, which kotlinc interns once the body is
+/// done and before the frames of that body.
+pub(super) fn seed_plain_constructor_locals(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
+    let parameter_locals = constructor_parameter_locals(seed.ir, seed.class);
+    cw.seed_plain_constructor_locals(seed.fq_name, &parameter_locals);
+}
+
+/// Seed what kotlinc interns once the primary constructor is written: its `$default` overload's
+/// header.
 pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
     let PlainClassPoolSeed {
         ir,
@@ -98,8 +105,7 @@ pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_>, cw: &mut
                 primary_ctor_parameter_descs(c)
             )
         });
-    let parameter_locals = constructor_parameter_locals(ir, c);
-    cw.seed_plain_constructor_tail(fq_name, &parameter_locals, default_marker_desc.as_deref());
+    cw.seed_plain_constructor_tail(default_marker_desc.as_deref());
 }
 
 /// Seed an enum constructor's LocalVariableTable strings, which kotlinc interns with the constructor,

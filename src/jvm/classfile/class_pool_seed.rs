@@ -64,15 +64,13 @@ impl ClassWriter {
         }
     }
 
-    /// Seed what follows the primary constructor's body: its LocalVariableTable strings (`this`
-    /// and its type, then each named parameter), then the header descriptor of the `$default`
-    /// overload kotlinc writes right after it. The overload's body interns its own entries when it
-    /// is emitted, which is right after the primary.
-    pub fn seed_plain_constructor_tail(
+    /// Seed the primary constructor's LocalVariableTable strings (`this` and its type, then each
+    /// named parameter) once its body is built and before the method is added: kotlinc writes the
+    /// table before it computes the method's frames, whose class entries follow.
+    pub fn seed_plain_constructor_locals(
         &mut self,
         this_internal: &str,
         parameter_locals: &[(String, String)],
-        default_marker_desc: Option<&str>,
     ) {
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
@@ -80,14 +78,20 @@ impl ClassWriter {
             self.cp.utf8(name);
             self.cp.utf8(desc);
         }
+    }
+
+    /// Seed the header descriptor of the `$default` overload kotlinc writes right after the
+    /// primary constructor. The overload's body interns its own entries when it is emitted, which
+    /// is right after the primary.
+    pub fn seed_plain_constructor_tail(&mut self, default_marker_desc: Option<&str>) {
         if let Some(desc) = default_marker_desc {
             self.cp.utf8(desc);
         }
-        // These strings are the constructor's. Its pool range was closed when the method was
-        // added, before they existed, so the next method's range began here. A rewrite of that
-        // method then owned them, and the layout moved a constructor local to that method's first
-        // remaining use — after `LocalVariableTable` — whenever the rewritten body no longer named
-        // the entry. Extending the constructor's range keeps the locals where this seed put them.
+        // This string follows the constructor. Its pool range was closed when the method was
+        // added, before it existed, so the next method's range began here. A rewrite of that
+        // method then owned it, and the layout moved it to that method's first remaining use
+        // whenever the rewritten body no longer named the entry. Extending the constructor's range
+        // keeps it where this seed put it.
         self.include_latest_method_pool();
     }
 

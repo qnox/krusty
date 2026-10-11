@@ -157,8 +157,8 @@ mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
     seed_accessor_locals, seed_ctor_before_members, seed_enum_constructor_locals,
-    seed_plain_constructor_tail, seed_value_class_method_locals, seed_value_ctor_after_members,
-    PlainClassPoolSeed,
+    seed_plain_constructor_locals, seed_plain_constructor_tail, seed_value_class_method_locals,
+    seed_value_ctor_after_members, PlainClassPoolSeed,
 };
 pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
@@ -2846,6 +2846,9 @@ fn emit_class(
         }
         ctor.ensure_locals(max_slot);
         ctor.link();
+        if byte_parity {
+            seed_plain_constructor_locals(pool_seed(), &mut cw);
+        }
         cw.add_method_sig(
             ctor_access,
             "<init>",
