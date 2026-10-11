@@ -8,7 +8,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
 
@@ -148,8 +148,8 @@ pub(crate) fn restore_erased_escaping_capture_holders(ir: &mut IrFile) {
 }
 
 fn restore_body(ir: &mut IrFile, body: ExprId) {
-    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::default();
-    let mut captured: Vec<(u32, u32, u32, Ty)> = Vec::new();
+    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::new();
+    let mut captured: Vec<(u32, Option<(u32, u32)>, Ty)> = Vec::new();
     let mut reads: Vec<(ExprId, ExprId, Ty)> = Vec::new();
     let mut writes: Vec<(ExprId, ExprId, Ty)> = Vec::new();
     collect_body(
@@ -165,12 +165,12 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
     // parameter is the holder that edge requires. The semantic type recorded when the capture
     // was built is not that holder: value-class lowering may already have specialized both the
     // cell and the parameter to `IntRef` while the record still names the value class.
-    let mut captures_by_slot: HashMap<u32, Vec<(u32, u32, Ty)>> = HashMap::default();
-    for (slot, function, ordinal, required) in captured {
+    let mut captures_by_slot: HashMap<u32, Vec<(Option<(u32, u32)>, Ty)>> = HashMap::new();
+    for (slot, parameter, required) in captured {
         captures_by_slot
             .entry(slot)
             .or_default()
-            .push((function, ordinal, required));
+            .push((parameter, required));
     }
     let mut erased_of = HashMap::default();
     let mut retargeted = Vec::new();
@@ -181,7 +181,7 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
         let specialized_holder = holder_class(specialized).0;
         if edges
             .iter()
-            .all(|(_, _, required)| holder_class(required).0 == specialized_holder)
+            .all(|(_, required)| holder_class(required).0 == specialized_holder)
         {
             continue;
         }
@@ -190,14 +190,17 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
         // to the erased holder too; two holder objects could not represent one mutable source var.
         let Some(erased) = edges
             .iter()
-            .map(|(_, _, required)| *required)
+            .map(|(_, required)| *required)
             .find(|required| holder_class(required).0 == OBJECT_REF)
         else {
             continue;
         };
-        for (function, ordinal, required) in edges {
-            if holder_class(&required).0 != OBJECT_REF {
-                retargeted.push((function, ordinal, erased));
+        for (parameter, required) in edges {
+            // A constructor's holder is its class's ABI and is never moved.
+            if let Some((function, ordinal)) = parameter {
+                if holder_class(&required).0 != OBJECT_REF {
+                    retargeted.push((function, ordinal, erased));
+                }
             }
         }
         erased_of.insert(slot, erased);
@@ -364,6 +367,12 @@ enum BodyNode {
         function: u32,
         captures: Vec<ExprId>,
     },
+    /// An instance of a class whose constructor takes shared cells, such as a lambda class another
+    /// declaration wrote: its constructor fixes each cell's holder.
+    Construct {
+        arguments: Vec<ExprId>,
+        parameters: Vec<Ty>,
+    },
     Variable {
         index: u32,
         init: Option<ExprId>,
@@ -379,11 +388,29 @@ enum BodyNode {
     Descend,
 }
 
+/// The constructor parameters of a lambda class this file declares: one per field.
+fn lambda_class_constructor(ir: &IrFile, internal: TypeName) -> Option<Vec<Ty>> {
+    let class = &ir.classes[ir.class_id_by_name(internal)? as usize];
+    class.lambda.as_ref()?;
+    Some(class.fields.iter().map(|field| field.ty).collect())
+}
+
+/// The element a constructor parameter of the erased `Ref$ObjectRef<T>` holder carries.
+fn erased_cell_element(parameter: Ty) -> Option<Ty> {
+    let Ty::Obj(holder, arguments) = parameter.non_null() else {
+        return None;
+    };
+    if !holder.matches(OBJECT_REF) {
+        return None;
+    }
+    arguments.first().copied()
+}
+
 fn collect_body(
     ir: &IrFile,
     root: ExprId,
     declared: &mut HashMap<u32, (Ty, Vec<ExprId>)>,
-    captured: &mut Vec<(u32, u32, u32, Ty)>,
+    captured: &mut Vec<(u32, Option<(u32, u32)>, Ty)>,
     reads: &mut Vec<(ExprId, ExprId, Ty)>,
     writes: &mut Vec<(ExprId, ExprId, Ty)>,
 ) {
@@ -399,6 +426,21 @@ fn collect_body(
             } => BodyNode::Lambda {
                 function: *impl_fn,
                 captures: captures.clone(),
+            },
+            IrExpr::New {
+                internal,
+                args,
+                ctor_params,
+                ..
+            } => match ctor_params
+                .clone()
+                .or_else(|| lambda_class_constructor(ir, *internal))
+            {
+                Some(parameters) => BodyNode::Construct {
+                    arguments: args.clone(),
+                    parameters,
+                },
+                None => BodyNode::Descend,
             },
             IrExpr::Variable { index, init, .. } => BodyNode::Variable {
                 index: *index,
@@ -428,11 +470,24 @@ fn collect_body(
                             .and_then(|function| function.params.get(ordinal as usize))
                             .copied();
                         if let (Some(slot), Some(required)) = (value_slot(ir, capture), required) {
-                            captured.push((slot, function, ordinal, required));
+                            captured.push((slot, Some((function, ordinal)), required));
                         }
                     }
                     pending.push(capture);
                 }
+            }
+            BodyNode::Construct {
+                arguments,
+                parameters,
+            } => {
+                for (argument, parameter) in arguments.iter().copied().zip(parameters) {
+                    if let (Some(slot), Some(element)) =
+                        (value_slot(ir, argument), erased_cell_element(parameter))
+                    {
+                        captured.push((slot, None, element));
+                    }
+                }
+                pending.extend(arguments);
             }
             BodyNode::Variable { index, init } => {
                 if let Some(init) = init {
