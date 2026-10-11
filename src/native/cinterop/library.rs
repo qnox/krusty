@@ -34,7 +34,7 @@ use super::def_file::{CompilerOptions, DefFile};
 use super::model::Origin;
 use super::preprocessor::IncludeDir;
 use crate::klib::write::{KlibPlatform, KlibStamp, KlibWriter};
-use crate::native::target::{Arch, NativeTarget};
+use crate::native::target::NativeTarget;
 use callables::{function_stubs, global_property, Definition};
 use headers::{header_id, header_name, HeaderFilter};
 use mirror::{EnumStyles, Mapper};
@@ -54,11 +54,15 @@ pub(crate) struct InteropRequest<'a> {
     /// The target's sysroot, below which a header is named by its path.
     pub(crate) sysroot: Option<PathBuf>,
     pub(crate) stamp: KlibStamp,
+    /// Headers given beside the `.def` file (`-header`), read after its own.
+    pub(crate) extra_headers: Vec<String>,
+    /// Compiler options given beside the `.def` file (`-compiler-option`), after its own.
+    pub(crate) extra_compiler_options: Vec<String>,
 }
 
 /// Why an interop library could not be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CinteropError(pub(crate) String);
+pub struct CinteropError(pub(crate) String);
 
 impl std::fmt::Display for CinteropError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,27 +70,29 @@ impl std::fmt::Display for CinteropError {
     }
 }
 
+impl std::error::Error for CinteropError {}
+
 /// The path the translation unit's main file is read as; the `.def` file's code is in it.
 const MAIN_FILE: &str = "<def>";
 
 /// Build the interop library `request` describes.
 pub(crate) fn interop_library(request: InteropRequest<'_>) -> Result<KlibWriter, CinteropError> {
     let def = request.def;
-    let konan_target = match request.target.arch {
-        Arch::X86_64 => "linux_x64",
-        Arch::Aarch64 => "linux_arm64",
-        Arch::Riscv64 => {
-            return Err(CinteropError(
-                "Kotlin/Native has no interop library format for linux riscv64".to_string(),
-            ))
-        }
+    let Some(konan_target) = request.target.konan_name() else {
+        return Err(CinteropError(format!(
+            "Kotlin/Native has no interop library format for {}",
+            request.target
+        )));
     };
     let list = |key: &str| {
         def.list(key, "linux", konan_target)
             .map_err(|error| CinteropError(format!("{key}: {error}")))
     };
-    let options = CompilerOptions::parse(&list("compilerOpts")?).map_err(CinteropError)?;
-    let header_list = list("headers")?;
+    let mut compiler_options = list("compilerOpts")?;
+    compiler_options.extend(request.extra_compiler_options.iter().cloned());
+    let options = CompilerOptions::parse(&compiler_options).map_err(CinteropError)?;
+    let mut header_list = list("headers")?;
+    header_list.extend(request.extra_headers.iter().cloned());
     let filter = HeaderFilter::new(list("headerFilter")?);
     let excluded: HashSet<String> = list("excludedFunctions")?.into_iter().collect();
     let strict = list("strictEnums")?;

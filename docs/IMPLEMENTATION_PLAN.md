@@ -4753,8 +4753,22 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
 - **Open.** Platform libraries as dependencies (today a type from a system header is declared in
   the library itself, as `cinterop -no-default-libs` does); linux_arm64 output is unverified
   against Kotlin/Native; riscv64 has no Kotlin/Native target and is refused; aliases for duplicate
-  strict-enum values, wide-string and struct-typed macro values, and vector types; no driver option
-  invokes the library builder yet.
+  strict-enum values, wide-string and struct-typed macro values, and vector types.
+- **Driver (done).** `krusty cinterop` takes Kotlin/Native's `cinterop` options and writes the
+  library packed or unpacked, with the link facts of the `linkerOpts` libraries under
+  `default/targets/<target>/imports`. `tests/native_cinterop_e2e.rs` runs it on zlib.
+- **Calls (done for scalars).** `krusty::native::InteropLibraries` publishes an interop library to
+  the frontend after the platform (`KlibOverlay`) and supplies its import libraries to the link; a
+  `@CCall.Direct` function whose parameters and result are integers, unsigned integers,
+  floating-point numbers or `Boolean` is a direct C call. A zlib program printing
+  `compressBound`, `adler32_combine`, `crc32_combine` and `Z_*` constants answers what
+  Kotlin/Native answers.
+- **Blocked.** Pointers, structs, `CValuesRef`, `memScoped`/`allocArray`/`usePinned` and
+  `toKString` are `kotlinx.cinterop` code in the Native stdlib KLIB: they need the Native
+  frontend to read the stdlib KLIB instead of the JVM stdlib, and KLIB body lowering. A C call
+  passing or returning one declines by name. Global variables (`@CCall.Direct` getters) are not
+  lowered yet. There is no `kotlinc-native`-style command line for a Native program yet, so a
+  program takes an interop library through the library API.
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 

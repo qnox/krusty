@@ -200,6 +200,9 @@ pub struct KotlinFunction {
     pub context_kinds: Vec<crate::types::ContextParameterKind>,
     /// Qualified identities of annotations declared on this function.
     pub annotations: Vec<crate::types::TypeName>,
+    /// The C function a direct call realizes this `external` function with: the `name` of the
+    /// `@CCall.Direct` annotation an interop library puts on it.
+    pub direct_c_symbol: Option<String>,
     pub return_value_status: crate::types::ReturnValueStatus,
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
@@ -327,8 +330,9 @@ pub struct AnnotationApplication {
     pub arguments: Vec<(String, AnnotationArgument)>,
 }
 
-/// A recorded annotation argument. Only the enum shape (and arrays of it) is decoded: that is what
-/// `kotlin.annotation.Retention` and `kotlin.annotation.Target` carry.
+/// A recorded annotation argument. Only the enum shape (and arrays of it), which
+/// `kotlin.annotation.Retention` and `kotlin.annotation.Target` carry, and strings, which
+/// `kotlinx.cinterop.internal.CCall.Direct` carries, are decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnotationArgument {
     Enum {
@@ -336,6 +340,7 @@ pub enum AnnotationArgument {
         entry: String,
     },
     Array(Vec<AnnotationArgument>),
+    String(String),
     Other,
 }
 

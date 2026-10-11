@@ -88,6 +88,14 @@ impl DefFile {
             .insert(unescape(&text[..key_end]), unescape(rest.trim_end()));
     }
 
+    /// Put the declarations in `package`, whatever package the file names (`cinterop -pkg`).
+    pub(crate) fn set_package(&mut self, package: &str) {
+        self.properties
+            .retain(|key, _| key != "package" && !key.starts_with("package."));
+        self.properties
+            .insert("package".to_string(), package.to_string());
+    }
+
     /// Every property as written, in key order.
     pub(crate) fn properties(&self) -> impl Iterator<Item = (&str, &str)> {
         self.properties

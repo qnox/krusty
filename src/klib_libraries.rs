@@ -18,6 +18,7 @@ mod declaration_signatures;
 mod external_identities;
 mod inventory;
 mod lookup;
+mod overlay;
 pub(crate) mod parameter_defaults;
 mod platform;
 #[cfg(test)]
@@ -30,6 +31,7 @@ use crate::types::TypeName;
 pub use archives::KlibLibrariesOpenError;
 pub use declaration_bodies::{KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
+pub use overlay::KlibOverlay;
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.
 ///
@@ -57,6 +59,16 @@ impl KlibLibraries {
     /// The same declarations, for another compilation with no selected identities yet.
     pub fn for_compilation(&self) -> Self {
         Self::over(std::rc::Rc::clone(&self.inventory))
+    }
+
+    /// The same declarations, assigning identities from `base` instead of zero, so that they
+    /// can be layered after a provider whose identities never reach `base`.
+    fn with_identities_from(self, base: u32) -> Self {
+        Self {
+            inventory: self.inventory,
+            identities: external_identities::ExternalIdentities::starting_at(base),
+            lookups: lookup::SymbolLookups::default(),
+        }
     }
 
     fn over(inventory: std::rc::Rc<inventory::PackageInventory>) -> Self {

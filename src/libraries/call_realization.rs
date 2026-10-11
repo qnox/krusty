@@ -118,6 +118,10 @@ pub struct ExternalCallableRealization {
     /// can join this selection to its decoded IR body. Providers without serialized IR publish
     /// `None`; a consumer never reconstructs it from the callable's spelling or shape.
     pub declaration_signature: Option<KlibDeclarationSignature>,
+    /// The C function this `external` declaration is realized by, called directly with the
+    /// target's C calling convention: the `name` of the `@CCall.Direct` annotation an interop
+    /// library puts on it. `None` for every other declaration.
+    pub direct_c_symbol: Option<Box<str>>,
 }
 
 impl ExternalCallableRealization {

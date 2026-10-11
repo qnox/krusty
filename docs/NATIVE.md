@@ -196,6 +196,33 @@ unchanged.
   Against clang for the posix, linux, zlib and sqlite3 header sets on Kotlin/Native's x86_64
   glibc 2.19 sysroot, every record's size, alignment and field offsets (bitfields included) and
   every typedef's size match. `#pragma pack` is not read yet; no header in those sets uses it.
+- **Making a library: `krusty cinterop`.** It takes Kotlin/Native's `cinterop` options (`-def`,
+  `-header`, `-pkg`, `-o`, `-target`, `-compiler-option(s)`, `-linker-option(s)`, `-nopack`,
+  `-no-default-libs`, `-Xmodule-name`, `-Xccall-mode direct|both`) and refuses the rest by name.
+  It writes a packed `.klib` named after `-o` (a directory with `-nopack`), whose package is
+  `-pkg`, else the `.def` file's `package`, else the `.def` file's name, as Kotlin/Native chooses
+  it. Headers are read from the build machine's include directories below the sysroot `/`.
+- **Link facts travel with the library.** The `-l`/`-L` options of `linkerOpts` (and of
+  `-linker-option`) are resolved when the library is made: each `lib<name>.so` is found in the
+  `-L` directories, then the target's multiarch and common library directories, and read into an
+  `ImportLibrary`. The facts are written to `default/targets/<target>/imports` as text: a
+  `library <soname>` line, then `function <name> [<version>]` or `data <name> [<version>]` per
+  export. Any other linker option is refused. So the libraries are read on the machine that
+  makes the interop library, and a program built against it later needs only the klib.
+- **Using a library: `InteropLibraries`.** A Native build opens its interop libraries for the
+  target. Their declarations are published to the frontend after the platform's own
+  (`klib_libraries::KlibOverlay`); the overlay's identities start at 2^31, so the two providers
+  never answer for the same identity. The KLIB provider normalizes `@CCall.Direct(name)` into
+  `ExternalCallableRealization::direct_c_symbol`, the backend handoff freezes it, and the code
+  generator lowers a call of such a function to a direct call of that symbol with the C calling
+  convention (`codegen/lower/calls/c_calls.rs`). The program is linked against the libraries the
+  link facts name.
+- **What a C call passes today:** integers, unsigned integers, floating-point numbers and
+  `Boolean`, which are already carried as their C types. A pointer, struct, `CValuesRef` or
+  `String` (`const char *`) is declined by name: those need `kotlinx.cinterop`'s representation of
+  C data (`CPointer`, `memScoped`, `toKString`), which is Kotlin code in the Native stdlib KLIB.
+  The Native frontend still reads the JVM stdlib, which has no `kotlinx.cinterop`, and KLIB bodies
+  do not lower end to end yet, so `zlibVersion()?.toKString()` is blocked on both.
 
 ## Other operating systems
 

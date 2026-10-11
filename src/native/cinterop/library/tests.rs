@@ -36,6 +36,8 @@ fn build(name: &str, def: &str) -> PathBuf {
         system_dirs: vec![IncludeDir::Builtin(HEADERS)],
         sysroot: None,
         stamp: KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
+        extra_headers: Vec::new(),
+        extra_compiler_options: Vec::new(),
     })
     .expect("builds the library");
     let root = std::env::temp_dir().join(format!("cinterop-{name}-{}", std::process::id()));
@@ -151,4 +153,34 @@ fn layouts_anonymous_members_enum_styles_and_wrapped_macros() {
         include_str!("testdata/layouts.def"),
         include_str!("testdata/layouts.expected"),
     );
+}
+
+/// A library layered after another platform publishes each C function with the symbol its
+/// `@CCall.Direct` names, under an identity the other platform cannot also assign.
+#[test]
+fn layered_functions_carry_their_direct_c_symbol() {
+    use crate::klib_libraries::KlibOverlay;
+    use crate::libraries::EmptySymbolSource;
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+
+    let root = build("layered", include_str!("testdata/basics.def"));
+    let overlay = KlibOverlay::open(Box::new(EmptySymbolSource), std::slice::from_ref(&root))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let symbols = overlay.symbols(
+        SymbolNamespace::Package(crate::types::type_name("basics")),
+        "small_area",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one `small_area`");
+    };
+    let identity = function
+        .callable
+        .external_identity
+        .expect("a published function has its identity");
+    assert!(identity.raw() >= 1 << 31, "{identity:?}");
+    let realization = overlay
+        .external_callable(identity)
+        .expect("the overlay answers for the identity");
+    assert_eq!(realization.direct_c_symbol.as_deref(), Some("small_area"));
+    std::fs::remove_dir_all(&root).expect("removes the library");
 }

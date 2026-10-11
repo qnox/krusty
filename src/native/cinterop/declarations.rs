@@ -51,6 +51,7 @@ pub(super) struct Header {
 }
 
 /// Parse the preprocessed `tokens` of one translation unit for `target`.
+#[cfg(test)]
 pub(super) fn parse(tokens: &[Token], target: NativeTarget) -> Result<Header, ParseError> {
     let mut parser = parser::Parser::new(tokens, target);
     parser.translation_unit()?;

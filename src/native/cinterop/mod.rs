@@ -12,5 +12,11 @@ mod def_file;
 mod layout;
 mod lexer;
 mod library;
+mod link_facts;
 mod model;
 mod preprocessor;
+mod tool;
+
+pub use library::CinteropError;
+pub(super) use link_facts::imported as imported_libraries;
+pub use tool::{build_interop_library, CinteropOptions};

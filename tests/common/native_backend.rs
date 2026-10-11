@@ -208,7 +208,7 @@ pub fn native_analysis(
     sources: &[(&str, &str)],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    analyze_natively(sources, &[], false, diags)
+    analyze_natively(sources, &[], false, None, diags)
 }
 
 /// [`native_analysis`] of a build applying every compiler plugin krusty ships, with their
@@ -218,13 +218,14 @@ pub fn native_analysis_with_plugins(
     libraries: &[std::path::PathBuf],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    analyze_natively(sources, libraries, true, diags)
+    analyze_natively(sources, libraries, true, None, diags)
 }
 
 fn analyze_natively(
     sources: &[(&str, &str)],
     libraries: &[std::path::PathBuf],
     plugins: bool,
+    interop: Option<&krusty::native::InteropLibraries>,
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
     use krusty::source::SourceInput;
@@ -245,10 +246,20 @@ fn analyze_natively(
         .chain(libraries.iter().cloned())
         .collect::<Vec<_>>();
     let classpath = super::cached_classpath(&jars, Some(&jdk_modules()));
-    let platform = Box::new(
+    let platform: Box<dyn krusty::libraries::SemanticPlatform> = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
     );
+    // A C library's declarations come from the interop libraries the build names, after the
+    // standard library's.
+    let platform: Box<dyn krusty::libraries::SemanticPlatform> = match interop {
+        Some(interop) => Box::new(
+            interop
+                .over(platform)
+                .unwrap_or_else(|error| panic!("the interop libraries open: {error}")),
+        ),
+        None => platform,
+    };
     let inputs: Vec<_> = sources
         .iter()
         .map(|(stem, src)| SourceInput::kotlin(src).with_file_stem(stem))
@@ -281,11 +292,21 @@ pub fn native_image(
     sources: &[(&str, &str)],
     target: krusty::native::NativeTarget,
 ) -> Result<Vec<u8>, NativeBox> {
+    native_image_with_interop(sources, None, target)
+}
+
+/// [`native_image`] of a program that calls C through `interop`'s libraries, linked against the
+/// C libraries they import from.
+pub fn native_image_with_interop(
+    sources: &[(&str, &str)],
+    interop: Option<&krusty::native::InteropLibraries>,
+    target: krusty::native::NativeTarget,
+) -> Result<Vec<u8>, NativeBox> {
     use krusty::diag::DiagSink;
     use krusty::native::{CraneliftBackend, Entry};
 
     let mut diags = DiagSink::new();
-    let Some((analysis, stems)) = native_analysis(sources, &mut diags) else {
+    let Some((analysis, stems)) = analyze_natively(sources, &[], false, interop, &mut diags) else {
         return Err(NativeBox::Unavailable);
     };
     if let Some(refusal) = diags.diags.first() {
@@ -326,7 +347,8 @@ pub fn native_image(
         .map(|(_, object)| object)
         .collect();
     let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
-    let image = match krusty::native::link_program(&object_refs, target) {
+    let imports = interop.map_or(&[][..], |interop| interop.imports());
+    let image = match krusty::native::link_program_with_libraries(&object_refs, imports, target) {
         Ok(image) => image,
         Err(error) => return Err(NativeBox::Failed(format!("link: {error}"))),
     };
@@ -394,7 +416,17 @@ fn native_sources_outcome(
     sources: &[(&str, &str)],
     target: krusty::native::NativeTarget,
 ) -> NativeBox {
-    let image = match native_image(sources, target) {
+    native_interop_outcome(sources, None, target)
+}
+
+/// What a module calling C through `interop`'s libraries answers when built, linked and run;
+/// otherwise as [`native_sources_outcome`].
+pub fn native_interop_outcome(
+    sources: &[(&str, &str)],
+    interop: Option<&krusty::native::InteropLibraries>,
+    target: krusty::native::NativeTarget,
+) -> NativeBox {
+    let image = match native_image_with_interop(sources, interop, target) {
         Ok(image) => image,
         Err(outcome) => return outcome,
     };

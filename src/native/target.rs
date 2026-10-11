@@ -76,6 +76,24 @@ impl NativeTarget {
         }
     }
 
+    /// The name Kotlin/Native gives this target (`linux_x64`), which its tools take as `-target`
+    /// and its libraries are laid out by. `None` for a target Kotlin/Native does not have.
+    pub fn konan_name(self) -> Option<&'static str> {
+        match (self.os, self.arch) {
+            (Os::Linux, Arch::X86_64) => Some("linux_x64"),
+            (Os::Linux, Arch::Aarch64) => Some("linux_arm64"),
+            (Os::Linux, Arch::Riscv64) => None,
+        }
+    }
+
+    /// The target Kotlin/Native names `name`, if krusty targets it.
+    pub fn from_konan_name(name: &str) -> Option<Self> {
+        NativeTarget::ALL
+            .iter()
+            .copied()
+            .find(|target| target.konan_name() == Some(name))
+    }
+
     /// The conventional short name, as a user would write it.
     pub fn name(self) -> String {
         format!("{}-{}", self.os.triple_name(), self.arch.triple_name())

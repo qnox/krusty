@@ -83,6 +83,8 @@ pub struct KlibWriter {
     empty_packages: Vec<String>,
     /// Directories the library holds even when they are empty, relative to its root.
     directories: Vec<String>,
+    /// Other files, as (library-relative path, bytes).
+    files: Vec<(String, Vec<u8>)>,
 }
 
 impl KlibWriter {
@@ -121,6 +123,7 @@ impl KlibWriter {
             packages: Vec::new(),
             empty_packages: Vec::new(),
             directories: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -141,6 +144,11 @@ impl KlibWriter {
     /// Keep the directory `path` (library-relative) in the written library even when empty.
     pub fn add_directory(&mut self, path: &str) {
         self.directories.push(path.to_string());
+    }
+
+    /// Add the file `path` (library-relative) holding `bytes`.
+    pub fn add_file(&mut self, path: &str, bytes: Vec<u8>) {
+        self.files.push((path.to_string(), bytes));
     }
 
     /// Add one file's fragment to `package` (dotted; empty for the root package).
@@ -208,6 +216,7 @@ impl KlibWriter {
                 ));
             }
         }
+        entries.extend(self.files.iter().cloned());
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         entries
     }
@@ -224,6 +233,42 @@ impl KlibWriter {
             }
             std::fs::write(&path, &bytes)?;
         }
+        Ok(())
+    }
+
+    /// Write the library packed into the `.klib` archive at `path`: every directory, then every
+    /// file, in path order.
+    pub fn write_archive(&self, path: &Path) -> io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let entries = self.entries();
+        let mut directories = std::collections::BTreeSet::new();
+        for directory in self.directories.iter().map(String::as_str).chain(
+            entries
+                .iter()
+                .filter_map(|(entry, _)| Some(entry.rsplit_once('/')?.0)),
+        ) {
+            let mut prefix = String::new();
+            for segment in directory.split('/') {
+                prefix.push_str(segment);
+                prefix.push('/');
+                directories.insert(prefix.clone());
+            }
+        }
+        for directory in directories {
+            archive
+                .add_directory(directory, options)
+                .map_err(io::Error::other)?;
+        }
+        for (entry, bytes) in entries {
+            archive
+                .start_file(entry, options)
+                .map_err(io::Error::other)?;
+            io::Write::write_all(&mut archive, &bytes)?;
+        }
+        archive.finish().map_err(io::Error::other)?;
         Ok(())
     }
 }

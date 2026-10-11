@@ -146,6 +146,7 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        direct_c_symbol: None,
         return_value_status: Default::default(),
         contract: None,
     }

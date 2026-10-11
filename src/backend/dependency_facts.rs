@@ -79,6 +79,9 @@ pub struct BackendCallableFact {
     pub generic_sig: Option<Box<GenericSig>>,
     /// Exact serialized-IR identity the provider published for this declaration, if any.
     pub declaration_signature: Option<KlibDeclarationSignature>,
+    /// The C function a direct call realizes this declaration with, as its interop library's
+    /// provider published it. `None` for a declaration that is not a C function.
+    pub direct_c_symbol: Option<Box<str>>,
 }
 
 impl BackendCallableFact {
@@ -249,6 +252,7 @@ impl CheckedBackendCallables {
                     provider(identity).ok_or(DependencyFactError::UnknownCallable(identity))?;
                 let parameter_identities = realization.parameter_identities;
                 let declaration_signature = realization.declaration_signature;
+                let direct_c_symbol = realization.direct_c_symbol;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -281,6 +285,7 @@ impl CheckedBackendCallables {
                     overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
                     declaration_signature,
+                    direct_c_symbol,
                 })
             }
         };

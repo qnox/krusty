@@ -1,3 +1,5 @@
+mod direct_call;
+
 use super::*;
 use crate::metadata::decode::{
     field, packed_varints, parse_type_node, parse_type_param, parse_value_parameter, require_wire,
@@ -5,6 +7,7 @@ use crate::metadata::decode::{
     ParsedTypeArgument, ParsedTypeNode, ParsedTypeParam, ParsedValueParam, ParsedVariance, QName,
 };
 use crate::metadata::semantic as metadata;
+use direct_call::direct_c_symbol;
 
 fn semantic_error(detail: impl Into<String>) -> PackageFragmentDecodeError {
     PackageFragmentDecodeError {
@@ -289,10 +292,15 @@ fn annotation_argument(
     let mut class = None;
     let mut entry = None;
     let mut elements = Vec::new();
+    let mut string = None;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "annotation value")?;
         match (number, wire) {
             (1, 0) => kind = Some(cursor.varint("annotation value kind")?),
+            (5, 0) => {
+                let id = cursor.varint("annotation string value")?;
+                string = Some(semantic_string(strings, id, "annotation string value")?);
+            }
             (6, 0) => {
                 let id = cursor.varint("annotation class value")?;
                 class = Some(semantic_qname(
@@ -324,6 +332,9 @@ fn annotation_argument(
             ))
         }
         (Some(12), _, _) => metadata::AnnotationArgument::Array(elements),
+        (Some(8), _, _) => metadata::AnnotationArgument::String(
+            string.ok_or_else(|| semantic_error("string annotation value has no string"))?,
+        ),
         _ => metadata::AnnotationArgument::Other,
     })
 }
@@ -1054,6 +1065,7 @@ fn semantic_function(
         tables.qnames,
         "function declaration",
     )?;
+    let direct_c_symbol = direct_c_symbol(body, &annotations, tables)?;
     let function = semantic_function_shape(body)?;
     let type_parameter_bodies = message_bodies(body, 4, "function declaration")?;
     if function.type_params.len() != type_parameter_bodies.len() {
@@ -1289,6 +1301,7 @@ fn semantic_function(
         context_count: context_types.len(),
         context_kinds,
         annotations,
+        direct_c_symbol,
         return_value_status: function.return_value_status,
         contract,
     };

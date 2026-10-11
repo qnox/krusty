@@ -743,6 +743,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        direct_c_symbol: None,
         return_value_status: Default::default(),
         contract: None,
     };
@@ -849,6 +850,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         declaration_owner: None,
         parameter_identities: Box::new([]),
         declaration_signature: None,
+        direct_c_symbol: None,
     };
     let queries = std::cell::Cell::new(0);
     facts

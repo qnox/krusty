@@ -77,6 +77,14 @@ impl KlibLibraries {
         let wanted = inventory.defaulted_top_levels();
         let mut defaults = ParameterDefaults::default();
         for (library, archive) in libraries.iter().zip(&archives) {
+            // An interop library (`interop=true`, written by cinterop) holds metadata only: every
+            // declaration is `external`, so there is no serialized IR and no default to read.
+            let manifest = archive
+                .manifest()
+                .map_err(KlibLibrariesOpenError::Archive)?;
+            if manifest.get("interop") == Some("true") {
+                continue;
+            }
             let trees =
                 read_declaration_trees_where(archive, |signature| wanted.contains(signature))
                     .map_err(|error| KlibLibrariesOpenError::Declarations {

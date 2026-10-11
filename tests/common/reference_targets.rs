@@ -100,20 +100,25 @@ pub fn reference_outcome(
 /// What `box()` answers when kotlinc-native builds and runs `source`. `None` when kotlin-native is
 /// not provisioned and no recording exists.
 pub fn kotlin_native_box(source: &str) -> Option<String> {
+    kotlin_native_box_with_arguments(source, &[])
+}
+
+/// [`kotlin_native_box`] with `args` on kotlinc-native's command line.
+pub fn kotlin_native_box_with_arguments(source: &str, args: &[String]) -> Option<String> {
     let program = format!("{source}\nfun main() {{ print(box()) }}\n");
     let sources = [("box.kt", program.as_str())];
     let files = recorded(
         CompilationTarget::Native,
         "program",
         &sources,
-        &[],
+        args,
         |work| {
             let paths = super::common::write_fixture_sources(work, &sources);
             let built = run_reference(
                 CompilationTarget::Native,
                 work,
                 &paths,
-                &[],
+                args,
                 Output::Program,
             )?;
             assert!(

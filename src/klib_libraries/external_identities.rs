@@ -14,8 +14,12 @@ use crate::types::{SemanticCallableOwner, TypeName};
 
 /// One identity per exact declaration signature. The signature, not a spelling or a parameter
 /// tuple, decides whether two candidates are the same declaration.
+///
+/// Identities are dense from `base`: a provider layered over another one starts its own above
+/// every identity the other can assign, so the two never answer for the same identity.
 #[derive(Default)]
 pub(super) struct ExternalIdentities {
+    base: u32,
     realizations: RefCell<Vec<ExternalCallableRealization>>,
     by_signature: RefCell<HashMap<KlibDeclarationSignature, ExternalCallableId>>,
     properties: RefCell<Vec<ExternalPropertyRealization>>,
@@ -23,6 +27,29 @@ pub(super) struct ExternalIdentities {
 }
 
 impl ExternalIdentities {
+    /// Identities that start at `base` rather than at zero.
+    pub(super) fn starting_at(base: u32) -> Self {
+        Self {
+            base,
+            ..Self::default()
+        }
+    }
+
+    /// The identity of the declaration published at `index`.
+    fn raw(&self, index: usize, what: &str) -> u32 {
+        u32::try_from(index)
+            .ok()
+            .and_then(|index| self.base.checked_add(index))
+            .unwrap_or_else(|| {
+                panic!("too many external {what} declarations for packed FIR identity")
+            })
+    }
+
+    /// Where the declaration `raw` names is published, if this provider assigned it.
+    fn index(&self, raw: u32) -> Option<usize> {
+        raw.checked_sub(self.base).map(|index| index as usize)
+    }
+
     /// Give a normalized function the identity of its declaration, publishing the declaration's
     /// realization, of shape `kind`, the first time its signature is seen.
     pub(super) fn assign_function(
@@ -37,6 +64,14 @@ impl ExternalIdentities {
             &signed.parameters.physical,
             &mut function.callable,
         );
+        if let Some(symbol) = &signed.declaration.direct_c_symbol {
+            let identity = function
+                .callable
+                .external_identity
+                .expect("an assigned function has its identity");
+            let index = self.index(identity.raw()).expect("assigned here");
+            self.realizations.borrow_mut()[index].direct_c_symbol = Some(symbol.as_str().into());
+        }
     }
 
     /// Give a normalized property and each of its accessors the identity of its declaration. Each
@@ -133,10 +168,7 @@ impl ExternalIdentities {
             return identity;
         }
         let mut properties = self.properties.borrow_mut();
-        let identity = ExternalPropertyId::from_raw(
-            u32::try_from(properties.len())
-                .expect("too many external property declarations for packed FIR identity"),
-        );
+        let identity = ExternalPropertyId::from_raw(self.raw(properties.len(), "property"));
         properties.push(ExternalPropertyRealization {
             name: property.name.clone(),
             getter: property
@@ -168,10 +200,7 @@ impl ExternalIdentities {
             return;
         }
         let mut realizations = self.realizations.borrow_mut();
-        let identity = ExternalCallableId::from_raw(
-            u32::try_from(realizations.len())
-                .expect("too many external callable declarations for packed FIR identity"),
-        );
+        let identity = ExternalCallableId::from_raw(self.raw(realizations.len(), "callable"));
         callable.external_identity = Some(identity);
         realizations.push(ExternalCallableRealization {
             callable: callable.clone(),
@@ -179,6 +208,7 @@ impl ExternalIdentities {
             declaration_owner: callable.declaration_owner,
             parameter_identities: parameters.into(),
             declaration_signature: Some(signature.clone()),
+            direct_c_symbol: None,
         });
         self.by_signature.borrow_mut().insert(signature, identity);
     }
@@ -187,19 +217,15 @@ impl ExternalIdentities {
         &self,
         identity: ExternalCallableId,
     ) -> Option<ExternalCallableRealization> {
-        self.realizations
-            .borrow()
-            .get(identity.raw() as usize)
-            .cloned()
+        let index = self.index(identity.raw())?;
+        self.realizations.borrow().get(index).cloned()
     }
 
     pub(super) fn property(
         &self,
         identity: ExternalPropertyId,
     ) -> Option<ExternalPropertyRealization> {
-        self.properties
-            .borrow()
-            .get(identity.raw() as usize)
-            .cloned()
+        let index = self.index(identity.raw())?;
+        self.properties.borrow().get(index).cloned()
     }
 }
