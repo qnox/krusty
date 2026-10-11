@@ -4686,6 +4686,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is `underscore in name-based destructuring without renaming is forbidden.` and reads no
   property. Tests: `multiDecl/*` box corpus (+96 gate),
   `tests/name_based_destructuring_e2e.rs`.
+  `-Xname-based-destructuring=complete` also enables
+  `DeprecateNameMismatchInShortDestructuringWithParentheses`. kotlinc consults that feature only
+  while `EnableNameBasedDestructuringShortForm` is off (its short-form name-mismatch warnings), and
+  `complete` turns the short form on, so the mode is accepted; `name-mismatch`, which leaves the short
+  form positional and needs those warnings, is still refused (`LangFeatures::models_enabled`).
 
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and

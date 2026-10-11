@@ -131,6 +131,14 @@ const MODELED_FEATURES: &[&str] = &[
     "WhenGuards",
 ];
 
+/// Features kotlinc consults only while the second feature is disabled, so they have no effect
+/// once it is enabled. kotlinc's destructuring checker warns about a short-form name mismatch only
+/// while the short form is still positional (`FirDestructuringDeclarationChecker`).
+const SUBSUMED_FEATURES: &[(&str, &str)] = &[(
+    "DeprecateNameMismatchInShortDestructuringWithParentheses",
+    "EnableNameBasedDestructuringShortForm",
+)];
+
 impl LangFeatures {
     /// The feature table of the reference release these defaults come from.
     pub fn table(&self) -> &'static FeatureTable {
@@ -149,6 +157,15 @@ impl LangFeatures {
     /// be recorded by name without changing compilation semantics.
     pub fn models(name: &str) -> bool {
         MODELED_FEATURES.binary_search(&name).is_ok()
+    }
+
+    /// Whether enabling `name` under these settings changes nothing krusty does not model: the
+    /// feature is modeled, or every effect it has is gated off by a feature these settings enable.
+    pub fn models_enabled(&self, name: &str) -> bool {
+        Self::models(name)
+            || SUBSUMED_FEATURES
+                .iter()
+                .any(|&(feature, by)| feature == name && self.has(by))
     }
 
     /// Whether `name` is on at this language/API level before any explicit setting
