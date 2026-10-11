@@ -119,7 +119,7 @@ struct DataField {
 impl DataField {
     /// Read this property of `receiver`, an instance of `class`.
     fn read(&self, ir: &mut IrFile, class: ClassId, receiver: ExprId) -> ExprId {
-        match self.getter {
+        let read = match self.getter {
             Some(ty) => {
                 let owner = ir.classes[class as usize].fq_name_id();
                 ir.add_expr(IrExpr::PropertyRead {
@@ -136,7 +136,12 @@ impl DataField {
                 class,
                 index: self.index,
             }),
-        }
+        };
+        // Generated members have no source FIR expression whose finalization can attach this
+        // fact. Equality, hashing, and rendering still operate on the declared Kotlin field type,
+        // independently of the backend carrier or getter realization.
+        ir.logical_types.insert(read, self.ty);
+        read
     }
 }
 
@@ -324,10 +329,6 @@ fn synthesize_to_string(
         }
         let this = ir.add_expr(IrExpr::GetValue(0));
         let mut value = field.read(ir, class, this);
-        // Backend representation may erase a value class to its carrier, but data-class rendering
-        // is defined by the declared Kotlin field type. Keep that checked type on the generated read
-        // so a target can choose the value class's semantic string conversion.
-        ir.logical_types.insert(value, field.ty);
         // A NULLABLE array field renders its contents too — `A(x=[0, 1])` for an `Array<Int>?`
         // holding one, `A(x=null)` for one holding null. Asking `is_array` of the declared type
         // answers `false` for `Array<Int>?`, so the nullable field used to render by identity.
@@ -463,9 +464,11 @@ fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
         vec![non_null],
         Ty::Int,
     );
-    ir.add_expr(IrExpr::When {
+    let combined = ir.add_expr(IrExpr::When {
         branches: vec![(Some(is_null), zero), (None, hash)],
-    })
+    });
+    ir.logical_types.insert(combined, Ty::Int);
+    combined
 }
 
 fn synthesize_equals(

@@ -127,7 +127,7 @@ pub(super) fn lower_file(
             module,
             runtime,
             &parameters,
-            declared_variables(ir, root),
+            ir.declared_value_slot_types(root),
             function.ret,
         );
         body.function_body(root, function.ret)?;
@@ -155,7 +155,7 @@ pub(super) fn lower_file(
             ir.statics
                 .iter()
                 .filter_map(|property| property.init)
-                .flat_map(|init| declared_variables(ir, init))
+                .flat_map(|init| ir.declared_value_slot_types(init))
                 .collect(),
             Ty::Unit,
         );
@@ -186,19 +186,6 @@ struct FileContext<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
-}
-
-/// Every variable `root` declares, with its declared type.
-fn declared_variables(ir: &IrFile, root: u32) -> HashMap<u32, Ty> {
-    let mut declared = HashMap::new();
-    let mut pending = vec![root];
-    while let Some(id) = pending.pop() {
-        if let IrExpr::Variable { index, ty, .. } = ir.expr(id) {
-            declared.insert(*index, *ty);
-        }
-        crate::ir::for_each_child(&ir.exprs, id, &mut |child| pending.push(child));
-    }
-    declared
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -312,9 +299,18 @@ impl<'a> Body<'a> {
         module: &'a mut Module,
         runtime: &'a mut Runtime,
         parameters: &[Ty],
-        declared: HashMap<u32, Ty>,
+        mut declared: HashMap<u32, Ty>,
         result: Ty,
     ) -> Self {
+        // A dispatch receiver is the first entry in `parameters`, hence slot zero; ordinary
+        // parameters follow it. They have no `Variable` node, so add their semantic declarations
+        // to the same inventory explicitly.
+        declared.extend(
+            parameters
+                .iter()
+                .enumerate()
+                .map(|(slot, ty)| (slot as u32, *ty)),
+        );
         Self {
             ir: context.ir,
             module,
@@ -403,13 +399,10 @@ impl<'a> Body<'a> {
             | IrExpr::Block { value: None, .. } => Ty::Unit,
             IrExpr::GetValue(slot) => match self.ir.logical_types.get(&id) {
                 Some(ty) => *ty,
-                None => match self.values.get(slot) {
-                    Some((_, ty)) => *ty,
-                    None => *self
-                        .declared
-                        .get(slot)
-                        .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
-                },
+                None => *self
+                    .declared
+                    .get(slot)
+                    .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
             },
             // A member access common lowering produced after checking has its declaration's type,
             // which is what the instruction leaves on the stack; a use at a narrower type casts.

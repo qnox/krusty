@@ -350,6 +350,11 @@ impl BodyLowering<'_> {
             FirExprKind::ComparisonCall { operation, call } => {
                 let call = self
                     .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
+                // `ComparisonCall` is the checker's selected `compareTo` convention call. Its
+                // result is the `Int` that the relational operator compares with zero; the outer
+                // FIR expression records only the final Boolean, so keep the nested operand's
+                // checked type explicitly too.
+                self.ir.logical_types.insert(call, Ty::Int);
                 if let IrExpr::Call {
                     callee:
                         Callee::Intrinsic {
@@ -375,6 +380,10 @@ impl BodyLowering<'_> {
             FirExprKind::ContainmentCall { call, negated } => {
                 let call = self
                     .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
+                // The selected `contains` convention call is the Boolean operand of a synthesized
+                // negation for `!in`. The outer FIR expression records the negation's type, not
+                // this nested call's, so preserve the checker-owned result before building it.
+                self.ir.logical_types.insert(call, Ty::Boolean);
                 if *negated {
                     self.ir.add_negation(call)
                 } else {
@@ -923,15 +932,13 @@ impl BodyLowering<'_> {
                 start,
                 end,
                 negated,
-            } => self.in_range_expression(
+            } => self.in_range_expression(super::ranges::InRangeLowering::new(
                 *operation,
                 comparison.get(),
-                *value,
-                *start,
-                *end,
+                [*value, *start, *end],
                 *negated,
                 origin,
-            )?,
+            ))?,
             FirExprKind::StringTemplate(_) => {
                 unreachable!("a string template folds to a constant or is a concatenation")
             }

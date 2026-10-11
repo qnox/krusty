@@ -188,6 +188,12 @@ impl<'a> FileLowering<'a> {
                 key.function,
             ))
             .collect();
+        let semantic_slots: Vec<Ty> = declaration
+            .dispatch_receiver
+            .map(|owner| Ty::Obj(owner, &[]))
+            .into_iter()
+            .chain(declaration.params.iter().copied())
+            .collect();
         let name = format!("{}$defaults", declaration.name);
         let omitted = key.omitted.clone();
         // A defaulted call to an OPEN member still dispatches on its receiver: filling the
@@ -219,6 +225,7 @@ impl<'a> FileLowering<'a> {
         }
         let result = declaration.ret;
         self.emit_function(id, signature, result, &name, &mut |body, params| {
+            body.record_semantic_slots(&semantic_slots);
             // The callee's own frame: `this` at slot 0 where there is one, then every
             // parameter at its own ordinal, so a default reading an earlier one finds it. Each
             // slot is declared ONCE — declaring it again would hand back a fresh, undefined
@@ -357,9 +364,11 @@ impl<'a> FileLowering<'a> {
         let target =
             self.functions[function as usize].expect("declared only for a defined function");
         let slots = captures::carried_parameters(self.ir, function);
+        let semantic_slots = declaration.params.clone();
         let name = format!("{}$defaults", declaration.name);
         let result = declaration.ret;
         self.emit_function(id, signature, result, &name, &mut |body, params| {
+            body.record_semantic_slots(&semantic_slots);
             // The callee's own frame, every parameter at its own ordinal and each slot declared
             // once, so a default reading an earlier parameter finds what was put there.
             let mut variables = Vec::with_capacity(slots.len());
@@ -532,9 +541,9 @@ impl BodyLowering<'_, '_, '_> {
         };
         // The wrapper answers in the declaration's representation. An inherited provider declares
         // the result as its own type parameter, so `Input<V>.foo()` answers a box where the call
-        // reads a `V`.
+        // reads a `V`; the call site hands it over in the form its physical type names.
         let declared = self.file.ir.functions[function as usize].ret;
-        match self.type_of(site) {
+        match self.physical_type(site) {
             Some(read) => self.convert(result, Some(declared), read),
             None => Ok(Some(result)),
         }
@@ -861,9 +870,19 @@ impl<'a> FileLowering<'a> {
         .expect("checked when the wrapper was declared");
         let mut slots = vec![any()];
         slots.extend(frame.iter().copied());
+        let mut semantic_slots = vec![Ty::Obj(declaration.fq_name, &[])];
+        match key.secondary {
+            None => semantic_slots.extend(declaration.ctor_args.iter().map(|argument| argument.ty)),
+            Some(index) => {
+                let secondary = &declaration.secondary_ctors[index];
+                semantic_slots.extend(secondary.prefix_params.iter().copied());
+                semantic_slots.extend(secondary.params.iter().copied());
+            }
+        }
         let omitted = key.omitted.clone();
         let label = format!("{name}.<init>$defaults");
         self.emit_function(id, signature, Ty::Unit, &label, &mut |body, params| {
+            body.record_semantic_slots(&semantic_slots);
             // `this` at slot 0 and every parameter at its own ordinal, so a default reading an
             // earlier one finds it. Each slot is declared ONCE: declaring it again hands back a
             // fresh, undefined variable and loses what was put in it.

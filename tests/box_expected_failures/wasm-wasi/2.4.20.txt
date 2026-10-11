@@ -1995,7 +1995,6 @@ dataClasses/kt49715_behaviorChange.kt
 dataClasses/mixedParams.kt
 dataClasses/multiDeclaration.kt
 dataClasses/multiDeclarationFor.kt
-dataClasses/nonTrivialFinalMemberInSuperClass.kt
 dataClasses/nonTrivialMemberInSuperClass.kt
 dataClasses/privateValParams.kt
 dataClasses/propertyOfDnnType.kt
@@ -2868,7 +2867,6 @@ functions/localFunctions/overloadedLocalFunction3.kt
 functions/localFunctions/parameterAsDefaultValue.kt
 functions/localReturnInsideFunctionExpression.kt
 functions/nothisnoclosure.kt
-functions/recursiveCompareTo.kt
 functions/typeParametersInLocalFunction.kt
 ieee754/anyCastToPrimitiveCompareTo1.kt
 ieee754/anyCastToPrimitiveCompareTo2.kt

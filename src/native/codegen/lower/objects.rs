@@ -1097,6 +1097,9 @@ impl<'a> FileLowering<'a> {
         let mut slots = vec![self.object_type(class)];
         slots.extend(secondary.prefix_params.iter().copied());
         slots.extend(secondary.params.iter().copied());
+        let mut semantic_slots = vec![Ty::Obj(declaration.fq_name, &[])];
+        semantic_slots.extend(secondary.prefix_params.iter().copied());
+        semantic_slots.extend(secondary.params.iter().copied());
         let signature = self.signature_of(&slots, Ty::Unit)?;
 
         // Which constructor the delegation reaches. The class's own initializers are not run from
@@ -1308,6 +1311,7 @@ impl<'a> FileLowering<'a> {
         let prelude = secondary.delegate_prelude.clone();
         let body_expression = secondary.body;
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
+            body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
                 body.builder.def_var(variable, *value);
@@ -1675,6 +1679,8 @@ impl<'a> FileLowering<'a> {
             .expect("a primary constructor is defined only where one was declared");
         let mut slots = vec![self.object_type(class)];
         slots.extend(constructor_parameters(self.ir, class));
+        let mut semantic_slots = vec![Ty::Obj(declaration.fq_name, &[])];
+        semantic_slots.extend(declaration.ctor_args.iter().map(|argument| argument.ty));
         let signature = self.signature_of(&slots, Ty::Unit)?;
         let parent = match layout.superclass {
             Some(parent) => {
@@ -1764,6 +1770,7 @@ impl<'a> FileLowering<'a> {
 
         let name = format!("{}.<init>", declaration.fq_name());
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
+            body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
                 body.builder.def_var(variable, *value);
@@ -2092,16 +2099,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if !self.file.values.is_value_class(classifier) {
             return false;
         }
-        let physical = self.type_of(receiver);
-        if physical == Some(any()) {
+        if self.physical_type(receiver) == Some(any()) {
             return false;
         }
-        self.file
-            .ir
-            .logical_types
-            .get(&receiver)
-            .copied()
-            .or(physical)
+        self.checked_type(receiver)
             .and_then(|ty| self.file.values.unboxed(ty))
             == Some(classifier)
     }

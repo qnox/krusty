@@ -46,6 +46,7 @@ impl FileLowering<'_> {
                     accessor.result,
                     &symbol,
                     &mut |body, parameters| {
+                        body.record_semantic_slots(&accessor.parameters);
                         body.unresolved_reified.extend(
                             accessor
                                 .type_parameters

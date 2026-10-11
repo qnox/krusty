@@ -50,7 +50,7 @@ impl BodyLowering<'_, '_, '_> {
                 let (Some(receiver), []) = (receiver, args) else {
                     return Some(Err("a malformed `Boolean.not`".into()));
                 };
-                if self.type_of(receiver).map(Ty::non_null) != Some(Ty::Boolean) {
+                if self.checked_type(receiver).map(Ty::non_null) != Some(Ty::Boolean) {
                     return Some(Err(
                         "a `Boolean.not` receiver with a non-Boolean type".into()
                     ));

@@ -19,7 +19,7 @@ use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, V
 use super::super::super::objects::REFERENCE;
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
-use super::{carrier, declared_variables, Body, FileContext, Unsupported, STRING};
+use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
 const STRING_HEAP: HeapType = HeapType::Concrete(1);
@@ -706,7 +706,7 @@ pub(super) fn define_class_functions(
                 .chain(&class.super_args)
                 .chain(class.init_body.iter())
             {
-                declared.extend(declared_variables(ir, root));
+                declared.extend(ir.declared_value_slot_types(root));
             }
             let mut body = Body::new(context, module, runtime, &parameters, declared, Ty::Unit);
             body.primary_constructor(id)?;
@@ -725,7 +725,7 @@ pub(super) fn define_class_functions(
                 .chain(&secondary.delegate_args)
                 .chain(secondary.body.iter())
             {
-                declared.extend(declared_variables(ir, root));
+                declared.extend(ir.declared_value_slot_types(root));
             }
             let mut body = Body::new(context, module, runtime, &parameters, declared, Ty::Unit);
             body.secondary_constructor(id, ordinal)?;

@@ -312,22 +312,27 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::UnsupportedLoopMember);
         };
         let receiver_value = self.ir.add_expr(self.ir.expr(value).clone());
-        self.external_property_access(super::source_calls::ExternalPropertyRequest {
-            target: *property,
-            dispatch: dispatch.clone(),
-            receiver_ty: *receiver,
-            parameters,
-            result: *result,
-            extension_receiver_parameter: *extension_receiver_parameter,
-            dispatch_receiver: super::source_calls::DispatchOperand {
-                receiver: Some(receiver_value),
-                class: Self::static_class(*receiver),
-            },
-            extension_receiver: None,
-            arguments: &[],
-            write: false,
-        })
-        .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))
+        let read = self
+            .external_property_access(super::source_calls::ExternalPropertyRequest {
+                target: *property,
+                dispatch: dispatch.clone(),
+                receiver_ty: *receiver,
+                parameters,
+                result: *result,
+                extension_receiver_parameter: *extension_receiver_parameter,
+                dispatch_receiver: super::source_calls::DispatchOperand {
+                    receiver: Some(receiver_value),
+                    class: Self::static_class(*receiver),
+                },
+                extension_receiver: None,
+                arguments: &[],
+                write: false,
+            })
+            .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?;
+        // Loop protocol reads are synthesized after FIR, so there is no source expression whose
+        // finalization can preserve the selected property's semantic result on a wrapper block.
+        self.ir.logical_types.insert(read, result.get());
+        Ok(read)
     }
 
     pub(super) fn iterable_loop(

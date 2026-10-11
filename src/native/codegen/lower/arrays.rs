@@ -83,7 +83,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// The array an access names, checked non-null.
     fn array_of(&mut self, receiver: u32) -> Result<(Value, Shape), Unsupported> {
         let ty = self
-            .type_of(receiver)
+            .checked_type(receiver)
             .ok_or_else(|| "an array access on an undetermined type".to_string())?;
         let shape = self.array_shape(ty)?;
         let array = self.reference(receiver)?;

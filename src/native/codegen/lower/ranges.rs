@@ -361,14 +361,14 @@ impl BodyLowering<'_, '_, '_> {
         // A member of one. The RECEIVER is what says so, never the owner: `contains` is declared
         // on the facade as well as on the interface, and `start` on the interface a user class may
         // implement.
-        if floating_range(self.type_of(receiver)?).is_some() {
-            let (_, element) = floating_range(self.type_of(receiver)?)?;
+        if floating_range(self.checked_type(receiver)?).is_some() {
+            let (_, element) = floating_range(self.checked_type(receiver)?)?;
             let (symbol, answer) = floating_range_symbol(signature)?;
             return Some(self.floating_range_call(symbol, answer, element, receiver, args, ret));
         }
         // A member of a COMPARABLE range, keyed on the receiver for the same reason. The range
         // carries its own order, so any element the construction accepted can be asked about.
-        if comparable_range_element(self.type_of(receiver)?).is_some() {
+        if comparable_range_element(self.checked_type(receiver)?).is_some() {
             let (symbol, answer) = comparable_range_symbol(signature)?;
             return Some(self.comparable_range_call(symbol, answer, receiver, args, ret));
         }
@@ -441,7 +441,7 @@ impl BodyLowering<'_, '_, '_> {
             }
             return Some(self.range_call("kt_range_reversed", any(), any(), receiver, &[], ret));
         }
-        if self.type_of(receiver).is_some_and(is_range_iterator) {
+        if self.checked_type(receiver).is_some_and(is_range_iterator) {
             let (symbol, carried) = range_iterator_symbol(signature)?;
             // The element width the iterator answers at is the one the loop variable has.
             return Some(self.range_call(symbol, carried, ret.non_null(), receiver, args, ret));
@@ -467,7 +467,7 @@ impl BodyLowering<'_, '_, '_> {
             && super::super::super::intrinsics::is_ranges_facade(signature.owner)
             && range_element(owner.physical()).is_none()
             && self
-                .type_of(receiver)
+                .checked_type(receiver)
                 .map(Ty::non_null)
                 .and_then(|ty| ty.obj_internal())
                 .is_some_and(|internal| range_element(internal).is_some())
@@ -478,7 +478,7 @@ impl BodyLowering<'_, '_, '_> {
         // name; see [`closed_range_element`]. The receiver answers it, and the bound it hands back
         // is boxed at the element's own width rather than left at the runtime's 64 bits, because
         // `ClosedRange`'s own declaration types it as the erased `T`.
-        if let Some(element) = self.type_of(receiver).and_then(closed_range_element) {
+        if let Some(element) = self.checked_type(receiver).and_then(closed_range_element) {
             let (symbol, carried) = range_symbol(signature)?;
             return Some(self.closed_range_call(symbol, carried, element, receiver, args, ret));
         }
@@ -497,7 +497,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let receiver_ty = self.type_of(receiver)?;
+        let receiver_ty = self.checked_type(receiver)?;
         if let Some((_, element)) = floating_range(receiver_ty) {
             let (symbol, answer) = floating_range_property_symbol(name)?;
             return Some(self.floating_range_call(symbol, answer, element, receiver, &[], ret));
@@ -738,7 +738,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         argument: u32,
     ) -> Result<Option<Value>, Unsupported> {
-        let Some(receiver_ty) = self.type_of(receiver).map(Ty::non_null) else {
+        let Some(receiver_ty) = self.checked_type(receiver).map(Ty::non_null) else {
             return Err("`contains` on a receiver with no known type".into());
         };
         let Some(internal) = receiver_ty.obj_internal() else {
@@ -747,7 +747,7 @@ impl BodyLowering<'_, '_, '_> {
         if range_element(internal).is_none() {
             return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         }
-        let Some(argument_ty) = self.type_of(argument) else {
+        let Some(argument_ty) = self.checked_type(argument) else {
             return Err("`contains` of a value with no known type".into());
         };
         // Only a value that IS a scalar is answered. Kotlin's `contains` over a possibly-absent
@@ -907,7 +907,7 @@ impl BodyLowering<'_, '_, '_> {
     /// same extension property covers `Collection`, which needs a `size` there is no collection
     /// runtime to answer yet, so one of those declines by receiver rather than by name.
     pub(super) fn indices(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
-        let Some(ty) = self.type_of(receiver).map(Ty::non_null) else {
+        let Some(ty) = self.checked_type(receiver).map(Ty::non_null) else {
             return Err("`indices` of a receiver with no known type".into());
         };
         // A type parameter stands for whatever its bound admits, and `indices` is declared for the
@@ -996,7 +996,7 @@ impl BodyLowering<'_, '_, '_> {
         if range_element(declaration_owner.unwrap_or(getter.physical_owner)).is_some() {
             integral_range_property_symbol(&property.name)?;
         } else {
-            let ty = self.type_of(receiver)?;
+            let ty = self.checked_type(receiver)?;
             if floating_range(ty).is_some() {
                 floating_range_property_symbol(&property.name)?;
             } else if comparable_range_element(ty).is_some() {
