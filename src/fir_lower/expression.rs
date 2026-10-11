@@ -513,11 +513,19 @@ impl BodyLowering<'_> {
                     FirTypeOperation::SafeCast => {
                         self.safe_cast_expression(operand_id, target.get())?
                     }
-                    FirTypeOperation::Is | FirTypeOperation::NotIs => self.type_test(
-                        *operation == FirTypeOperation::NotIs,
+                    FirTypeOperation::Is(plan) => self.type_test(
+                        false,
                         operand,
                         operand_ty,
                         target.get(),
+                        plan.same_erased_upper_bound,
+                    ),
+                    FirTypeOperation::NotIs(plan) => self.type_test(
+                        true,
+                        operand,
+                        operand_ty,
+                        target.get(),
+                        plan.same_erased_upper_bound,
                     ),
                     FirTypeOperation::Cast => {
                         let cast = self.ir.add_expr(IrExpr::TypeOp {
@@ -2374,8 +2382,8 @@ fn lower_binary_operation(operation: FirBinaryOperation) -> IrBinOp {
 
 fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -> IrTypeOp {
     match operation {
-        FirTypeOperation::Is => IrTypeOp::InstanceOf,
-        FirTypeOperation::NotIs => IrTypeOp::NotInstanceOf,
+        FirTypeOperation::Is(_) => IrTypeOp::InstanceOf,
+        FirTypeOperation::NotIs(_) => IrTypeOp::NotInstanceOf,
         // A cast to a type parameter follows the parameter's upper-bound nullability. Kotlin's
         // implicit bound is `Any?`, so `value as E` in an unconstrained generic function must let
         // `null` reach an instantiation such as `E = String?`; only `<E : Any>`/`E & Any` requires

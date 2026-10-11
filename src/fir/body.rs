@@ -765,11 +765,18 @@ pub struct FirLocalCallableRef {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirTypeOperation {
-    Is,
-    NotIs,
+    Is(FirTypeTestPlan),
+    NotIs(FirTypeTestPlan),
     Cast,
     SafeCast,
     NotNullAssertion,
+}
+
+/// Resolver-finalized facts used only by runtime type tests. Casts and null assertions carry no
+/// such plan, so an impossible operation/plan pairing is explicit at the checked boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FirTypeTestPlan {
+    pub same_erased_upper_bound: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -17,50 +17,6 @@ fn admits_null_at_runtime(ty: Ty) -> bool {
     ty.admits_null() || (ty.is_ty_param() && ty.upper_bound_admits_null())
 }
 
-/// The classifier an erased type stands for at run time. A function type stands for its
-/// `FunctionN`/`SuspendFunctionN` classifier, identified by its arity and suspend-ness.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ErasedBound {
-    Classifier(Ty),
-    Function { arity: usize, suspend: bool },
-}
-
-/// kotlinc's `erasedUpperBound`: the classifier a type stands for once erased, through type
-/// parameter bounds and nullability.
-fn erased_upper_bound(ty: Ty) -> Option<ErasedBound> {
-    let mut current = ty.non_null();
-    let mut seen = std::collections::HashSet::new();
-    loop {
-        match current {
-            Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
-            Ty::DefinitelyNotNull(inner) => current = inner.non_null(),
-            Ty::Obj(name, _) => {
-                return Some(ErasedBound::Classifier(
-                    Ty::obj_name(name).canonical_semantic(),
-                ))
-            }
-            Ty::Fun(signature) => {
-                return Some(ErasedBound::Function {
-                    arity: signature.params.len(),
-                    suspend: signature.suspend,
-                })
-            }
-            Ty::TyParam(..)
-            | Ty::Nullable(_)
-            | Ty::PlatformNullable(_)
-            | Ty::Null
-            | Ty::Nothing
-            | Ty::Error
-            | Ty::Pending
-            | Ty::InProjection(_)
-            | Ty::OutProjection(_)
-            | Ty::StarProjection(_)
-            | Ty::Intersection(_) => return None,
-            builtin => return Some(ErasedBound::Classifier(builtin)),
-        }
-    }
-}
-
 impl BodyLowering<'_> {
     /// `operand is target` (or `!is`), with the one case the LANGUAGE settles folded.
     ///
@@ -135,11 +91,12 @@ impl BodyLowering<'_> {
         operand: ExprId,
         operand_type: Ty,
         target: Ty,
+        same_erased_upper_bound: bool,
     ) -> ExprId {
         if self.is_reified_type_parameter(target) {
             return self.instance_check(negated, operand, target);
         }
-        if admits_null_at_runtime(operand_type) && target.admits_null() {
+        if admits_null_at_runtime(operand_type) && admits_null_at_runtime(target) {
             let test = self.null_or_instance(operand, target.non_null());
             return if negated {
                 self.ir.add_negation(test)
@@ -147,10 +104,7 @@ impl BodyLowering<'_> {
                 test
             };
         }
-        if admits_null_at_runtime(operand_type)
-            && erased_upper_bound(operand_type)
-                .is_some_and(|bound| Some(bound) == erased_upper_bound(target))
-        {
+        if admits_null_at_runtime(operand_type) && same_erased_upper_bound {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
             return self.ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: if negated {
@@ -505,7 +459,9 @@ mod tests {
             origin,
             ty: resolved(Ty::Boolean),
             kind: FirExprKind::TypeOperation {
-                operation: FirTypeOperation::NotIs,
+                operation: FirTypeOperation::NotIs(crate::fir::FirTypeTestPlan {
+                    same_erased_upper_bound: false,
+                }),
                 operand,
                 target: resolved(Ty::nullable(Ty::obj("sample/Item"))),
             },
@@ -549,8 +505,18 @@ mod tests {
     #[test]
     fn a_settled_nothing_check_keeps_its_operand_and_answers_a_constant() {
         for (operation, expected) in [
-            (FirTypeOperation::Is, false),
-            (FirTypeOperation::NotIs, true),
+            (
+                FirTypeOperation::Is(crate::fir::FirTypeTestPlan {
+                    same_erased_upper_bound: false,
+                }),
+                false,
+            ),
+            (
+                FirTypeOperation::NotIs(crate::fir::FirTypeTestPlan {
+                    same_erased_upper_bound: false,
+                }),
+                true,
+            ),
         ] {
             let (ir, produced_id) = lowered_nothing_check(operation);
             assert_eq!(ir.checked_type(produced_id), Some(Ty::Boolean));

@@ -56,6 +56,27 @@ fn a_type_test_takes_kotlincs_shape_for_its_operand_and_target() {
     );
 }
 
+#[test]
+fn mixed_arrow_and_nominal_function_bounds_take_kotlincs_null_check_shape() {
+    common::assert_classes_identical_to_kotlinc(
+        "MixedFunctionBounds",
+        "fun ordinary(value: (() -> Any?)?) = value is Function0<*>\n\
+         fun suspended(value: (suspend () -> Any?)?) =\n\
+             value is kotlin.coroutines.SuspendFunction0<*>\n",
+        &["MixedFunctionBoundsKt"],
+    );
+}
+
+#[test]
+fn a_non_reified_nullable_type_parameter_target_admits_null_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "NullableParameterTarget",
+        "fun <T> same(value: T) = value is T\n\
+         fun box() = if (same<String?>(null)) \"OK\" else \"fail\"\n",
+        &["NullableParameterTargetKt"],
+    );
+}
+
 /// The specialized call sites, instruction for instruction. Their classes are not compared whole:
 /// krusty writes no SMAP for a same-file inline call yet (a documented residual), so the facade's
 /// `SourceDebugExtension` and the inlined line numbers differ for reasons unrelated to type tests.

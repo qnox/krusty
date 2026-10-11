@@ -3,6 +3,7 @@ use super::test_support::{
     root_expression,
 };
 use super::*;
+use crate::fir::FirTypeTestPlan;
 
 #[test]
 fn scalar_and_unit_type_tests_retain_checked_fir_operations() {
@@ -23,12 +24,52 @@ fn scalar_and_unit_type_tests_retain_checked_fir_operations() {
         assert!(matches!(
             &expression.kind,
             FirExprKind::TypeOperation {
-                operation: FirTypeOperation::Is,
+                operation: FirTypeOperation::Is(_),
                 target: actual,
                 ..
             } if actual.get() == target
         ));
         assert_eq!(expression.ty.get(), Ty::Boolean);
+    }
+}
+
+#[test]
+fn function_type_tests_publish_provider_normalized_erased_bound_matches() {
+    for (source, expected) in [
+        (
+            "fun test(value: (() -> Any?)?) = value is Function0<*>\n",
+            true,
+        ),
+        (
+            "fun test(value: (suspend () -> Any?)?) = value is kotlin.coroutines.SuspendFunction0<*>\n",
+            true,
+        ),
+        (
+            "fun test(value: (() -> Any?)?) = value is kotlin.coroutines.SuspendFunction0<*>\n",
+            false,
+        ),
+        (
+            "fun test(value: (() -> Any?)?) = value is Function1<*, *>\n",
+            false,
+        ),
+        (
+            "fun test(value: Function0<*>?) = value is Function0<*>\n",
+            true,
+        ),
+        (
+            "fun test(value: Function0<*>?) = value is Function1<*, *>\n",
+            false,
+        ),
+    ] {
+        let (body, _) = checked_function_body_with_platform(source, "test", jvm_stdlib_semantics());
+        let expression = body.expr(root_expression(&body)).expect("type test");
+        assert!(matches!(
+            &expression.kind,
+            FirExprKind::TypeOperation {
+                operation: FirTypeOperation::Is(FirTypeTestPlan { same_erased_upper_bound }),
+                ..
+            } if *same_erased_upper_bound == expected
+        ), "source: {source}");
     }
 }
 
@@ -82,13 +123,13 @@ fn bare_generic_typealias_runtime_operands_are_checked_as_star_expansions() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        operations,
-        vec![
-            (FirTypeOperation::NotIs, target, Ty::Boolean),
-            (FirTypeOperation::Cast, target, target),
-        ]
-    );
+    assert!(matches!(
+        operations.as_slice(),
+        [
+            (FirTypeOperation::NotIs(_), first_target, Ty::Boolean),
+            (FirTypeOperation::Cast, second_target, result),
+        ] if *first_target == target && *second_target == target && *result == target
+    ));
 }
 
 #[test]
