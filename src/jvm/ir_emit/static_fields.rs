@@ -153,33 +153,36 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     e.record_locals = true;
     let mut code = CodeBuilder::new(0);
     e.emit_delegated_property_array(env, env.facade_class, facade, &mut code);
-    // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
-    // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
-    let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
+    // Each store opens on its initializer's line, and the lines the initializer marks inside
+    // itself (an argument on a line of its own at the same offset, an inlined body) stay. `add_method` drops a
+    // `<clinit>`'s marks, so collect them and set them after.
+    let first_mark = code.line_marks().len();
     for &(index, s) in &facade_statics {
         let Some(init) = stored_initializer(s) else {
             continue;
         };
-        if s.line != 0 {
-            clinit_lines.push((code.bytes.len() as u16, s.line));
-        }
+        code.mark_line_retained(initializer_line(ir, s, init));
         e.emit_static_initializer_store(facade, index, init, &mut code);
     }
     code.ret_void();
-    // `<clinit>` normally keeps only its declaration-owned entries, not incidental marks from a
-    // nested initializer expression. A classpath inline call is different: its mapped callee lines
-    // and caller-line restoration are part of kotlinc's public debug surface. Keep only marks that
-    // the inliner explicitly tagged, then merge them with the curated property entries.
-    clinit_lines.extend(
-        code.inlined_line_marks()
-            .map(|(pc, line)| (pc, u32::from(line))),
-    );
-    clinit_lines.sort_by_key(|&(pc, _)| pc);
+    let mut clinit_lines: Vec<(u16, u32)> = code.line_marks()[first_mark..]
+        .iter()
+        .map(|&(pc, line)| (pc, u32::from(line)))
+        .collect();
+    // The store's own mark is retained so an argument line at the same offset follows it; the
+    // initializer marking that same line again there adds nothing.
     clinit_lines.dedup();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
     }
+}
+
+/// The line a static's `<clinit>` store opens on: its initializer's own line, which kotlinc gives the
+/// field store. An explicit backing field's `field = …` and a `val x =` whose initializer starts on
+/// the next line both differ from the declaration line; generated storage has only the latter.
+pub(super) fn initializer_line(ir: &IrFile, s: &crate::ir::IrStatic, init: ExprId) -> u32 {
+    ir.expr_source_lines.get(&init).copied().unwrap_or(s.line)
 }
 
 /// The HOISTED outer-class static backing a companion property of `c` (a companion class), if any:

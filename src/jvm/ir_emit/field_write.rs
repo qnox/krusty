@@ -88,7 +88,8 @@ impl Emitter<'_> {
         let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         if static_storage(self.ir, class_decl) {
-            self.emit_static_storage_field(receiver, value, &owner, &name, field_ty, code);
+            let store = (statement, receiver, value);
+            self.emit_static_storage_field(store, &owner, &name, field_ty, code);
             return;
         }
         let reader = (!self.export_private_calls)
@@ -153,8 +154,7 @@ impl Emitter<'_> {
 
     fn emit_static_storage_field(
         &mut self,
-        receiver: u32,
-        value: u32,
+        (statement, receiver, value): (u32, u32, u32),
         owner: &str,
         name: &str,
         field_ty: Ty,
@@ -165,6 +165,14 @@ impl Emitter<'_> {
         if !matches!(self.ir.expr(receiver), IrExpr::GetValue(_)) {
             self.emit_value(receiver, code);
             code.pop();
+        }
+        // An object initializer's store opens on its line and the value starts at that same
+        // offset; a line the value marks there (an argument on a line of its own) follows the
+        // store's entry instead of replacing it, as kotlinc keeps both.
+        if self.render_initializer_boundaries {
+            if let Some(&line) = self.ir.expr_lines.get(&statement) {
+                code.mark_line_retained(line);
+            }
         }
         self.emit_value(value, code);
         if self.diverges(value) {
