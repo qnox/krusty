@@ -871,6 +871,7 @@ impl JvmBackend {
             source,
             classifiers,
             mut callables,
+            dependency_exports: _,
             native_plugins,
             module_name,
             stems,

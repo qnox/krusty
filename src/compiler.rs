@@ -3,6 +3,7 @@
 mod backend_handoff;
 mod declaration_metadata;
 mod diagnostic_recovery;
+mod emission_session;
 mod local_visibility;
 mod metadata_handoff;
 #[cfg(test)]
@@ -13,6 +14,7 @@ pub use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::StreamingSourceSetAnalysis;
 use diagnostic_recovery::recover_pass_two_diagnostics;
+pub use emission_session::{EmissionSession, EmittedDependencyModule};
 
 /// Consume the production source-set analysis and require its finalized streaming Pass-1 product
 /// before any backend lowering starts.
@@ -26,6 +28,39 @@ pub fn emit_analyzed<B: Backend>(
     backend: &B,
     module_name: &str,
     diags: &mut DiagSink,
+) -> Vec<Artifact> {
+    let mut state = B::State::default();
+    let mut outputs = emit_analyzed_into(
+        analysis,
+        stems,
+        backend,
+        &mut state,
+        module_name,
+        diags,
+        &mut |_, _| {},
+    );
+    if !diags.has_errors() {
+        backend.check_module(&state, diags);
+    }
+    if !diags.has_errors() {
+        outputs.extend(backend.finalize(state, module_name));
+    }
+    outputs
+}
+
+/// Lower one separately analyzed source module into an existing backend state.
+///
+/// `before_target` observes each immutable checked file and may attach dependency-export facts
+/// before target representation consumes it. Backend validation/finalization belongs to the owner
+/// of `state`, after every source module has been supplied.
+fn emit_analyzed_into<B: Backend>(
+    analysis: impl Into<StreamingSourceSetAnalysis>,
+    stems: &[String],
+    backend: &B,
+    state: &mut B::State,
+    module_name: &str,
+    diags: &mut DiagSink,
+    before_target: &mut impl FnMut(&mut CheckedIrFile<'_>, &mut DiagSink),
 ) -> Vec<Artifact> {
     let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
     let StreamingSourceSetAnalysis {
@@ -102,7 +137,6 @@ pub fn emit_analyzed<B: Backend>(
         }
     };
     let mut outputs = Vec::new();
-    let mut state = B::State::default();
     for (raw_source, source) in reparse_sources.iter().enumerate() {
         // Java declaration headers participated in Pass 1 through the platform provider. Java
         // executable bodies belong to javac and are never reparsed or lowered as Kotlin units.
@@ -265,7 +299,7 @@ pub fn emit_analyzed<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        let Some(file) = backend_handoff::checked_ir_file(
+        let Some(mut file) = backend_handoff::checked_ir_file(
             ir,
             source_id,
             &backend_module_facts,
@@ -279,18 +313,16 @@ pub fn emit_analyzed<B: Backend>(
         ) else {
             continue;
         };
-        outputs.extend(backend.lower_ir_file(file, &mut state, diags));
+        before_target(&mut file, diags);
+        if diags.has_errors() {
+            continue;
+        }
+        outputs.extend(backend.lower_ir_file(file, state, diags));
     }
     assert!(
         default_arguments.is_empty(),
         "Pass 2 must consume every checked signature default"
     );
-    if !diags.has_errors() {
-        backend.check_module(&state, diags);
-    }
-    if !diags.has_errors() {
-        outputs.extend(backend.finalize(state, module_name));
-    }
     outputs
 }
 
