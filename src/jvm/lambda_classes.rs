@@ -411,12 +411,8 @@ pub(super) fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId
 }
 
 /// Whether the body declares a lambda or local function of its own. Its lifted function would have
-/// to move into the lambda's class with it, which kotlinc does and this step does not yet.
-pub(super) fn nests_lifted_functions(ir: &IrFile, body: ExprId) -> bool {
-    nests_lifted_functions_with(ir, body, false)
-}
-
-fn nests_lifted_functions_with(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool) -> bool {
+/// to move into the lambda's class with it, which this step does not do.
+fn nests_lifted_functions(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool) -> bool {
     crate::ir::value_namespace_expressions(ir, body)
         .iter()
         .any(|&expression| match &ir.exprs[expression as usize] {
@@ -596,7 +592,7 @@ pub(super) fn realize(
             }
             let body = ir.functions[fid as usize].body.ok_or(())?;
             let captures = captures(ir, fid, body, &sites[0]).ok_or(())?;
-            if nests_lifted_functions_with(ir, body, runtime_reified) {
+            if nests_lifted_functions(ir, body, runtime_reified) {
                 return Err(());
             }
             realize_class(ir, fid, body, &sites[0], signature, &captures, None);
@@ -691,7 +687,7 @@ fn class_shape(
     let site = site_in_roots(ir, fid, every_emitted_root, class_name)
         .ok_or("no single named value outside an inline call")?;
     let body = ir.functions[fid as usize].body.ok_or("no body")?;
-    if nests_lifted_functions_with(ir, body, allow_nested_lambdas) {
+    if nests_lifted_functions(ir, body, allow_nested_lambdas) {
         return Err("its body declares a lambda or local function");
     }
     let captures = captures(ir, fid, body, &site).ok_or("a capture has no field identity")?;

@@ -2192,6 +2192,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lifted name and descriptor are already taken in the class it lands in (an enum entry's argument
   lambdas are placed in the enum rather than the entry class kotlinc uses, so they are numbered
   with the enum's) (`tests/lifted_callable_names_e2e.rs`).
+- **What a suspend lambda declares is lifted into the lambda's class.** kotlinc makes the suspend
+  lambda a `SuspendLambda` class before it lifts local declarations, so a lambda or local function
+  the body declares is a private static of that class, named after `invokeSuspend` and numbered
+  afresh there: `invokeSuspend$lambda$0`, `invokeSuspend$lambda$0$0` for a lambda inside it,
+  `invokeSuspend$twice` for a local function. A suspend lambda nested in it is a class of its own and
+  claims what it declares. The class lists them after its constructor, `invokeSuspend`, `create` and
+  typed `invoke`, and before the erased bridge, local functions first, then lambdas with each nested
+  lambda before its enclosing one. A lambda an inline call splices is no closure and stays in the
+  body. The names apply only to a lambda realized as its class; one that keeps the lifted-function
+  path keeps the names it had (`tests/suspend_lambda_nested_declarations_e2e.rs`).
 - **Internal instance members are public and named `name$<module>`.** An `internal` method or
   property accessor is `ACC_PUBLIC` in bytecode, with `$` and the compilation's module name
   appended. The module is sanitized by keeping letters, digits, and `_` and turning every other

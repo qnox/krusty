@@ -24,7 +24,7 @@ use super::{append_continuation, box_returns, continuation_ty, ensure_tail_retur
 use crate::ir::{
     ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
 };
-use crate::jvm::lambda_classes::{nests_lifted_functions, site, Site};
+use crate::jvm::lambda_classes::{site, Site};
 use crate::types::{Ty, TypeName};
 use std::collections::HashSet;
 
@@ -81,10 +81,10 @@ pub(super) fn route(
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no class site");
         return Routed::NotEligible;
     };
-    if nests_lifted_functions(ir, body) {
+    if builds_unrealized_suspend_lambda(ir, body) {
         crate::trace_compiler!(
             "suspend",
-            "suspend lambda fid={fid}: nests a lifted function"
+            "suspend lambda fid={fid}: a nested suspend lambda keeps its lifted function"
         );
         return Routed::NotEligible;
     }
@@ -170,6 +170,7 @@ pub(super) fn route(
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no source form");
         return Routed::Failed;
     };
+    adopt_lifted_callables(ir, fid, class);
     become_invoke_suspend(ir, fid, internal);
     enclose_in_invoke_suspend(ir, fid);
     ir.classes[class as usize].methods.push(fid);
@@ -587,6 +588,84 @@ fn enclose_in_invoke_suspend(ir: &mut IrFile, fid: u32) {
         *enclosure = invoke_suspend;
     }
     ir.lambda_enclosures.remove(&fid);
+}
+
+/// Whether `body`, or a body an inline call splices into it, builds the value of a suspend lambda
+/// that kept its lifted function. Lambdas are taken innermost first, so such a lambda was not taken;
+/// its function and the continuation class re-entering it stay where the enclosing body is, which a
+/// class of the enclosing lambda's own would leave out of reach.
+fn builds_unrealized_suspend_lambda(ir: &IrFile, body: ExprId) -> bool {
+    let mut pending = vec![body];
+    let mut seen = HashSet::new();
+    while let Some(root) = pending.pop() {
+        if !seen.insert(root) {
+            continue;
+        }
+        for expression in crate::ir::value_namespace_expressions(ir, root) {
+            if let IrExpr::Lambda {
+                impl_fn,
+                inline_body,
+                ..
+            } = &ir.exprs[expression as usize]
+            {
+                if ir.suspend_funs.contains(impl_fn) {
+                    return true;
+                }
+                pending.extend(inline_body.iter().copied());
+            }
+        }
+    }
+    false
+}
+
+/// Make the lambdas and local functions the lambda declares, outside any suspend lambda nested in
+/// it, private static methods of its class, as kotlinc lifts them out of the `invokeSuspend` the
+/// body became (`invokeSuspend$lambda$0`, `invokeSuspend$local`). One whose body an inline call
+/// splices has no standalone method, there as anywhere.
+fn adopt_lifted_callables(ir: &mut IrFile, fid: u32, class: ClassId) {
+    let Some((sequence, site)) = ir.lifted_functions.get(&fid) else {
+        unreachable!("a suspend lambda has its lifting site");
+    };
+    let own = site.path.last().map(|step| step.position);
+    // A realized inner suspend lambda has left `lifted_functions`, but its stable sequence entry
+    // deliberately remains. Use that immutable provenance so an outer lambda cannot adopt the
+    // inner class's helpers a second time.
+    let suspend_lambdas = ir
+        .lifting_sequences
+        .get(sequence)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .filter(|(_, entry)| {
+            !entry.lifted && entry.kind == crate::lifting_provenance::LiftingCallableKind::Lambda
+        })
+        .map(|(&position, _)| position)
+        .collect::<HashSet<_>>();
+    let mut declared = ir
+        .lifted_functions
+        .iter()
+        .filter(|(_, (other, site))| {
+            other == sequence
+                && site.lifted
+                && site.path[..site.path.len() - 1]
+                    .iter()
+                    .rev()
+                    .map(|step| step.position)
+                    .find(|position| suspend_lambdas.contains(position))
+                    == own
+        })
+        .map(|(&function, _)| function)
+        .collect::<Vec<_>>();
+    declared.sort_unstable();
+    let owner = ir.classes[class as usize].fq_name;
+    for function in declared {
+        for other in &mut ir.classes {
+            other.methods.retain(|&method| method != function);
+        }
+        ir.class_method_owners.remove(&function);
+        ir.classes[class as usize].methods.push(function);
+        ir.note_class_method(class, function);
+        ir.class_static_local_functions.insert(function, owner);
+    }
 }
 
 fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {

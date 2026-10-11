@@ -1051,8 +1051,12 @@ impl Emitter<'_> {
                 Supply::Stored
             };
             // kotlinc never stores an inline suspend callee's continuation: the body reads the
-            // caller's own continuation local, as every suspension point in the caller does.
-            if self.reads_continuation_local(argument) {
+            // caller's own continuation local, as every suspension point in the caller does. A
+            // suspend lambda's continuation is the lambda itself, `this` cast where it is read.
+            let lambda_continuation = self.transformed_result(call_expression).is_some()
+                && index + 1 == args.len()
+                && self.cast_local_operand(argument).is_some();
+            if self.reads_continuation_local(argument) || lambda_continuation {
                 supplies.push(Supply::CallerLocal);
                 continue;
             }
@@ -1184,6 +1188,21 @@ impl Emitter<'_> {
             && !self.is_fake_continuation(argument)
     }
 
+    /// The local a cast reads, when `argument` is a cast of a local: a suspend lambda's own
+    /// continuation operand, `this` as `Continuation`.
+    fn cast_local_operand(&self, argument: u32) -> Option<u32> {
+        match self.ir.expr(argument) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg,
+                ..
+            } if matches!(self.ir.expr(*arg), IrExpr::GetValue(value) if self.slots.contains_key(value)) => {
+                Some(*arg)
+            }
+            _ => None,
+        }
+    }
+
     /// The caller local an argument is read from, coerced to the parameter's class as kotlinc's
     /// `StackValue.coerce` does between two reference types.
     fn caller_local_binding(&self, argument: u32, parameter: Ty) -> Binding {
@@ -1197,7 +1216,10 @@ impl Emitter<'_> {
                 checkcast: None,
             };
         }
-        let argument = self.reference_local_operand(argument).unwrap_or(argument);
+        let argument = self
+            .reference_local_operand(argument)
+            .or_else(|| self.cast_local_operand(argument))
+            .unwrap_or(argument);
         let IrExpr::GetValue(value) = self.ir.expr(argument) else {
             unreachable!("a caller-local argument is a local read");
         };
