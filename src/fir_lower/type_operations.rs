@@ -35,7 +35,9 @@ fn erased_upper_bound(ty: Ty) -> Option<ErasedBound> {
             Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
             Ty::DefinitelyNotNull(inner) => current = inner.non_null(),
             Ty::Obj(name, _) => {
-                return Some(ErasedBound::Classifier(Ty::obj_name(name).canonical_semantic()))
+                return Some(ErasedBound::Classifier(
+                    Ty::obj_name(name).canonical_semantic(),
+                ))
             }
             Ty::Fun(signature) => {
                 return Some(ErasedBound::Function {
