@@ -47,20 +47,7 @@ pub fn realize_top_level_jvm_fields(ir: &mut IrFile) {
 /// for the first declaration and numbers the rest `prop$delegate$1`, `prop$delegate$2`, … even
 /// when the descriptors differ. A non-delegate static that already occupies the spelling counts.
 pub fn realize_delegate_static_field_names(ir: &mut IrFile) {
-    let delegates = ir
-        .local_property_layouts
-        .values()
-        .filter_map(|layout| match layout {
-            IrLocalPropertyLayout::TopLevelAccessor {
-                delegate: Some(storage),
-                ..
-            } => Some(*storage),
-            IrLocalPropertyLayout::TopLevelAccessor { delegate: None, .. }
-            | IrLocalPropertyLayout::TopLevelStorage { .. }
-            | IrLocalPropertyLayout::Member { .. }
-            | IrLocalPropertyLayout::MemberExtension { .. } => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let delegates = delegate_statics(ir);
     let mut used: std::collections::HashMap<Option<crate::types::TypeName>, Vec<String>> =
         std::collections::HashMap::new();
     for index in 0..ir.statics.len() {
@@ -79,6 +66,23 @@ pub fn realize_delegate_static_field_names(ir: &mut IrFile) {
         bucket.push(physical.clone());
         ir.set_jvm_static_field_name(index as u32, physical);
     }
+}
+
+/// The statics that hold a delegated property's delegate (`x$delegate`), by static index.
+pub(crate) fn delegate_statics(ir: &IrFile) -> std::collections::HashSet<u32> {
+    ir.local_property_layouts
+        .values()
+        .filter_map(|layout| match layout {
+            IrLocalPropertyLayout::TopLevelAccessor {
+                delegate: Some(storage),
+                ..
+            } => Some(*storage),
+            IrLocalPropertyLayout::TopLevelAccessor { delegate: None, .. }
+            | IrLocalPropertyLayout::TopLevelStorage { .. }
+            | IrLocalPropertyLayout::Member { .. }
+            | IrLocalPropertyLayout::MemberExtension { .. } => None,
+        })
+        .collect()
 }
 
 /// Remove JVM-default declaration stores from constructor/init blocks.

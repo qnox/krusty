@@ -37,3 +37,22 @@ fn member_val_by_lazy() {
         fun main() { println(box()) }\n";
     assert_eq!(run(SRC).expect("member by lazy"), "OK");
 }
+
+/// kotlinc's `ClassCodegen.generateField` writes no `Signature` for a `PROPERTY_DELEGATE` field, so
+/// `names$delegate` is a bare `Lkotlin/Lazy;` even though its delegate is a `Lazy<List<String>>`.
+/// The same holds for a member extension property's delegate and an enum's.
+#[test]
+fn a_delegate_field_carries_no_generic_signature() {
+    const SRC: &str = "class Holder {\n\
+        \x20   val names by lazy { listOf(\"a\") }\n\
+        \x20   val Int.twice by lazy { mapOf(1 to \"b\") }\n\
+        }\n\
+        enum class Kind { A; val codes by lazy { setOf(1) } }\n";
+    let stdlib = [common::stdlib_jar()];
+    for class in ["Holder", "Kind"] {
+        let diff =
+            common::byte_diff_against_kotlinc_cp("DelegateFieldSignature", SRC, class, &stdlib)
+                .expect("kotlinc reference");
+        assert_eq!(diff, Ok(()), "{class}");
+    }
+}

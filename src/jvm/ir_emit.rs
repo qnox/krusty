@@ -60,6 +60,7 @@ mod coroutine_machine;
 mod debug_lines;
 mod declaration_annotations;
 mod declaration_types;
+mod declared_field_signature;
 mod declared_nullability;
 mod declared_property_access;
 mod declared_property_accessor;
@@ -182,6 +183,7 @@ mod unified_lambda_splice;
 mod value_emission;
 mod vararg;
 mod when;
+use declared_field_signature::declared_field_signature;
 use declared_property_accessor::{
     declared_property_accessor_jvm, emit_backing_field_read_adaptation,
     emit_backing_field_write_adaptation,
@@ -2552,15 +2554,8 @@ fn emit_class(
         } else {
             declared_field_access(c, field_index, static_storage(ir, c))
         };
-        // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
-        // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
-        // like kotlinc; disjoint (a field is one or the other).
-        let type_parameter = ir
-            .field_signatures(&fq_name)
-            .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
-            .map(|(_, parameter)| parameter.as_str())
-            .or(field.type_param.as_deref());
-        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
+        let field_sig =
+            declared_field_signature(ir, &signature_formatter, c, &fq_name, field_index);
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
         // Coroutine continuation fields are compiler-generated storage rather than Kotlin
@@ -3703,12 +3698,11 @@ fn emit_enum_class(
     cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
-    for (f, t) in c.fields.iter().zip(&field_tys) {
+    for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
         let nullability = (!f.is_lateinit())
             .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
             .flatten();
-        let signature =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).field;
+        let signature = declared_field_signature(ir, &signature_formatter, c, &fq, field_index);
         cw.add_field_late_sig(
             enum_field_acc(f),
             &f.name,

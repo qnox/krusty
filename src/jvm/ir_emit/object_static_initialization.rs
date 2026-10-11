@@ -53,13 +53,8 @@ pub(super) fn emit(
     } else {
         for (field_index, field) in c.fields.iter().enumerate() {
             let acc = declared_field_access(c, field_index, true);
-            let type_parameter = ir
-                .field_signatures(fq_name)
-                .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
-                .map(|(_, parameter)| parameter.as_str())
-                .or(field.type_param.as_deref());
             let field_sig =
-                property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+                declared_field_signature(ir, signature_formatter, c, fq_name, field_index);
             let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
             cw.add_field_sig(
                 acc,
@@ -248,13 +243,8 @@ fn emit_interface_companion_member_fields(
             Member::Instance(field_index) => {
                 let field = &c.fields[field_index];
                 let acc = declared_field_access(c, field_index, true);
-                let type_parameter = ir
-                    .field_signatures(fq_name)
-                    .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
-                    .map(|(_, parameter)| parameter.as_str())
-                    .or(field.type_param.as_deref());
                 let field_sig =
-                    property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+                    declared_field_signature(ir, signature_formatter, c, fq_name, field_index);
                 let physical_name = instance_field_jvm_name(ir, run, c, field_index);
                 let descriptor = ir_type_desc(&field.ty);
                 let nullability = field_visibility::publishes_field_nullability(c, field_index)

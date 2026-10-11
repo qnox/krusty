@@ -55,6 +55,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         return;
     }
     delegated_property_array::declare(env, env.facade_class, cw);
+    let delegates = crate::jvm::property_storage::delegate_statics(ir);
     for &(static_index, s) in &facade_statics {
         // kotlinc: `const val` → `static final` at the DECLARATION's visibility; a plain `val` →
         // `private static final`; a `var` → `private static` (mutated through the synthesized
@@ -90,7 +91,11 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
         // as the same property declared inside a class does — the facade's field table is a different
         // emitter, and without this a top-level property's element type was lost to erasure.
+        // kotlinc writes no `Signature` for a `PROPERTY_DELEGATE` field (`ClassCodegen.generateField`).
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
+        let field_signature = signatures
+            .field
+            .filter(|_| !delegates.contains(&static_index));
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field, except a `lateinit` one, which holds null until assigned.
         let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
@@ -109,7 +114,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             acc,
             ir.static_field_jvm_name(static_index),
             &desc,
-            signatures.field.as_deref(),
+            field_signature.as_deref(),
             cv,
             field_ann,
         );
@@ -444,6 +449,7 @@ pub(super) fn emit_class_static_fields(
         .map(|(index, property)| (index as u32, property))
         .collect();
     owner_statics.sort_by_key(|(_, property)| property.line);
+    let delegates = crate::jvm::property_storage::delegate_statics(ir);
     for (static_index, s) in owner_statics {
         let desc = ir_type_desc(&s.ty);
         // A `private const val`/`private val` on an object/companion keeps its declared visibility
@@ -488,7 +494,9 @@ pub(super) fn emit_class_static_fields(
                         "Lorg/jetbrains/annotations/NotNull;"
                     }
                 });
-        let signature = property_jvm_signatures(signature_formatter, &s.ty, None).field;
+        let signature = property_jvm_signatures(signature_formatter, &s.ty, None)
+            .field
+            .filter(|_| !delegates.contains(&static_index));
         cw.add_field_late_sig(
             acc,
             ir.static_field_jvm_name(static_index),
