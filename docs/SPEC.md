@@ -1943,6 +1943,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generic receiver signatures, parameter annotations, local-variable slots, `InnerClasses`, and
   synthetic Kotlin metadata.
 
+  A holder forward to the interface's own member starts on the member's declaration line (the
+  `fun` line, even when an expression body wraps onto the next) and marks its `return` on the line
+  of the body's last token, block or expression body, getter and setter alike; one-line members
+  keep a single entry. An inherited member's forward has no lines. Tested by
+  `tests/default_impls_forward_lines_e2e.rs`.
+
   `enable` (krusty's default) emits the full measured compatibility surface: a `public static
   synthetic access$<name>$jd` bridge on the interface per non-private body (an `invokespecial` on
   the interface's own default method; `LineNumberTable` = one entry at the invoke pc on the

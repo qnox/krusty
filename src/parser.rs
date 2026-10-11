@@ -2636,6 +2636,7 @@ impl<'a> Parser<'a> {
             decl_line: 0,
             sig_line: 0,
             body_close_line: 0,
+            body_end_line: 0,
         }
     }
 

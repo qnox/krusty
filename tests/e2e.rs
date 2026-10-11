@@ -2950,5 +2950,7 @@ mod type_intrinsics_e2e;
 #[path = "value_class_receiver_inline_only_e2e.rs"]
 mod value_class_receiver_inline_only_e2e;
 
+#[path = "default_impls_forward_lines_e2e.rs"]
+mod default_impls_forward_lines_e2e;
 #[path = "field_store_lines_e2e.rs"]
 mod field_store_lines_e2e;

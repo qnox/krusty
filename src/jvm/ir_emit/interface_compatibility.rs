@@ -200,6 +200,7 @@ pub(super) fn emit_inherited_default_surface(
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
                 // this interface.
                 decl_line: 0,
+                end_line: 0,
                 varargs,
                 target,
             },
@@ -286,18 +287,26 @@ pub(super) fn emit_own_member_forward(
             ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
             semantic_ret,
             signature: signature.as_deref(),
-            // A property accessor has no `fn_decl_lines` entry — its line lives on the
-            // property declaration it realizes.
-            decl_line: ir.fn_decl_lines.get(&fid).copied().unwrap_or_else(|| {
-                c.properties
-                    .iter()
-                    .find(|property| {
-                        let (getter, setter) = accessor_jvm_names(c, &property.name);
-                        getter == f.name || setter == f.name
-                    })
-                    .map(|property| property.decl_line)
-                    .unwrap_or(0)
-            }),
+            // The forward starts on the declaration's own line, not on a wrapped expression
+            // body's. A property accessor has neither entry; its line lives on the property
+            // declaration it realizes.
+            decl_line: ir
+                .fn_sig_lines
+                .get(&fid)
+                .or_else(|| ir.fn_decl_lines.get(&fid))
+                .copied()
+                .unwrap_or_else(|| {
+                    c.properties
+                        .iter()
+                        .find(|property| {
+                            let (getter, setter) = accessor_jvm_names(c, &property.name);
+                            getter == f.name || setter == f.name
+                        })
+                        .map(|property| property.decl_line)
+                        .unwrap_or(0)
+                }),
+            // kotlinc returns from the forward on the member's last line.
+            end_line: ir.fn_end_lines.get(&fid).copied().unwrap_or(0),
             varargs: method_access::varargs_access(ir, fid),
             target: JdHolderTarget::AccessBridge,
         },
@@ -319,6 +328,8 @@ struct HolderForward<'a> {
     semantic_ret: Ty,
     signature: Option<&'a str>,
     decl_line: u32,
+    /// The line of the member body's last token, which the forward's `return` takes; `0` for none.
+    end_line: u32,
     /// The member's own `ACC_VARARGS` when its last physical parameter is the declared vararg.
     varargs: u16,
     target: JdHolderTarget<'a>,
@@ -338,6 +349,7 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         semantic_ret,
         signature,
         decl_line,
+        end_line,
         varargs,
         target,
     } = forward;
@@ -418,6 +430,9 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
             let target = cw.methodref(&holder.render(), member_name, descriptor);
             code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
         }
+    }
+    if end_line != 0 {
+        code.mark_line(end_line);
     }
     emit_return(ret, &mut code);
     code.ensure_locals(argument_words);

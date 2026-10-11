@@ -137,6 +137,16 @@ pub(super) fn attach(file: &mut File, src: &str) {
             _ => 0,
         }
     };
+    // The line of a body's last token, block or expression.
+    let body_end = |body: &FunBody| -> u32 {
+        let (FunBody::Block(e) | FunBody::Expr(e)) = body else {
+            return 0;
+        };
+        match (expr_lo.get(e.0 as usize), expr_hi.get(e.0 as usize)) {
+            (Some(&lo), Some(&hi)) if lo != 0 || hi != 0 => line_at(hi.saturating_sub(1)),
+            _ => 0,
+        }
+    };
     for decl in &mut file.decl_arena {
         match decl {
             Decl::Class(c) => {
@@ -170,6 +180,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     m.sig_line = line_at(m.span.lo);
                     m.decl_line = body_line(&m.body, m.sig_line);
                     m.body_close_line = body_close(&m.body);
+                    m.body_end_line = body_end(&m.body);
                 }
                 for p in &mut c.props {
                     if p.span.lo != 0 || p.span.hi != 0 {
@@ -190,7 +201,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 }
                 for p in &mut c.body_props {
                     p.decl_line = line_at(p.span.lo);
-                    p.accessor_lines = accessor_lines(p, line_at);
+                    p.accessor_lines = accessor_lines(p, line_at, body_end);
                 }
                 for e in &mut c.enum_entries {
                     e.decl_line = line_at(e.span.lo);
@@ -226,20 +237,22 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 f.sig_line = line_at(f.span.lo);
                 f.decl_line = body_line(&f.body, f.sig_line);
                 f.body_close_line = body_close(&f.body);
+                f.body_end_line = body_end(&f.body);
             }
             // A top-level property's accessors and `<clinit>` store map to its declaration line.
             Decl::Property(p) => {
                 p.decl_line = line_at(p.span.lo);
-                p.accessor_lines = accessor_lines(p, line_at);
+                p.accessor_lines = accessor_lines(p, line_at, body_end);
             }
         }
     }
 }
 
-/// The header lines of `property`'s accessors written with a body of their own.
+/// The header and last lines of `property`'s accessors written with a body of their own.
 fn accessor_lines(
     property: &crate::ast::PropDecl,
     line_at: impl Fn(u32) -> u32,
+    body_end: impl Fn(&FunBody) -> u32,
 ) -> crate::ast::AccessorLines {
     let getter = property
         .getter_span
@@ -250,7 +263,18 @@ fn accessor_lines(
         .as_ref()
         .filter(|setter| setter.body.is_some())
         .map_or(0, |setter| line_at(setter.span.lo));
-    crate::ast::AccessorLines { getter, setter }
+    let getter_end = property.getter.as_ref().map_or(0, &body_end);
+    let setter_end = property
+        .setter
+        .as_ref()
+        .and_then(|setter| setter.body.as_ref())
+        .map_or(0, &body_end);
+    crate::ast::AccessorLines {
+        getter,
+        setter,
+        getter_end,
+        setter_end,
+    }
 }
 
 #[cfg(test)]

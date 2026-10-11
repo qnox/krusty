@@ -776,6 +776,9 @@ pub struct FunDecl {
     /// `return` to this line in the `LineNumberTable`. 0 = unknown / expression body. Filled by the
     /// same parser post-pass as `decl_line`.
     pub body_close_line: u32,
+    /// 1-based source line of the body's last token, block or expression (0 = no body / unknown).
+    /// kotlinc ends a generated forward to this declaration there. Filled by the same post-pass.
+    pub body_end_line: u32,
     /// Bit-packed `is_inline`/`is_final`/`is_open`/`is_override`/`is_abstract`/`is_suspend`/`is_tailrec`/
     /// `is_operator`/`is_infix` (read via the accessors below).
     /// `is_final` — `final`, cannot be overridden. `is_open` — `open`/`override` without `final`, so the
@@ -1281,6 +1284,9 @@ pub struct ExplicitBackingField {
 pub struct AccessorLines {
     pub getter: u32,
     pub setter: u32,
+    /// The last line of each accessor's own body, 0 when it has none.
+    pub getter_end: u32,
+    pub setter_end: u32,
 }
 
 /// A top-level `val`/`var` property: `val name: Type = init`.
