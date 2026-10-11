@@ -5,6 +5,7 @@
 //! generator has not been taught declines the compilation with a diagnostic naming the construct,
 //! and a declined compilation emits nothing.
 
+mod callable_registry;
 mod classes;
 mod lower;
 
@@ -58,6 +59,7 @@ struct Started {
     module: Module,
     host: Host,
     runtime: Runtime,
+    callables: callable_registry::CallableRegistry,
 }
 
 impl Started {
@@ -72,6 +74,7 @@ impl Started {
             module,
             host,
             runtime,
+            callables: Default::default(),
         }
     }
 }
@@ -117,11 +120,15 @@ impl Backend for WasmBackend {
         let started = state
             .started
             .get_or_insert_with(|| Started::new(self.target));
+        started.callables.enter_source_module(file.module_name);
         let lowered = match lower::lower_file(
             &file.ir,
             &properties,
+            &file.callables,
+            &file.dependency_exports,
             &mut started.module,
             &mut started.runtime,
+            &mut started.callables,
         ) {
             Ok(lowered) => lowered,
             Err(construct) => {

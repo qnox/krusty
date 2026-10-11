@@ -20,12 +20,14 @@ use std::collections::{HashMap, HashSet};
 
 mod objects;
 
+use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use crate::types::{EqualityMode, Ty};
 
 use super::super::encode::{BlockType, Code, Function, Module, ValType};
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
+use super::callable_registry::{CallableRegistry, FileCallTargets};
 use super::classes::{FileClasses, RealizedProperties};
 
 pub(super) type Unsupported = String;
@@ -43,8 +45,11 @@ pub(super) struct LoweredFile {
 pub(super) fn lower_file(
     ir: &IrFile,
     properties: &RealizedProperties,
+    callables: &CheckedBackendCallables,
+    dependency_exports: &DependencyExportSignatures,
     module: &mut Module,
     runtime: &mut Runtime,
+    callable_registry: &mut CallableRegistry,
 ) -> Result<LoweredFile, Unsupported> {
     let mut globals = Vec::with_capacity(ir.statics.len());
     for property in &ir.statics {
@@ -79,10 +84,8 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(module.func_type(params, results));
     }
-    let indices = signatures
-        .iter()
-        .map(|_| module.declare())
-        .collect::<Vec<_>>();
+    let indices = callable_registry.declare_file(ir, module)?;
+    let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let classes = if ir.classes.is_empty() {
         None
     } else {
@@ -99,6 +102,7 @@ pub(super) fn lower_file(
         functions: &indices,
         globals: &globals,
         classes: classes.as_ref(),
+        calls: &call_targets,
     };
     for (id, function) in ir.functions.iter().enumerate() {
         let Some(root) = function.body else {
@@ -171,6 +175,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
+    callable_registry.publish(dependency_exports, &indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -186,6 +191,8 @@ struct FileContext<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    calls: &'a FileCallTargets,
+    calls: &'a FileCallTargets,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -318,6 +325,7 @@ impl<'a> Body<'a> {
             functions: context.functions,
             globals: context.globals,
             classes: context.classes,
+            calls: context.calls,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -631,6 +639,44 @@ impl<'a> Body<'a> {
                 self.code.call(self.functions[function as usize]);
             }
             IrExpr::Call {
+                callee: Callee::Module { target, params, .. },
+                dispatch_receiver: None,
+                args,
+            }
+            | IrExpr::Call {
+                callee:
+                    Callee::CrossFile {
+                        module_target: Some(target),
+                        params,
+                        ..
+                    },
+                dispatch_receiver: None,
+                args,
+            } => {
+                let function = self
+                    .calls
+                    .module(target)
+                    .ok_or_else(|| "an unregistered source callable identity".to_string())?;
+                self.direct_call(function, &params, &args)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        defaults,
+                        ..
+                    },
+                dispatch_receiver: None,
+                args,
+            } if defaults.is_empty() => {
+                let function = self
+                    .calls
+                    .external(target)
+                    .ok_or_else(|| "an unregistered dependency callable identity".to_string())?;
+                self.direct_call(function, &params, &args)?;
+            }
+            IrExpr::Call {
                 callee:
                     Callee::Intrinsic {
                         operation: IrIntrinsic::PrimitiveCompare { operand, .. },
@@ -802,6 +848,22 @@ impl<'a> Body<'a> {
             .local_get(right)
             .op(less)
             .op(SUB32);
+        Ok(())
+    }
+
+    fn direct_call(
+        &mut self,
+        function: u32,
+        params: &[Ty],
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        if params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        for (&arg, &param) in args.iter().zip(params) {
+            self.value(arg, param)?;
+        }
+        self.code.call(function);
         Ok(())
     }
 
