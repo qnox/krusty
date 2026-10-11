@@ -1101,6 +1101,12 @@ impl<'a> CommonIrBodySink<'a> {
             } else {
                 return Err(FirFileLoweringFailure::MissingClassifier(outer));
             };
+            // kotlinc types the field as the outer class's default type, its own type parameters
+            // applied, so a generic outer gives it a `Signature`.
+            let field_ty = index
+                .classifier_header(outer)
+                .and_then(|_| index.classifier_self_type(outer))
+                .unwrap_or(outer_ty);
             let class = &mut self.ir.classes[class as usize];
             for argument in &mut class.ctor_args {
                 if let Some(field) = &mut argument.field_index {
@@ -1111,7 +1117,7 @@ impl<'a> CommonIrBodySink<'a> {
             }
             class.fields.insert(
                 0,
-                crate::ir::IrField::new("this$0".to_owned(), outer_ty).with_is_final(true),
+                crate::ir::IrField::new("this$0".to_owned(), field_ty).with_is_final(true),
             );
             class.ctor_args.insert(
                 0,
