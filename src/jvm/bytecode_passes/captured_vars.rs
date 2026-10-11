@@ -366,11 +366,7 @@ pub(crate) fn eliminate(method: &mut MethodNode, owner: &str) -> Result<bool, An
 }
 
 /// `trackPops`: a `pop` of a `Ref` moves it; a `pop2` of two words that are `Ref`s rules them out.
-fn track_pops(
-    method: &MethodNode,
-    frames: &Frames<TrackedValue>,
-    vars: &mut [CapturedVar],
-) {
+fn track_pops(method: &MethodNode, frames: &Frames<TrackedValue>, vars: &mut [CapturedVar]) {
     for (index, node) in method.nodes.iter().enumerate() {
         let Some(frame) = frames.get(index) else {
             continue;

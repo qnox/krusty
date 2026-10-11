@@ -225,7 +225,8 @@ impl Executor<NewValueInterpreter> for NewValueFrames {
         at: &At,
         interpreter: &mut NewValueInterpreter,
     ) -> Result<(), AnalyzerError> {
-        let initializes = uninitialized_receiver(&frame.stack, at.insn, self.special_method, at.index)?;
+        let initializes =
+            uninitialized_receiver(&frame.stack, at.insn, self.special_method, at.index)?;
         frame.execute(at, interpreter)?;
         if let Some((_, object)) = initializes {
             frame.stack.pop();

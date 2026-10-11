@@ -141,7 +141,8 @@ pub(crate) fn spill_variables(
             .ok_or(CoroutineError::Unsupported(
                 "a suspension point without a following instruction",
             ))?;
-        let result_stack = frames.get(method.insns.index_of(after))
+        let result_stack = frames
+            .get(method.insns.index_of(after))
             .ok_or(CoroutineError::Unsupported(
                 "an unreachable suspension-point continuation",
             ))?

@@ -94,10 +94,7 @@ fn values_of_variable<'f>(
     let (start, end) = (positions.at(variable.start), positions.at(variable.end));
     let slot = usize::from(variable.slot);
     let mut values = Vec::new();
-    if let Some(local) = frames
-        .get(start)
-        .and_then(|frame| frame.locals.get(slot))
-    {
+    if let Some(local) = frames.get(start).and_then(|frame| frame.locals.get(slot)) {
         values.push(local);
     }
     let range = method.nodes.iter().zip(frames).take(end).skip(start);

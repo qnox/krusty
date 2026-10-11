@@ -186,7 +186,9 @@ impl Run<'_> {
             return Ok(Transformation::ReplaceWithNop);
         }
         if is_primitive_boxing_insn(insn) || is_primitive_type_conversion(insn) {
-            let input = self.frames.get(source)
+            let input = self
+                .frames
+                .get(source)
                 .ok_or_else(|| error("a dead instruction used by a live one"))?
                 .stack
                 .last()

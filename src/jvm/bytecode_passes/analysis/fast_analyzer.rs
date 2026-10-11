@@ -426,9 +426,7 @@ mod tests {
             Node::Insn(Insn::Op(IRETURN)),
         ];
         let frames = frames_of(&method);
-        let before_return = frames
-            .get(frames.len() - 1)
-            .expect("the join is reached");
+        let before_return = frames.get(frames.len() - 1).expect("the join is reached");
         assert_eq!(before_return.stack, vec![BasicValue::Int]);
     }
 
