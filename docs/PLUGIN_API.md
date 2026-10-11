@@ -124,7 +124,8 @@ kotlinc's sam-with-receiver plugin is a `FirSamConversionTransformerExtension`: 
 declaring a SAM conversion's abstract method carries one of its annotations directly, the
 conversion's function type takes the method's first value parameter as the receiver. The native
 port is configuration plus one frontend fact. `IrPlugin::sam_with_receiver_annotations` names the
-annotations (`annotation=<fqname>`; kotlinc ships no presets). Signature collection stores them on
+annotations (`annotation=<fqname>`; kotlinc does not register a `preset` command-line option).
+Signature collection stores them on
 the symbol table and publishes them into the module index, and the current-module providers answer
 `SymbolSource::sam_with_receiver_annotations` from there, so every federated source the resolver and
 checker use carries them. `symbol_resolver::semantic_sam_signature` reads the declaring classifier's
