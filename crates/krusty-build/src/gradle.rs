@@ -214,6 +214,8 @@ fn diagnostic_tails(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty::plugins::cli::{SAM_WITH_RECEIVER_PLUGIN_ID, SERIALIZATION_PLUGIN_ID};
+    use krusty::plugins::registry::{declared_registrars, PluginDiagnostic};
 
     #[test]
     fn failed_gradle_output_keeps_stderr_and_stdout_tails_separate() {
@@ -361,6 +363,7 @@ mod tests {
         let fixture = IntegrationFixture::new("krusty-kotlin-slice", write_compiler_slice);
         let root = fixture.root.clone();
         let log = fixture.log.clone();
+        let diagnostics = fixture.diagnostics.clone();
         let kgp = fixture.kgp.clone();
         let build = || fixture.build();
         let full_build_tasks = [
@@ -904,9 +907,9 @@ mod tests {
                 };
                 let rendered = error.to_string();
                 if case == "compiler-plugin" {
-                    assert!(rendered.contains(expected), "{case}: {rendered}");
-                    assert!(rendered.contains("sam-with-receiver"), "{case}: {rendered}");
                     assert!(log.exists(), "{case} must be rejected by krusty's registry");
+                    let invocation = single_invocation(&log);
+                    assert_assignment_rejected_exactly(&diagnostics, &invocation, &[]);
                 } else {
                     let expected_line = format!("> {expected}");
                     assert_eq!(
@@ -1277,7 +1280,12 @@ error: warnings found and -Werror specified\n";
     fn serialization_plugin_compiles_through_krusty() {
         let fixture =
             IntegrationFixture::new("krusty-kotlin-serialization", write_serialization_build);
-        let (root, log, kgp) = (&fixture.root, &fixture.log, fixture.kgp.as_str());
+        let (root, log, diagnostics, kgp) = (
+            &fixture.root,
+            &fixture.log,
+            &fixture.diagnostics,
+            fixture.kgp.as_str(),
+        );
 
         let output = fixture
             .build()
@@ -1298,6 +1306,7 @@ error: warnings found and -Werror specified\n";
                 r#"json={"point":{"x":3,"label":"p"}}"#,
                 "decoded=Envelope(point=Point(x=7, label=q), tags=[a, b])",
                 "descriptor=model.Point",
+                "measured=4",
             ],
             "{output}"
         );
@@ -1330,15 +1339,28 @@ error: warnings found and -Werror specified\n";
             .property("krusty.negative", "compiler-plugin-before-krusty")
             .tasks([":model:compileKotlin"])
             .run();
-        let error = match result {
+        match result {
             Ok(()) => panic!("a compiler plugin applied before krusty was ignored"),
-            Err(error) => error.to_string(),
-        };
-        assert!(error.contains("unsupported compiler plugin"), "{error}");
-        assert!(error.contains("sam-with-receiver"), "{error}");
+            Err(_) => {}
+        }
         assert!(
             log.exists(),
             "the compiler registry must inspect the forwarded plugin classpath"
+        );
+        let invocation = single_invocation(log);
+        assert_assignment_rejected_exactly(
+            diagnostics,
+            &invocation,
+            &[
+                (
+                    SERIALIZATION_PLUGIN_ID,
+                    "org.jetbrains.kotlinx.serialization.compiler.extensions.SerializationComponentRegistrar",
+                ),
+                (
+                    SAM_WITH_RECEIVER_PLUGIN_ID,
+                    "org.jetbrains.kotlin.samWithReceiver.SamWithReceiverComponentRegistrar",
+                ),
+            ],
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -1402,13 +1424,18 @@ plugins {
     kotlin("plugin.serialization") version "KGP_VERSION"
     kotlin("jvm")
     id("krusty") version "PLUGIN_VERSION" apply false
-    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
+    kotlin("plugin.sam.with.receiver") version "KGP_VERSION"
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
+}
+
+samWithReceiver {
+    annotation("model.WithReceiver")
 }
 
 // A plugin applied before krusty, as an earlier `plugins` entry or a convention plugin applies it.
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 pluginManager.apply("krusty")
 
@@ -1419,7 +1446,7 @@ dependencies {
         );
         write(
             "model/src/main/kotlin/model/Point.kt",
-            "package model\n\nimport kotlinx.serialization.Serializable\n\n@Serializable\ndata class Point(val x: Int, val label: String)\n",
+            "package model\n\nimport kotlinx.serialization.Serializable\n\n@Serializable\ndata class Point(val x: Int, val label: String)\n\n@Target(AnnotationTarget.CLASS)\nannotation class WithReceiver\n\n@WithReceiver\nfun interface Measure { fun measure(text: String): Int }\n\nfun measured() = Measure { length }.measure(\"four\")\n",
         );
         // ...and follows krusty here.
         write(
@@ -1448,6 +1475,7 @@ application {
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import model.Point
+import model.measured
 
 @Serializable
 data class Envelope(val point: Point, val tags: List<String> = listOf("default"))
@@ -1460,6 +1488,7 @@ fun main() {
     )
     println("decoded=$decoded")
     println("descriptor=" + Point.serializer().descriptor.serialName)
+    println("measured=" + measured())
 }
 "#,
         );
@@ -1475,7 +1504,7 @@ fun main() {
     #[ignore = "downloads Gradle, the Kotlin Gradle plugin and KSP"]
     fn ksp2_generated_sources_compile_through_krusty() {
         let fixture = IntegrationFixture::new("krusty-ksp2", write_ksp2_build);
-        let (root, log) = (&fixture.root, &fixture.log);
+        let (root, log, diagnostics) = (&fixture.root, &fixture.log, &fixture.diagnostics);
 
         let output = fixture
             .build()
@@ -1518,19 +1547,19 @@ fun main() {
         let _ = std::fs::remove_file(log);
         let result = fixture
             .build()
-            .property("krusty.negative", "sam-with-receiver")
+            .property("krusty.negative", "assignment")
             .tasks([":app:compileKotlin"])
             .run();
-        let error = match result {
-            Ok(()) => panic!("sam-with-receiver applied beside KSP was ignored"),
-            Err(error) => error.to_string(),
-        };
-        assert!(error.contains("unsupported compiler plugin"), "{error}");
-        assert!(error.contains("sam-with-receiver"), "{error}");
+        match result {
+            Ok(()) => panic!("the assignment plugin applied beside KSP was ignored"),
+            Err(_) => {}
+        }
         assert!(
             log.exists(),
             "the compiler registry must inspect the forwarded plugin classpath"
         );
+        let invocation = single_invocation(log);
+        assert_assignment_rejected_exactly(diagnostics, &invocation, &[]);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1657,12 +1686,12 @@ plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
     id("krusty") version "PLUGIN_VERSION"
-    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     application
 }
 
-if (providers.gradleProperty("krusty.negative").orNull == "sam-with-receiver") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
+if (providers.gradleProperty("krusty.negative").orNull == "assignment") {
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 
 dependencies {
@@ -1710,6 +1739,7 @@ fun main() {
         _serial: std::sync::MutexGuard<'static, ()>,
         root: PathBuf,
         log: PathBuf,
+        diagnostics: PathBuf,
         proxy: PathBuf,
         plugin_project: PathBuf,
         plugin_version: String,
@@ -1781,6 +1811,7 @@ fun main() {
                 _serial: serial,
                 root,
                 log,
+                diagnostics,
                 proxy,
                 plugin_project,
                 plugin_version,
@@ -1925,6 +1956,60 @@ fun main() {
             .flat_map(|jars| jars.split(','))
             .map(|jar| jar.rsplit('/').next().unwrap_or(jar))
             .collect()
+    }
+
+    /// Assert the complete diagnostic captured directly from krusty for the assignment plugin.
+    /// The Gradle cache prefix and artifact version vary by lane, so the exact jar path comes from
+    /// the recorded structured compiler-plugin argument rather than from Gradle's decorated error.
+    fn assert_assignment_rejected_exactly(
+        diagnostics: &Path,
+        args: &[String],
+        native_plugins: &[(&str, &str)],
+    ) {
+        let requests = args
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("-Xplugin="))
+            .flat_map(|jars| jars.split(','))
+            .collect::<Vec<_>>();
+        let assignment = requests
+            .iter()
+            .copied()
+            .find(|jar| {
+                Path::new(jar)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.split('-').any(|part| part == "assignment"))
+            })
+            .expect("the invocation carries the assignment compiler plugin");
+        let mut expected = String::new();
+        for &(plugin_id, registrar) in native_plugins {
+            let jar = requests
+                .iter()
+                .copied()
+                .find(|jar| {
+                    declared_registrars(jar).is_some_and(|registrars| {
+                        registrars.iter().any(|declared| declared == registrar)
+                    })
+                })
+                .unwrap_or_else(|| panic!("the invocation carries registrar {registrar}"));
+            let substitution = PluginDiagnostic::NativeSubstitution {
+                plugin_id: plugin_id.to_owned(),
+                jar: Some(jar.to_owned()),
+            };
+            expected.push_str("info: ");
+            expected.push_str(&substitution.message());
+            expected.push('\n');
+        }
+        let unsupported = PluginDiagnostic::Unsupported {
+            plugin: assignment.to_owned(),
+        };
+        expected.push_str("error: ");
+        expected.push_str(&unsupported.message());
+        expected.push('\n');
+        assert_eq!(
+            std::fs::read_to_string(diagnostics).expect("recorded krusty diagnostics"),
+            expected
+        );
     }
 
     fn source_names(args: &[String]) -> Vec<&str> {
@@ -2272,7 +2357,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 plugins {
     kotlin("jvm") version "KGP_VERSION"
     id("krusty") version "PLUGIN_VERSION"
-    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
 
@@ -2283,7 +2368,7 @@ dependencies {
 val krustyNegative = providers.gradleProperty("krusty.negative").orNull
 
 if (krustyNegative == "compiler-plugin") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 
 abstract class GenerateKotlin : DefaultTask() {

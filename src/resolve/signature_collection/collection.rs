@@ -71,6 +71,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
+    table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
     let mut declaration_annotation_resolution_attempts = std::collections::HashSet::new();
     for file_index in 0..source_packages.len() {
         diags.set_file(file_index as u32);

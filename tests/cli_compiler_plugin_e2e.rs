@@ -4,15 +4,15 @@
 //! `-P plugin:<id>:<key>=<value>`. krusty cannot execute a JVM FIR/IR plugin, so it resolves each
 //! requested jar against its extension registry (`docs/PLUGIN_API.md`): kotlinx.serialization runs as
 //! krusty's native pass (with an `info:` line saying so), and so do all-open
-//! (`allopen_plugin_e2e`) and no-arg (`noarg_plugin_e2e`); every other plugin — sam-with-receiver,
-//! Compose — fails the compile. Before, the CLI printed "ignoring unsupported option" and went on to
+//! (`allopen_plugin_e2e`), no-arg (`noarg_plugin_e2e`) and sam-with-receiver
+//! (`sam_with_receiver_plugin_e2e`); every other plugin — Compose — fails the compile. Before, the CLI printed "ignoring unsupported option" and went on to
 //! emit a no-arg class with no no-arg constructor and an untransformed `@Composable` signature.
 //!
 //! The reverse holds too: with no plugin requested krusty synthesizes nothing, exactly like kotlinc.
 //!
 //! A jar is identified the way kotlinc's `ServiceLoader` identifies it — by the registrar class its
 //! `META-INF/services` file declares — so the error is proven on a neutral plugin the test builds, and
-//! on the real sam-with-receiver and Compose jars wherever the reference distribution ships them.
+//! on the real Compose jar wherever the reference distribution ships it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -181,8 +181,7 @@ fn unsupported(plugin: &str) -> String {
 
 /// A plugin krusty has no implementation of must stop the compile with the registry's error — naming
 /// the jar, and the `-P` plugin id when options were passed — rather than compile the module as if
-/// the plugin were absent. Proven on a neutral plugin built here, then on sam-with-receiver and
-/// Compose.
+/// the plugin were absent. Proven on a neutral plugin built here, then on Compose.
 #[test]
 fn a_plugin_krusty_cannot_run_fails_the_compile() {
     let open = "package probe\n\
@@ -194,18 +193,7 @@ fn a_plugin_krusty_cannot_run_fails_the_compile() {
         widget_plugin_jar(&widget_dir),
         Some(("org.example.widget", "annotation=probe.Open")),
     )];
-    for (jar_name, options) in [
-        (
-            "sam-with-receiver-compiler-plugin.jar",
-            Some((
-                "org.jetbrains.kotlin.samWithReceiver",
-                "annotation=probe.Open",
-            )),
-        ),
-        ("compose-compiler-plugin.jar", None),
-    ] {
-        plugins.extend(shipped_plugin_jar(jar_name).map(|jar| (jar, options)));
-    }
+    plugins.extend(shipped_plugin_jar("compose-compiler-plugin.jar").map(|jar| (jar, None)));
     for (jar, options) in plugins {
         let label = jar.display().to_string();
         let mut switches = vec![format!("-Xplugin={label}")];

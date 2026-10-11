@@ -1429,6 +1429,8 @@ pub struct ResolvedModuleIndex {
     serialization_companion_accessors: HashMap<DeclarationId, (Box<str>, TypeName, usize)>,
     /// The superclass constructor each class the no-arg plugin matched delegates to.
     no_arg_constructors: HashMap<DeclarationId, NoArgSuperConstructor>,
+    /// The annotations kotlinc's sam-with-receiver plugin is configured with.
+    sam_with_receiver_annotations: Box<[TypeName]>,
     /// Primary constructor of the custom serializer CLASS a source classifier's
     /// `@Serializable(with = …)` names, selected and validated by the serialization frontend, with
     /// the generated accessor's operand ordinal passed to each constructor parameter.
@@ -2614,6 +2616,7 @@ impl ResolvedModuleIndex {
             && self.generated_classifiers.is_empty()
             && self.serialization_companion_accessors.is_empty()
             && self.no_arg_constructors.is_empty()
+            && self.sam_with_receiver_annotations.is_empty()
             && self.serialization_custom_serializer_constructors.is_empty()
             && self
                 .serialization_type_use_serializer_constructors
@@ -3111,6 +3114,7 @@ impl ResolvedModuleIndex {
                     + std::mem::size_of::<(Box<str>, TypeName, usize)>())
             + self.no_arg_constructors.len()
                 * std::mem::size_of::<(DeclarationId, NoArgSuperConstructor)>()
+            + std::mem::size_of_val(&*self.sam_with_receiver_annotations)
             + self
                 .serialization_companion_accessors
                 .values()

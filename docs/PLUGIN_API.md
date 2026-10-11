@@ -118,6 +118,20 @@ initializer, and carries `@Deprecated(level = HIDDEN)` and `@java.lang.Deprecate
 select it while Java and frameworks can. `invokeInitializers=true` is not implemented and fails the
 compile (`UnimplementedOption`).
 
+### SAM conversion receiver — `sam-with-receiver`
+
+kotlinc's sam-with-receiver plugin is a `FirSamConversionTransformerExtension`: when the interface
+declaring a SAM conversion's abstract method carries one of its annotations directly, the
+conversion's function type takes the method's first value parameter as the receiver. The native
+port is configuration plus one frontend fact. `IrPlugin::sam_with_receiver_annotations` names the
+annotations (`annotation=<fqname>`; kotlinc does not register a `preset` command-line option).
+Signature collection stores them on
+the symbol table and publishes them into the module index, and the current-module providers answer
+`SymbolSource::sam_with_receiver_annotations` from there, so every federated source the resolver and
+checker use carries them. `symbol_resolver::semantic_sam_signature` reads the declaring classifier's
+own annotations and sets `SamSignature::has_receiver`; every consumer already shapes the converted
+function type from that flag, so lambda typing, lowering and emission need no plugin knowledge.
+
 ### Reference plugin — `serialization`
 
 `@Serializable class Foo(val a: Int, val b: String)` → the PoC synthesizes the structure kotlinc's
@@ -264,10 +278,10 @@ silently dropping a plugin would emit wrong bytecode, each activated plugin gets
 
 | Situation | Diagnostic | Severity |
 |---|---|---|
-| native reimpl (serialization, all-open, no-arg) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
+| native reimpl (serialization, all-open, no-arg, sam-with-receiver) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
 | hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
 | hosted (KSP), from a driver with no codegen host (`Activation::codegen_host == false`) | `HostUnavailable` — reporting it hosted would drop its generated sources | **ERROR** (fails the compile) |
-| `-Xplugin` jar declaring a registrar no extension answers to (Compose, sam-with-receiver, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
+| `-Xplugin` jar declaring a registrar no extension answers to (Compose, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
 | `-Xplugin` entry krusty cannot read (not a zip, not a directory) | `Unsupported` — it cannot be identified, so it cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:…` for an id no extension answers to | `Unsupported` (`plugin id '<id>'`) — the option cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:<key>=…` with a key the extension's command-line processor does not declare (checked where the extension lists its keys, as all-open does) | `UnsupportedOption` — kotlinc's own `unsupported plugin option: <id>:<key>=<value>` | **ERROR** (fails the compile) |
