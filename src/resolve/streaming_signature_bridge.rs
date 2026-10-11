@@ -31,6 +31,7 @@ mod lookups;
 mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
+mod rejected_member_call;
 mod scope_resolver;
 mod selected_call_facts;
 mod semantics;
@@ -934,74 +935,6 @@ impl ProductionSignatureSemantics<'_> {
             origin,
             format!("overload resolution ambiguity for member '{spelling}'"),
         )
-    }
-
-    fn record_inapplicable_member_call(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        origin: crate::fir::OriginId,
-        spelling: &str,
-        candidates: &[crate::libraries::FunctionInfo],
-    ) -> crate::fir::DiagnosticId {
-        let mut displays = candidates
-            .iter()
-            .map(|candidate| {
-                let parameters = candidate
-                    .semantic_params()
-                    .iter()
-                    .enumerate()
-                    .map(|(ordinal, parameter)| {
-                        let name = candidate
-                            .call_sig
-                            .param_names
-                            .get(ordinal)
-                            .filter(|name| !name.is_empty())
-                            .cloned()
-                            .unwrap_or_else(|| format!("p{ordinal}"));
-                        format!("{name}: {}", parameter.source_name())
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "fun {spelling}({parameters}): {}",
-                    candidate.callable.ret.source_name()
-                )
-            })
-            .collect::<Vec<_>>();
-        displays.sort_unstable();
-        displays.dedup();
-        displays.truncate(64);
-        let mut message = String::from("none of the following candidates is applicable:");
-        for (ordinal, display) in displays.into_iter().enumerate() {
-            message.push_str(if ordinal == 0 { "\n\n" } else { "\n" });
-            message.push_str(&display);
-        }
-        self.record_source_diagnostic(declaration, origin, message)
-    }
-
-    fn record_member_call_selection_failure(
-        &self,
-        scope: crate::fir::SignatureScope,
-        origin: crate::fir::OriginId,
-        receiver: Ty,
-        spelling: &str,
-    ) -> crate::fir::DiagnosticId {
-        let candidates = match self.with_resolver(scope, |resolver| {
-            Some(
-                resolver
-                    .receiver_callables(receiver, spelling)
-                    .functions()
-                    .to_vec(),
-            )
-        }) {
-            Ok(candidates) => candidates,
-            Err(diagnostic) => return diagnostic,
-        };
-        if candidates.is_empty() {
-            self.record_unresolved_member(scope, origin, receiver, spelling)
-        } else {
-            self.record_inapplicable_member_call(scope.owner, origin, spelling, &candidates)
-        }
     }
 
     fn classifier_is_singleton(&self, classifier: crate::types::TypeName) -> bool {

@@ -13215,6 +13215,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot supply a final vararg and reads
   `passing value as a vararg is allowed only inside a parenthesized argument list.`; normal overload
   selection still takes precedence.
+- **A call whose one shape-matching candidate rejects an argument's type is resolved to that
+  candidate.** kotlinc reports `api.over(null)` against Java `over(@NotNull String)` and
+  `over(int, int)` as `null cannot be a value of a non-null type 'String'.` only, with the
+  declaration annotation and with its type-use form alike. The call still has `over(String)`'s
+  result, so `fun f(api: Api) = api.over(null)` infers `String!`. krusty's member body check
+  already reported the candidate's mismatch. Two other paths did not:
+  - Signature evaluation of an inferred result recorded `none of the following candidates is
+    applicable:` for the same call, which preceded the mismatch.
+  - A Java static (`Api.stat(null)`) reported `unresolved Java static 'Api.stat' for given argument
+    types`.
+
+  Both now select the one candidate at the nearest scope rank whose parameters the arguments map
+  onto. Signature evaluation takes its result when that result names no type parameter, and
+  leaves the mismatch to the body check. The candidate list stays for a call whose arguments no
+  candidate's shape accepts. Test: `tests/java_not_null_null_argument_e2e.rs`.
 - **A `vararg` parameter is always omittable in default-argument resolution.** A `vararg` with no
   declared default leaves `declares_default_value` unset — it is implicitly omittable — so
   `CallSig::has_known_required_param` skips the vararg slot (mirroring the call-arg slot mapper).
