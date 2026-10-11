@@ -11496,6 +11496,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and records it (`IrFile::replace_with_negation`) together, so no consumer reads a negation back
   from the comparison's shape. Tests: `tests/boolean_literal_equality_e2e.rs`,
   `tests/boolean_not_call_e2e.rs` (`if (b.not())` and `Boolean::not`).
+- **A discarded call result is popped as the call leaves it.** kotlinc materializes a call at
+  its callee's JVM return type and discards that value directly, so a statement-position
+  `AtomicReference<String>.getAndSet(…)`, `ArrayList<String>.set(…)` or `HashMap<K, Int>.put(…)`
+  is `invokevirtual; pop` with no `checkcast` or unboxing. Checked IR narrows a source
+  declaration's result with a marked declaration-result coercion, and the JVM realization of a
+  dependency call places the same kind of boundary over the provider's erased result (the call
+  records its physical type); statement emission recognizes both, emits the call and pops the
+  words it pushed. Tests: `tests/discarded_generic_result_e2e.rs`,
+  `tests/discarded_dependency_result_e2e.rs`.
 - **A discarded value whose pushers are all loads or constants is not pushed, as kotlinc's
   `PopBackwardPropagationTransformer` does, and dead code goes before the `goto` and `nop` steps.**
   The pass runs after StackPeephole (step `PopBackwardPropagation`,

@@ -706,6 +706,8 @@ mod diagnostics_parity_support;
 mod diagnostics_receiver_reference_cases_e2e;
 #[path = "diagnostics_type_inference_cases_e2e.rs"]
 mod diagnostics_type_inference_cases_e2e;
+#[path = "discarded_dependency_result_e2e.rs"]
+mod discarded_dependency_result_e2e;
 #[path = "discarded_generic_result_e2e.rs"]
 mod discarded_generic_result_e2e;
 #[path = "discarded_read_statement_e2e.rs"]
