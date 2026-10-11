@@ -13970,6 +13970,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/type_parameter_nullability_e2e.rs`. Corpus:
   `inference/capturedTypeAsLambdaInputType.kt`.
 
+- **A type-parameter accessor's annotation interns with its header.** kotlinc visits a getter's
+  `@Nullable` right after its name, descriptor and `Signature`, before the body's field reference,
+  so `open var x: T? = null` lists `Lorg/jetbrains/annotations/Nullable;` ahead of the `x` field's
+  entries. krusty reserved a declared accessor's header without an annotation whenever the field was
+  typed by a type parameter, and the class-wide accessor pass interned it after the setter. The
+  header now takes the field's own classification (`field_nullability_kind`), the one that pass
+  attaches: `T?` is `@Nullable`, a non-null-bounded `T` is `@NotNull`, an unbounded `T` has none.
+  Test: `tests/type_parameter_accessor_pool_e2e.rs::a_nullable_type_parameter_getter_interns_its_annotation_with_its_header`.
+  Corpus: `bridges/test21.kt`.
+
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
   guarded region saw the finalizer's line where the source says otherwise:

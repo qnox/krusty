@@ -2734,6 +2734,8 @@ mod type_argument_serializer_e2e;
 mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
+#[path = "type_parameter_accessor_pool_e2e.rs"]
+mod type_parameter_accessor_pool_e2e;
 #[path = "type_parameter_bound_erasure_e2e.rs"]
 mod type_parameter_bound_erasure_e2e;
 #[path = "type_parameter_invoke_e2e.rs"]
