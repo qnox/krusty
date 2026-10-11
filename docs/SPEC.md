@@ -2670,6 +2670,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`resolve/value_classes.rs`). Test:
   `tests/platform_call_assertions_e2e.rs::a_java_value_received_by_a_value_class_is_checked_like_kotlinc`.
 
+  A RANGE LITERAL's end is the argument of `rangeTo`/`rangeUntil` and is checked like one; its start
+  is the dispatch receiver and is not (`(0..list[0]).last` checks `get(...)`, `(list[0]..3).first`
+  does not). A counted `for` loop over a range literal (`..`, `..<`, `until`, `downTo`) commits each
+  bound whose type is the progression's own element type to that non-null type — kotlinc's
+  `HeaderInfoBuilder` reads both bounds into the loop — so `for (i in list[0]..3)` checks the start
+  too, while a bound the loop first widens (`for (i in 0L..javaInt)`) stays unchecked
+  (`fir/body_check/progressions.rs`). Not yet matched: the start of a range under `step`, both bounds
+  of `x in a..b`, and an `IntArray` index. Test:
+  `tests/platform_call_assertions_e2e.rs::java_range_bounds_are_checked_like_kotlinc`.
+
   kotlinc's OTHER form, the message-less `Intrinsics.checkNotNull(Object)V`, follows from where its
   message comes from: the JVM lowering names an implicit not-null cast only when the cast's OPERAND is
   a call (`name(...)`, a property accessor and an index `get` included) or a declared field read, and

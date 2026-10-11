@@ -608,6 +608,124 @@ fn a_java_value_received_by_a_value_class_is_checked_like_kotlinc() {
     assert_eq!(run(&value_class_receivers().reference), "OK");
 }
 
+/// A counted loop over a range literal commits each bound of the progression's own element type
+/// to that non-null type, so a Java value there is checked where the loop reads it — the receiver
+/// of `..` included — while a bound the loop must widen (`0L..javaInt`) stays unchecked. A range
+/// literal used as a value checks only its end, the argument of `rangeTo`.
+const RANGE_BOUNDS: &str = r#"
+fun loopStart(values: java.util.ArrayList<Int>): Int {
+    var sum = 0
+    for (i in values[0]..3) sum += i
+    return sum
+}
+
+fun loopEnd(values: java.util.ArrayList<Int>): Int {
+    var sum = 0
+    for (i in 0..values[0]) sum += i
+    return sum
+}
+
+fun loopUntil(values: java.util.ArrayList<Int>): Int {
+    var sum = 0
+    for (i in values[0] until values[1]) sum += i
+    return sum
+}
+
+fun loopChar(values: java.util.ArrayList<Char>): Int {
+    var count = 0
+    for (c in values[0]..'z') count += 1
+    return count
+}
+
+fun loopLocal(values: java.util.ArrayList<Int>): Int {
+    val last = values[0]
+    var sum = 0
+    for (i in 0..last) sum += i
+    return sum
+}
+
+fun loopWidened(values: java.util.ArrayList<Int>): Long {
+    var sum = 0L
+    for (i in 0L..values[0]) sum += i
+    return sum
+}
+
+fun valueEnd(values: java.util.ArrayList<Int>): Int = (0..values[0]).last
+
+fun valueStart(values: java.util.ArrayList<Int>): Int = (values[0]..3).first
+
+fun fails(position: Int): Boolean {
+    val absent = java.util.ArrayList<Int>()
+    (absent as java.util.ArrayList<Any?>).add(null)
+    absent.add(2)
+    return try {
+        when (position) {
+            0 -> loopStart(absent)
+            1 -> loopEnd(absent)
+            2 -> loopUntil(absent)
+            3 -> loopLocal(absent)
+            else -> valueEnd(absent)
+        }
+        false
+    } catch (e: NullPointerException) {
+        true
+    }
+}
+
+fun box(): String {
+    val values = java.util.ArrayList<Int>()
+    values.add(1)
+    values.add(3)
+    val total = loopStart(values) + loopEnd(values) + loopUntil(values) + loopLocal(values) +
+        valueEnd(values) + valueStart(values)
+    if (total != 6 + 1 + 3 + 1 + 1 + 1) return "total " + total
+    if (loopWidened(values) != 1L) return "widened"
+    val letters = java.util.ArrayList<Char>()
+    letters.add('y')
+    if (loopChar(letters) != 2) return "char"
+    var position = 0
+    while (position < 5) {
+        if (!fails(position)) return "position " + position + " did not fail"
+        position = position + 1
+    }
+    return "OK"
+}
+"#;
+
+fn range_bounds() -> &'static Builds {
+    static BUILDS: OnceLock<Builds> = OnceLock::new();
+    BUILDS.get_or_init(|| Builds {
+        krusty: common::expect_classes_with_stdlib(RANGE_BOUNDS, "RangeBounds"),
+        reference: compile_reference(RANGE_BOUNDS, "RangeBounds"),
+    })
+}
+
+#[test]
+fn java_range_bounds_are_checked_like_kotlinc() {
+    let reference = assertion_sites(&range_bounds().reference, "kotlinc");
+    assert_eq!(
+        reference,
+        [
+            "public static final int loopChar(java.util.ArrayList<java.lang.Character>);",
+            "public static final int loopEnd(java.util.ArrayList<java.lang.Integer>);",
+            "public static final int loopLocal(java.util.ArrayList<java.lang.Integer>);",
+            "public static final int loopStart(java.util.ArrayList<java.lang.Integer>);",
+            "public static final int loopUntil(java.util.ArrayList<java.lang.Integer>);",
+            "public static final int loopUntil(java.util.ArrayList<java.lang.Integer>);",
+            "public static final int valueEnd(java.util.ArrayList<java.lang.Integer>);",
+        ]
+        .map(|method| (method.to_string(), "get(...)".to_string())),
+        "the fixture must make kotlinc check exactly these range bounds"
+    );
+    assert_eq!(
+        disassembly(&range_bounds().krusty, "krusty"),
+        disassembly(&range_bounds().reference, "kotlinc"),
+        "krusty must check range bounds instruction for instruction like kotlinc"
+    );
+    assert_eq!(run(&range_bounds().krusty), "OK");
+    assert_eq!(run(&range_bounds().reference), "OK");
+}
+
 /// A Java bean property names the accessor (`getTitle(...)`), a Java field names the field, a
 /// Kotlin property names `<get-title>(...)`, and `list[0]` names `get(...)`. The getter expression
 /// body guards the Java value inside the getter.

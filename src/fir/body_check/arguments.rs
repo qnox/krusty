@@ -1064,7 +1064,7 @@ impl BodyFirChecker<'_> {
     /// field read (`checkNotNullExpressionValue`); over any other operand — a local or captured
     /// value, a `try`, a conditional merged in argument position — it keeps the value in a
     /// temporary and uses the message-less `checkNotNull(Object)`.
-    fn platform_producer_conversion(
+    pub(super) fn platform_producer_conversion(
         &mut self,
         source: ExprId,
         value: crate::fir::FirExprId,
