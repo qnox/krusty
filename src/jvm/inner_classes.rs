@@ -680,6 +680,7 @@ mod tests {
             requires_reification: false,
             extension_receiver_label: None,
             inline_default_owner: None,
+            default_stub_owner: None,
             invoke: implementation,
             function_type: Ty::fun(Vec::new(), Ty::Unit),
             raw_supertype: false,
@@ -691,6 +692,7 @@ mod tests {
             captured_receivers: Vec::new(),
             lifting_root: None,
             bridge: crate::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
+            kotlin_lambda: None,
         });
         ir.add_class(closure);
         implementation

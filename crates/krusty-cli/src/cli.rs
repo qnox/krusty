@@ -677,8 +677,9 @@ Common options (kotlinc-compatible):
                         (legacy -Xjvm-default=all | all-compatibility)
   -Xno-param-assertions omit JVM entry guards for non-null parameters
   -Xno-call-assertions  omit JVM assertions on platform-typed call results
-  -Xlambdas=indy        emit lambdas through LambdaMetafactory (class is not supported)
-  -Xsam-conversions=indy emit SAM conversions through LambdaMetafactory
+  -Xlambdas=indy|class  emit lambdas through LambdaMetafactory, or as kotlin.jvm.internal.Lambda
+                        classes
+  -Xsam-conversions=indy|class emit SAM conversions through LambdaMetafactory or as classes
   -Xplugin=<jar>,<jar>  compiler plugins; kotlinx.serialization runs as krusty's native pass,
                         any other plugin is an error (krusty cannot run FIR/IR plugin jars)
   -P plugin:<id>:<key>=<value>

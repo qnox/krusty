@@ -2277,6 +2277,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `builder_inferred_class_lambda_metadata_matches_kotlinc`,
   `shadowed_type_parameter_class_lambda_metadata_matches_kotlinc`), box
   `inference/pcla/issues/kt47744.kt`.
+- **A `-Xlambdas=class` lambda's body is its class's `invoke`.** kotlinc moves the lambda into its
+  class: the class extends `kotlin/jvm/internal/Lambda`, its constructor stores each capture in a
+  final synthetic `$name` field and then calls `Lambda(arity)`, and the typed `invoke` holds the
+  body (no static `$lambda$N` implementation method). krusty realizes every Kotlin function lambda
+  this way through the same IR pass that builds the classes `LambdaMetafactory` cannot. A capture
+  typed by an enclosing type parameter is signed `TT;` on its field and constructor, and the typed
+  `invoke` names the type parameter. The class supertype `Signature` writes nested
+  declaration-site variance (`Function1<Pair<+Integer;+Integer;>;…>`). A receiver lambda's guard
+  names `$this$<label>`. A lambda written in another lambda is enclosed by the outer class's
+  `invoke`. A default argument lambda of a non-inline function is enclosed by its `$default`
+  stub, and an inline function's default lambda carries its function record in `@Metadata`.
+  Dead code dropped while emitting (the tail after `return` in an anonymous function) no longer
+  leaves its constants in the pool. Not yet identical: lambdas the serialization plugin synthesizes
+  (kotlinc names them `Owner$1` / `Owner$$childSerializers$1`), a receiver type spelled through a
+  typealias (`kotlin.text.StringBuilder` or `Appendable`, recorded as the abbreviation in
+  `@Metadata`), and a postfix `++` on a captured `var`. Test: `tests/class_lambda_e2e.rs`
+  (`class_lambda_shapes_are_identical_to_kotlinc`).
 - **Lifted method names (kotlinc's `LocalDeclarationsLowering`).** A lambda or local function is
   lifted into a method named after the declarations around it, joined by `$`: the outermost
   declaration (a function's or property's name; `_init_` for constructors, `init` blocks, parameter

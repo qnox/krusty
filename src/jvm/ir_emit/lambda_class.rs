@@ -18,27 +18,59 @@ pub(super) fn emit_lambda_class(
     opts: &EmitOptions,
 ) -> Vec<u8> {
     const OBJECT: &str = "java/lang/Object";
+    const LAMBDA: &str = "kotlin/jvm/internal/Lambda";
     let class = c.fq_name();
     let arity = u8::try_from(lambda.bridge.param_tys.len())
         .expect("a lambda class's arity fits a numbered FunctionN");
     // The class's generic header: `Object`, then the function type it implements — except when
     // kotlinc's `hasNothingInNonContravariantPosition` leaves that supertype raw (no `Signature`).
     let formatter = JvmSignatureFormatter::new(ir, env);
+    // A `-Xlambdas=class` lambda extends `Lambda` and carries kotlinc's reflection record of the
+    // source lambda; a class the runtime factory forces extends `Object` and carries none.
+    let reflection = match &lambda.kotlin_lambda {
+        Some(origin) => {
+            let function = &ir.functions[lambda.invoke as usize];
+            let invoke = class_lambda_reflection::ClassLambdaInvoke {
+                own: &function.params,
+                result: function.ret,
+            };
+            match class_lambda_reflection::reflect_source(
+                ir,
+                lambda.function_type,
+                lambda.invoke,
+                origin,
+                invoke,
+                &formatter,
+            ) {
+                Ok(reflection) => Some(reflection),
+                Err(error) => {
+                    env.run.set_emit_error(error);
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let superclass = if lambda.kotlin_lambda.is_some() {
+        LAMBDA
+    } else {
+        OBJECT
+    };
     let signature = if lambda.raw_supertype {
         None
     } else {
         formatter
-            .ty_at(&lambda.function_type, Wildcards::Suppressed)
-            .map(|function| format!("L{OBJECT};{function}"))
+            .ty_at(&lambda.function_type, Wildcards::Supertype)
+            .map(|function| format!("L{superclass};{function}"))
     };
-    let mut cw = new_writer_generic(&class, signature.as_deref(), OBJECT, opts);
+    let mut cw = new_writer_generic(&class, signature.as_deref(), superclass, opts);
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
     cw.set_access(0x0010 | 0x0020 | u16::from(lambda.public_inline)); // FINAL | SUPER | publication
-    let inline_default = lambda.inline_default_owner;
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
-        let method = inline_default
+        let method = lambda
+            .default_stub_owner
             .map(|function| super::method_defaults::default_stub_method(ir, function, &owner))
             .or(method);
         match method {
@@ -99,12 +131,12 @@ pub(super) fn emit_lambda_class(
             signature: if regenerated {
                 None
             } else {
-                parameterized_sig(&formatter, &field.ty)
+                capture_signature(&formatter, &field.ty, Wildcards::Suppressed)
             },
             parameter_signature: if regenerated {
                 None
             } else {
-                parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared)
+                capture_signature(&formatter, &field.ty, Wildcards::Declared)
             },
         })
         .collect::<Vec<_>>();
@@ -149,8 +181,15 @@ pub(super) fn emit_lambda_class(
         slot += slot_words(capture.ty);
     }
     code.aload(0);
-    let object = cw.methodref(OBJECT, "<init>", "()V");
-    code.invokespecial(object, 0, 0);
+    if lambda.kotlin_lambda.is_some() {
+        // `Lambda(arity)`: the source arity the lambda's function type declares.
+        code.push_int(i32::from(arity), &mut cw);
+        let lambda_init = cw.methodref(LAMBDA, "<init>", "(I)V");
+        code.invokespecial(lambda_init, 1, 0);
+    } else {
+        let object = cw.methodref(OBJECT, "<init>", "()V");
+        code.invokespecial(object, 0, 0);
+    }
     code.ret_void();
     // Anonymous-object regeneration drops only a transferred capture's declaration-local row.
     // Its physical parameter still advances the slot used by every following capture.
@@ -266,7 +305,18 @@ pub(super) fn emit_lambda_class(
         if lambda.public_inline_abi {
             xi |= super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
         }
-        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &[], &[]);
+        // A `-Xlambdas=class` default lambda records its source function like any other.
+        let (d1, d2) = reflection
+            .as_ref()
+            .map_or((&[][..], &[][..]), |reflection| {
+                (&reflection.d1[..], &reflection.d2[..])
+            });
+        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, d1, d2);
+        env.run.finish_class(cw)
+    } else if let Some(reflection) = &reflection {
+        let xi =
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_LOCAL);
+        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &reflection.d1, &reflection.d2);
         env.run.finish_class(cw)
     } else {
         finish_local_synthetic_class(cw, env)
@@ -382,6 +432,20 @@ fn emit_initialization(
     code.ret_void();
     let locals = emitter.frame.max();
     finish_code::<0x0008>(emitter.cw, "<clinit>", "()V", &mut code, locals);
+}
+
+/// The generic `Signature` of a captured value's field or constructor parameter: a parameterized
+/// type, or a type parameter of the enclosing declaration (`TT;`), which the class names through
+/// its `EnclosingMethod`.
+fn capture_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ty: &Ty,
+    wildcards: Wildcards,
+) -> Option<String> {
+    match ty.non_null() {
+        Ty::TyParam(..) => formatter.ty_at(ty, wildcards),
+        _ => parameterized_sig_at(formatter, ty, wildcards),
+    }
 }
 
 /// A captured value's field, as the constructor and `invoke` spell it.

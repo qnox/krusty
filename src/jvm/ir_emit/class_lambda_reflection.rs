@@ -62,6 +62,23 @@ pub(super) fn reflect(
         .get(&expr)
         .copied()
         .ok_or("a source class lambda has no function type")?;
+    let origin = ir
+        .lambda_origins
+        .get(&impl_fn)
+        .ok_or("a source class lambda has no source form")?;
+    reflect_source(ir, function_type, impl_fn, origin, invoke, formatter).map(Some)
+}
+
+/// The reflection record of a source lambda whose class was realized in IR: its function type and
+/// source form are kept on the class record, since the implementation became its `invoke`.
+pub(super) fn reflect_source(
+    ir: &IrFile,
+    function_type: Ty,
+    impl_fn: u32,
+    origin: &crate::ir::IrLambdaOrigin,
+    invoke: ClassLambdaInvoke<'_>,
+    formatter: &JvmSignatureFormatter<'_>,
+) -> Result<ClassLambdaReflection, String> {
     let recorded = ir
         .recorded_lambda_type_parameters(impl_fn)
         .ok_or("a source class lambda does not publish its type parameters")?;
@@ -91,10 +108,6 @@ pub(super) fn reflect(
         .copied()
         .zip(values.iter().copied())
         .collect::<Vec<_>>();
-    let origin = ir
-        .lambda_origins
-        .get(&impl_fn)
-        .ok_or("a source class lambda has no source form")?;
     let local_classifiers = crate::metadata::local_classifiers::names(ir);
     let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
     let physical = super::super::metadata_method_signatures::lambda_invoke_descriptor(
@@ -134,12 +147,12 @@ pub(super) fn reflect(
         && implementation_invoke_descriptor(&invoke, signature.ret) == physical)
         .then(|| typed_invoke(formatter, receiver, values, signature.ret, physical))
         .transpose()?;
-    Ok(Some(ClassLambdaReflection {
+    Ok(ClassLambdaReflection {
         signature: format!("Lkotlin/jvm/internal/Lambda;{rendered}"),
         d1: crate::metadata::encoding::bytes_to_strings(&bytes),
         d2: strings,
         typed_invoke,
-    }))
+    })
 }
 
 /// The typed `invoke` with descriptor `physical`, and its generic `Signature` when it differs from

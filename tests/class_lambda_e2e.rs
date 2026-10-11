@@ -667,3 +667,105 @@ class Outer<T : CharSequence> {
 "#;
     assert_class_lambda_invoke_matches_kotlinc(source, &["Outer$inner$1", "Outer$outer$1"]);
 }
+
+/// Compile `source` (file `B.kt`) with both compilers under `-Xlambdas=class` and require every
+/// class kotlinc writes to be byte-identical: the lambda classes extend `Lambda`, hold the body in
+/// their typed `invoke`, and the callers construct them.
+fn assert_class_mode_identical_to_kotlinc(source: &str) {
+    let work = common::scratch_dir().expect("allocate class-lambda byte fixture");
+    let source_path = work.join("B.kt");
+    std::fs::write(&source_path, source).expect("write fixture");
+    let krusty_output = work.join("krusty-out");
+    let reference_output = work.join("reference-out");
+    std::fs::create_dir_all(&krusty_output).expect("create krusty output");
+    std::fs::create_dir_all(&reference_output).expect("create kotlinc output");
+    let stdlib = common::stdlib_jar();
+    let krusty = std::process::Command::new(common::krusty_binary())
+        .args(["-d", krusty_output.to_str().expect("UTF-8 output")])
+        .args(["-Xlambdas=class"])
+        .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
+        .arg(&source_path)
+        .output()
+        .expect("run krusty");
+    assert!(
+        krusty.status.success(),
+        "krusty rejected the class-lambda byte fixture: {}",
+        String::from_utf8_lossy(&krusty.stderr)
+    );
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-Xlambdas=class".to_string(),
+        source_path.to_string_lossy().into_owned(),
+    ])
+    .expect("kotlinc");
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected the class-lambda byte fixture: {stderr}"
+    );
+    let mut krusty_classes = Vec::new();
+    let mut reference_classes = Vec::new();
+    collect_classes(&krusty_output, &krusty_output, &mut krusty_classes);
+    collect_classes(&reference_output, &reference_output, &mut reference_classes);
+    krusty_classes.sort();
+    reference_classes.sort();
+    assert_eq!(
+        krusty_classes, reference_classes,
+        "class set differs from kotlinc"
+    );
+    let differing = reference_classes
+        .iter()
+        .filter(|name| {
+            let ours =
+                std::fs::read(krusty_output.join(format!("{name}.class"))).expect("read krusty");
+            let theirs = std::fs::read(reference_output.join(format!("{name}.class")))
+                .expect("read kotlinc");
+            ours != theirs
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let _ = std::fs::remove_dir_all(work);
+    assert_eq!(
+        differing,
+        Vec::<String>::new(),
+        "classes differ from kotlinc"
+    );
+}
+
+/// Each lambda shape becomes kotlinc's `Lambda` subclass: a singleton, captured values in final
+/// synthetic fields, a capture of the enclosing function's type parameter (`TT;`), a receiver
+/// lambda (its guard names `$this$<label>`), an anonymous function and a labeled return (whose
+/// unreachable tail interns nothing), lambdas nested in a lambda (the inner one encloses the outer
+/// class's `invoke`), and lambdas initializing object and class properties.
+const CLASS_LAMBDA_SHAPES: &str = r#"
+package p
+
+fun <T> go(f: () -> T): T = f()
+fun go2(f: (Int, String) -> Unit) = f(1, "a")
+fun goR(f: String.(Int) -> Unit) = "r".f(2)
+
+fun nested(x: Int): Int = go { go { x + 1 } }
+fun unitLambda() = go2 { a, b -> println("$a$b") }
+fun receiver() = goR { println(length + it) }
+fun <T> generic(t: T): () -> T = { t }
+val prop: (Int) -> Int = { it * 2 }
+class K {
+  val f: () -> String = { toString() }
+  fun m(s: String) = go { s + this }
+  companion object { val g = { 42 } }
+}
+object O { val h = { "o" } }
+fun local(): Int {
+  fun inner(y: Int) = go { y }
+  return inner(3)
+}
+fun stored(): List<() -> Int> = listOf({ 1 }, { 2 })
+fun nothing(): () -> Nothing = { throw IllegalStateException() }
+fun anon() = go(fun(): Int { return 5 })
+fun labeled() = go lbl@{ return@lbl 7 }
+"#;
+
+#[test]
+fn class_lambda_shapes_are_identical_to_kotlinc() {
+    assert_class_mode_identical_to_kotlinc(CLASS_LAMBDA_SHAPES);
+}

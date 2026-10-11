@@ -37,6 +37,9 @@ pub struct IrLambdaClass {
     /// records it before replacing the lambda expression; emission uses it for the `$default`
     /// enclosure, source map, and metadata ABI flag without searching the rewritten body.
     pub inline_default_owner: Option<FunId>,
+    /// The function whose `$default` stub builds this lambda as a default argument value, inline
+    /// or not: the class's `EnclosingMethod` is that stub.
+    pub default_stub_owner: Option<FunId>,
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,
@@ -63,6 +66,11 @@ pub struct IrLambdaClass {
     pub(crate) lifting_root: Option<IrLiftingRoot>,
     /// What the erased `FunctionN.invoke` bridge adapts, once `invoke` has its physical signature.
     pub bridge: IrInvokeBridge,
+    /// The class is a `-Xlambdas=class` Kotlin lambda: it extends `kotlin.jvm.internal.Lambda`
+    /// and carries the source lambda's reflection record. `None` for a class the runtime factory
+    /// forces (it extends `Object`). The source form is kept here because realization moves the
+    /// implementation out of the lambda-origin table.
+    pub kotlin_lambda: Option<IrLambdaOrigin>,
 }
 
 /// One captured value a lambda class stores in a field.
