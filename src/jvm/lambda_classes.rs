@@ -557,7 +557,11 @@ pub(super) fn realize(
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
         let inline_anonymous = ir.inline_anonymous_lambdas.contains(&fid);
         let inline_default = inline_default_classes.get(&fid).copied();
-        let inline_scope = inline_scopes.inline_scope(ir, fid);
+        // A lambda an inline call splices, or one an inline expansion took the body of, is no value
+        // and has no class.
+        let inline_scope = inline_scopes.inline_scope(ir, fid).filter(|scope| {
+            ir.functions[fid as usize].body.is_some() && !inline_call_argument(ir, scope.node)
+        });
         let inline_scoped = inline_scope.is_some();
         let delegate_source = delegates.source(ir, fid);
         // A genuine source lambda has naming/origin provenance and obeys the same class-realization
@@ -610,6 +614,7 @@ pub(super) fn realize(
                     let parameters = captures.iter().map(|capture| capture.ty).collect();
                     construct(ir, &site, Some(parameters));
                     ir.inline_only_fns.insert(fid);
+                    unlift(ir, fid);
                 }
                 None => {
                     ir.jvm_unrealized_lambda_classes.insert(fid);
@@ -1130,7 +1135,10 @@ fn declare_class(
         // default, and a private one still crosses packages inside the module.
         public_inline,
         public_inline_abi,
-        inline_origin: inline_default.is_some() || origin.scope.is_some_and(|scope| scope.direct),
+        // Only a lambda the inline function itself declares; one nested in it is the outer
+        // class's code, already mapped.
+        inline_origin: inline_default_owner.is_some()
+            || origin.scope.is_some_and(|scope| scope.direct),
         requires_reification,
         extension_receiver_label,
         inline_default_owner,
@@ -1189,17 +1197,9 @@ pub(super) fn rename_specialized_reified_classes(
     all_names
 }
 
-/// Make the lifted lambda function the class's `invoke` over the lambda's own parameters, taking
-/// no lifted name and checking each non-null reference parameter.
-fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, result: Ty) {
-    let internal = ir.classes[class as usize].fq_name;
-    if let Some(parameters) = ir.fn_params.get_mut(&fid) {
-        parameters.identities.drain(..captured);
-    }
-    for owner in &mut ir.classes {
-        owner.methods.retain(|&method| method != fid);
-    }
-    ir.class_method_owners.remove(&fid);
+/// Take a lambda that is a class out of its lifting sequence: it is no lifted method, so it takes
+/// no number from the lambdas and local functions lifted beside it.
+fn unlift(ir: &mut IrFile, fid: FunId) {
     if let Some((sequence, site)) = ir.lifted_functions.remove(&fid) {
         let entry = site.path.last().and_then(|step| {
             ir.lifting_sequences
@@ -1211,6 +1211,20 @@ fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, r
         }
     }
     ir.lifted_names.remove(&fid);
+}
+
+/// Make the lifted lambda function the class's `invoke` over the lambda's own parameters, taking
+/// no lifted name and checking each non-null reference parameter.
+fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, result: Ty) {
+    let internal = ir.classes[class as usize].fq_name;
+    if let Some(parameters) = ir.fn_params.get_mut(&fid) {
+        parameters.identities.drain(..captured);
+    }
+    for owner in &mut ir.classes {
+        owner.methods.retain(|&method| method != fid);
+    }
+    ir.class_method_owners.remove(&fid);
+    unlift(ir, fid);
     let function = &mut ir.functions[fid as usize];
     function.params.drain(..captured);
     function.param_checks = function
