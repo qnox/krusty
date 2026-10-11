@@ -104,6 +104,15 @@ impl ConstantEvaluation {
         (converted.ty == to.get().canonical_semantic()).then_some(converted)
     }
 
+    /// Bind `expression` to the runtime temporary that holds its value from here on, so no
+    /// operation reading it folds. A safe call's selector reads its receiver through such a
+    /// temporary: kotlinc's `"123456"?.get(0)` calls `charAt` on the temporary rather than folding
+    /// `'1'`, even though the receiver itself is a constant (and is folded as the temporary's
+    /// initializer, which lowering has already emitted by the time the receiver is bound).
+    pub(super) fn bind_temporary(&mut self, expression: FirExprId) {
+        self.values.insert(expression, None);
+    }
+
     /// A flattened concatenation's parts with each run of constant parts merged into one
     /// `String` constant, as kotlinc folds a string concatenation whose neighbouring arguments
     /// are constants or operations over constants.

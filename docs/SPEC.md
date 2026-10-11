@@ -12284,6 +12284,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
+  A safe call's selector does not fold over a constant receiver: kotlinc's safe-call lowering puts
+  the receiver into a temporary before the interpreter runs, so the selector's receiver is a
+  variable read, not a constant. `"123456"?.get(0)` is `ldc "123456"; iconst_0; charAt` and
+  `"123456"?.length` calls `length()`, even discarded (`"123456"?.get(0)!!.toInt()` keeps its
+  `charAt; pop`), while `"123456"[0]` and `"123456".length` still fold. The receiver itself is
+  folded as the temporary's initializer (`("12" + "34")?.length` reads the length of `"1234"`).
+  Common lowering binds the receiver expression to that temporary in the evaluation memo once the
+  receiver is lowered. (`constant_evaluation_e2e::a_safe_call_over_a_constant_receiver_stays_a_call`.
+  Corpus: `primitiveTypes/kt4098.kt`.)
 - **Delegated property references (kotlinc's `PropertyReferenceLowering`).** The `KProperty` a
   class's, object's or file facade's delegated-property operators receive live in one
   `$$delegatedProperties` array per class: a leading `static final synthetic` field (after an enum's
