@@ -76,52 +76,48 @@ impl Checker<'_> {
         !diagnostics.is_empty()
     }
 
-    /// Collect kotlinc's diagnostics for one argument in emission order. Array literals report an
-    /// aggregate `NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION` before their element diagnostics when
-    /// any element is non-constant, except for dedicated enum/KClass and resolution-error cases.
-    /// Synthetic vararg calls only contribute their individual source elements.
+    /// Collect kotlinc's diagnostics for one argument in emission order. An array (a literal, an
+    /// `arrayOf`-family call, or the operand of a vararg spread) reports an aggregate
+    /// `NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION` before its element diagnostics when any element
+    /// is non-constant, except for dedicated enum/KClass and resolution-error cases.
     fn annotation_argument_diagnostics(
         &self,
         argument: ExprId,
         diagnostics: &mut Vec<(ExprId, NonConstantArgument)>,
     ) {
-        if let Some(elements) = self.synthetic_vararg_elements(argument) {
-            for &element in elements {
-                self.annotation_argument_diagnostics(element, diagnostics);
-            }
-            return;
+        let elements = match self.file.expr(argument) {
+            Expr::AnnotationArrayLiteral(elements) => elements.as_slice(),
+            _ => match self.synthetic_vararg_elements(argument) {
+                Some(elements) => elements,
+                None => {
+                    if let Some(kind) = self.non_constant_argument(argument) {
+                        diagnostics.push((argument, kind));
+                    }
+                    return;
+                }
+            },
+        };
+        let first_element_diagnostic = diagnostics.len();
+        for &element in elements {
+            self.annotation_argument_diagnostics(element, diagnostics);
         }
-        match self.file.expr(argument) {
-            Expr::AnnotationArrayLiteral(elements) => {
-                let first_element_diagnostic = diagnostics.len();
-                for &element in elements {
-                    self.annotation_argument_diagnostics(element, diagnostics);
-                }
-                if diagnostics[first_element_diagnostic..]
-                    .iter()
-                    .any(|(_, kind)| {
-                        matches!(
-                            kind,
-                            NonConstantArgument::NotConst | NonConstantArgument::NonConstVal
-                        )
-                    })
-                {
-                    diagnostics.insert(
-                        first_element_diagnostic,
-                        (argument, NonConstantArgument::NonConstVal),
-                    );
-                }
-            }
-            _ => {
-                if let Some(kind) = self.non_constant_argument(argument) {
-                    diagnostics.push((argument, kind));
-                }
-            }
+        if diagnostics[first_element_diagnostic..]
+            .iter()
+            .any(|(_, kind)| {
+                matches!(
+                    kind,
+                    NonConstantArgument::NotConst | NonConstantArgument::NonConstVal
+                )
+            })
+        {
+            diagnostics.insert(
+                first_element_diagnostic,
+                (argument, NonConstantArgument::NonConstVal),
+            );
         }
     }
 
-    /// Source elements packed by an array-construction synthetic. The synthetic call itself has no
-    /// annotation diagnostic; its source elements retain their own order and kinds.
+    /// Source elements packed by an array-construction synthetic (`arrayOf`), in their own order.
     fn synthetic_vararg_elements(&self, argument: ExprId) -> Option<&[ExprId]> {
         use crate::synthetics::SyntheticKind;
         let Expr::Call { args, .. } = self.file.expr(argument) else {
@@ -221,8 +217,9 @@ impl Checker<'_> {
     /// kotlinc's `computeConstantExpressionKind` for the expression forms krusty selects with a
     /// known answer: a compiler-intrinsic operator is as constant as its first non-constant operand,
     /// a lexical value or a branch is never constant, a property read is constant only for a `const
-    /// val`, a cast keeps its operand's kind, and an indexed read, type test, Elvis, branch,
-    /// selected constructor, or selected non-intrinsic call is never constant. Other forms
+    /// val`, a cast keeps its operand's kind, and an indexed read, type test, range test, null
+    /// handling, `try`, lambda, block, branch, selected constructor, or selected non-intrinsic call
+    /// is never constant; a call producing a `KClass` is not a class literal. Other forms
     /// (compiler intrinsics kotlinc may evaluate) are not classified here.
     fn non_constant_expression(
         &self,
@@ -262,9 +259,15 @@ impl Checker<'_> {
                 self.non_constant_argument_for(*operand, ConstantUse::EmbeddedExpression)
             }
             Expr::Index { .. }
+            | Expr::SafeIndex { .. }
             | Expr::Is { .. }
+            | Expr::InRange { .. }
             | Expr::NotNull { .. }
             | Expr::Elvis { .. }
+            | Expr::SafeCall { .. }
+            | Expr::Try { .. }
+            | Expr::Lambda { .. }
+            | Expr::Block { .. }
             | Expr::If { .. }
             | Expr::When { .. } => Some(NonConstantArgument::NotConst),
             // kotlinc reports a nested annotation at its call, with the kind of its first
@@ -277,7 +280,15 @@ impl Checker<'_> {
                     .resolved_calls
                     .get(&expression)
                     .is_some_and(|call| call.compiler_intrinsic().is_none()))
-            .then_some(NonConstantArgument::NotConst),
+            .then(|| {
+                if self.expr_types[expression.0 as usize].kotlin_class_internal()
+                    == Some(crate::types::wk::kclass())
+                {
+                    NonConstantArgument::NotKClassLiteral
+                } else {
+                    NonConstantArgument::NotConst
+                }
+            }),
             _ if let Some(scope::PathRoot::Value(identity)) =
                 self.read_flow_roots.get(&expression) =>
             {

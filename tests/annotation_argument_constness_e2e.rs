@@ -437,3 +437,103 @@ var mutable = \"a\"
 ";
     common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
 }
+
+/// kotlinc evaluates only an `@IntrinsicConstEvaluation` callee, so a call of any other library
+/// function is not a constant either.
+#[test]
+fn a_library_call_is_not_a_constant() {
+    let src = "annotation class A(val s: String)
+annotation class I(val i: Int)
+@I(maxOf(1, 2)) fun l1() {}
+@A(listOf(\"a\").first()) fun l2() {}
+@A(\"a\".uppercase()) fun l3() {}
+@A(\"a\".repeat(2)) fun l4() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// Each array element is checked on its own, and an array with a non-constant element is also
+/// reported, ahead of its elements, as a value only `const val`s could build: an array literal,
+/// an `arrayOf` call and a spread vararg operand alike. Elements that are not class literals do
+/// not make their array non-constant, and inside a nested annotation an array takes its first
+/// non-constant element's kind.
+#[test]
+fn an_array_with_a_non_constant_element_is_reported_with_its_elements() {
+    let src = "import kotlin.reflect.KClass
+annotation class B(val s: Array<String>)
+annotation class K(val k: Array<KClass<*>>)
+annotation class I(val i: IntArray)
+annotation class V(vararg val s: String)
+annotation class N(val n: Array<B>)
+annotation class M(val b: B)
+val text = \"t\"
+val kc = String::class
+fun call() = \"c\"
+@B([text]) fun a1() {}
+@B([call(), text]) fun a2() {}
+@B([\"a\", unresolved]) fun a3() {}
+@K([String::class, text::class]) fun a4() {}
+@I([1, if (true) 2 else 3]) fun a5() {}
+@B(arrayOf(call())) fun a6() {}
+@B(s = [call()]) fun a7() {}
+@K([kc, text::class]) fun a8() {}
+@K([String::class, if (true) kc else kc]) fun a9() {}
+@V(call()) fun a10() {}
+@V(\"a\", text) fun a11() {}
+@V(*arrayOf(call()), text) fun a12() {}
+@B(arrayOf(*arrayOf(text))) fun a13() {}
+@N([B([call()])]) fun a14() {}
+@M(B([call()])) fun a15() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A property read or call producing a `KClass` is not a class literal; a local or parameter is
+/// simply not a constant.
+#[test]
+fn a_kclass_value_is_not_a_class_literal() {
+    let src = "import kotlin.reflect.KClass
+annotation class K1(val k: KClass<*>)
+annotation class K(val k: Array<KClass<*>>)
+annotation class NK(val k: K)
+val kc = String::class
+fun kcall(): KClass<*> = Int::class
+@K1(kc) fun c1() {}
+@K1(kcall()) fun c2() {}
+@K([kcall()]) fun c3() {}
+@K(arrayOf(kc)) fun c4() {}
+@NK(K([kc])) fun c5() {}
+fun f(p: KClass<*>) {
+    val l = String::class
+    @K1(l) val x = 1
+    @K1(p) val y = 2
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A safe call, range test, `try`, scope-function call or subjectless `when` is never a constant,
+/// whatever its operands; a parenthesized expression is its content, and a cast of a constant to
+/// its own type is still that constant.
+#[test]
+fn other_expression_forms_are_not_constants() {
+    let src = "annotation class A(val s: String)
+annotation class I(val i: Int)
+annotation class Bo(val b: Boolean)
+val text = \"t\"
+var mutable = \"m\"
+val nullable: String? = \"n\"
+const val C = \"c\"
+@A(C!!) fun e1() {}
+@I(nullable?.length ?: 0) fun e2() {}
+@Bo(!(text is String)) fun e3() {}
+@A(try { \"a\" } catch (e: Exception) { \"b\" }) fun e4() {}
+@Bo(1 in 0..2) fun e5() {}
+@A(run { \"a\" }) fun e6() {}
+@A(when { else -> \"a\" }) fun e7() {}
+@A((text)) fun e8() {}
+@A((mutable)) fun e9() {}
+@A(C as String) fun e10() {}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
