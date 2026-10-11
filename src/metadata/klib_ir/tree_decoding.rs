@@ -121,6 +121,15 @@ impl KlibIrModuleTrees {
 pub fn read_declaration_trees(
     archive: &KlibArchive,
 ) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
+    read_declaration_trees_where(archive, |_| true)
+}
+
+/// Decode the top-level declaration trees whose own identity `keep` accepts. A declaration that is
+/// left out costs only reading its identity; its members and bodies are never decoded.
+pub fn read_declaration_trees_where(
+    archive: &KlibArchive,
+    mut keep: impl FnMut(&KlibIrSignature) -> bool,
+) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
     let files = read_per_file_table(archive, "files.knf")?;
     let strings = read_per_file_table(archive, "strings.knt")?;
     let signatures = read_per_file_table(archive, "signatures.knt")?;
@@ -166,8 +175,12 @@ pub fn read_declaration_trees(
                     format!("references absent declaration id {id}"),
                 )
             })?;
+            let msg = Msg::parse(bytes, 0, DECLARATIONS)?;
+            if !keep(&top_level_signature(&mut file, &msg)?) {
+                continue;
+            }
             let mut decoder = TreeDecoder::new(&mut file);
-            let declaration = decoder.member(&Msg::parse(bytes, 0, DECLARATIONS)?)?;
+            let declaration = decoder.member(&msg)?;
             module.trees.push(KlibIrDeclarationTree {
                 arena: decoder.arena,
                 declaration,
@@ -176,6 +189,24 @@ pub fn read_declaration_trees(
     }
     module.index()?;
     Ok(module)
+}
+
+/// The identity of the declaration `msg` serializes, read from its base without decoding the rest.
+fn top_level_signature(
+    file: &mut FileTables<'_>,
+    msg: &Msg<'_>,
+) -> Result<KlibIrSignature, KlibIrDecodeError> {
+    let (kind, declaration) = msg
+        .oneof(1..=12, "IrDeclaration")?
+        .ok_or_else(|| msg.error("declaration is empty"))?;
+    // A constructor or function nests its declaration base inside its function base.
+    let declaration = match kind {
+        3 | 6 => declaration.required(1, "function base")?,
+        _ => declaration,
+    };
+    let base = declaration.required(1, "declaration base")?;
+    let code = base.required_varint(1, "declaration symbol")?;
+    Ok(file.signatures.symbol(code)?.signature)
 }
 
 struct FileTables<'a> {

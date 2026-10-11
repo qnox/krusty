@@ -26,7 +26,9 @@ mod tree_decoding;
 mod wire;
 
 pub use symbols::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
-pub use tree_decoding::{read_declaration_trees, KlibIrDeclarationTree, KlibIrModuleTrees};
+pub use tree_decoding::{
+    read_declaration_trees, read_declaration_trees_where, KlibIrDeclarationTree, KlibIrModuleTrees,
+};
 
 use wire::{
     declaration_index, entries, message, packed_field, read_per_file_table, required_bytes_field,

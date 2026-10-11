@@ -6,7 +6,7 @@ use super::classifier_signatures::{sign_package_classes, SignedClassifier};
 use super::declaration_signatures::{
     sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
 };
-use super::parameter_defaults::ParameterDefaults;
+use super::parameter_defaults::{ParameterDefaults, TopLevelDeclarations};
 use crate::libraries::{declared_type_alias, AliasExpansion};
 use crate::metadata::klib_ir::KlibIrSignature;
 use crate::metadata::semantic::KotlinPackage;
@@ -147,6 +147,40 @@ impl PackageInventory {
             }
         }
         Ok(inventory)
+    }
+
+    /// The top-level declarations whose IR holds a parameter default that metadata says exists:
+    /// a defaulted function, or a classifier with a defaulted constructor or member.
+    pub(super) fn defaulted_top_levels(&self) -> TopLevelDeclarations {
+        let mut wanted = TopLevelDeclarations::default();
+        let functions = self.functions.values().flatten().chain(
+            self.companion_functions
+                .values()
+                .flatten()
+                .map(|extension| &extension.signed),
+        );
+        for function in functions {
+            if function.declaration.param_defaults.contains(&true) {
+                wanted.insert(&function.signature);
+            }
+        }
+        for classifier in self.classifiers.values() {
+            let constructors = classifier
+                .constructors
+                .iter()
+                .filter(|constructor| constructor.declaration.param_defaults.contains(&true))
+                .map(|constructor| &constructor.signature);
+            let members = classifier
+                .functions
+                .iter()
+                .chain(&classifier.associated_functions)
+                .filter(|function| function.declaration.param_defaults.contains(&true))
+                .map(|function| &function.signature);
+            constructors
+                .chain(members)
+                .for_each(|signature| wanted.insert(signature));
+        }
+        wanted
     }
 
     /// Give every function the constant defaults its library's IR declares for it.
