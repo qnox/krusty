@@ -17186,6 +17186,7 @@ impl<'a> Checker<'a> {
                         .classifier_call_candidates(classifier, &name)
                         .map(|(_, candidates)| candidates)
                         .unwrap_or_default();
+                    let rejected_candidates = candidates.clone();
                     if let Some(selected) = self
                         .select_callable_candidate(
                             scope,
@@ -17298,6 +17299,27 @@ impl<'a> Checker<'a> {
                             );
                         }
                         return Ty::Error;
+                    }
+                    // The one candidate whose parameters the arguments map onto owns the failure,
+                    // as for a member call: `J.a(null)` against `a(@NotNull String)` is that
+                    // candidate's argument mismatch, not an unresolved static.
+                    let call_diagnostics = self.diags.diags.len();
+                    if let Some(rejected) = self.report_single_mapped_candidate_type_errors(
+                        scope,
+                        call,
+                        &name,
+                        args,
+                        &arg_tys,
+                        CallConstraints {
+                            type_args: &explicit_type_args,
+                            receiver: classifier_receiver,
+                            expected,
+                        },
+                        &rejected_candidates,
+                    ) {
+                        self.diags.sort_source_order_from(call_diagnostics);
+                        self.set(receiver, classifier_receiver);
+                        return rejected;
                     }
                     if self.resolved_type_name(classifier).is_some() {
                         if self.libraries.inherits_classifier_callables(classifier) {

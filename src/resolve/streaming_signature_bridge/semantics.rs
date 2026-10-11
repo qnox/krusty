@@ -4150,31 +4150,37 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     }
                 }
                 let [argument] = ordinary_argument_types.as_slice() else {
-                    return Err(self.record_member_call_selection_failure(
+                    return self.rejected_member_call(
                         scope,
                         origin,
                         receiver.get(),
                         spelling,
-                    ));
+                        arguments,
+                        trailing_lambda,
+                    );
                 };
                 let Some(operator) = crate::ast::BinOp::from_arith_operator_name(spelling) else {
-                    return Err(self.record_member_call_selection_failure(
+                    return self.rejected_member_call(
                         scope,
                         origin,
                         receiver.get(),
                         spelling,
-                    ));
+                        arguments,
+                        trailing_lambda,
+                    );
                 };
                 return self
                     .checked_binary(scope, origin, operator, receiver.get(), *argument)
                     .map_or_else(
                         |_| {
-                            Err(self.record_member_call_selection_failure(
+                            self.rejected_member_call(
                                 scope,
                                 origin,
                                 receiver.get(),
                                 spelling,
-                            ))
+                                arguments,
+                                trailing_lambda,
+                            )
                         },
                         |ty| {
                             Ok(crate::fir::ResolvedMemberCall {
