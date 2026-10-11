@@ -2973,7 +2973,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   calls to the same generic builder; otherwise the outer call can specialize the inner receiver
   before its lambda contributes independent evidence. A recursive call instead
   receives a fresh call-owned variable, so the enclosing declaration's fixed `T` remains distinct
-  evidence and the solution is translated back at the call boundary. Tests:
+  evidence and the solution is translated back at the call boundary. When an inner selected call's
+  declared bound mentions that variable (`C = MutableSet<E(call)>` under
+  `C : MutableCollection<in String>`), selection may provisionally admit the bound, but the selected
+  call must publish `String <: E(call)` into the owning postponed frame before that frame is solved.
+  Tests: `tests/postponed_bound_inference_e2e.rs`,
+  `class_lambda_e2e::builder_inferred_class_lambda_metadata_matches_kotlinc`,
   `tests/builder_nested_lambda_result_e2e.rs`,
   `nested_lambda_builder_result_keeps_value_evidence_in_receiver_position`
   (`src/fir/body_check/builder_inference_tests.rs`).

@@ -42430,6 +42430,34 @@ impl<'a> Checker<'a> {
             "a selected callable's declared and selected parameters line up"
         );
         let declared_params = shape.declared_params(&declared_signature.params);
+        // Selection may admit a declaration bound that still contains a variable owned by an
+        // enclosing postponed call. Admission only keeps this candidate in the overload set; the
+        // selected-call boundary must now publish the same relation into that owner's frame. For
+        // example, `C = MutableSet<E(call)>` under `C : MutableCollection<in String>` contributes
+        // `String <: E(call)` to the surrounding builder inference problem.
+        if let Some(signature) = selected.generic_sig.as_ref() {
+            for (index, formal) in signature.formals.iter().enumerate() {
+                let Some(actual) = selected_bindings.get(formal).copied() else {
+                    continue;
+                };
+                for &bound in signature.formal_bounds.get(index).into_iter().flatten() {
+                    let expected =
+                        crate::symbol_resolver::ty_subst_keep_unbound(bound, &selected_bindings);
+                    if !self.receiver_is_assignable(actual, expected)
+                        && !self.nominal_function_bound_admits(actual, expected)
+                        && (self.postponed_call_mentions(actual)
+                            || self.postponed_call_mentions(expected))
+                    {
+                        self.expect_assignable(
+                            expected,
+                            actual,
+                            self.call_callee_name_span(call),
+                            "type argument",
+                        );
+                    }
+                }
+            }
+        }
         // Snapshot postponed producer ownership before selected-argument commitment turns those
         // calls into proper concrete values. Selection has already consumed their declaration
         // signatures; commitment finalizes the nested call and must not reopen the outer winner's
