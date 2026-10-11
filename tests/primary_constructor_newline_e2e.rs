@@ -19,7 +19,10 @@ const SOURCE: &str = "package store\n\
     )\n\
     \n\
     enum class Level\n\
-    (val weight: Int) { LOW(1), HIGH(2) }\n";
+    (val weight: Int) { LOW(1), HIGH(2) }\n\
+    \n\
+    enum class Keyed\n\
+    constructor(val key: Int) { A(1), B(2) }\n";
 
 #[test]
 fn primary_constructor_after_a_line_break_is_byte_identical_to_kotlinc() {
@@ -28,6 +31,7 @@ fn primary_constructor_after_a_line_break_is_byte_identical_to_kotlinc() {
         ("PrimaryConstructorNewlineWrapped", "store/Wrapped"),
         ("PrimaryConstructorNewlineAnnotated", "store/Annotated"),
         ("PrimaryConstructorNewlineLevel", "store/Level"),
+        ("PrimaryConstructorNewlineKeyed", "store/Keyed"),
     ] {
         common::byte_diff_against_kotlinc_cp(name, SOURCE, class, &[common::stdlib_jar()])
             .expect("reference kotlinc is provisioned")

@@ -2082,6 +2082,10 @@ impl<'a> Parser<'a> {
         // Optional explicit `constructor` keyword and primary constructor:
         // `enum class C constructor(val rgb: Int, …)`.
         let mut ctor_open_offset = 0u32;
+        // `NL* primaryConstructor`: the `constructor` keyword may also start on a later line.
+        if self.primary_constructor_header_follows() {
+            self.skip_newlines();
+        }
         if self.at(TokenKind::Ident) && self.keyword_text("constructor") {
             ctor_open_offset = self.tok().span.lo;
             self.bump();
