@@ -120,7 +120,9 @@ mod implicit_rungs;
 mod inline_access;
 mod inner_constructor_calls;
 use inner_constructor_calls::BoundInnerConstruction;
+mod import_diagnostics;
 mod inspection_analysis;
+pub(crate) use import_diagnostics::check_module_import_paths;
 mod integer_constants;
 mod interface_delegate_calls;
 mod interface_delegation;
@@ -515,111 +517,6 @@ fn order_primary_class_bounds(
     }
 }
 
-/// Validate an import from left to right and return its single source diagnostic, if any.
-fn import_path_diagnostic(
-    import: &crate::ast::ImportPath,
-    source: &dyn SymbolSource,
-    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
-    access_package: TypeName,
-) -> Option<(Span, String)> {
-    use crate::libraries::Callables;
-    use crate::symbol_source::SymbolNamespace;
-    let unresolved =
-        |segment: &str, span: Span| (span, format!("unresolved reference '{segment}'."));
-    let mut prefix = ResolvedQualifier::Package(TypeName::ROOT);
-    for (index, (segment, span)) in import.segments.iter().enumerate() {
-        // A `.*` suffix means every stored segment is a qualifier, never the imported name.
-        let terminal = index + 1 == import.segments.len() && !import.wildcard;
-        match prefix {
-            ResolvedQualifier::Value => return None,
-            ResolvedQualifier::Package(package) => {
-                let symbols = source.symbols(SymbolNamespace::Package(package), segment);
-                if let Some(classifier) = symbols.classifier_name {
-                    if terminal {
-                        let shape = source.classifier(classifier)?;
-                        if shape.access == crate::libraries::ClassifierAccess::PackagePrivate
-                            && access_package != classifier.namespace()
-                        {
-                            return Some((
-                                *span,
-                                format!(
-                                    "cannot access '{}': it is package-private in file.",
-                                    classifier_access_display_from_shape(classifier, &shape),
-                                ),
-                            ));
-                        }
-                    }
-                    prefix = ResolvedQualifier::Classifier(classifier);
-                } else if source.package_exists(package, segment) {
-                    prefix =
-                        ResolvedQualifier::Package(crate::types::type_name_child(package, segment));
-                } else if terminal
-                    && (!matches!(symbols.callables, Callables::None)
-                        || symbols.importable_declaration)
-                {
-                    return None;
-                } else {
-                    return Some(unresolved(segment, *span));
-                }
-            }
-            ResolvedQualifier::Classifier(owner) => {
-                let symbols = source.symbols(SymbolNamespace::Classifier(owner), segment);
-                if let Some(classifier) = symbols.classifier_name {
-                    prefix = ResolvedQualifier::Classifier(classifier);
-                    continue;
-                }
-                if !terminal {
-                    return Some(unresolved(segment, *span));
-                }
-                let inherited = crate::symbol_resolver::members_in_hierarchy(
-                    source,
-                    Ty::obj_name(owner),
-                    segment,
-                );
-                let owner_type = source.classifier(owner);
-                let imported_object_member =
-                    crate::symbol_resolver::imported_object_member_symbols(source, owner, segment);
-                let classifier_callable = resolver
-                    .classifier_call_candidates(owner, segment)
-                    .is_some_and(|(_, candidates)| !candidates.is_empty());
-                if !matches!(symbols.callables, Callables::None)
-                    || symbols.importable_declaration
-                    || imported_object_member.is_some()
-                    || classifier_callable
-                    || resolver
-                        .accessible_classifier_associated_property(owner, segment)
-                        .is_some()
-                    || owner_type
-                        .as_ref()
-                        .is_some_and(|owner| owner.is_enum_entry(segment))
-                    || (owner_type.as_ref().is_some_and(|owner| owner.is_object())
-                        && !matches!(inherited, Callables::None))
-                {
-                    return None;
-                }
-                let Some(owner_type) = owner_type else {
-                    return Some(unresolved(segment, *span));
-                };
-                let instance_member = !matches!(inherited, Callables::None)
-                    || owner_type
-                        .members
-                        .iter()
-                        .any(|member| member.name == *segment);
-                if instance_member {
-                    return Some((
-                        *span,
-                        format!(
-                            "cannot import '{segment}'. Functions and properties can only be imported from packages or objects."
-                        ),
-                    ));
-                }
-                return Some(unresolved(segment, *span));
-            }
-        }
-    }
-    None
-}
-
 impl Checker<'_> {
     /// Complete bind-once facts for one selected module or dependency type-alias declaration.
     fn source_alias_binding(&self, identity: TypeName) -> Option<crate::libraries::AliasExpansion> {
@@ -639,43 +536,6 @@ impl Checker<'_> {
 
     fn source_alias_declared(&self, identity: TypeName) -> bool {
         self.source_alias_expansion(identity).is_some()
-    }
-
-    fn check_import_paths(&mut self) {
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &self.module as &dyn SymbolSource,
-            self.libraries as &dyn SymbolSource,
-        ]);
-        let resolver = self.resolver();
-        let mut reports = Vec::new();
-        for import in &self.file.import_paths {
-            if !import.wildcard
-                && existing_type_name(&import.path().replace('.', "/"))
-                    .is_some_and(|identity| self.source_alias_declared(identity))
-            {
-                // A typealias is a declaration in this namespace, not a classifier symbol. Its
-                // fully-qualified stable expansion validates the terminal segment; walking only
-                // classifier/provider edges would reject every nested alias import after reaching
-                // its declaring classifier.
-                continue;
-            }
-            if let Some(report) =
-                import_path_diagnostic(import, &source, &resolver, self.source_package_name())
-            {
-                reports.push(report);
-            }
-        }
-        for (span, message) in reports {
-            // Body checking re-enters a file once per declaration group. An import diagnostic is a
-            // file fact, so a later group must not report the same segment again.
-            let identity = crate::diag::DiagnosticIdentity::ImportResolution { reference: span };
-            let already_reported = self.diags.diags.iter().any(|diagnostic| {
-                diagnostic.file == self.file_index && diagnostic.identity == Some(identity)
-            });
-            if !already_reported {
-                self.diags.error_with_identity(span, identity, message);
-            }
-        }
     }
 }
 
@@ -1064,9 +924,22 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
         let packages = self.packages;
         let import_scope = self.import_scope;
         let scope_name = self.scope_name;
+        let explicit_packages = import_scope
+            .zip(scope_name)
+            .map(|(scope, name)| {
+                scope
+                    .explicit_targets(name)
+                    .into_iter()
+                    .filter_map(|(owner, _)| match owner {
+                        crate::symbol_source::SymbolNamespace::Package(package) => Some(package),
+                        crate::symbol_source::SymbolNamespace::Classifier(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let selected_import_level = import_scope.and_then(|scope| {
             let name = scope_name?;
-            if scope.explicit_owner(name).is_some() {
+            if scope.has_explicit(name) {
                 return None;
             }
             scope.levels().iter().position(|level| {
@@ -1084,13 +957,8 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
             .filter(move |signature| {
                 import_scope.is_some_and(|scope| {
                     let name = scope_name.expect("an import-scoped overload view has a name");
-                    if let Some(explicit) = scope.explicit_owner(name) {
-                        return match explicit {
-                            crate::symbol_source::SymbolNamespace::Package(package) => {
-                                package == signature.package
-                            }
-                            crate::symbol_source::SymbolNamespace::Classifier(_) => false,
-                        };
+                    if scope.has_explicit(name) {
+                        return explicit_packages.contains(&signature.package);
                     }
                     selected_import_level
                         .is_some_and(|level| scope.levels()[level].contains(&signature.package))
@@ -9065,6 +8933,7 @@ enum UnboundRefSelection {
 enum NestedConstructorRefSelection {
     Selected(Ty),
     Inapplicable,
+    ReceiverMismatch(Ty),
     Missing,
 }
 
@@ -13727,33 +13596,46 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
     ) -> Option<(ImplicitReceiver, String, SingletonValue)> {
-        let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
-        crate::trace_compiler!(
-            "resolve",
-            "imported singleton candidate name={name} target={namespace:?}.{declared_name}"
-        );
-        let crate::symbol_source::SymbolNamespace::Classifier(classifier) = namespace else {
+        let mut candidates = self
+            .function_import_scope
+            .explicit_targets(name)
+            .into_iter()
+            .filter_map(|(namespace, declared_name)| {
+                crate::trace_compiler!(
+                    "resolve",
+                    "imported singleton candidate name={name} target={namespace:?}.{declared_name}"
+                );
+                let crate::symbol_source::SymbolNamespace::Classifier(classifier) = namespace
+                else {
+                    return None;
+                };
+                let singleton = self.classifier_singleton_value(classifier)?;
+                (singleton.classifier == classifier).then_some((
+                    ImplicitReceiver {
+                        receiver_role: None,
+                        ty: Ty::obj_name(classifier),
+                        declared_ty: Ty::obj_name(classifier),
+                        identity: (0, 0),
+                        extension_receiver: None,
+                        class_receiver: false,
+                        current: false,
+                        receiver_depth: 0,
+                    },
+                    declared_name,
+                    singleton,
+                ))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
             return None;
-        };
-        let singleton = self.classifier_singleton_value(classifier)?;
+        }
+        let (receiver, declared_name, singleton) = candidates.pop()?;
         crate::trace_compiler!(
             "resolve",
-            "imported singleton classifier={classifier} storage={singleton:?}"
+            "imported singleton classifier={:?} storage={singleton:?}",
+            singleton.classifier
         );
-        (singleton.classifier == classifier).then_some((
-            ImplicitReceiver {
-                receiver_role: None,
-                ty: Ty::obj_name(classifier),
-                declared_ty: Ty::obj_name(classifier),
-                identity: (0, 0),
-                extension_receiver: None,
-                class_receiver: false,
-                current: false,
-                receiver_depth: 0,
-            },
-            declared_name,
-            singleton,
-        ))
+        Some((receiver, declared_name, singleton))
     }
 
     /// A classifier contributed by a star-import level can denote a value when it is an object or
@@ -13768,6 +13650,29 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         name: &str,
     ) -> Option<Ty> {
+        let mut explicit = Vec::new();
+        for (namespace, declared_name) in self.function_import_scope.explicit_targets(name) {
+            let record = self.fed_source().symbols(namespace, &declared_name);
+            let Some(classifier) = record.classifier_name else {
+                continue;
+            };
+            if self.classifier_singleton_value(classifier).is_some()
+                && !explicit.contains(&classifier)
+            {
+                explicit.push(classifier);
+            }
+        }
+        match explicit.as_slice() {
+            [classifier] => return self.classifier_value_ty(expression, *classifier),
+            [_, _, ..] => {
+                self.diags.error(
+                    self.span(expression),
+                    format!("overload resolution ambiguity for classifier value '{name}'"),
+                );
+                return Some(Ty::Error);
+            }
+            [] => {}
+        }
         let levels = {
             let source = self.fed_source();
             self.function_import_scope
@@ -13821,15 +13726,20 @@ impl<'a> Checker<'a> {
     }
 
     fn imported_associated_property(&self, name: &str) -> Option<crate::libraries::PropertyInfo> {
-        let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
-        match namespace {
-            crate::symbol_source::SymbolNamespace::Package(package) => self
-                .libraries
-                .top_level_associated_property(package, &declared_name),
-            crate::symbol_source::SymbolNamespace::Classifier(owner) => {
-                self.resolver().associated_property(owner, &declared_name)
-            }
-        }
+        let mut properties = self
+            .function_import_scope
+            .explicit_targets(name)
+            .into_iter()
+            .filter_map(|(namespace, declared_name)| match namespace {
+                crate::symbol_source::SymbolNamespace::Package(package) => self
+                    .libraries
+                    .top_level_associated_property(package, &declared_name),
+                crate::symbol_source::SymbolNamespace::Classifier(owner) => {
+                    self.resolver().associated_property(owner, &declared_name)
+                }
+            })
+            .collect::<Vec<_>>();
+        (properties.len() == 1).then(|| properties.pop()).flatten()
     }
 
     /// The constructor shapes each argument of `Name(args)` is typed against, in SOURCE-ARGUMENT
@@ -21687,9 +21597,11 @@ impl<'a> Checker<'a> {
                 // receiver-less callable rung. A foreign provider may contribute that callable
                 // through the imported classifier's inherited namespace even though it is absent
                 // from the ordinary package/top-level candidate inventory.
-                if let Some((crate::symbol_source::SymbolNamespace::Classifier(owner), declared)) =
-                    self.function_import_scope.explicit_target(&fname)
-                {
+                let mut imported_members = self
+                    .function_import_scope
+                    .explicit_classifier_member_targets(&fname);
+                if let [(_owner, _declared)] = imported_members.as_slice() {
+                    let (owner, declared) = imported_members.pop().expect("one imported member");
                     let type_args = self.resolved_explicit_type_args(scope, call);
                     let arg_kinds = args
                         .iter()
@@ -21729,13 +21641,15 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let imported_classifier_value = unshadowed_name
-                    .then(|| self.function_import_scope.explicit_target(&fname))
+                    .then(|| {
+                        let mut targets = self
+                            .function_import_scope
+                            .explicit_classifier_member_targets(&fname);
+                        (targets.len() == 1).then(|| targets.pop()).flatten()
+                    })
                     .flatten()
-                    .and_then(|(namespace, declared_name)| match namespace {
-                        crate::symbol_source::SymbolNamespace::Classifier(owner) => {
-                            self.read_classifier_member(callee, owner, &declared_name)
-                        }
-                        crate::symbol_source::SymbolNamespace::Package(_) => None,
+                    .and_then(|(owner, declared_name)| {
+                        self.read_classifier_member(callee, owner, &declared_name)
                     });
                 if let Some(ct) = imported_classifier_value.or_else(|| {
                     bare_classifier.and_then(|internal| self.classifier_value_ty(callee, internal))
@@ -33149,33 +33063,48 @@ fn function_import_scope_with(
     platform_defaults: &[&str],
     source: &dyn SymbolSource,
 ) -> crate::symbol_resolver::FunctionImportScope {
-    let explicit = import_map(file)
-        .into_iter()
-        .filter_map(|(name, fqn)| {
-            let (parent, declared_name) = fqn.rsplit_once('/').unwrap_or(("", fqn.as_str()));
-            let owner = if parent.is_empty() {
-                crate::symbol_source::SymbolNamespace::Package(TypeName::ROOT)
-            } else {
-                match qualifier_path(parent, source, None).ok()? {
-                    ResolvedQualifier::Package(package) => {
-                        crate::symbol_source::SymbolNamespace::Package(package)
-                    }
-                    ResolvedQualifier::Classifier(classifier) => {
-                        crate::symbol_source::SymbolNamespace::Classifier(classifier)
-                    }
-                    ResolvedQualifier::Value => return None,
-                }
-            };
+    let explicit = file
+        .import_paths
+        .iter()
+        .filter(|import| !import.wildcard)
+        .filter_map(|import| {
+            let (name, owner, declared_name) = explicit_import_target(import, source)?;
             Some((
                 name,
-                crate::symbol_resolver::CallableImport::new(owner, declared_name.to_string()),
+                crate::symbol_resolver::CallableImport::new(owner, declared_name),
             ))
         })
-        .collect();
+        .collect::<Vec<_>>();
     crate::symbol_resolver::FunctionImportScope::new(
         explicit,
         import_levels(file, platform_defaults, source),
     )
+}
+
+fn explicit_import_target(
+    import: &crate::ast::ImportPath,
+    source: &dyn SymbolSource,
+) -> Option<(String, crate::symbol_source::SymbolNamespace, String)> {
+    if import.wildcard {
+        return None;
+    }
+    let visible = import.imported_name()?.to_string();
+    let fqn = import.path().replace('.', "/");
+    let (parent, declared_name) = fqn.rsplit_once('/').unwrap_or(("", fqn.as_str()));
+    let owner = if parent.is_empty() {
+        crate::symbol_source::SymbolNamespace::Package(TypeName::ROOT)
+    } else {
+        match qualifier_path(parent, source, None).ok()? {
+            ResolvedQualifier::Package(package) => {
+                crate::symbol_source::SymbolNamespace::Package(package)
+            }
+            ResolvedQualifier::Classifier(classifier) => {
+                crate::symbol_source::SymbolNamespace::Classifier(classifier)
+            }
+            ResolvedQualifier::Value => return None,
+        }
+    };
+    Some((visible, owner, declared_name.to_string()))
 }
 
 fn make_checker<'a>(
@@ -34772,7 +34701,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         c.in_script_body = false;
     }
     if !capture_discovery && !fragment.publishes_annotation_metadata() {
-        c.check_import_paths();
         for reference in &file.detached_type_refs {
             if c.resolved_type_tys
                 .contains_key(&(reference.span.lo, reference.span.hi))
@@ -45827,19 +45755,6 @@ impl<'a> Checker<'a> {
             .classes
             .contains_key(&internal)
             .then_some(internal)
-    }
-
-    /// The classifier an explicit (non-star) import binds this spelling to.
-    ///
-    /// Kotlin's classifier tower ranks explicit imports ABOVE the current package, which in turn
-    /// outranks star imports. `import_levels` already encodes package-vs-star, but the explicit
-    /// map is separate, so this rung has to be asked before the same-package one.
-    fn explicit_import_classifier_binding(
-        &self,
-        name: &str,
-    ) -> Option<(TypeName, Option<crate::libraries::ClassifierDeclaration>)> {
-        let path = self.imports.get(name)?;
-        classifier_path_with_declaration_identity(path, &self.fed_source(), None).ok()
     }
 
     /// Find a nested type visible from the lexical class receiver stack.
@@ -62278,60 +62193,6 @@ impl<'a> Checker<'a> {
         Some(signature)
     }
 
-    /// Apply the selected enclosing classifier to an inner classifier token. The stable type layout
-    /// stores the inner declaration's own parameters first and its captured outer parameters next.
-    /// A nested constructor reference has no runtime receiver expression, but its qualified LHS
-    /// still fixes the type of the leading outer parameter (`Foo<String>::Inner`).
-    fn apply_inner_classifier_outer(&self, target: Ty, outer: Ty) -> Ty {
-        let Some(internal) = target.kotlin_class_internal() else {
-            return target;
-        };
-        let source = self.fed_source();
-        let Some(classifier) = source.classifier(internal) else {
-            return target;
-        };
-        let Some(outer_owner) = classifier.outer_instance else {
-            return target;
-        };
-        let Some(applied_outer) = crate::symbol_resolver::applied_hierarchy(&source, outer)
-            .into_iter()
-            .find_map(|(owner, applied, _)| (owner == outer_owner).then_some(applied))
-        else {
-            return target;
-        };
-        let own_count = classifier
-            .own_type_parameter_count
-            .min(classifier.type_params().len());
-        let captured_count = classifier.type_params().len().saturating_sub(own_count);
-        if applied_outer.type_args().len() < captured_count {
-            return target;
-        }
-        let mut arguments = target
-            .type_args()
-            .iter()
-            .copied()
-            .take(own_count)
-            .collect::<Vec<_>>();
-        for index in arguments.len()..own_count {
-            let formal = &classifier.type_params()[index];
-            let bound = classifier
-                .type_param_bounds()
-                .get(index)
-                .and_then(|bounds| bounds.first())
-                .copied()
-                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            arguments.push(Ty::ty_param(formal, bound));
-        }
-        arguments.extend(
-            applied_outer
-                .type_args()
-                .iter()
-                .copied()
-                .take(captured_count),
-        );
-        Ty::obj_args_name(internal, &arguments)
-    }
-
     /// Select `Owner::Nested` through the classifier namespace before deciding whether `Owner`
     /// contributes a singleton value receiver. A nested constructor and an object member are not
     /// alternative interpretations of a failed value lookup: the `Nested` declaration fixes which
@@ -62345,6 +62206,46 @@ impl<'a> Checker<'a> {
         applied_owner: Ty,
         name: &str,
     ) -> NestedConstructorRefSelection {
+        // A nested typealias occupies this classifier's Kotlin type namespace, but its semantic
+        // target is the expanded classifier rather than a synthetic `$Alias` classifier. Consume
+        // the provider-published declaration facet directly so the alias's fixed arguments and
+        // declaration identity stay attached to the constructor selection. In particular,
+        // `Foo<String>::ToInner` must not fall through to an import-spelling lookup for
+        // `ToInner`: the already-bound `Foo` owner is the namespace authority.
+        let nested_alias = {
+            let source = self.fed_source();
+            let record = source.symbols(
+                crate::symbol_source::SymbolNamespace::Classifier(owner),
+                name,
+            );
+            match record.classifier_declaration.as_ref() {
+                Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
+                    Some(alias.clone())
+                }
+                Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
+            }
+        };
+        if let Some(alias) = nested_alias {
+            let target = match self.apply_inner_alias_outer(alias.expansion, applied_owner) {
+                inner_constructor_calls::InnerAliasOuterApplication::Applied(target) => target,
+                inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch => {
+                    return NestedConstructorRefSelection::ReceiverMismatch(alias.expansion);
+                }
+                inner_constructor_calls::InnerAliasOuterApplication::NotInner => {
+                    return NestedConstructorRefSelection::Missing;
+                }
+            };
+            return self
+                .constructor_reference(
+                    scope,
+                    expression,
+                    expected,
+                    target,
+                    ConstructorReferenceOuter::Unbound,
+                )
+                .map(NestedConstructorRefSelection::Selected)
+                .unwrap_or(NestedConstructorRefSelection::Inapplicable);
+        }
         let source = self.fed_source();
         let nested = crate::symbol_resolver::inherited_nested_classifier_name(
             name,
@@ -62377,7 +62278,35 @@ impl<'a> Checker<'a> {
                 );
                 NestedConstructorRefSelection::Selected(Ty::Error)
             }
-            InheritedNestedClassifier::NotFound => NestedConstructorRefSelection::Missing,
+            InheritedNestedClassifier::NotFound => {
+                // Kotlin also admits an alias visible at the reference site when its selected
+                // expansion is an inner classifier of the already-bound LHS (`C::Alias` where
+                // `typealias Alias = C.Inner`). Select that declaration through the ordinary
+                // classifier tower, then intersect its resolved target with `owner`; never retry a
+                // package/provider spelling or reinterpret the LHS after it has bound.
+                let (selection, _, alias) = self.select_classifier_binding(scope, name);
+                let (InheritedNestedClassifier::Found(_), Some(alias)) = (selection, alias) else {
+                    return NestedConstructorRefSelection::Missing;
+                };
+                let target = match self.apply_inner_alias_outer(alias.expansion, applied_owner) {
+                    inner_constructor_calls::InnerAliasOuterApplication::Applied(target) => target,
+                    inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch => {
+                        return NestedConstructorRefSelection::ReceiverMismatch(alias.expansion);
+                    }
+                    inner_constructor_calls::InnerAliasOuterApplication::NotInner => {
+                        return NestedConstructorRefSelection::Missing;
+                    }
+                };
+                self.constructor_reference(
+                    scope,
+                    expression,
+                    expected,
+                    target,
+                    ConstructorReferenceOuter::Unbound,
+                )
+                .map(NestedConstructorRefSelection::Selected)
+                .unwrap_or(NestedConstructorRefSelection::Inapplicable)
+            }
         }
     }
 
@@ -62428,9 +62357,13 @@ impl<'a> Checker<'a> {
             ) {
                 NestedConstructorRefSelection::Selected(ty) => UnboundRefSelection::Selected(ty),
                 NestedConstructorRefSelection::Inapplicable => UnboundRefSelection::Missing,
+                NestedConstructorRefSelection::ReceiverMismatch(_) => {
+                    UnboundRefSelection::NotClassifier
+                }
                 NestedConstructorRefSelection::Missing => UnboundRefSelection::NotClassifier,
             };
         }
+        let mut inner_alias_receiver_mismatch = None;
         let selected = (|| {
             let receiver_ty = receiver_ty.unboxed_primitive().unwrap_or_else(|| {
                 if internal.matches("kotlin/String") {
@@ -62688,37 +62621,10 @@ impl<'a> Checker<'a> {
             ) {
                 NestedConstructorRefSelection::Selected(ty) => return Some(ty),
                 NestedConstructorRefSelection::Inapplicable => {}
-                NestedConstructorRefSelection::Missing => {
-                    // An imported nested typealias participates only after the receiver's real
-                    // nested-classifier rung is empty. Preserve its applied expansion so fixed
-                    // outer/class arguments survive into the constructor-reference result.
-                    if let Some(target) =
-                        self.scoped_source_alias_target(scope, name)
-                            .filter(|target| {
-                                target
-                                    .kotlin_class_internal()
-                                    .and_then(|target| self.fed_source().classifier(target))
-                                    .and_then(|classifier| classifier.outer_instance)
-                                    .is_some_and(|outer| {
-                                        self.receiver_is_assignable(
-                                            Ty::obj_name(internal),
-                                            Ty::obj_name(outer),
-                                        )
-                                    })
-                            })
-                    {
-                        let target = self.apply_inner_classifier_outer(target, receiver_ty);
-                        if let Some(ty) = self.constructor_reference(
-                            scope,
-                            expression,
-                            expected,
-                            target,
-                            ConstructorReferenceOuter::Unbound,
-                        ) {
-                            return Some(ty);
-                        }
-                    }
+                NestedConstructorRefSelection::ReceiverMismatch(target) => {
+                    inner_alias_receiver_mismatch = Some(target);
                 }
+                NestedConstructorRefSelection::Missing => {}
             }
             crate::trace_compiler!(
             "resolve",
@@ -62884,6 +62790,11 @@ impl<'a> Checker<'a> {
                         self.record_companion_ref_receiver(receiver, companion, companion_ty);
                     }
                     return Some(ty);
+                }
+            }
+            if let Some(target) = inner_alias_receiver_mismatch {
+                if self.report_inner_alias_receiver_mismatch(expression, name, target) {
+                    return Some(Ty::Error);
                 }
             }
             None

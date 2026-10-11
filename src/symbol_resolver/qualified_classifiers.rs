@@ -8,12 +8,13 @@
 use super::*;
 
 /// Why a written classifier path did not bind to one classifier.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ClassifierMiss {
     /// The path stopped at this segment.
     Unresolved(String),
-    /// Several complete classifiers are equally visible at the nearest scope rung.
-    Ambiguous(Vec<TypeName>),
+    /// Several complete classifiers are equally visible at the nearest scope rung, each with the
+    /// typealias declaration that named it there.
+    Ambiguous(Vec<ScopedClassifier>),
 }
 
 #[derive(Clone, Copy)]
@@ -182,30 +183,6 @@ impl SymbolResolver<'_> {
         (CandidateSelection::None, Some(first.to_string()))
     }
 
-    /// Bind a type path by testing complete candidates at each classifier-scope rung. Selection
-    /// happens only after the whole candidate path is applicable, so an incomplete same-named root
-    /// does not hide a complete explicit-import or package path.
-    pub(crate) fn qualified_type_classifier_binding_in_scope(
-        &self,
-        spelling: &str,
-    ) -> (CandidateSelectionWithTies<TypeName>, Option<String>) {
-        let (selection, failed) = self.qualified_type_path_in_scope(spelling);
-        (
-            match selection {
-                CandidateSelectionWithTies::Selected(path) => {
-                    CandidateSelectionWithTies::Selected(path.classifier)
-                }
-                CandidateSelectionWithTies::Ambiguous(paths) => {
-                    CandidateSelectionWithTies::Ambiguous(
-                        paths.into_iter().map(|path| path.classifier).collect(),
-                    )
-                }
-                CandidateSelectionWithTies::None => CandidateSelectionWithTies::None,
-            },
-            failed,
-        )
-    }
-
     /// The typealias on the same winning type path as
     /// [`Self::qualified_type_classifier_binding_in_scope`]. An ordinary classifier completion
     /// returns `None`; the caller then builds that classifier. A disputed alias on one classifier
@@ -214,13 +191,17 @@ impl SymbolResolver<'_> {
         &self,
         spelling: &str,
     ) -> Option<crate::libraries::AliasExpansion> {
-        match self.qualified_type_path_in_scope(spelling).0 {
+        match self.qualified_type_classifier_binding_in_scope(spelling).0 {
             CandidateSelectionWithTies::Selected(path) => path.alias,
             CandidateSelectionWithTies::Ambiguous(_) | CandidateSelectionWithTies::None => None,
         }
     }
 
-    fn qualified_type_path_in_scope(
+    /// Bind a type path by testing complete candidates at each classifier-scope rung. Selection
+    /// happens only after the whole candidate path is applicable, so an incomplete same-named root
+    /// does not hide a complete explicit-import or package path. Every completed path carries the
+    /// typealias declaration on its final segment, so an ambiguity names its candidates exactly.
+    pub(crate) fn qualified_type_classifier_binding_in_scope(
         &self,
         spelling: &str,
     ) -> (
@@ -267,23 +248,16 @@ impl SymbolResolver<'_> {
             };
         match self.fn_scope {
             Some(FunctionScopeRef::Imports(imports)) => {
-                if imports.explicit_is_ambiguous(first) {
-                    return (
-                        CandidateSelectionWithTies::Ambiguous(Vec::new()),
-                        Some(first.to_string()),
-                    );
-                }
-                if let Some((owner, declared_name)) = imports.explicit_target(first) {
-                    let record = self.src.symbols(owner, &declared_name);
-                    if let Some(candidate) = record.classifier_name {
-                        let alias = alias_on_selected_classifier(
-                            candidate,
-                            record.classifier_declaration.as_ref(),
-                        );
-                        if let Some(selection) = consider(vec![(candidate, alias)]) {
-                            return selected(selection);
-                        }
-                    }
+                // Every explicit import under the root is one rung. Conflicting imports stay
+                // candidates: the use site reports the ambiguity between their complete paths.
+                let explicit = super::classifier_scope::explicit_classifier_candidates(
+                    &self.src, imports, first,
+                )
+                .into_iter()
+                .map(|candidate| (candidate.classifier, candidate.alias))
+                .collect::<Vec<_>>();
+                if let Some(selection) = consider(explicit) {
+                    return selected(selection);
                 }
                 for level in imports.classifier_levels() {
                     let candidates =

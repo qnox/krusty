@@ -57,7 +57,13 @@ pub trait SymbolSource {
     /// the implementation lives here solely while call sites migrate to reading the record directly.
     fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         let (namespace, name) = SymbolNamespace::classifier_key(internal);
-        self.symbols(namespace, name).classifier.clone()
+        let record = self.symbols(namespace, name);
+        // A typealias occupies this source key but names its expanded classifier. Asking for the
+        // alias declaration's synthetic-looking child identity must not turn that spelling into a
+        // real classifier: callers of this identity API have already resolved the declaration.
+        (record.classifier_name == Some(internal))
+            .then(|| record.classifier.clone())
+            .flatten()
     }
 
     /// Whether `name` is a package directly inside `parent` in this source.
