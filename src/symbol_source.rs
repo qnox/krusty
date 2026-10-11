@@ -517,6 +517,8 @@ mod tests {
                                     implicit_integer_coercion: false,
                                     compile_time_constant: None,
                                     metadata_constant_read: false,
+                                    deprecated_hidden: false,
+                                    is_final: false,
                                     visibility: Visibility::Public,
                                     owner: self.owner.as_str().into(),
                                     receiver_rank: 0,

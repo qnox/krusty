@@ -74,7 +74,7 @@ impl Checker<'_> {
 
     /// Join a class method to its stable declaration. The sibling ordinal is the same coordinate
     /// the surrounding member walk uses; it locates the declaration and is not a type.
-    fn member_declaration(
+    pub(super) fn member_declaration(
         &self,
         class_decl: DeclId,
         owner: Option<TypeName>,

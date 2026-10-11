@@ -863,6 +863,8 @@ impl<'a> ModuleSymbols<'a> {
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
                 metadata_constant_read: false,
+                deprecated_hidden: false,
+                is_final: false,
                 visibility: declaration.visibility(),
                 owner: internal,
                 receiver_rank: 0,
@@ -1060,6 +1062,7 @@ fn fn_info(
             infix: sig.is_infix(),
             is_abstract: sig.is_abstract(),
             is_final: sig.is_final(),
+            deprecated_hidden: false,
             inherited_by_delegation: false,
             return_value_status: None,
         },
@@ -1178,6 +1181,7 @@ fn source_property(
     owner_is_interface: bool,
     receiver_rank: u32,
 ) -> PropertyInfo {
+    let is_final = !property.is_open && !property.is_abstract;
     let mut getter = source_property_getter(
         owner,
         property.getter_name.clone(),
@@ -1214,6 +1218,8 @@ fn source_property(
         implicit_integer_coercion: false,
         compile_time_constant: None,
         metadata_constant_read: false,
+        deprecated_hidden: false,
+        is_final,
         visibility: property.visibility,
         owner,
         receiver_rank,
@@ -1226,7 +1232,7 @@ fn source_property(
         read_stability: crate::libraries::PropertyReadStability::from_declaration(
             property.setter_name.is_some(),
             property.has_custom_getter,
-            property.is_open,
+            !is_final,
             !property.context_params.is_empty(),
         ),
     }
@@ -1461,6 +1467,8 @@ impl SymbolSource for ModuleSymbols<'_> {
                 implicit_integer_coercion: property.implicit_integer_coercion,
                 compile_time_constant: property.compile_time_constant.clone(),
                 metadata_constant_read: false,
+                deprecated_hidden: false,
+                is_final: true,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -1553,6 +1561,8 @@ impl SymbolSource for ModuleSymbols<'_> {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
+                    deprecated_hidden: false,
+                    is_final: false,
                     visibility: property.visibility,
                     owner,
                     receiver_rank: 0,
@@ -2201,6 +2211,7 @@ mod tests {
         assert_eq!(property.receiver, Some(Ty::obj("demo/Base")));
         assert_eq!(property.ty, Ty::String);
         assert_eq!(property.visibility, Visibility::Protected);
+        assert!(property.is_final);
         assert_eq!(property.receiver_rank, 0);
         assert!(property.owner.matches("demo/Base"));
         assert_eq!(
@@ -2223,6 +2234,49 @@ mod tests {
             .1
             .overloads
             .is_empty());
+    }
+
+    #[test]
+    fn abstract_member_property_remains_an_override_target() {
+        let mut symbols = FrontendSymbols::default();
+        let mut base = class("demo/Base");
+        base.declared_callable_order.push("state".to_string());
+        base.declared_props.insert(
+            "state".into(),
+            FrontendDeclaredPropertySig {
+                ty: Ty::String,
+                storage_ty: None,
+                visibility: Visibility::Public,
+                source_visible: true,
+                is_const: false,
+                annotations: Vec::new(),
+                getter_name: "getState".into(),
+                setter_name: None,
+                setter_parameter_name: None,
+                setter_visibility: None,
+                has_custom_getter: false,
+                // Source `is_open` records an explicit `open` or a non-final `override`; an
+                // abstract declaration is independently overridable even when this bit is false.
+                is_abstract: true,
+                is_open: false,
+                context_params: Vec::new(),
+                source_member: None,
+                stable_declaration: None,
+            },
+        );
+        symbols.insert_class(base);
+        let source = ModuleSymbols::new(&symbols);
+
+        let properties = declared(&source, Ty::obj("demo/Base"), "state")
+            .into_parts()
+            .1;
+        assert_eq!(properties.overloads.len(), 1);
+        assert!(properties.overloads[0].getter.is_abstract);
+        assert!(!properties.overloads[0].is_final);
+        assert_eq!(
+            properties.overloads[0].read_stability,
+            crate::libraries::PropertyReadStability::StableOnFinalReceiver
+        );
     }
 
     #[test]

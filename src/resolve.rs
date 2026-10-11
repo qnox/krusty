@@ -27276,6 +27276,8 @@ fun box(): String {
                             implicit_integer_coercion: false,
                             compile_time_constant: None,
                             metadata_constant_read: false,
+                            deprecated_hidden: false,
+                            is_final: false,
                             visibility: Visibility::Public,
                             owner: foo,
                             receiver_rank: 0,
@@ -50603,75 +50605,51 @@ impl<'a> Checker<'a> {
             let methods: Vec<&FunDecl> = cl.methods.iter().collect();
             self.check_conflicting_member_overloads(d, current_owner, &methods);
             if let Some(internal) = current_owner {
-                // An `override` member must MATCH a supertype member (same name + arity) —
-                // kotlinc rejects an `override` that overrides nothing. With member overloads a
-                // same-name sibling of a different arity no longer pairs, so check explicitly.
-                // Only when the hierarchy is MODULE-closed: a classpath supertype's members are
-                // invisible to this walk, so absence there proves nothing (properties and
-                // property-overrides are likewise out of scope — this checks methods only).
+                // An `override` member must match one complete invariant input signature in the
+                // declaration hierarchy. HIDDEN declarations remain eligible here even though the
+                // call-facing view filters them. Properties and property overrides are checked by
+                // their own declaration path; this loop owns functions only.
                 let receiver = scope.this_ty().unwrap_or(Ty::obj_name(internal));
-                let direct_supertypes =
-                    <Self as crate::assignable::TypeOracle>::direct_supertypes(self, receiver);
-                // `kotlin/Any`'s universal members are overridable in every class.
-                let is_any_member = |m: &FunDecl| {
-                    matches!(
-                        (m.name.as_str(), m.params.len()),
-                        ("toString", 0) | ("hashCode", 0) | ("equals", 1)
-                    )
-                };
+                let direct_supertypes = crate::symbol_resolver::with_implicit_any(
+                    internal,
+                    <Self as crate::assignable::TypeOracle>::direct_supertypes(self, receiver),
+                );
                 for (method_index, m) in cl.methods.iter().enumerate() {
                     if !m.is_override() {
                         continue;
                     }
-                    let selected_default = self.selected_signature_default_source_member(
-                        crate::libraries::SourceMember::Class {
-                            file: self.file_index,
-                            owner: d.0,
-                            method: method_index as u32,
-                        },
-                    );
+                    let source_member = crate::libraries::SourceMember::Class {
+                        file: self.file_index,
+                        owner: d.0,
+                        method: method_index as u32,
+                    };
+                    let selected_default =
+                        self.selected_signature_default_source_member(source_member);
                     if self.signature_defaults_only && !default_owned_class && !selected_default {
                         continue;
                     }
-                    let declared_extension_shape = if let Some(receiver_ref) = &m.receiver {
-                        let method_tparams = scope.visible_tparams().symbolic_extended_with(
-                            &m.type_params,
-                            &m.type_param_bounds,
-                            &|name| self.select_classifier(scope, name).found(),
-                        );
-                        let method_scope = scope.child(ScopeKind::Block);
-                        method_scope.declare_tparams(&m.type_params, &method_tparams, |_| false);
-                        let extension_receiver = self.type_ref_ty(&method_scope, receiver_ref);
-                        let parameters = m
-                            .params
-                            .iter()
-                            .map(|parameter| {
-                                semantic_value_parameter_ty(
-                                    self.type_ref_ty(&method_scope, &parameter.ty),
-                                    parameter.is_vararg,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let formals = m
-                            .type_params
-                            .iter()
-                            .map(|name| {
-                                method_tparams
-                                    .bound(name)
-                                    .ty_param_name()
-                                    .unwrap_or(name)
-                                    .to_string()
-                            })
-                            .collect::<Vec<_>>();
-                        Some((extension_receiver, parameters, formals))
-                    } else {
-                        None
-                    };
                     let source = self.fed_source();
+                    let implementation_declaration =
+                        self.member_declaration(d, current_owner, method_index);
+                    let implementation = crate::symbol_resolver::declared_member_declarations(
+                        &source, receiver, &m.name,
+                    )
+                    .into_parts()
+                    .0
+                    .overloads
+                    .into_iter()
+                    .find(|candidate| {
+                        if self.resolved_index.is_some() {
+                            implementation_declaration.is_some()
+                                && candidate.stable_declaration == implementation_declaration
+                        } else {
+                            candidate.source_member == Some(source_member)
+                        }
+                    });
                     let candidates = direct_supertypes
                         .iter()
                         .flat_map(|supertype| {
-                            crate::symbol_resolver::members_in_hierarchy(
+                            crate::symbol_resolver::member_declarations_in_hierarchy(
                                 &source, *supertype, &m.name,
                             )
                             .into_parts()
@@ -50680,58 +50658,30 @@ impl<'a> Checker<'a> {
                         })
                         .collect::<Vec<_>>();
                     let mut overrides_super =
-                        if let Some((extension_receiver, parameters, formals)) =
-                            declared_extension_shape
-                        {
+                        implementation.as_ref().is_some_and(|implementation| {
                             candidates.iter().any(|candidate| {
-                                let candidate_formals = candidate
-                                    .generic_sig
-                                    .as_ref()
-                                    .map(|signature| signature.formals.as_slice())
-                                    .unwrap_or_default();
-                                let same_type = |candidate: Ty, overriding: Ty| {
-                                    crate::types::ty_canonicalize_params(
+                                candidate.visibility != Visibility::Private
+                                    && !candidate.flags.is_final
+                                    && crate::symbol_resolver::function_input_shapes_match(
+                                        &source,
                                         candidate,
-                                        candidate_formals,
-                                    ) == crate::types::ty_canonicalize_params(overriding, &formals)
-                                };
-                                candidate.kind == crate::libraries::FnKind::Extension
-                                    && candidate_formals.len() == formals.len()
-                                    && candidate.semantic_receiver().is_some_and(|receiver| {
-                                        same_type(receiver, extension_receiver)
-                                    })
-                                    && candidate.semantic_params().len() == parameters.len()
-                                    && candidate
-                                        .semantic_params()
-                                        .iter()
-                                        .copied()
-                                        .zip(parameters.iter().copied())
-                                        .all(|(candidate, overriding)| {
-                                            same_type(candidate, overriding)
-                                        })
-                                    && candidate.visibility != Visibility::Private
-                                    && !candidate.flags.is_final
-                            })
-                        } else {
-                            candidates.iter().any(|candidate| {
-                                candidate.kind == crate::libraries::FnKind::Member
-                                    && candidate.semantic_params().len() == m.params.len()
-                                    && candidate.visibility != Visibility::Private
-                                    && !candidate.flags.is_final
-                            }) || (m.name == "invoke"
-                                && crate::symbol_resolver::classifier_callable_signatures(
-                                    &source, receiver,
-                                )
-                                .into_iter()
-                                .any(|callable| {
-                                    matches!(
-                                        callable.non_null(),
-                                        Ty::Fun(function)
-                                            if function.params.len() == m.params.len()
-                                                && function.suspend == m.is_suspend()
+                                        implementation,
                                     )
-                                }))
-                        };
+                            })
+                        }) || (m.receiver.is_none()
+                            && m.name == "invoke"
+                            && crate::symbol_resolver::classifier_callable_signatures(
+                                &source, receiver,
+                            )
+                            .into_iter()
+                            .any(|callable| {
+                                matches!(
+                                    callable.non_null(),
+                                    Ty::Fun(function)
+                                        if function.params.len() == m.params.len()
+                                            && function.suspend == m.is_suspend()
+                                )
+                            }));
                     // A body-local super member with an inferred result intentionally has no
                     // Pass-1 signature. Its stable header and active Pass-2 declaration still
                     // provide the complete non-extension override shape; do not diagnose it as
@@ -50784,11 +50734,53 @@ impl<'a> Checker<'a> {
                                 )
                             });
                     }
-                    if !is_any_member(m) && !overrides_super {
+                    if !overrides_super {
+                        let expected_kind = if m.receiver.is_some() {
+                            crate::libraries::FnKind::Extension
+                        } else {
+                            crate::libraries::FnKind::Member
+                        };
+                        let declarations = candidates
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.kind == expected_kind
+                                    && candidate.visibility != Visibility::Private
+                            })
+                            .collect::<Vec<_>>();
+                        let final_owner = implementation.as_ref().and_then(|implementation| {
+                            declarations
+                                .iter()
+                                .find(|candidate| {
+                                    candidate.flags.is_final
+                                        && crate::symbol_resolver::function_input_shapes_match(
+                                            &source,
+                                            candidate,
+                                            implementation,
+                                        )
+                                })
+                                .map(|candidate| candidate.callable.owner)
+                        });
+                        let message = if let Some(owner) = final_owner {
+                            format!(
+                                "'{}' in '{}' is final and cannot be overridden.",
+                                m.name,
+                                owner.segment().replace('$', ".")
+                            )
+                        } else if declarations
+                            .iter()
+                            .any(|candidate| !candidate.flags.is_final)
+                        {
+                            format!(
+                                "'{}' overrides nothing. Potential signatures for overriding:",
+                                m.name
+                            )
+                        } else {
+                            format!("'{}' overrides nothing.", m.name)
+                        };
                         self.diags.error(
                             m.override_span
                                 .expect("an override function must retain its modifier span"),
-                            format!("'{}' overrides nothing.", m.name),
+                            message,
                         );
                     }
                 }

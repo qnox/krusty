@@ -59,7 +59,7 @@ pub(super) fn inherited_defaults(
         let receiver = applied(owner);
         for name in &own.declared_callable_order {
             let (functions, properties) =
-                crate::symbol_resolver::declared_member_callables(source, receiver, name)
+                crate::symbol_resolver::declared_member_declarations(source, receiver, name)
                     .into_parts();
             selected.extend(
                 functions
@@ -442,7 +442,8 @@ fn module_surface(
             .signature(child)
             .expect("a module interface member has a checked signature");
         let (functions, properties) =
-            crate::symbol_resolver::declared_member_callables(source, receiver, name).into_parts();
+            crate::symbol_resolver::declared_member_declarations(source, receiver, name)
+                .into_parts();
         let is_abstract = header.flags.has(DeclarationFlags::ABSTRACT);
         match header.kind {
             DeclarationKind::Function => {
@@ -595,7 +596,8 @@ fn dependency_surface(
             continue;
         };
         let (applied_functions, applied_properties) =
-            crate::symbol_resolver::declared_member_callables(source, receiver, name).into_parts();
+            crate::symbol_resolver::declared_member_declarations(source, receiver, name)
+                .into_parts();
         assert_eq!(
             applied_functions.overloads.len(),
             declared.functions().len(),

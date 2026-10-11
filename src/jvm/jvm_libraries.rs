@@ -6,6 +6,7 @@
 mod builtin_classifier_shapes;
 mod builtin_property_realization;
 mod builtins_customizer;
+mod callable_availability;
 mod catalog_presence;
 mod classifier_facts;
 #[cfg(test)]
@@ -529,6 +530,7 @@ impl JvmLibraries {
                     infix: meta.is_infix,
                     is_abstract: false,
                     is_final: true,
+                    deprecated_hidden: false,
                     inherited_by_delegation: false,
                     return_value_status: None,
                 },
@@ -600,6 +602,7 @@ impl JvmLibraries {
                 infix: builtin.is_infix,
                 is_abstract: false,
                 is_final: true,
+                deprecated_hidden: false,
                 inherited_by_delegation: false,
                 return_value_status: None,
             };
@@ -784,6 +787,7 @@ impl JvmLibraries {
                     infix: function.is_infix(),
                     is_abstract: false,
                     is_final: function.is_final(),
+                    deprecated_hidden: false,
                     inherited_by_delegation: false,
                     return_value_status: Some(function.return_value_status),
                 },
@@ -903,6 +907,8 @@ impl JvmLibraries {
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
                 metadata_constant_read: false,
+                deprecated_hidden: property.deprecated_hidden,
+                is_final: property.is_final,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -941,35 +947,6 @@ impl JvmLibraries {
             api_withheld: Default::default(),
             building_types: Default::default(),
         })
-    }
-
-    /// Select which `@SinceKotlin` declarations this compilation may call.
-    pub fn with_api_version(mut self, api_version: LanguageVersion) -> Self {
-        self.api_version = api_version;
-        self
-    }
-
-    /// `@Deprecated(HIDDEN)` and a `@SinceKotlin` newer than [`Self::api_version`] are both absent
-    /// from overload resolution. Kotlinc reports the missing callable as an unresolved reference,
-    /// and omits the receiver type when the withheld declaration was the applicable one.
-    fn hides_callable(
-        &self,
-        deprecated_hidden: bool,
-        since_kotlin: Option<LanguageVersion>,
-    ) -> bool {
-        deprecated_hidden || self.since_kotlin_withheld(since_kotlin)
-    }
-
-    fn since_kotlin_withheld(&self, since_kotlin: Option<LanguageVersion>) -> bool {
-        since_kotlin.is_some_and(|since| since > self.api_version)
-    }
-
-    fn note_api_withheld(&self, owner: TypeName, name: &str) {
-        self.api_withheld
-            .borrow_mut()
-            .entry(owner)
-            .or_default()
-            .insert(name.to_string());
     }
 
     /// The type Kotlin metadata declares for a property named `name` on `internal`, or on its
@@ -1334,11 +1311,9 @@ impl JvmLibraries {
                     .filter(|declaration| {
                         if self.since_kotlin_withheld(declaration.since_kotlin()) {
                             self.note_api_withheld(internal_name, &declaration.kotlin_name);
+                            return false;
                         }
-                        !self.hides_callable(
-                            declaration.deprecated_hidden(),
-                            declaration.since_kotlin(),
-                        )
+                        true
                     })
                     .filter_map(|declaration| {
                         let descriptor = declaration.jvm_desc?;
@@ -1512,6 +1487,7 @@ impl JvmLibraries {
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
                     member.set_is_infix(declaration.is_infix());
+                    member.set_deprecated_hidden(declaration.deprecated_hidden());
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_return(declaration);
                 } else if let Some(declaration) = constructor_declaration {
@@ -2333,18 +2309,13 @@ impl JvmLibraries {
             // The members half of the same decision (see the supertype block below): for a mapped
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
-            let hidden_deprecated_callables = if kotlin_scope_is_authoritative {
-                members
-                    .iter()
-                    .filter(|member| {
-                        mapped_builtin_member_status(internal_name, ci.this_class, member)
-                            == MappedBuiltinMemberStatus::DeprecatedHidden
-                    })
-                    .map(|member| member.name.clone())
-                    .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+            let hidden_deprecated_callables = self.hidden_deprecated_callables(
+                internal_name,
+                &ci,
+                meta_fns,
+                &members,
+                kotlin_scope_is_authoritative,
+            );
             if kotlin_scope_is_authoritative {
                 // Retain only physical members admitted to this mapped Kotlin declaration by the
                 // provider-owned, versioned JVM-builtins policy.
@@ -3375,6 +3346,8 @@ impl JvmLibraries {
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
                         metadata_constant_read: false,
+                        deprecated_hidden: mp.deprecated_hidden,
+                        is_final: mp.is_final,
                         visibility: mp.visibility,
                         owner: cn,
                         receiver_rank: 0,
@@ -3535,6 +3508,8 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
+                    deprecated_hidden: mp.deprecated_hidden,
+                    is_final: mp.is_final,
                     visibility: mp.visibility,
                     owner: cn,
                     receiver_rank: 0,
@@ -3652,6 +3627,8 @@ impl JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
+                    deprecated_hidden: false,
+                    is_final: false,
                     visibility,
                     owner: cn,
                     receiver_rank: 0,
@@ -3752,6 +3729,8 @@ impl JvmLibraries {
                         implicit_integer_coercion: false,
                         compile_time_constant: None,
                         metadata_constant_read: false,
+                        deprecated_hidden: false,
+                        is_final: false,
                         visibility,
                         owner,
                         receiver_rank: 0,
@@ -3880,6 +3859,15 @@ impl JvmLibraries {
                             classifier.insert_declared_callables(name, declarations);
                         }
                     }
+                    // `declared_callables` is the declaration-facing model used by override
+                    // planning. The flat capability view is call-facing, so HIDDEN declarations
+                    // remain absent there as they are from ordinary overload selection.
+                    classifier
+                        .members
+                        .retain(|member| !member.deprecated_hidden());
+                    classifier
+                        .companion
+                        .retain(|member| !member.deprecated_hidden());
                     self.building_types.borrow_mut().remove(&internal_name);
                     crate::libraries::add_core_builtin_declarations(&mut classifier, internal_name);
                     // Core declarations added after classpath decoding are ordinary provider
@@ -4258,6 +4246,7 @@ impl JvmLibraries {
                         infix: mf.is_infix(),
                         is_abstract: false,
                         is_final: mf.is_final(),
+                        deprecated_hidden: false,
                         inherited_by_delegation: false,
                         return_value_status: Some(mf.return_value_status),
                     },
@@ -4332,6 +4321,7 @@ impl JvmLibraries {
                 );
             }
         }
+        props.retain(|property| !property.deprecated_hidden);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {
             (false, false) => Callables::Both {
                 functions: FunctionSet { overloads },
@@ -4892,6 +4882,7 @@ impl JvmLibraries {
                                 infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
                                 is_final: m.is_final(),
+                                deprecated_hidden: m.deprecated_hidden(),
                                 inherited_by_delegation: m.inherited_by_delegation(),
                                 return_value_status: m.return_value_status,
                             },
@@ -5294,6 +5285,8 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
                     metadata_constant_read: false,
+                    deprecated_hidden: false,
+                    is_final: false,
                     visibility: function.visibility,
                     owner: function.callable.owner,
                     receiver_rank: 0,

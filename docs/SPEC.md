@@ -16279,6 +16279,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identity. Method annotations are folded and published on stable declarations before cross-file
   candidate collection; value-parameter annotations remain owned by the method body fragment.
   Test: `tests/hidden_deprecation_overload_e2e.rs`.
+  A HIDDEN member is also absent from call resolution when it shares a name with a visible
+  overload (`limited(n: Int)` hidden beside `limited(n: Int, name: String? = null)`). kotlinc
+  still accepts `override` of that hidden source arity: the declaration exists for binary
+  compatibility, and a reflective call of the hidden JVM method dispatches to the override. krusty
+  dropped the hidden declaration before the override walk, so the subclass was rejected as
+  "overrides nothing". Providers now retain it as the same full `FunctionInfo` declaration used by
+  the common override graph, tagged as hidden from calls. Ordinary member-candidate views filter
+  that tag; override publication instead matches its resolved parameter, receiver, context,
+  suspension, type-parameter bound, result, modality, and stable callable identity facts. There is
+  no name/arity override query or provider-owned inheritance walk. A shorter prefix of a defaulted
+  function is still not an override, an incompatible same-arity declaration still overrides
+  nothing, generic parameters are specialized through intermediate supertypes, and a HIDDEN member
+  that is not `open` stays final. When rejection has an open same-name declaration of the same
+  callable kind, the diagnostic ends with kotlinc's `Potential signatures for overriding:`; an
+  absent or final-only declaration keeps the plain `overrides nothing.` message. The diagnostic
+  query uses the same applied declaration hierarchy and never exposes HIDDEN declarations to call
+  selection. Tests: `tests/classpath_hidden_deprecated_e2e.rs`.
 - **A type variable is solved through the declaration's own bound relation.** A generic declaration
   states constraints beyond its parameter types, and both are load-bearing at a call site. For
   `fun <T : Base<T>, C : T> C.f(subs: Iterable<T>)`, an argument can pin `T` to a type its OWN bound

@@ -251,7 +251,7 @@ fn declared_properties(
     } else {
         PropKind::Member
     };
-    crate::symbol_resolver::declared_member_callables(source, owner, name)
+    crate::symbol_resolver::declared_member_declarations(source, owner, name)
         .into_parts()
         .1
         .overloads
@@ -264,12 +264,24 @@ fn declared_properties(
         .collect()
 }
 
+fn overridable_declared_properties(
+    source: &dyn crate::symbol_source::SymbolSource,
+    owner: Ty,
+    name: &str,
+    member_extensions: bool,
+) -> Vec<PropertyInfo> {
+    declared_properties(source, owner, name, member_extensions)
+        .into_iter()
+        .filter(|property| !property.is_final)
+        .collect()
+}
+
 pub(super) fn declared_functions(
     source: &dyn crate::symbol_source::SymbolSource,
     receiver: Ty,
     name: &str,
 ) -> Vec<FunctionInfo> {
-    crate::symbol_resolver::declared_member_callables(source, receiver, name)
+    crate::symbol_resolver::declared_member_declarations(source, receiver, name)
         .into_parts()
         .0
         .overloads
@@ -278,6 +290,20 @@ pub(super) fn declared_functions(
             matches!(function.kind, FnKind::Member | FnKind::Extension)
                 && function.visibility != Visibility::Private
         })
+        .collect()
+}
+
+/// Declarations that may be the target of a source override. Keep this distinct from
+/// [`declared_functions`]: bridge planning also asks for an implementation's declaration, and an
+/// overriding implementation is final by default even though its own super target must be open.
+fn overridable_declared_functions(
+    source: &dyn crate::symbol_source::SymbolSource,
+    receiver: Ty,
+    name: &str,
+) -> Vec<FunctionInfo> {
+    declared_functions(source, receiver, name)
+        .into_iter()
+        .filter(|function| !function.flags.is_final)
         .collect()
 }
 
@@ -524,10 +550,10 @@ fn publish_inherited_interface_function_plans(
         };
         for name in &interface.declared_callable_order {
             let raw = declarations_by_target(
-                declared_functions(source, Ty::obj_name(supertype.classifier), name),
+                overridable_declared_functions(source, Ty::obj_name(supertype.classifier), name),
                 |function| function_target(index, function),
             );
-            for applied in declared_functions(source, supertype.applied.get(), name) {
+            for applied in overridable_declared_functions(source, supertype.applied.get(), name) {
                 let Some(overridden) = function_target(index, &applied) else {
                     continue;
                 };
@@ -824,7 +850,7 @@ fn append_property_override_edges(
             .classifier(supertype.classifier)
             .is_some_and(|classifier| classifier.is_interface());
         let raw = declarations_by_target(
-            declared_properties(
+            overridable_declared_properties(
                 source,
                 Ty::obj_name(supertype.classifier),
                 name,
@@ -832,7 +858,8 @@ fn append_property_override_edges(
             ),
             |property| target(index, property),
         );
-        for applied in declared_properties(source, supertype.applied.get(), name, member_extension)
+        for applied in
+            overridable_declared_properties(source, supertype.applied.get(), name, member_extension)
         {
             let Some(overridden) = target(index, &applied) else {
                 continue;
@@ -1105,10 +1132,10 @@ fn append_function_override_edges(
             .classifier(supertype.classifier)
             .is_some_and(|classifier| classifier.is_interface());
         let raw = declarations_by_target(
-            declared_functions(source, Ty::obj_name(supertype.classifier), name),
+            overridable_declared_functions(source, Ty::obj_name(supertype.classifier), name),
             |function| function_target(index, function),
         );
-        for applied in declared_functions(source, supertype.applied.get(), name) {
+        for applied in overridable_declared_functions(source, supertype.applied.get(), name) {
             let Some(overridden) = function_target(index, &applied) else {
                 continue;
             };

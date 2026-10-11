@@ -115,3 +115,133 @@ fn hidden_imported_object_member_is_not_a_candidate() {
         "OK"
     );
 }
+
+const HIDDEN_OPEN: &str = "package lib\n\
+    open class Base {\n\
+    \x20   @Deprecated(\"use the named form\", level = DeprecationLevel.HIDDEN)\n\
+    \x20   open fun limited(n: Int): Int = n\n\
+    \x20   open fun limited(n: Int, name: String? = null): Int = n + (name?.length ?: 0)\n\
+    \x20   @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN)\n\
+    \x20   open val value: String = \"base\"\n\
+    \x20   @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN)\n\
+    \x20   open var count: Int = 0\n\
+    }\n";
+
+/// kotlinc keeps a HIDDEN member out of calls and still accepts `override` of that source arity.
+/// The hidden JVM method is synthetic, so Java source cannot name it; reflection dispatches
+/// through the override and must not run the hidden body.
+#[test]
+fn hidden_open_member_remains_overridable() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let lib =
+        common::compile_lib("hidden-override", HIDDEN_OPEN).expect("hidden open member library");
+    let main = "import lib.Base\n\
+        class Child : Base() {\n\
+        \x20   override fun limited(n: Int): Int = n + 1\n\
+        \x20   override val value: String = \"child\"\n\
+        \x20   override var count: Int = 7\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val method = Base::class.java.getDeclaredMethod(\"limited\", Int::class.javaPrimitiveType)\n\
+        \x20   val called = method.invoke(Child(), 6) as Int\n\
+        \x20   val visible = Child().limited(1, null)\n\
+        \x20   val child = Child()\n\
+        \x20   val value = Base::class.java.getDeclaredMethod(\"getValue\").invoke(child) as String\n\
+        \x20   Base::class.java.getDeclaredMethod(\"setCount\", Int::class.javaPrimitiveType).invoke(child, 9)\n\
+        \x20   val count = Base::class.java.getDeclaredMethod(\"getCount\").invoke(child) as Int\n\
+        \x20   return if (called == 7 && visible == 1 && value == \"child\" && count == 9) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_box(main, "Child", &[lib, stdlib], Some(jdk.as_path())).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn hidden_property_is_not_a_read_candidate() {
+    let lib =
+        common::compile_lib("hidden-property-read", HIDDEN_OPEN).expect("hidden property library");
+    let consumer = "import lib.Base\n\
+        fun read(base: Base): String = base.value\n";
+    let result =
+        common::compiler_diagnostics(&[("Read.kt", consumer)], &[lib, common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "hidden property read");
+}
+
+/// A shorter prefix of a function with a default is not an override unless that prefix is itself
+/// a HIDDEN declaration. A classpath HIDDEN member that is final by Kotlin's default is not
+/// overridable.
+#[test]
+fn default_argument_prefix_and_hidden_final_override_nothing() {
+    let classpath = [common::stdlib_jar()];
+    let prefix = "open class Base {\n\
+        \x20   open fun f(a: Int, b: Int = 0): Int = a + b\n\
+        }\n\
+        class Child : Base() {\n\
+        \x20   override fun f(a: Int): Int = a\n\
+        }\n";
+    let prefix_result = common::compiler_diagnostics(&[("Prefix.kt", prefix)], &classpath);
+    common::expect_identical_rejection(&prefix_result, "default argument prefix");
+    let lib = "package lib\n\
+        open class Base {\n\
+        \x20   @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN)\n\
+        \x20   fun fixed(n: Int): Int = n\n\
+        \x20   @Deprecated(\"gone\", level = DeprecationLevel.HIDDEN)\n\
+        \x20   val fixedValue: String = \"base\"\n\
+        }\n";
+    let lib = common::compile_lib("hidden-final", lib).expect("hidden final member library");
+    let consumer = "import lib.Base\n\
+        class Child : Base() {\n\
+        \x20   override fun fixed(n: Int): Int = n + 1\n\
+        \x20   override val fixedValue: String = \"child\"\n\
+        }\n";
+    let final_result =
+        common::compiler_diagnostics(&[("Child.kt", consumer)], &[lib, common::stdlib_jar()]);
+    common::expect_identical_rejection(&final_result, "hidden final member");
+}
+
+/// A HIDDEN declaration participates in override matching with its complete signature. A sibling
+/// of the same source arity but a different parameter type cannot make an unrelated override legal.
+#[test]
+fn hidden_same_arity_incompatible_signature_overrides_nothing() {
+    let lib =
+        common::compile_lib("hidden-override-type", HIDDEN_OPEN).expect("hidden signature library");
+    let consumer = "import lib.Base\n\
+        class Child : Base() {\n\
+        \x20   override fun limited(n: String): Int = n.length\n\
+        }\n";
+    let result =
+        common::compiler_diagnostics(&[("Child.kt", consumer)], &[lib, common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "hidden incompatible same-arity override");
+}
+
+const HIDDEN_GENERIC: &str = "package lib\n\
+    open class GenericBase<T> {\n\
+    \x20   @Deprecated(\"hidden\", level = DeprecationLevel.HIDDEN)\n\
+    \x20   open fun convert(value: T): String = \"base\"\n\
+    }\n\
+    open class GenericMid<U> : GenericBase<List<U>>()\n";
+
+/// The common hierarchy specializes the retained declaration before matching the override. The
+/// generated bridge must still dispatch a call through the erased hidden base method.
+#[test]
+fn inherited_hidden_generic_signature_is_specialized() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let lib = common::compile_lib("hidden-override-generic", HIDDEN_GENERIC)
+        .expect("hidden generic library");
+    let main = "import lib.GenericBase\n\
+        import lib.GenericMid\n\
+        class Child : GenericMid<String>() {\n\
+        \x20   override fun convert(value: List<String>): String = value.single()\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val method = GenericBase::class.java.getDeclaredMethod(\"convert\", Object::class.java)\n\
+        \x20   return method.invoke(Child(), listOf(\"OK\")) as String\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_box(main, "Child", &[lib, stdlib], Some(jdk.as_path())).as_deref(),
+        Some("OK")
+    );
+}
