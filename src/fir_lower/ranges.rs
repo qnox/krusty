@@ -181,13 +181,14 @@ impl BodyLowering<'_> {
             FirRangeOperation::DownTo => (end_slot, start_slot, false),
         };
         let result = if negated {
-            let below = self.comparison(IrBinOp::Lt, value_slot, low);
+            let below = self.comparison(IrBinOp::Lt, comparison_ty, value_slot, low);
             let above = self.comparison(
                 if high_strict {
                     IrBinOp::Ge
                 } else {
                     IrBinOp::Gt
                 },
+                comparison_ty,
                 value_slot,
                 high,
             );
@@ -197,13 +198,14 @@ impl BodyLowering<'_> {
                 rhs: above,
             })
         } else {
-            let above_low = self.comparison(IrBinOp::Le, low, value_slot);
+            let above_low = self.comparison(IrBinOp::Le, comparison_ty, low, value_slot);
             let below_high = self.comparison(
                 if high_strict {
                     IrBinOp::Lt
                 } else {
                     IrBinOp::Le
                 },
+                comparison_ty,
                 value_slot,
                 high,
             );
@@ -231,9 +233,14 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn comparison(&mut self, operation: IrBinOp, lhs: u32, rhs: u32) -> ExprId {
+    fn comparison(&mut self, operation: IrBinOp, ty: Ty, lhs: u32, rhs: u32) -> ExprId {
         let lhs = self.ir.add_expr(IrExpr::GetValue(lhs));
         let rhs = self.ir.add_expr(IrExpr::GetValue(rhs));
+        // These reads are synthesized from temporaries declared above, rather than lowered from
+        // source FIR expressions. Preserve the selected range-comparison type on each operand so
+        // targets choose only its representation.
+        self.ir.logical_types.insert(lhs, ty);
+        self.ir.logical_types.insert(rhs, ty);
         self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: operation,
             lhs,

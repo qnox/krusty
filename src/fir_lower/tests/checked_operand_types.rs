@@ -44,3 +44,19 @@ fn generated_data_class_equality_records_declared_field_types() {
         [(Some(Ty::Int), Some(Ty::Int))]
     );
 }
+
+#[test]
+fn generated_range_membership_records_the_comparison_type() {
+    let ir = lower_single_source(
+        "fun contains(value: Int): Boolean = value in 1..3\n",
+        "CheckedRangeMembershipOperands",
+    );
+
+    assert_eq!(
+        primitive_operands(&ir, IrBinOp::Le),
+        [
+            (Some(Ty::Int), Some(Ty::Int)),
+            (Some(Ty::Int), Some(Ty::Int)),
+        ]
+    );
+}
