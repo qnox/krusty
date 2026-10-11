@@ -1,8 +1,9 @@
 //! Import-scope ownership and callable views over one scope-tower level.
 
-use super::{classifier_scope, imported_object_member_symbols};
+use super::{classifier_scope, imported_object_member_symbols, SymbolResolver};
 use crate::libraries::{
-    Callables, FunctionInfo, FunctionSet, Origin, PropertyInfo, PropertySet, ResolvedSymbols,
+    Callables, FunctionInfo, FunctionSet, Origin, PropKind, PropertyInfo, PropertySet,
+    ResolvedSymbols,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
@@ -317,6 +318,32 @@ pub(super) fn level_properties(
     symbols
         .iter()
         .flat_map(|record| record.callables.properties().iter())
+}
+
+impl SymbolResolver<'_> {
+    /// The top-level properties named `name` at the nearest scope level that declares a visible
+    /// one: the property facet of [`SymbolResolver::select_symbol`] on a receiver-less name,
+    /// without collecting and selecting among the same name's function overloads.
+    pub(crate) fn top_level_properties(&self, name: &str) -> Vec<PropertyInfo> {
+        self.nearest_top_level_properties(self.symbol_levels_in_scope(name))
+    }
+
+    pub(super) fn nearest_top_level_properties(
+        &self,
+        levels: Vec<Vec<Rc<ResolvedSymbols>>>,
+    ) -> Vec<PropertyInfo> {
+        levels
+            .iter()
+            .map(|symbols| {
+                level_properties(symbols)
+                    .filter(|property| property.kind == PropKind::TopLevel)
+                    .filter(|property| self.property_visible(property))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .find(|properties| !properties.is_empty())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
