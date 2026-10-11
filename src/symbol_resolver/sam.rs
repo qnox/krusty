@@ -57,6 +57,8 @@ pub struct SamSignature {
 /// One inherited declaration of an abstract-method candidate.
 struct CollectedDeclaration {
     depth: u32,
+    /// The declaring interface carries a sam-with-receiver annotation.
+    receiver_convention: bool,
     member: LibraryMember,
     params: Vec<Ty>,
     contravariant_params: Vec<bool>,
@@ -86,6 +88,7 @@ pub(crate) fn semantic_sam_signature(
         return None;
     }
     let kotlin_interface = target_classifier.is_kotlin;
+    let receiver_annotations = source.sam_with_receiver_annotations();
 
     let mut declarations: Vec<OverrideSlot> = Vec::new();
     for (applied, depth) in receiver_hierarchy(source, target) {
@@ -122,6 +125,13 @@ pub(crate) fn semantic_sam_signature(
         // type's own `invoke`, whichever provider published it: the same normalized method as the
         // `invoke` a functional supertype contributes below.
         let function_type = classifier.represents_function_type();
+        // kotlinc's sam-with-receiver plugin reads the annotations the interface DECLARING the
+        // abstract method carries itself: neither a meta-annotation nor one on a subinterface.
+        let receiver_convention = !function_type
+            && classifier
+                .annotations
+                .iter()
+                .any(|annotation| receiver_annotations.contains(&annotation.annotation));
         for member in &classifier.members {
             collect_member(
                 member,
@@ -131,7 +141,10 @@ pub(crate) fn semantic_sam_signature(
                     member_declaration(member)
                 },
                 depth,
-                depth == 0 && classifier.is_kotlin,
+                MemberRole {
+                    retain_direct_kotlin_object_method: depth == 0 && classifier.is_kotlin,
+                    receiver_convention,
+                },
                 &specialization,
                 &mut declarations,
             );
@@ -156,7 +169,10 @@ pub(crate) fn semantic_sam_signature(
                 &invoke,
                 Some(SamMethodDeclaration::FunctionTypeInvoke),
                 depth,
-                false,
+                MemberRole {
+                    retain_direct_kotlin_object_method: false,
+                    receiver_convention: false,
+                },
                 &specialization,
                 &mut declarations,
             );
@@ -195,6 +211,7 @@ pub(crate) fn semantic_sam_signature(
             contravariant_params,
             ret,
             declaration,
+            receiver_convention,
             ..
         } = nearest.into_iter().next()?;
         if abstract_method
@@ -205,15 +222,21 @@ pub(crate) fn semantic_sam_signature(
                 ret,
                 declaration,
                 overridden_results,
+                receiver_convention,
             ))
             .is_some()
         {
             return None;
         }
     }
-    let (sam, params, contravariant_params, ret, declaration, overridden_results) =
+    let (sam, params, contravariant_params, ret, declaration, overridden_results, convention) =
         abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
+    // Under the convention the first value parameter (after any context parameters) is the
+    // converted function's receiver: the slot an extension method's receiver takes. An abstract
+    // method that already declares a receiver keeps its own shape.
+    let has_receiver =
+        sam.is_member_extension() || (convention && params.len() > sam.context_count);
     Some(SamSignature {
         internal,
         method: sam.name.clone(),
@@ -224,7 +247,7 @@ pub(crate) fn semantic_sam_signature(
         declared_params: sam.params.clone(),
         declared_ret: sam.ret,
         context_count: sam.context_count,
-        has_receiver: sam.is_member_extension(),
+        has_receiver,
         suspend: sam.suspend(),
         overridden_results,
         kotlin_interface,
@@ -267,14 +290,27 @@ fn member_declaration(member: &LibraryMember) -> Option<SamMethodDeclaration> {
     }
 }
 
+/// How an abstract-method candidate's declaring classifier shapes it.
+#[derive(Clone, Copy)]
+struct MemberRole {
+    /// The member is the Kotlin fun interface's own redeclaration of an `Any` member.
+    retain_direct_kotlin_object_method: bool,
+    /// The declaring interface carries a sam-with-receiver annotation.
+    receiver_convention: bool,
+}
+
 fn collect_member(
     member: &LibraryMember,
     declaration: Option<SamMethodDeclaration>,
     depth: u32,
-    retain_direct_kotlin_object_method: bool,
+    role: MemberRole,
     specialization: &SamCaptureSpecialization<'_>,
     declarations: &mut Vec<OverrideSlot>,
 ) {
+    let MemberRole {
+        retain_direct_kotlin_object_method,
+        receiver_convention,
+    } = role;
     // A public `Any`-shaped member inherited by the interface does not create a SAM method.
     // Kotlin does, however, allow the fun interface itself to redeclare that shape abstractly
     // (`fun interface F { override fun toString(): String }`).  The declaration at depth zero is
@@ -326,6 +362,7 @@ fn collect_member(
     });
     let collected = CollectedDeclaration {
         depth,
+        receiver_convention,
         member: member.clone(),
         params: params.clone(),
         contravariant_params,

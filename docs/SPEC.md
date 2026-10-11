@@ -10189,7 +10189,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every native extension explicitly (`PluginRegistry::every_native_extension`); the Bazel worker and
   `krusty-build` refuse plugin flags, so their compiles now match kotlinc without the plugin.
   Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the
-  sam-with-receiver and Compose jars wherever the reference distribution ships them, fail; so does a `-P` for an
+  Compose jar wherever the reference distribution ships it, fail; so does a `-P` for an
   unknown id; serialization with and without the plugin emits kotlinc's class set; comma lists; a
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
   `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
@@ -10274,6 +10274,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's), `plugins::noarg` and `plugins::registry` unit tests
   (`noarg_resolves_to_native_and_reads_its_options`,
   `an_unimplemented_option_setting_fails_the_compile`).
+- **Sam-with-receiver converts a lambda with the abstract method's first parameter as its
+  receiver.** `-Xplugin=sam-with-receiver-compiler-plugin.jar` (registrar
+  `SamWithReceiverComponentRegistrar`) with `-P plugin:org.jetbrains.kotlin.samWithReceiver:annotation=<fqname>`
+  runs krusty's native convention. When the interface that DECLARES a SAM conversion's abstract
+  method carries one of the annotations itself, the converted function type takes that method's
+  first value parameter (after any context parameters) as its receiver: the lambda reads it as
+  `this`, its implementation names it `$this$<callee>`, and it has no `it`. kotlinc 2.4.20 reads
+  only the declaring interface's own annotations (`getResolvedAnnotationClassIds`), so neither a
+  meta-annotation nor an annotation on a subinterface that inherits the method applies, while a
+  subinterface inheriting an annotated interface's method does. Java interfaces and Kotlin `fun
+  interface`s alike, through a SAM-converted argument and a SAM constructor; a method with no
+  value parameters is unchanged. kotlinc's `SUPPORTED_PRESETS` is empty, so `preset=` adds
+  nothing. An abstract method that already declares an extension receiver keeps its own shape in
+  krusty; kotlinc 2.4.20 instead drops that receiver and makes the first value parameter the
+  receiver. The convention is a frontend fact (`SymbolSource::sam_with_receiver_annotations`, read
+  by `symbol_resolver::semantic_sam_signature`), so checking, lowering and the backend see the same
+  receiver function type. Tests: `tests/sam_with_receiver_plugin_e2e.rs` (annotated Java and
+  Kotlin interfaces, an inherited annotated method, a meta-annotation, an annotated subinterface of
+  an unannotated method, a parameterless method, byte-identical to kotlinc and run),
+  `plugins::sam_with_receiver` and `plugins::registry` unit tests
+  (`sam_with_receiver_resolves_to_native_and_reads_its_options`).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,

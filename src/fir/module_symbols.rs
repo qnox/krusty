@@ -285,6 +285,16 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.inheritance.is_extensible =
             !flags.has(DeclarationFlags::INTERFACE) && !flags.has(DeclarationFlags::FINAL);
         projected.sam_eligible = flags.has(DeclarationFlags::FUN_INTERFACE);
+        projected.annotations = self
+            .index
+            .declaration_annotations(owner)
+            .iter()
+            .map(|&annotation| crate::types::ResolvedAnnotation {
+                annotation,
+                arguments: Vec::new(),
+                facts: Default::default(),
+            })
+            .collect();
         let mut supertype_templates = classifier_header
             .declared_supertypes()
             .map(|supertype| supertype.get())
@@ -1714,6 +1724,10 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        self.index.sam_with_receiver_annotations()
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.index.source_package_child_exists(parent, name)
     }

@@ -1233,6 +1233,10 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &self.syms.sam_with_receiver_annotations
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         crate::types::existing_type_name_child(parent, name)
             .is_some_and(|package| self.syms.source_packages.contains(&package))

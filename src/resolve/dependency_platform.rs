@@ -346,6 +346,10 @@ impl SymbolSource for DependencyPlatform {
             .or_else(|| self.platform.generated_serializer_singleton(classifier))
     }
 
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &self.symbols.sam_with_receiver_annotations
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
         if let Some(merged) = self
             .symbols_memo
