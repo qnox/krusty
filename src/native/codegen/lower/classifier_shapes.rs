@@ -4,6 +4,7 @@
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::ClassId;
+use crate::ir::TypeCheckRole;
 use crate::types::{ClassifierRole, CollectionKind, MappedCollection, Ty, TypeName};
 
 use super::super::super::intrinsics::CollectionShape;
@@ -328,11 +329,13 @@ pub(super) fn is_list_check_type(
     )
 }
 
-/// The native runtime marker for a published non-suspend function classifier.
-pub(super) fn function_type_descriptor(
-    classifiers: &dyn BackendClassifierSource,
-    internal: TypeName,
-) -> Option<&'static str> {
+/// The native runtime marker for a checked function role.
+///
+/// Native function values publish one marker per ordinary source arity through 22. Suspend
+/// functions have a distinct semantic role, but this runtime does not yet construct suspend
+/// function values or publish suspend markers. Wider ordinary functions likewise have no marker,
+/// so both remain an explicit decline instead of being mistaken for another function family.
+pub(super) fn function_check_descriptor(role: TypeCheckRole) -> Option<&'static str> {
     const ARITIES: [&str; 23] = [
         "kt_type_function0",
         "kt_type_function1",
@@ -358,13 +361,24 @@ pub(super) fn function_type_descriptor(
         "kt_type_function21",
         "kt_type_function22",
     ];
+    match role {
+        TypeCheckRole::FunctionOfArity(arity) => ARITIES.get(usize::from(arity)).copied(),
+        TypeCheckRole::SuspendFunctionOfArity(_) | TypeCheckRole::MutableCollection(_) => None,
+    }
+}
+
+/// The native runtime marker for a published non-suspend function classifier.
+pub(super) fn function_type_descriptor(
+    classifiers: &dyn BackendClassifierSource,
+    internal: TypeName,
+) -> Option<&'static str> {
     if internal == crate::types::wk::function_root() {
         return Some("kt_type_function");
     }
     let ClassifierRole::FunctionOfArity(arity) = classifiers.classifier(internal)?.role? else {
         return None;
     };
-    ARITIES.get(usize::from(arity)).copied()
+    function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
 }
 
 /// Runtime marker descriptors for dependency interfaces in one class's declared interface graph.
@@ -411,32 +425,7 @@ pub(super) fn runtime_interface_descriptors(
                 CollectionKind::ListIterator => None,
             },
             Some(ClassifierRole::FunctionOfArity(arity)) => {
-                const ARITIES: [&str; 23] = [
-                    "kt_type_function0",
-                    "kt_type_function1",
-                    "kt_type_function2",
-                    "kt_type_function3",
-                    "kt_type_function4",
-                    "kt_type_function5",
-                    "kt_type_function6",
-                    "kt_type_function7",
-                    "kt_type_function8",
-                    "kt_type_function9",
-                    "kt_type_function10",
-                    "kt_type_function11",
-                    "kt_type_function12",
-                    "kt_type_function13",
-                    "kt_type_function14",
-                    "kt_type_function15",
-                    "kt_type_function16",
-                    "kt_type_function17",
-                    "kt_type_function18",
-                    "kt_type_function19",
-                    "kt_type_function20",
-                    "kt_type_function21",
-                    "kt_type_function22",
-                ];
-                ARITIES.get(usize::from(arity)).copied()
+                function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
             }
             Some(ClassifierRole::SuspendFunctionOfArity(_)) | None => {
                 standard_interface_descriptor(internal)
@@ -633,5 +622,25 @@ mod tests {
         );
         assert!(is_comparable(type_name("kotlin/Comparable")));
         assert!(!is_comparable(type_name("sample/Comparable")));
+    }
+
+    #[test]
+    fn native_function_check_markers_follow_runtime_role_limits() {
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::FunctionOfArity(0)),
+            Some("kt_type_function0")
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::FunctionOfArity(22)),
+            Some("kt_type_function22")
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::FunctionOfArity(23)),
+            None
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::SuspendFunctionOfArity(0)),
+            None
+        );
     }
 }
