@@ -198,6 +198,7 @@ use receiver_function_values::ImplicitReceiverFunctionInvoke;
 mod receiver_tower;
 mod receiver_uses;
 mod reflection_locals;
+mod reified_type_arguments;
 mod resolved_type_occurrences;
 mod safe_call_flow;
 mod safe_index;
@@ -7851,6 +7852,8 @@ pub enum ResolvedCall {
         /// Exact declaration type-parameter ordinals carrying `reified`, retained independently of
         /// provider origin so checked FIR can classify runtime substitutions.
         reified_type_parameter_ordinals: Box<[u32]>,
+        /// The declaration's own type-parameter identities, by ordinal, for diagnostics.
+        type_parameters: Box<[String]>,
         suspend: bool,
         declared_ret: Option<Ty>,
         overridden_results: Box<[Ty]>,
@@ -35134,6 +35137,7 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     physical_name: String,
     /// Solved method type arguments in formal order. `None` is an unsolved formal.
     type_arguments: Vec<Option<Ty>>,
+    type_parameters: Box<[String]>,
 }
 
 #[derive(Clone)]
@@ -54403,6 +54407,7 @@ impl<'a> Checker<'a> {
         });
         self.check_expression_usage(scope, e);
         self.check_static_access_type_arguments(e);
+        self.check_reified_type_arguments(scope, e);
         self.check_expression_missing_supertypes(e);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();

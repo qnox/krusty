@@ -51,6 +51,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "ForbidUselessTypeArgumentsIn25",
         "type arguments are not allowed when static member is accessed.",
     );
+    file.reified_type_arguments = crate::ast::ReifiedTypeArgumentFeatures {
+        report_in_dnn_and_flexible: features.has("ReportReificationProblemsInDnnAndFlexible"),
+        prohibit_intersection: features.has("ProhibitIntersectionReifiedTypeParameter"),
+        nullable_nothing: features.has("NullableNothingInReifiedPosition"),
+    };
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }

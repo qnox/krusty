@@ -2029,11 +2029,27 @@ pub struct File {
     pub forbid_useless_type_arguments: bool,
     /// Exact per-compilation warning text for the useless-type-argument transition.
     pub type_arguments_not_allowed_warning: Option<String>,
+    /// The language features deciding which reified type arguments are reported, and how.
+    pub reified_type_arguments: ReifiedTypeArgumentFeatures,
     /// `+JvmSupportRecursiveTypeOf`: permit reflective descriptions of non-reified type
     /// parameters whose declared upper bounds contain a cycle.
     pub recursive_type_of: bool,
     /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
     pub opted_in_markers: Vec<String>,
+}
+
+/// The language features kotlinc's reified type-argument checker consults.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReifiedTypeArgumentFeatures {
+    /// `+ReportReificationProblemsInDnnAndFlexible`: a type parameter or an intersection reached
+    /// through a definitely-non-nullable or flexible type is the ordinary error rather than a
+    /// KTLC-399 deprecation warning.
+    pub report_in_dnn_and_flexible: bool,
+    /// `+ProhibitIntersectionReifiedTypeParameter`: an inferred intersection type argument is an
+    /// error rather than a deprecation warning.
+    pub prohibit_intersection: bool,
+    /// `+NullableNothingInReifiedPosition`: `Nothing?` is an accepted reified type argument.
+    pub nullable_nothing: bool,
 }
 
 impl File {
