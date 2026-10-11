@@ -17,12 +17,13 @@ use crate::types::Ty;
 
 // --- Calls --------------------------------------------------------------------------------------
 
-const IDENTITY_AND_CALLER: [Shape; 2] = [("b", &[T::Int], T::Int), ("a", &[T::Int], T::Int)];
+pub(super) const IDENTITY_AND_CALLER: [Shape; 2] =
+    [("b", &[T::Int], T::Int), ("a", &[T::Int], T::Int)];
 
-const IDENTITY_AND_CALLER_SOURCE: &str = "fun b(a: Int): Int {\n return a\n}\n\
+pub(super) const IDENTITY_AND_CALLER_SOURCE: &str = "fun b(a: Int): Int {\n return a\n}\n\
      fun a(a: Int): Int {\n return b(a)\n}\n";
 
-fn identity_and_caller(name: &str, body: &mut Body) -> Option<Vec<KlibIrStatement>> {
+pub(super) fn identity_and_caller(name: &str, body: &mut Body) -> Option<Vec<KlibIrStatement>> {
     let a = body.param(0);
     let value = match name {
         "a" => body.call("b", vec![a], T::Int),
@@ -152,15 +153,6 @@ fn a_callee_without_a_body_declines_by_its_own_reason() {
 }
 
 #[test]
-fn a_callee_no_frozen_selection_describes_declines_by_name() {
-    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
-    assert_eq!(
-        demo.declined("a", &["a"]),
-        "the KLIB body of `demo.a` (it calls `demo.b`, which no selected declaration describes)"
-    );
-}
-
-#[test]
 fn a_callee_two_frozen_selections_describe_declines_by_name() {
     let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
     assert_eq!(
@@ -170,7 +162,7 @@ fn a_callee_two_frozen_selections_describe_declines_by_name() {
 }
 
 #[test]
-fn a_call_of_an_already_lowered_function_still_needs_its_frozen_selection() {
+fn a_call_of_an_already_lowered_function_follows_the_active_selection() {
     let shapes: [Shape; 3] = [
         ("a", &[T::Int], T::Int),
         ("b", &[T::Int], T::Int),
@@ -189,12 +181,6 @@ fn a_call_of_an_already_lowered_function_still_needs_its_frozen_selection() {
     let functions = unit.ir().functions.len();
     let expressions = unit.ir().exprs.len();
     assert_eq!(
-        demo.lower(&mut unit, "c", &[])
-            .expect_err("`b` is not selected for this lowering")
-            .to_string(),
-        "the KLIB body of `demo.c` (it calls `demo.b`, which no selected declaration describes)"
-    );
-    assert_eq!(
         demo.lower(&mut unit, "c", &["b", "b"])
             .expect_err("`b` is ambiguous for this lowering")
             .to_string(),
@@ -202,6 +188,14 @@ fn a_call_of_an_already_lowered_function_still_needs_its_frozen_selection() {
     );
     assert_eq!(unit.ir().functions.len(), functions);
     assert_eq!(unit.ir().exprs.len(), expressions);
+    // With no selection of its own, the call links to the function already in the unit, which its
+    // serialized header describes as the earlier selection did.
+    let c = demo.lower(&mut unit, "c", &[]).expect("lowers");
+    assert_eq!(unit.ir().functions.len(), functions + 1);
+    assert_eq!(
+        lowered_body(&unit, c),
+        "scope {scope {return@Some(0) call b(v0!: Int): Int: Nothing}: Nothing}"
+    );
     validated(unit.ir());
 }
 
@@ -513,7 +507,7 @@ fn a_flat_if_chain_lowers_as_the_source_else_if_chain_does() {
 // --- The Kotlin/Native stdlib -------------------------------------------------------------------
 
 /// The semantic type of the class `kotlin.<name>`.
-fn kotlin(name: &str) -> Ty {
+pub(super) fn kotlin(name: &str) -> Ty {
     semantic_ty(&kotlin_class(name), &HashMap::new())
 }
 
@@ -551,8 +545,8 @@ fn stdlib_structural_equality_lowers_as_its_source_does() {
 }
 
 /// `kotlin.math.max` on `ULong` calls `kotlin.comparisons.maxOf`, whose body the stdlib
-/// serializes with an inlined function block: the caller declines through its callee when the
-/// callee is selected, and by the callee's identity when it is not.
+/// serializes with an inlined function block: the caller declines through its callee, whether a
+/// checked call selected the callee or its serialized header alone describes it.
 #[test]
 fn stdlib_unsigned_max_declines_through_its_callee() {
     let Some(root) = distribution_root() else {
@@ -587,10 +581,11 @@ fn stdlib_unsigned_max_declines_through_its_callee() {
     assert_unit_is_empty(&unit);
     assert_eq!(
         unit.lower_function(callable, &bodies, &KlibCalleeFacts::default())
-            .expect_err("the callee is not selected")
+            .expect_err("the callee declines")
             .to_string(),
         "the KLIB body of `kotlin.math.max` \
-         (it calls `kotlin.comparisons.maxOf`, which no selected declaration describes)"
+         (it reaches the KLIB body of `kotlin.comparisons.maxOf` \
+         (it uses a block of a compiler-introduced form))"
     );
     assert_unit_is_empty(&unit);
 }
