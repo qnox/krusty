@@ -1349,6 +1349,8 @@ fun box(): String = Registry.value()\n";
     let arguments = vec![
         "-d".to_string(),
         reference_output.to_string_lossy().into_owned(),
+        "-module-name".to_string(),
+        "platform".to_string(),
         "-Xmulti-platform".to_string(),
         format!("-Xcommon-sources={}", common_path.to_string_lossy()),
         common_path.to_string_lossy().into_owned(),
