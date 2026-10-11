@@ -145,3 +145,41 @@ fn forbidden_recursion_through_type_parameters_is_an_error() {
         &[],
     );
 }
+
+const SUPPRESSED: &str = "\
+@JvmInline value class T1<T : T1<T>>(@Suppress(\"VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING\") val x: T)
+@Suppress(\"VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING\")
+@JvmInline value class T2<T : T2<T>>(val x: T)
+@JvmInline value class T3<T : T3<T>>(val x: T)
+";
+
+/// The warning's name suppresses it on the parameter that holds it as well as on the class.
+#[test]
+fn recursion_warning_is_suppressed_on_the_parameter_and_the_class() {
+    let expected = [
+        "4:45: warning: value class cannot be recursive. This will become an error \
+                     in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-85848.",
+    ];
+    let result = common::compiler_diagnostics_with_shared_args(
+        &[("ValueClasses.kt", SUPPRESSED)],
+        &[common::stdlib_jar()],
+        &[],
+    );
+    assert!(common::compiler_errors(&result.reference_stderr).is_empty());
+    let kotlinc = common::compiler_warnings(&result.reference_stderr)
+        .into_iter()
+        .map(|warning| {
+            format!(
+                "{}:{}: warning: {}",
+                warning.line, warning.column, warning.message
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(kotlinc, expected);
+    let krusty = common::front_end_diagnostics_located(
+        SUPPRESSED,
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    assert_eq!(krusty, expected);
+}

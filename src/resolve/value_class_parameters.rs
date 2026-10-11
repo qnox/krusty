@@ -141,13 +141,23 @@ impl Checker<'_> {
                     self.diags
                         .error(parameter.ty.span, "value class cannot be recursive.");
                 }
-                Some(Recursion::ViaTypeParameters) => self.report_deprecation_error(
-                    parameter.ty.span,
-                    "ForbidValueClassRecursionViaTypeParameters",
-                    self.file.forbid_value_class_recursion_via_type_parameters,
-                    "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING",
-                    "value class cannot be recursive.",
-                ),
+                Some(Recursion::ViaTypeParameters) => {
+                    // The warning is inside the parameter declaration, so the parameter's own
+                    // `@Suppress` silences it too.
+                    let depth = self.push_declaration_policies(
+                        scope,
+                        &parameter.annotations,
+                        &parameter.annotation_args,
+                    );
+                    self.report_deprecation_error(
+                        parameter.ty.span,
+                        "ForbidValueClassRecursionViaTypeParameters",
+                        self.file.forbid_value_class_recursion_via_type_parameters,
+                        "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING",
+                        "value class cannot be recursive.",
+                    );
+                    self.active_lexical_policies.truncate(depth);
+                }
                 None => {}
             }
         }
