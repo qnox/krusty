@@ -14,7 +14,7 @@ use crate::metadata::semantic::{
 use super::inventory::PackageInventory;
 use super::parameter_defaults::ParameterDefaults;
 use super::{KlibLibraries, KlibLibraryError};
-use crate::metadata::klib_ir::{read_declaration_trees, KlibIrDecodeError};
+use crate::metadata::klib_ir::{read_declaration_trees_where, KlibIrDecodeError};
 
 /// Why the selected libraries could not be published.
 #[derive(Debug)]
@@ -65,20 +65,26 @@ impl KlibLibraries {
     /// Publish every package fragment of the KLIBs at `libraries`, zipped or unpacked.
     pub fn open(libraries: &[PathBuf]) -> Result<Self, KlibLibrariesOpenError> {
         let mut packages = Vec::new();
-        let mut defaults = ParameterDefaults::default();
+        let mut archives = Vec::with_capacity(libraries.len());
         for library in libraries {
             let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
             packages.extend(package_fragments(library, &archive)?);
-            let trees = read_declaration_trees(&archive).map_err(|error| {
-                KlibLibrariesOpenError::Declarations {
-                    library: library.to_path_buf(),
-                    error,
-                }
-            })?;
-            defaults.add_library(&trees);
+            archives.push(archive);
         }
         let mut inventory = PackageInventory::from_packages(packages)
             .map_err(KlibLibrariesOpenError::Declaration)?;
+        // Only a declaration metadata marks as defaulted has a default to read from the IR.
+        let wanted = inventory.defaulted_top_levels();
+        let mut defaults = ParameterDefaults::default();
+        for (library, archive) in libraries.iter().zip(&archives) {
+            let trees =
+                read_declaration_trees_where(archive, |signature| wanted.contains(signature))
+                    .map_err(|error| KlibLibrariesOpenError::Declarations {
+                        library: library.to_path_buf(),
+                        error,
+                    })?;
+            defaults.add_library(&trees);
+        }
         inventory.attach_defaults(&defaults);
         Ok(Self::over(std::rc::Rc::new(inventory)))
     }
