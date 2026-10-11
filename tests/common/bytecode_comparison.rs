@@ -239,11 +239,13 @@ fn compare_with_kotlinc_plugin_request(
             .map(|target| target + 44)
             .unwrap_or_else(|| panic!("unknown -jvm-target {other}")),
     };
+    let jdk = super::common_core::jdk_modules();
+    let jdk = (!krusty_cp_jars.contains(&jdk)).then_some(jdk);
     let classes = match language_settings {
         Some(language_settings) => super::common_core::source_set_compile::compile(
             &[(name, src)],
             krusty_cp_jars,
-            None,
+            jdk.as_deref(),
             Some(class_major),
             Some(language_settings.language_version.metadata_version()),
             language_settings,
@@ -769,7 +771,18 @@ pub fn classes_against_kotlinc_lib_target(
     src: &str,
     jvm_target: Option<u16>,
 ) -> Option<ClassSets> {
-    classes_against_kotlinc_lib_request(name, lib, src, jvm_target, None)
+    classes_against_kotlinc_lib_request(name, lib, &[], src, jvm_target, None)
+}
+
+/// [`classes_against_kotlinc_lib`] with the library compiled under `-java-parameters`, so its
+/// methods carry `MethodParameters`; the consumer is compiled without it.
+pub fn classes_against_kotlinc_java_parameters_lib(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+) -> Option<ClassSets> {
+    let library_options = ["-java-parameters".to_string()];
+    classes_against_kotlinc_lib_request(name, lib, &library_options, src, None, None)
 }
 
 /// [`classes_against_kotlinc_lib`] with the dependency and consumer compiled under the same
@@ -780,12 +793,13 @@ pub fn classes_against_kotlinc_lib_language_settings(
     src: &str,
     language_settings: &krusty::language_settings::LanguageSettings,
 ) -> Option<ClassSets> {
-    classes_against_kotlinc_lib_request(name, lib, src, None, Some(language_settings))
+    classes_against_kotlinc_lib_request(name, lib, &[], src, None, Some(language_settings))
 }
 
 fn classes_against_kotlinc_lib_request(
     name: &str,
     lib: &[(&str, &str)],
+    library_options: &[String],
     src: &str,
     jvm_target: Option<u16>,
     language_settings: Option<&krusty::language_settings::LanguageSettings>,
@@ -793,7 +807,8 @@ fn classes_against_kotlinc_lib_request(
     let kotlinc_extra = language_settings
         .map(kotlinc_language_options)
         .unwrap_or_default();
-    let library = super::common_core::kotlinc_lib::kotlinc_lib_out_with(lib, &kotlinc_extra)?;
+    let library_arguments = [kotlinc_extra.as_slice(), library_options].concat();
+    let library = super::common_core::kotlinc_lib::kotlinc_lib_out_with(lib, &library_arguments)?;
     let target = jvm_target
         .map(super::common_core::kotlinc_jvm_target_argument)
         .unwrap_or_else(|| "default".to_string());

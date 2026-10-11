@@ -210,13 +210,13 @@ impl Realizer<'_> {
             lhs: current,
             rhs: variables.step,
         };
-        // The signed addition Kotlin promotes the variable to; an unsigned progression's addition
-        // has no signed type of its own to record.
-        let stepped = match ty {
-            Ty::Byte | Ty::Short | Ty::Char | Ty::Int => self.add_checked(step, Ty::Int),
-            Ty::Long => self.add_checked(step, Ty::Long),
-            _ => self.add(step),
+        // The signed addition Kotlin promotes the variable to: an unsigned progression steps its
+        // signed carrier, as `UInt.plus` adds the `Int` it wraps.
+        let sum = match ty {
+            Ty::Long | Ty::ULong => Ty::Long,
+            _ => Ty::Int,
         };
+        let stepped = self.add_checked(step, sum);
         let stepped = if ty == Ty::Char {
             self.range_bound(stepped, ty)
         } else {

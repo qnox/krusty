@@ -299,6 +299,8 @@ mod tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
+        // The handoff records the class's declarations before the JVM lowers it.
+        crate::metadata::class_declarations::record_all(&mut ir);
 
         let run = EmitRun::default();
         let classes = emit_for_test(&ir, "demo/FacadeKt", &run)

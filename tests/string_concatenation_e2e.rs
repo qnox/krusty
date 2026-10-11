@@ -61,9 +61,13 @@ fn a_flattened_concatenation_keeps_kotlin_values() {
                \x20   val s = \"s\" + (\"q\" + x) + n + 'c' + 1L + \"${x}!\" + a.toString()\n\
                \x20   return s\n\
                }\n";
-    let actual =
-        common::compile_and_run_box(src, "string_concatenation", &[common::stdlib_jar()], None)
-            .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        src,
+        "string_concatenation",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "sq7nullc17!null");
 }
 
@@ -105,7 +109,12 @@ fn split_constants_rebuild_their_text() {
          }}\n",
         boundary_constants()
     );
-    let actual = common::compile_and_run_box(&src, "long_constants", &[common::stdlib_jar()], None)
-        .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        &src,
+        "long_constants",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "OK");
 }

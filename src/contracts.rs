@@ -8,8 +8,8 @@ use crate::ast::TypeRef;
 mod description;
 
 pub use description::{
-    CallBinding, Decoded, Description, DescriptionBinder, DescriptionOwner, DslMember, KindBinding,
-    SelectedDslCallable, Term, TermId, TermKind,
+    dsl_member, is_contract_intrinsic, CallBinding, Decoded, Description, DescriptionBinder,
+    DescriptionOwner, DslMember, KindBinding, SelectedDslCallable, Term, TermId, TermKind,
 };
 
 /// A contract whose source type references have all been bound to publishable semantic types.
@@ -47,13 +47,20 @@ impl ResolvedContract {
                     validate(left)?;
                     validate(right)
                 }
-                Condition::IsNull { .. } | Condition::BoolParam(_) | Condition::Const(_) => Ok(()),
+                Condition::IsNull { .. } | Condition::BoolParam { .. } | Condition::Const(_) => {
+                    Ok(())
+                }
             }
         }
 
         for effect in &contract.effects {
-            if let Effect::ConditionalReturns { conclusion, .. } = effect {
-                validate(conclusion)?;
+            match effect {
+                Effect::ConditionalReturns { conclusion, .. }
+                | Effect::HoldsIn {
+                    condition: conclusion,
+                    ..
+                } => validate(conclusion)?,
+                Effect::Returns(_) | Effect::CallsInPlace { .. } => {}
             }
         }
         Ok(Self(std::sync::Arc::new(contract)))
@@ -87,9 +94,11 @@ impl ResolvedContract {
                 .map(|effect| {
                     std::mem::size_of::<Effect>()
                         + match effect {
-                            Effect::ConditionalReturns { conclusion, .. } => {
-                                condition_bytes(conclusion)
-                            }
+                            Effect::ConditionalReturns { conclusion, .. }
+                            | Effect::HoldsIn {
+                                condition: conclusion,
+                                ..
+                            } => condition_bytes(conclusion),
                             Effect::Returns(_) | Effect::CallsInPlace { .. } => 0,
                         }
                 })
@@ -150,6 +159,10 @@ impl Contract {
                         returns: *returns,
                         conclusion: map(conclusion, resolve),
                     },
+                    Effect::HoldsIn { condition, lambda } => Effect::HoldsIn {
+                        condition: map(condition, resolve),
+                        lambda: *lambda,
+                    },
                     e => e.clone(),
                 })
                 .collect(),
@@ -170,6 +183,11 @@ pub enum Effect {
     CallsInPlace {
         param: ParamRef,
         kind: InvocationKind,
+    },
+    /// `<condition> holdsIn lambda` — the condition holds inside the lambda parameter's body.
+    HoldsIn {
+        condition: Condition,
+        lambda: ParamRef,
     },
 }
 
@@ -273,8 +291,12 @@ pub enum Condition {
         ty: ConditionType,
         negated: bool,
     },
-    /// The boolean argument itself — `returns() implies actual` in `require(actual)`.
-    BoolParam(ParamRef),
+    /// The boolean argument itself — `returns() implies actual` in `require(actual)` — or its
+    /// negation (`negated = true`), `returns() implies !actual` in `assertFalse(actual)`.
+    BoolParam {
+        param: ParamRef,
+        negated: bool,
+    },
     Const(bool),
     And(Box<Condition>, Box<Condition>),
     Or(Box<Condition>, Box<Condition>),
@@ -395,7 +417,10 @@ mod tests {
             c.effects,
             vec![Effect::ConditionalReturns {
                 returns: ReturnsValue::Any,
-                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: false,
+                },
             }]
         );
     }

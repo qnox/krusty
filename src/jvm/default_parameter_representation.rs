@@ -57,6 +57,17 @@ pub(super) fn defaulted_primitive_bounds(
         .collect()
 }
 
+/// Whether a `$default` stub takes a defaulted parameter of type `parameter` as its box: a non-null
+/// value class whose carrier can hold `null`, so the stub's placeholder stays distinct from a
+/// supplied value. A sibling-file or dependency declaration follows the rule a same-file one records.
+pub(super) fn default_stub_takes_box(ir: &IrFile, parameter: Ty) -> bool {
+    let Ty::Obj(classifier, _) = parameter else {
+        return false;
+    };
+    crate::jvm::value_classes::boxed_value_class_carrier(ir, classifier)
+        .is_some_and(|carrier| carrier.is_nullable())
+}
+
 /// `(primitive, JDK wrapper)` when `declared` is a non-null type parameter bounded by a JVM
 /// primitive.
 pub(super) fn primitive_bounded_type_parameter(declared: Ty) -> Option<(Ty, Ty)> {

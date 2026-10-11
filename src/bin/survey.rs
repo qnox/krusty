@@ -132,7 +132,7 @@ fn frontend_census_error(
     let platform = JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         features,
         &mut diagnostics,
     );
@@ -202,7 +202,7 @@ fn common_lowering_error(
         .collect::<Vec<_>>();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        JvmLibraries::new(cp.clone()),
+        krusty::frontend::PlatformProvider::jvm(JvmLibraries::new(cp.clone())),
         features,
         &mut diagnostics,
     );
@@ -260,7 +260,7 @@ fn emit_frontend_dependency(
     let platform = JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         features,
         &mut diagnostics,
     );

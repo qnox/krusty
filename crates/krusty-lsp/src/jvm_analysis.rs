@@ -14,7 +14,9 @@ pub(crate) fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> So
     ));
     compiler_analysis::analyze_source_inputs_with_features(
         inputs,
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath),
+        krusty::frontend::PlatformProvider::jvm(krusty::jvm::jvm_libraries::JvmLibraries::new(
+            classpath,
+        )),
         &LangFeatures::new(),
     )
 }

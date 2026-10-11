@@ -54,6 +54,19 @@ struct KObject {
     } as;
 };
 
+/* A string: the built-in object, followed by where the last `s[i]` on non-ASCII text stopped.
+
+   Kotlin indexes a string by UTF-16 unit and the text is stored as UTF-8, so finding unit `i`
+   walks the bytes. A scan `for (i in s.indices) s[i]` would walk from the start each time and be
+   quadratic; resuming from the code point the previous access found makes it linear. The cursor
+   packs that code point's first unit (low half) and first byte (high half) into one word so it is
+   read and written whole: two threads indexing the same string see one or the other position,
+   never a mix. Zero is the start of the text. */
+typedef struct KString {
+    KObject object;
+    uint64_t cursor;
+} KString;
+
 /* A thread that runs Kotlin (`krusty_threads.c`). The first two fields are stored by assembly, at
    the offsets that file asserts. */
 struct KThread {

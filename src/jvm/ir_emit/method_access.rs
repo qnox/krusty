@@ -47,9 +47,11 @@ pub(super) fn declared_method_access(
     } else if instance {
         // `ACC_FINAL` follows the member's own Kotlin modality, whatever the class's: an `open`,
         // `abstract` or non-`final` `override` member stays overridable even in a final class, and
-        // any other member is final even in an open one. A private member is final too. An
-        // interface method is never final (the JVM rejects it: `illegal modifiers 0x12`).
-        let fin = (private || !ir.open_methods.contains(&fid)) && !owner_is_iface;
+        // any other member is final even in an open one. A private member is final by default
+        // too, but not when a compiler plugin (all-open) made `open` its default modality, which
+        // kotlinc emits without `ACC_FINAL`. An interface method is never final (the JVM rejects
+        // it: `illegal modifiers 0x12`).
+        let fin = !ir.open_methods.contains(&fid) && !owner_is_iface;
         let vis = jvm_visibility(visibility);
         vis | if fin { ACC_FINAL } else { 0 }
     } else {

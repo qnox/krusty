@@ -2,6 +2,7 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
+pub(crate) mod class_tables;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
 mod dependency_facts;
@@ -46,6 +47,18 @@ pub struct CheckedIrFile<'a> {
     pub native_plugins: &'a crate::plugins::registry::NativePlugins,
     pub module_name: &'a str,
     pub stems: &'a [String],
+    /// Where each checked node came from. A backend that declines a construct reports it at the
+    /// source span of the node it declined, which common IR identifies by origin.
+    pub origins: &'a crate::fir::OriginStore,
+}
+
+impl CheckedIrFile<'_> {
+    /// The source file (by index into the module's sources) and span a checked node came from.
+    pub fn origin_span(&self, origin: crate::fir::OriginId) -> Option<(u32, crate::diag::Span)> {
+        self.origins
+            .source_span(origin)
+            .map(|(source, span)| (source.raw(), span))
+    }
 }
 
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).
@@ -54,6 +67,10 @@ pub type Artifact = (String, Vec<u8>);
 pub trait Backend {
     /// Cross-file state accumulated while lowering.
     type State: Default;
+
+    /// The platform this backend emits for. The analysis it consumes must have been checked under
+    /// the same platform's rules.
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget;
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR

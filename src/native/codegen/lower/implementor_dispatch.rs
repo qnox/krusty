@@ -5,8 +5,27 @@
 
 use super::*;
 
+/// A class of this file that implements a dependency declaration, and the slot it does it in.
+pub(super) struct ImplementorArm {
+    class: ClassId,
+    slot: u32,
+    params: Vec<ParameterBoundary>,
+    ret: Ty,
+}
+
+/// One parameter of an implementor's arm, at both of its types. The call site hands the operand to
+/// the DEPENDENCY declaration, whose parameter may be a type parameter the implementor fixes:
+/// `Comparable<II>.compareTo` takes a `T`, carried as a reference, where `II.compareTo` takes the
+/// `II` value. The operand crosses that declared boundary first and becomes the implementation's
+/// type from there, as it would through the bridge a virtual call reaches.
+struct ParameterBoundary {
+    declared: Ty,
+    implementation: Ty,
+}
+
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
-    /// The slot that implements one exact dependency declaration in `class`.
+    /// The slot that implements one exact dependency declaration in `class`, each parameter paired
+    /// with `declared`, the parameter types the dependency declaration states.
     ///
     /// Common IR already joined an override to its provider-owned callable identity. Consuming that
     /// edge keeps same-name/same-arity overloads distinct and avoids repeating overload selection in
@@ -15,7 +34,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &self,
         class: ClassId,
         overridden: crate::fir::ExternalCallableId,
-    ) -> Option<(u32, Vec<Ty>, Ty)> {
+        declared: &[Ty],
+    ) -> Option<ImplementorArm> {
         let ir = self.file.ir;
         let class_name = ir.classes[class as usize].fq_name;
         let edge = ir
@@ -36,12 +56,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let key = super::super::super::classes::function_key(ir, owner, function);
         let slot = self.file.model.slot(class, &key)?;
         let declaration = &ir.functions[function as usize];
-        Some((slot, declaration.params.clone(), declaration.ret))
+        // An override takes the parameters of what it overrides, so a count that differs is a
+        // declaration this pairing does not describe.
+        if declaration.params.len() != declared.len() {
+            return None;
+        }
+        let params = declared
+            .iter()
+            .zip(&declaration.params)
+            .map(|(&declared, &implementation)| ParameterBoundary {
+                declared,
+                implementation,
+            })
+            .collect();
+        Some(ImplementorArm {
+            class,
+            slot,
+            params,
+            ret: declaration.ret,
+        })
     }
 
     pub(super) fn dispatch_by_implementor_with(
         &mut self,
-        implementors: &[(ClassId, u32, Vec<Ty>, Ty)],
+        implementors: &[ImplementorArm],
         object: Value,
         arguments: &[(Value, Option<Ty>)],
         answer: Ty,
@@ -52,8 +90,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(clif) = carried.clif() {
             self.builder.append_block_param(merge, clif);
         }
-        for (class, slot, params, declared) in implementors {
-            let descriptor = self.file.classes[*class as usize].descriptor;
+        for arm in implementors {
+            let descriptor = self.file.classes[arm.class as usize].descriptor;
             let type_address = self.data_address(descriptor);
             let matches = self
                 .runtime_call(
@@ -70,15 +108,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             self.continue_in(mine);
             self.builder.seal_block(mine);
             let mut operands = Vec::with_capacity(arguments.len());
-            for ((value, source), target) in arguments.iter().zip(params.iter()) {
-                let Some(converted) = self.convert(*value, *source, *target)? else {
+            for (&(value, source), boundary) in arguments.iter().zip(&arm.params) {
+                let Some(crossing) = self.convert(value, source, boundary.declared)? else {
+                    return Ok(None);
+                };
+                let Some(converted) =
+                    self.convert(crossing, Some(boundary.declared), boundary.implementation)?
+                else {
                     return Ok(None);
                 };
                 operands.push(converted);
             }
-            let produced = self.dispatch(object, *slot, params, *declared, &operands)?;
+            let params: Vec<Ty> = arm.params.iter().map(|p| p.implementation).collect();
+            let produced = self.dispatch(object, arm.slot, &params, arm.ret, &operands)?;
             let produced = match produced {
-                Some(value) => self.convert(value, Some(*declared), answer)?,
+                Some(value) => self.convert(value, Some(arm.ret), answer)?,
                 None => self.unit_where_wanted(answer)?,
             };
             self.jump_to_merge(merge, carried, produced);

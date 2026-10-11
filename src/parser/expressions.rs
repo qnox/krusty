@@ -136,14 +136,17 @@ impl Parser<'_> {
                 };
                 if let Some(negated) = in_negated {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let membership_start = self.tok().span.lo;
                     if negated {
                         self.bump(); // '!'
                     }
+                    let membership = Span::new(membership_start, self.tok().span.hi);
                     self.bump(); // 'in'
                     self.skip_newlines();
                     self.relabel_left_operand(label_mark, None);
                     // the range start binds tighter than `in` (and `..`)
                     let rstart = self.with_lambda_label(None, |parser| parser.parse_bp(9));
+                    let range_token = self.tok().span;
                     let kind = if self.eat(TokenKind::DotDot) {
                         Some(RangeKind::Through)
                     } else if self.eat(TokenKind::DotDotLt) {
@@ -171,6 +174,7 @@ impl Parser<'_> {
                                 },
                                 Span::new(lspan.lo, end.hi),
                             );
+                            self.file.operator_token_spans.insert(lhs.0, range_token);
                         }
                         None => {
                             // `value in container` → `container.contains(value)`.
@@ -190,13 +194,17 @@ impl Parser<'_> {
                                 Span::new(lspan.lo, cspan.hi),
                             );
                             lhs = if negated {
-                                self.file.add_expr(
+                                let negation = self.file.add_expr(
                                     Expr::Unary {
                                         op: UnOp::Not,
                                         operand: call,
                                     },
                                     Span::new(lspan.lo, cspan.hi),
-                                )
+                                );
+                                self.file
+                                    .operator_token_spans
+                                    .insert(negation.0, membership);
+                                negation
                             } else {
                                 call
                             };
@@ -220,6 +228,7 @@ impl Parser<'_> {
                 };
                 if let Some(kind) = rkind {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let operator = self.tok().span;
                     self.bump(); // '..' / '..<'
                     self.skip_newlines();
                     self.relabel_left_operand(label_mark, None);
@@ -229,6 +238,7 @@ impl Parser<'_> {
                         Expr::RangeTo { lo: lhs, hi, kind },
                         Span::new(lspan.lo, rspan.hi),
                     );
+                    self.file.operator_token_spans.insert(lhs.0, operator);
                     continue;
                 }
             }
@@ -1571,9 +1581,11 @@ impl Parser<'_> {
             if negated {
                 self.bump(); // '!'
             }
+            let membership = Span::new(start.lo, self.tok().span.hi);
             self.bump(); // 'in'
             self.skip_newlines();
             let rstart = self.parse_bp(9);
+            let range_token = self.tok().span;
             let kind = if self.eat(TokenKind::DotDot) {
                 Some(RangeKind::Through)
             } else if self.eat(TokenKind::DotDotLt) {
@@ -1591,7 +1603,7 @@ impl Parser<'_> {
                 Some(kind) => {
                     let rend = self.parse_bp(9);
                     let end = self.file.expr_spans[rend.0 as usize];
-                    self.file.add_expr(
+                    let membership = self.file.add_expr(
                         Expr::InRange {
                             value: subj,
                             start: rstart,
@@ -1600,7 +1612,11 @@ impl Parser<'_> {
                             negated,
                         },
                         Span::new(start.lo, end.hi),
-                    )
+                    );
+                    self.file
+                        .operator_token_spans
+                        .insert(membership.0, range_token);
+                    membership
                 }
                 None => {
                     let cspan = self.file.expr_spans[rstart.0 as usize];
@@ -1619,13 +1635,17 @@ impl Parser<'_> {
                         Span::new(start.lo, cspan.hi),
                     );
                     if negated {
-                        self.file.add_expr(
+                        let negation = self.file.add_expr(
                             Expr::Unary {
                                 op: UnOp::Not,
                                 operand: call,
                             },
                             Span::new(start.lo, cspan.hi),
-                        )
+                        );
+                        self.file
+                            .operator_token_spans
+                            .insert(negation.0, membership);
+                        negation
                     } else {
                         call
                     }

@@ -24,7 +24,7 @@ fn editor_diagnostics(source: &str) -> Vec<String> {
         &inputs,
         1,
         1,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &krusty::features::LangFeatures::new(),
         &mut diags,
     );

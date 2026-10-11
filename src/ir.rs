@@ -30,6 +30,15 @@ pub enum IrNodeOrigin {
     },
 }
 
+impl IrNodeOrigin {
+    /// The checked FIR origin this node was lowered from, or was generated for.
+    pub fn fir_origin(self) -> crate::fir::OriginId {
+        match self {
+            Self::Fir(origin) | Self::Synthetic { cause: origin, .. } => origin,
+        }
+    }
+}
+
 mod annotations;
 mod bindings;
 mod bottom_values;
@@ -107,10 +116,12 @@ pub use constructors::{
     IrJvmValueClassSecondaryCtor,
 };
 pub use constructors::{
+    IrCheckedConstructorTarget, IrExternalConstructorTarget, IrSecondaryCtor, IrSecondaryCtorLines,
+};
+pub use constructors::{
     IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction,
     IrCustomSerializerConstructorTarget,
 };
-pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
@@ -122,7 +133,8 @@ pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
-    IrModuleClassifier, IrModuleMemberAccess, IrModuleSource,
+    IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
+    IrModuleSource,
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
@@ -222,36 +234,6 @@ pub struct IrCheckedEnumEntryBody {
     pub ordinal: u32,
     pub name: String,
     pub construction: ExprId,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum IrCheckedConstructorTarget {
-    Module(crate::fir::CallableId),
-    External {
-        declaration: crate::fir::ExternalCallableId,
-        classifier: TypeName,
-        parameters: Vec<Ty>,
-    },
-}
-
-/// Exact dependency constructor selected by checked FIR, with an optional backend realization.
-///
-/// `declaration` is provider-neutral and survives common lowering. A target backend fills
-/// `descriptor` from that identity before emission; common lowering never derives a physical ABI
-/// from the call site's specialized semantic parameter types.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IrExternalConstructorTarget {
-    pub declaration: crate::fir::ExternalCallableId,
-    pub descriptor: Option<String>,
-}
-
-impl IrExternalConstructorTarget {
-    pub fn unresolved(declaration: crate::fir::ExternalCallableId) -> Self {
-        Self {
-            declaration,
-            descriptor: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1010,6 +992,9 @@ pub struct IrClass {
     /// classes must not be published as declared nested classifiers in language metadata, even when
     /// their backend name happens to look nested.
     pub is_source_declared: bool,
+    /// A classifier the compiler generated for a source declaration (the companion a compiler
+    /// plugin gives a class). It is declared with no source file.
+    pub is_compiler_generated: bool,
     /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
     /// The executable scope a local, anonymous or generated class is declared in, recorded as an
@@ -1239,6 +1224,7 @@ impl IrClass {
         Self {
             fq_name,
             is_source_declared: false,
+            is_compiler_generated: false,
             is_anonymous_object: false,
             enclosure: None,
             is_inner_class: false,
@@ -1358,6 +1344,7 @@ impl IrClass {
         Self {
             fq_name: header.classifier,
             is_source_declared: true,
+            is_compiler_generated: flags.has(crate::fir::DeclarationFlags::COMPILER_GENERATED),
             is_anonymous_object: flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT),
             enclosure: None,
             is_inner_class: flags.has(crate::fir::DeclarationFlags::INNER),
@@ -1671,6 +1658,8 @@ pub struct IrFile {
     /// Referenced current-module singleton classifiers. Backends choose their storage field from
     /// this semantic singleton/companion shape without querying frontend declarations.
     pub referenced_module_classifiers: std::collections::HashMap<TypeName, IrModuleClassifier>,
+    /// Selected module constructors and their declaration records.
+    pub module_constructions: IrModuleConstructions,
     /// Complete checked applied hierarchy for every source classifier realized in this file.
     /// Common lowering copies it from the stable FIR index; target passes may inspect target-specific
     /// representation rules but must not reconstruct semantic inheritance through frontend lookup.
@@ -1823,6 +1812,10 @@ pub struct IrFile {
     /// without scanning classes or recovering ownership from its generated name.
     pub(crate) class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
     pub classes: Vec<IrClass>,
+    /// Exact generated-class identities keyed by their semantic role within a source owner.
+    generated_classes: std::collections::HashMap<(TypeName, IrGeneratedClassRole), ClassId>,
+    /// Exact generated-function identities keyed by their semantic role within a class.
+    generated_functions: std::collections::HashMap<(TypeName, IrGeneratedFunctionRole), FunId>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:
         std::collections::HashMap<(TypeName, IrSecondaryConstructorRole), u32>,
@@ -2090,6 +2083,13 @@ pub struct IrFile {
     pub extension_receiver_fns: std::collections::HashSet<u32>,
     /// Members this file's `companion { … }` blocks declared, placed on their classes.
     pub companion_blocks: IrCompanionBlocks,
+    /// Each class's Kotlin declaration record, built from the checked IR at the backend handoff,
+    /// before any target lowering rewrites a declaration. `None` for a class the record cannot
+    /// describe.
+    pub(crate) class_declarations: std::collections::HashMap<
+        TypeName,
+        Option<crate::metadata::class_declarations::ClassDeclarationRecord>,
+    >,
     /// Function id → how many of its LEADING physical parameters are context parameters. Class
     /// `@Metadata` is built from the IR alone, so this is the only carrier telling it to record them
     /// as `Function.context_parameter` (field 13) rather than as ordinary value parameters — without
@@ -2691,6 +2691,14 @@ pub struct IrAppliedClassifier {
 }
 
 impl IrFile {
+    /// The checked FIR origin of an expression lowering recorded one for; `None` for a node a
+    /// later pass built.
+    pub fn node_origin(&self, expression: ExprId) -> Option<crate::fir::OriginId> {
+        self.fir_origins
+            .get(&expression)
+            .map(|origin| origin.fir_origin())
+    }
+
     /// A method's Kotlin declaration visibility. Public is the compact default for generated and
     /// ordinary declarations; every non-public source or generated method is recorded explicitly.
     pub fn method_visibility(&self, function: FunId) -> crate::types::Visibility {
@@ -2745,7 +2753,11 @@ impl IrFile {
     }
 
     pub fn class_const(&mut self, internal: Option<&str>) -> ExprId {
-        let internal = internal.map(crate::types::type_name);
+        self.class_const_name(internal.map(crate::types::type_name))
+    }
+
+    /// A class literal whose classifier is already resolved.
+    pub fn class_const_name(&mut self, internal: Option<TypeName>) -> ExprId {
         self.add_expr(IrExpr::ClassConst { internal })
     }
 
@@ -2755,7 +2767,16 @@ impl IrFile {
         name: impl Into<String>,
         descriptor: impl Into<String>,
     ) -> ExprId {
-        let owner = crate::types::type_name(owner);
+        self.external_static_field_name(crate::types::type_name(owner), name, descriptor)
+    }
+
+    /// A static field read whose owner is already resolved.
+    pub fn external_static_field_name(
+        &mut self,
+        owner: TypeName,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+    ) -> ExprId {
         self.add_expr(IrExpr::ExternalStaticField {
             owner,
             name: name.into(),
@@ -2784,7 +2805,16 @@ impl IrFile {
         ctor_desc: impl Into<String>,
         args: Vec<ExprId>,
     ) -> ExprId {
-        let internal = crate::types::type_name(internal);
+        self.new_external_name(crate::types::type_name(internal), ctor_desc, args)
+    }
+
+    /// An external construction whose classifier is already resolved.
+    pub fn new_external_name(
+        &mut self,
+        internal: TypeName,
+        ctor_desc: impl Into<String>,
+        args: Vec<ExprId>,
+    ) -> ExprId {
         self.add_expr(IrExpr::New {
             internal,
             args,
@@ -2890,7 +2920,9 @@ pub(crate) use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
-pub(crate) use generated_members::IrValueClassAnyMember;
+pub(crate) use generated_members::{
+    IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember,
+};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,

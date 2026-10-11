@@ -9,6 +9,12 @@ use super::*;
 /// Project `@Suppress` visibility flags onto stable declarations after annotation names have been
 /// resolved. Signature solving runs without source AST ownership, so it consumes this compact fact;
 /// source spellings and annotation expression ids do not cross the boundary.
+///
+/// A suppression is lexical: it holds for the annotated element and everything written inside it.
+/// Each declaration's fact is therefore the policy in force at that declaration — its file's, its
+/// lexically enclosing declarations', and its own applications — so a supertype, a member
+/// signature, or a nested classifier header reads one declaration-owned policy, exactly as the body
+/// checker reads the policy stack it opened for the same declarations.
 pub(in crate::resolve) fn collect_stable_visibility_suppressions(
     table: &mut SymbolTable,
     headers: Option<&crate::fir::StreamedHeaderModule>,
@@ -18,10 +24,19 @@ pub(in crate::resolve) fn collect_stable_visibility_suppressions(
     };
     for stub in &headers.stubs {
         let mut suppressions = VisibilitySuppressions::default();
-        for application in headers
-            .file_visibility_suppressions(stub.source)
-            .iter()
-            .chain(headers.declaration_visibility_suppressions(stub.id))
+        let lexical_declarations = std::iter::successors(Some(stub.id), |declaration| {
+            headers
+                .declarations
+                .anchor(*declaration)
+                .and_then(|anchor| anchor.owner)
+        });
+        for application in
+            headers
+                .file_visibility_suppressions(stub.source)
+                .iter()
+                .chain(lexical_declarations.flat_map(|declaration| {
+                    headers.declaration_visibility_suppressions(declaration)
+                }))
         {
             let annotation = AnnotationRef {
                 name: String::new(),

@@ -246,7 +246,7 @@ impl<'a> FileLowering<'a> {
             // What the body takes beyond the captures is what a caller supplies. A SUSPEND lambda's
             // body takes a continuation nobody here can pass, and that is what this catches.
             let Some(arity) = body.params.len().checked_sub(captures.len()) else {
-                return Err(format!(
+                return Err(declined!(
                     "a function value whose body takes {} parameters for {} captures",
                     body.params.len(),
                     captures.len()
@@ -257,7 +257,7 @@ impl<'a> FileLowering<'a> {
             } = &self.ir.exprs[index]
             {
                 if usize::from(*declared) != arity {
-                    return Err(format!(
+                    return Err(declined!(
                         "a lambda of arity {declared} whose body takes {} parameters for {} \
                          captures",
                         body.params.len(),
@@ -471,10 +471,10 @@ impl<'a> FileLowering<'a> {
         capture_offsets: &[u32],
     ) -> Result<(Vec<FuncId>, Vec<DataId>, String), Unsupported> {
         if target.suspend {
-            return Err("a suspend functional interface".to_string());
+            return Err("a suspend functional interface".into());
         }
         let Some(interface) = self.ir.class_id_by_name(target.classifier) else {
-            return Err(format!(
+            return Err(declined!(
                 "a functional interface declared outside this file (`{}`)",
                 target.classifier.render()
             ));
@@ -540,12 +540,12 @@ impl<'a> FileLowering<'a> {
                 | model::Slot::Bridge { .. }
                 | model::Slot::FunctionBridge { .. }
                 | model::Slot::AccessorBridge { .. } => {
-                    return Err("a functional interface with a synthesized member".to_string())
+                    return Err("a functional interface with a synthesized member".into())
                 }
             });
         }
         if slot >= vtable.len() {
-            return Err("a functional interface member outside the vtable".to_string());
+            return Err("a functional interface member outside the vtable".into());
         }
         vtable[slot] = thunk;
 
@@ -595,7 +595,7 @@ impl<'a> FileLowering<'a> {
         let target =
             self.functions[impl_fn as usize].ok_or_else(|| self.missing_body_reason(impl_fn))?;
         if declared.len() != capture_offsets.len() + parameters.len() {
-            return Err("a functional interface method of a different arity".to_string());
+            return Err("a functional interface method of a different arity".into());
         }
         let mut signature = vec![any()];
         signature.extend(parameters.iter().copied());
@@ -607,7 +607,7 @@ impl<'a> FileLowering<'a> {
             let mut arguments = Vec::with_capacity(declared.len());
             for (offset, ty) in capture_offsets.iter().zip(&declared) {
                 let Some(clif) = body.carrier(*ty).clif() else {
-                    return Err("a `Unit` capture".to_string());
+                    return Err("a `Unit` capture".into());
                 };
                 arguments.push(
                     body.builder
@@ -618,7 +618,7 @@ impl<'a> FileLowering<'a> {
             for (index, ty) in declared[capture_offsets.len()..].iter().enumerate() {
                 let Some(value) = body.convert(params[index + 1], Some(incoming[index]), *ty)?
                 else {
-                    return Err("a `Unit` argument to a functional interface".to_string());
+                    return Err("a `Unit` argument to a functional interface".into());
                 };
                 arguments.push(value);
             }
@@ -672,7 +672,7 @@ impl<'a> FileLowering<'a> {
             let mut arguments = Vec::with_capacity(parameters.len());
             for (offset, ty) in capture_offsets.iter().zip(&parameters) {
                 let Some(clif) = body.carrier(*ty).clif() else {
-                    return Err("a `Unit` capture".to_string());
+                    return Err("a `Unit` capture".into());
                 };
                 arguments.push(
                     body.builder
@@ -787,7 +787,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut values = Vec::with_capacity(captures.len());
         for (capture, ty) in captures.iter().zip(&parameters) {
             let Some(value) = self.coerce(*capture, *ty)? else {
-                return Err("a `Unit` capture".to_string());
+                return Err("a `Unit` capture".into());
             };
             if self.terminated {
                 return Ok(None);
@@ -916,7 +916,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let (offsets, instance_size, _) = super::functions::layout(self.file.values, &[elem]);
         let value = if let Some(init) = init {
             let Some(value) = self.coerce(init, elem)? else {
-                return Err("a captured `Unit` variable".to_string());
+                return Err("a captured `Unit` variable".into());
             };
             Some(value)
         } else {
@@ -966,7 +966,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         let Some(value) = value else {
-            return Err("a `Unit` value assigned to a captured variable".to_string());
+            return Err("a `Unit` value assigned to a captured variable".into());
         };
         let (offsets, _, _) = super::functions::layout(self.file.values, &[elem]);
         self.builder

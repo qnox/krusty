@@ -235,10 +235,15 @@ impl Emitter<'_> {
         {
             return;
         }
-        if let Some(line) = self.ir.invocation_result_adaptation_line(expression) {
+        if self.ir.inline_result_adaptation_restores_early(expression) {
+            let line = self
+                .ir
+                .invocation_result_adaptation_line(expression)
+                .expect("a claimed invocation adaptation must retain its caller line");
             // This is the expansion's return to caller-owned code. Reset the callee line before
-            // marking it, just as the ordinary post-inline boundary does when no adaptation owns
-            // that transition.
+            // marking it because a source initializer or branch condition restores its line
+            // before its store/jump. A return does not claim this boundary: its own instruction
+            // restores the caller line after narrowing instead.
             code.forget_line();
             self.mark_expression_line(expression, line, code);
         }

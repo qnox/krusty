@@ -21,9 +21,10 @@ fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)>
     let dir = std::env::temp_dir().join(format!("krusty_bcp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    // Compile in-process (no CLI spawn): these snippets need no classpath, exactly as the previous
-    // `krusty -d dir B.kt` (no `-cp`). Write the class bytes to `dir` so `javap` can disassemble them.
-    let classes = common::compile_in_process(src, "B", &[], None)
+    // Compile in-process (no CLI spawn) against the classpath `krusty -d dir B.kt` gets by default,
+    // its stdlib and the JDK. Write the class bytes to `dir` so `javap` can disassemble them.
+    let stdlib = common::stdlib_jar();
+    let classes = common::compile_in_process(src, "B", &[stdlib], Some(&common::jdk_modules()))
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = dir.join(format!("{internal}.class"));
@@ -44,7 +45,7 @@ fn krusty_compile_stdlib(name: &str, src: &str) -> Option<(std::path::PathBuf, S
     let dir = std::env::temp_dir().join(format!("krusty_bcp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let classes = common::compile_in_process(src, "B", &[stdlib], None)
+    let classes = common::compile_in_process(src, "B", &[stdlib], Some(&common::jdk_modules()))
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = dir.join(format!("{internal}.class"));

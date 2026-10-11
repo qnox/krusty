@@ -14,9 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -51,15 +50,16 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && krusty::toolchain::stdlib_jar().is_some())
-        .then_some(target)
+    (krusty::native::can_link(target)
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some())
+    .then_some(target)
 }
 
 /// Compile one program with the native code generator for the host.
 fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let target = host().expect("checked by the caller");
-    let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -68,10 +68,13 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let mut diags = DiagSink::new();
     let mut features = krusty::features::LangFeatures::new();
     features.apply_source_directives(source);
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
-    );
     let backend = CraneliftBackend::new(target).verified();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
+    );
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
         &["Main".to_string()],

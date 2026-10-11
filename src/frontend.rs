@@ -3,6 +3,7 @@
 //! Source analysis: lexing, parsing, signature collection, and checking.
 
 use crate::ast::File;
+use crate::compilation_target::CompilationTarget;
 use crate::diag::{DiagSink, Severity, Span};
 use crate::features::LangFeatures;
 pub use crate::fir::DeclarationId as FrontendDeclarationId;
@@ -41,6 +42,8 @@ pub use crate::source::{SourceInput, SourceKind};
 /// returns those vectors empty after inline FIR preparation; Pass 2 reparses through
 /// `reparse_sources` and never observes the Pass-1 arenas.
 pub struct SourceSetAnalysis {
+    /// The platform whose rules the source set was checked under.
+    pub target: CompilationTarget,
     pub files: Vec<File>,
     pub symbols: FrontendSymbols,
     pub types: Vec<Option<FrontendTypeInfo>>,
@@ -55,6 +58,9 @@ pub struct SourceSetAnalysis {
 /// the Pass-1 signature graph.  A successful value owns only the external semantic platform, the
 /// finalized FIR module, and the source text that the driver will sequentially reparse in Pass 2.
 pub struct StreamingSourceSetAnalysis {
+    /// The platform whose rules the source set was checked under; only a backend for the same
+    /// platform may consume it.
+    pub(crate) target: CompilationTarget,
     pub(crate) symbols: crate::resolve::PassTwoSymbols,
     pub(crate) reparse_sources: Vec<ReparseSource>,
     pub(crate) streamed: Option<StreamedPassState>,
@@ -63,6 +69,7 @@ pub struct StreamingSourceSetAnalysis {
 impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
     fn from(analysis: SourceSetAnalysis) -> Self {
         let SourceSetAnalysis {
+            target,
             files,
             symbols,
             types,
@@ -75,6 +82,7 @@ impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
         drop(parse_errors);
         let symbols = symbols.into_pass_two_symbols();
         Self {
+            target,
             symbols,
             reparse_sources,
             streamed,
@@ -708,8 +716,11 @@ pub fn analyze_source_set_with_features(
     )
 }
 
-/// What a source set is analyzed against: the semantic platform and the native compiler plugins the
-/// compilation runs.
+/// What a source set is analyzed against: the compilation target whose rules apply, the semantic
+/// platform that supplies library declarations, and the native compiler plugins the compilation runs.
+///
+/// The target is required: a caller names it when it builds the request, and the backend that
+/// consumes the analysis must be for the same target (see [`crate::compiler::emit_analyzed`]).
 ///
 /// The platform is either fully constructed or a terminal initialization diagnostic. The failed
 /// state does not implement symbol lookup and therefore cannot leak dependency corruption as
@@ -719,11 +730,31 @@ pub fn analyze_source_set_with_features(
 /// (the CLI from kotlinc's `-Xplugin`/`-P` switches): kotlinc synthesizes nothing for a plugin it was
 /// not given, so a `@Serializable` class gets no serializer without the serialization plugin.
 pub struct PlatformProvider {
+    target: CompilationTarget,
     platform: Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
     native_plugins: NativePlugins,
 }
 
 impl PlatformProvider {
+    /// Analyze for `target` against the library declarations of `libraries`.
+    pub fn new(target: CompilationTarget, libraries: impl Into<PlatformLibraries>) -> Self {
+        Self {
+            target,
+            platform: libraries.into().0,
+            native_plugins: NativePlugins::none(),
+        }
+    }
+
+    /// Analyze for the JVM against the library declarations of `libraries`.
+    pub fn jvm(libraries: impl Into<PlatformLibraries>) -> Self {
+        Self::new(CompilationTarget::Jvm, libraries)
+    }
+
+    /// The platform whose rules this analysis checks the source set under.
+    pub fn target(&self) -> CompilationTarget {
+        self.target
+    }
+
     /// Run `native_plugins` in this analysis and in the emission that consumes it.
     pub fn with_native_plugins(self, native_plugins: NativePlugins) -> Self {
         Self {
@@ -733,16 +764,18 @@ impl PlatformProvider {
     }
 }
 
-impl From<Box<dyn SemanticPlatform>> for PlatformProvider {
+/// The library declarations an analysis resolves against, or why they could not be initialized.
+pub struct PlatformLibraries(
+    Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
+);
+
+impl From<Box<dyn SemanticPlatform>> for PlatformLibraries {
     fn from(platform: Box<dyn SemanticPlatform>) -> Self {
-        Self {
-            platform: Ok(platform),
-            native_plugins: NativePlugins::none(),
-        }
+        Self(Ok(platform))
     }
 }
 
-impl<T> From<Box<T>> for PlatformProvider
+impl<T> From<Box<T>> for PlatformLibraries
 where
     T: SemanticPlatform + 'static,
 {
@@ -751,15 +784,12 @@ where
     }
 }
 
-impl<T> From<Result<T, crate::libraries::PlatformInitializationError>> for PlatformProvider
+impl<T> From<Result<T, crate::libraries::PlatformInitializationError>> for PlatformLibraries
 where
     T: SemanticPlatform + 'static,
 {
     fn from(platform: Result<T, crate::libraries::PlatformInitializationError>) -> Self {
-        Self {
-            platform: platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>),
-            native_plugins: NativePlugins::none(),
-        }
+        Self(platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>))
     }
 }
 
@@ -1131,6 +1161,7 @@ where
         )
         .collect::<Vec<_>>();
     let PlatformProvider {
+        target,
         platform,
         native_plugins,
     } = platform;
@@ -1142,6 +1173,7 @@ where
             diags.collapse_duplicates_from(diagnostics_start);
             let types = files.iter().map(|_| None).collect();
             return SourceSetAnalysis {
+                target,
                 files: if retain_inspection_analysis {
                     files
                 } else {
@@ -1161,6 +1193,7 @@ where
         diags.collapse_duplicates_from(diagnostics_start);
         let types = files.iter().map(|_| None).collect();
         return SourceSetAnalysis {
+            target,
             files: if retain_inspection_analysis {
                 files
             } else {
@@ -1252,6 +1285,7 @@ where
             &files[inferred_count..],
             platform,
             native_plugins.clone(),
+            target,
             &mut dependency_diags,
         );
         dependency_symbols.offset_source_files(inferred_count as u32);
@@ -1278,6 +1312,7 @@ where
         &local_class_contexts[..inferred_end],
         platform,
         native_plugins,
+        target,
         diags,
     );
     if multiplatform {
@@ -1294,6 +1329,7 @@ where
     }
     prepare_symbols(&files, &mut symbols);
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
+    crate::resolve::check_module_import_paths(&files[..inferred_end], &symbols, diags);
     let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
     let has_inline_capture_roots = inline_capture_selection
         .roots
@@ -1536,6 +1572,7 @@ where
     }
     diags.collapse_duplicates_from(diagnostics_start);
     let analysis = SourceSetAnalysis {
+        target,
         files: if retain_inspection_analysis {
             files
         } else {
@@ -1601,7 +1638,7 @@ fn check_source_set_skipping_with_index(
 /// Analyze a source set using only per-source feature directives.
 pub fn analyze_source_set(
     sources: &[&str],
-    platform: Box<dyn SemanticPlatform>,
+    platform: PlatformProvider,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis {
     let inputs = sources
@@ -1614,7 +1651,7 @@ pub fn analyze_source_set(
 /// Parse a single source and run signature collection plus checking against `platform`.
 pub fn analyze_source(
     src: &str,
-    platform: Box<dyn SemanticPlatform>,
+    platform: PlatformProvider,
     diags: &mut DiagSink,
 ) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
     let mut analysis = analyze_source_set(&[src], platform, diags);
@@ -1630,12 +1667,16 @@ pub fn analyze_source(
     (file, parsed.then_some(analysis.symbols), info)
 }
 
-/// Parse and check a source with no external libraries.
+/// Parse and check a source for the JVM with no external libraries.
 pub fn analyze_source_standalone(
     src: &str,
     diags: &mut DiagSink,
 ) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
-    analyze_source(src, Box::new(EmptySymbolSource), diags)
+    analyze_source(
+        src,
+        PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        diags,
+    )
 }
 
 /// Record local-class source ownership and ordering without choosing a target spelling.

@@ -26,8 +26,9 @@ impl CallableImport {
 /// Name-aware import scope for unqualified top-level and extension callables.
 #[derive(Clone, Debug)]
 pub(crate) struct FunctionImportScope {
-    explicit: std::collections::HashMap<String, CallableImport>,
-    ambiguous_explicit: std::collections::HashSet<String>,
+    /// Every explicit import of a visible name, in import order. Callables imported under one name
+    /// from several owners are all candidates at the explicit level, as in kotlinc.
+    explicit: std::collections::HashMap<String, Vec<CallableImport>>,
     /// Callable precedence: own package, explicit stars, Kotlin default stars, platform defaults.
     levels: [Vec<TypeName>; 4],
     /// Classifier precedence. Builtin classifiers outrank explicit stars; see
@@ -37,47 +38,57 @@ pub(crate) struct FunctionImportScope {
 
 impl FunctionImportScope {
     pub(crate) fn new(
-        explicit: std::collections::HashMap<String, CallableImport>,
+        explicit_imports: impl IntoIterator<Item = (String, CallableImport)>,
         levels: [Vec<TypeName>; 4],
     ) -> Self {
         let classifier_levels = classifier_scope::classifier_precedence_levels(&levels);
+        let mut explicit = std::collections::HashMap::<String, Vec<CallableImport>>::new();
+        for (name, import) in explicit_imports {
+            let imports = explicit.entry(name).or_default();
+            imports.retain(|existing| {
+                existing.owner != import.owner || existing.declared_name != import.declared_name
+            });
+            imports.push(import);
+        }
         Self {
             explicit,
-            ambiguous_explicit: std::collections::HashSet::new(),
             levels,
             classifier_levels,
         }
     }
 
-    pub(crate) fn with_ambiguous_explicit(
-        mut self,
-        names: std::collections::HashSet<String>,
-    ) -> Self {
-        self.ambiguous_explicit = names;
-        self
+    pub(crate) fn has_explicit(&self, name: &str) -> bool {
+        !self.explicit_targets(name).is_empty()
     }
 
-    pub(crate) fn explicit_is_ambiguous(&self, name: &str) -> bool {
-        self.ambiguous_explicit.contains(name)
-    }
-
-    pub(crate) fn explicit_owner(&self, name: &str) -> Option<SymbolNamespace> {
-        self.explicit
-            .get(name)
-            .map(|import| import.owner)
-            .or_else(|| {
-                name.strip_suffix("$default")
-                    .and_then(|base| self.explicit.get(base).map(|import| import.owner))
+    pub(crate) fn explicit_classifier_member_targets(&self, name: &str) -> Vec<(TypeName, String)> {
+        self.explicit_targets(name)
+            .into_iter()
+            .filter_map(|(owner, declared_name)| match owner {
+                SymbolNamespace::Classifier(owner) => Some((owner, declared_name)),
+                SymbolNamespace::Package(_) => None,
             })
+            .collect()
     }
 
-    pub(crate) fn explicit_target(&self, name: &str) -> Option<(SymbolNamespace, String)> {
-        if let Some(import) = self.explicit.get(name) {
-            return Some((import.owner, import.declared_name.clone()));
+    /// Every explicit import of `name`, in import order. `name$default` is the default stub of
+    /// each imported callable.
+    pub(crate) fn explicit_targets(&self, name: &str) -> Vec<(SymbolNamespace, String)> {
+        if let Some(imports) = self.explicit.get(name) {
+            return imports
+                .iter()
+                .map(|import| (import.owner, import.declared_name.clone()))
+                .collect();
         }
-        let base = name.strip_suffix("$default")?;
-        let import = self.explicit.get(base)?;
-        Some((import.owner, format!("{}$default", import.declared_name)))
+        let Some(base) = name.strip_suffix("$default") else {
+            return Vec::new();
+        };
+        self.explicit.get(base).map_or_else(Vec::new, |imports| {
+            imports
+                .iter()
+                .map(|import| (import.owner, format!("{}$default", import.declared_name)))
+                .collect()
+        })
     }
 
     pub(crate) fn levels(&self) -> &[Vec<TypeName>; 4] {
@@ -194,7 +205,8 @@ pub(super) fn tagged_symbol_levels_in_function_scope(
         }
         FunctionScopeRef::Imports(imports) => {
             let mut result = Vec::new();
-            if let Some((owner, declared_name)) = imports.explicit_target(name) {
+            let mut explicit = Vec::new();
+            for (owner, declared_name) in imports.explicit_targets(name) {
                 let record = match owner {
                     SymbolNamespace::Classifier(classifier) => {
                         imported_object_member_symbols(src, classifier, &declared_name)
@@ -202,23 +214,22 @@ pub(super) fn tagged_symbol_levels_in_function_scope(
                     }
                     SymbolNamespace::Package(_) => src.symbols(owner, &declared_name),
                 };
-                let records = (!record.is_empty())
-                    .then_some(record)
-                    .into_iter()
-                    .collect::<Vec<_>>();
                 crate::trace_compiler!(
                     "resolve",
-                    "import scope {name}: explicit target={:?}.{} records={}",
+                    "import scope {name}: explicit target={:?}.{} empty={}",
                     owner,
                     declared_name,
-                    records.len()
+                    record.is_empty()
                 );
-                if !records.is_empty() {
-                    result.push(FunctionScopeLevel {
-                        kind: FunctionScopeLevelKind::Explicit,
-                        symbols: records,
-                    });
+                if !record.is_empty() {
+                    explicit.push(record);
                 }
+            }
+            if !explicit.is_empty() {
+                result.push(FunctionScopeLevel {
+                    kind: FunctionScopeLevelKind::Explicit,
+                    symbols: explicit,
+                });
             }
             for (index, level) in imports.levels().iter().enumerate() {
                 let records = symbols_at_scope_level(src, name, level)

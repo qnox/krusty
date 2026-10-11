@@ -6,160 +6,80 @@
 
 use crate::ir::{IrClass, IrFile, IrSecondaryCtor};
 use crate::jvm::{ir_emit::jvm_tys, names::type_descriptor};
-use crate::metadata::MetadataAnnotations;
-use crate::types::{Ty, Visibility};
+use crate::metadata::class_builder::JvmConstructorSignature;
 
-pub(super) struct SecondaryConstructorMetadataShape {
-    pub(super) params: Vec<(String, Ty)>,
-    pub(super) param_spellings: Vec<crate::spelling::Spelled>,
-    pub(super) param_defaults: Vec<bool>,
-    pub(super) descriptor: String,
-    pub(super) signature_name: Option<&'static str>,
-    pub(super) vararg_index: Option<usize>,
-    pub(super) flags: u64,
-    pub(super) annotations: MetadataAnnotations,
-}
-
-pub(super) fn secondary_constructor_shapes(
-    ir: &IrFile,
-    class: &IrClass,
-) -> Vec<SecondaryConstructorMetadataShape> {
-    let mut shapes = class
-        .secondary_ctors
-        .iter()
-        .enumerate()
-        .filter_map(|(ordinal, constructor)| {
-            secondary_constructor_shape(ir, class, ordinal, constructor)
-        })
-        .collect::<Vec<_>>();
-    shapes.extend(
-        ir.jvm_value_class_secondary_ctors
-            .get(&class.fq_name_id())
-            .into_iter()
-            .flatten()
-            .map(|constructor| SecondaryConstructorMetadataShape {
-                params: constructor.params.clone(),
-                param_spellings: Vec::new(),
-                param_defaults: constructor.param_defaults.clone(),
-                descriptor: constructor.descriptor.clone(),
-                signature_name: Some("constructor-impl"),
-                vararg_index: constructor.vararg_index,
-                flags: secondary_constructor_flags(constructor.metadata_visibility),
-                annotations: MetadataAnnotations::of(&constructor.annotations),
-            }),
-    );
-    shapes
-}
-
-fn secondary_constructor_shape(
+/// How the JVM realizes the class's secondary constructor at `ordinal`.
+pub(super) fn secondary_constructor_signature(
     ir: &IrFile,
     class: &IrClass,
     ordinal: usize,
+) -> JvmConstructorSignature {
+    // A value class's lowering consumed its secondary constructors into static `constructor-impl`
+    // overloads, keeping each one's handle by ordinal.
+    if let Some(constructors) = ir.jvm_value_class_secondary_ctors.get(&class.fq_name_id()) {
+        let constructor = constructors
+            .iter()
+            .find(|constructor| constructor.ordinal == ordinal)
+            .expect("a published value-class secondary constructor keeps its static handle");
+        return JvmConstructorSignature {
+            name: "constructor-impl".into(),
+            desc: constructor.descriptor.clone(),
+        };
+    }
+    declared_constructor_signature(class, &class.secondary_ctors[ordinal])
+}
+
+fn declared_constructor_signature(
+    class: &IrClass,
     constructor: &IrSecondaryCtor,
-) -> Option<SecondaryConstructorMetadataShape> {
-    // Every enum constructor is private, as the primary's record says too: entries are the only
-    // instances.
-    let visibility = constructor.metadata_visibility.map(|visibility| {
-        if class.is_enum {
-            Visibility::Private
-        } else {
-            visibility
-        }
-    })?;
+) -> JvmConstructorSignature {
     // The JVM constructor takes the enum's `(String, int)` name and ordinal first.
     let owner_prefix = if class.is_enum {
         "Ljava/lang/String;I"
     } else {
         ""
     };
-    let mut params = constructor.named_params.clone();
-    let physical_prefix_params = jvm_tys(&constructor.prefix_params);
-    let physical_params = jvm_tys(&constructor.params);
-    let serialization_constructor = ir.generated_secondary_constructor_by_owner(
-        class.fq_name_id(),
-        crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
-    );
-    if serialization_constructor.and_then(|recorded| usize::try_from(recorded).ok())
-        == Some(ordinal)
-    {
-        assert_eq!(
-            params.len(),
-            physical_params.len(),
-            "serialization constructor metadata exactly matches its physical parameter contract"
-        );
-        for ((_, semantic), &physical) in params.iter_mut().zip(&physical_params) {
-            if physical.is_reference() {
-                *semantic = Ty::nullable(*semantic);
-            }
+    JvmConstructorSignature::init(format!(
+        "({owner_prefix}{}{}{})V",
+        jvm_tys(&constructor.prefix_params)
+            .iter()
+            .map(|&ty| type_descriptor(ty))
+            .collect::<String>(),
+        jvm_tys(&constructor.params)
+            .iter()
+            .map(|&ty| type_descriptor(ty))
+            .collect::<String>(),
+        if constructor.vc_params {
+            "Lkotlin/jvm/internal/DefaultConstructorMarker;"
+        } else {
+            ""
         }
-    }
-    Some(SecondaryConstructorMetadataShape {
-        params,
-        param_spellings: constructor.declared_spellings.params.clone(),
-        param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
-        descriptor: format!(
-            "({owner_prefix}{}{}{})V",
-            physical_prefix_params
-                .iter()
-                .map(|&ty| type_descriptor(ty))
-                .collect::<String>(),
-            physical_params
-                .iter()
-                .map(|&ty| type_descriptor(ty))
-                .collect::<String>(),
-            if constructor.vc_params {
-                "Lkotlin/jvm/internal/DefaultConstructorMarker;"
-            } else {
-                ""
-            }
-        ),
-        signature_name: None,
-        vararg_index: constructor.vararg_index,
-        flags: secondary_constructor_flags(visibility),
-        annotations: MetadataAnnotations::of(&constructor.annotations),
-    })
-}
-
-fn secondary_constructor_flags(visibility: Visibility) -> u64 {
-    const IS_SECONDARY: u64 = 16;
-    let visibility = match visibility {
-        Visibility::Internal => 0,
-        Visibility::Private => 2,
-        Visibility::Protected => 4,
-        Visibility::Public => 6,
-        Visibility::PackagePrivate => {
-            unreachable!("package-private is never published in Kotlin metadata")
-        }
-    };
-    IS_SECONDARY | visibility
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{secondary_constructor_flags, secondary_constructor_shape};
+    use super::{declared_constructor_signature, secondary_constructor_signature};
     use crate::ir::{
-        CtorDelegateTarget, DeclarationAnnotations, IrFile, IrSecondaryConstructorRole,
+        CtorDelegateTarget, DeclarationAnnotations, IrFile, IrJvmValueClassSecondaryCtor,
         IrSecondaryCtor,
     };
     use crate::plugins::synthetic_class;
     use crate::types::{type_name, Ty, Visibility};
 
-    fn constructor(metadata_visibility: Option<Visibility>) -> IrSecondaryCtor {
+    fn constructor(params: Vec<Ty>) -> IrSecondaryCtor {
         IrSecondaryCtor {
             annotations: DeclarationAnnotations::default(),
             source_order: u32::MAX,
             lines: crate::ir::IrSecondaryCtorLines::default(),
             prefix_params: vec![Ty::Boolean],
-            params: vec![Ty::Int, Ty::obj("kotlin/String")],
+            params,
             declared_spellings: crate::spelling::DeclaredSpellings::default(),
-            named_params: vec![
-                ("seen0".to_string(), Ty::Int),
-                ("value".to_string(), Ty::obj("kotlin/String")),
-            ],
-            metadata_visibility,
+            named_params: Vec::new(),
+            metadata_visibility: Some(Visibility::Internal),
             generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
-            vararg_index: Some(1),
-            defaults: vec![Some(0), None],
+            vararg_index: None,
+            defaults: Vec::new(),
             delegate_prelude: Vec::new(),
             delegate_args: Vec::new(),
             default_parameters: Vec::new(),
@@ -177,107 +97,54 @@ mod tests {
     }
 
     #[test]
-    fn publication_is_explicit_not_inferred_from_names_or_synthetic_shape() {
-        let ir = IrFile::default();
+    fn a_secondary_constructor_names_its_physical_init() {
         let class = synthetic_class("sample/Owner");
-        let mut unpublished = constructor(None);
-        unpublished.synthetic = false;
-        assert!(
-            secondary_constructor_shape(&ir, &class, 0, &unpublished).is_none(),
-            "metadata payload and a non-synthetic classfile method do not publish a constructor"
-        );
-
-        let mut empty_published = constructor(Some(Visibility::Internal));
-        empty_published.named_params.clear();
-        assert!(
-            secondary_constructor_shape(&ir, &class, 0, &empty_published).is_some(),
-            "an explicit zero-parameter publication does not need a spelling sentinel"
-        );
-
-        let source = constructor(Some(Visibility::Internal));
-        let published = secondary_constructor_shape(&ir, &class, 0, &source)
-            .expect("explicitly published constructor");
-        assert_eq!(published.params, source.named_params);
-        assert_eq!(published.param_defaults, [true, false]);
-        assert_eq!(published.descriptor, "(ZILjava/lang/String;)V");
-        assert_eq!(published.signature_name, None);
-        assert_eq!(published.vararg_index, Some(1));
-        assert_eq!(published.flags, 16);
-        assert!(!published.annotations.declares_annotations());
-    }
-
-    #[test]
-    fn serialization_projection_uses_exact_role_and_physical_jvm_parameters() {
-        let mut ir = IrFile::default();
-        let class_id = ir.add_class(synthetic_class("sample/Owner"));
-        let mut generated = constructor(Some(Visibility::Internal));
-        generated.prefix_params.clear();
-        generated.params = vec![
-            Ty::Int,
-            Ty::obj("kotlin/String"),
-            Ty::Unit,
-            Ty::ty_param("T", Ty::obj("kotlin/Any")),
-            Ty::Long,
-        ];
-        generated.named_params = vec![
-            ("primitive".to_string(), Ty::Int),
-            ("reference".to_string(), Ty::obj("kotlin/String")),
-            ("unit".to_string(), Ty::Unit),
-            (
-                "generic".to_string(),
+        let signature = declared_constructor_signature(
+            &class,
+            &constructor(vec![
+                Ty::Int,
+                Ty::obj("kotlin/String"),
+                Ty::Unit,
                 Ty::ty_param("T", Ty::obj("kotlin/Any")),
-            ),
-            ("value".to_string(), Ty::obj("sample/Value")),
-        ];
-        ir.classes[class_id as usize]
-            .secondary_ctors
-            .push(generated);
-        ir.record_generated_secondary_constructor(
-            class_id,
-            IrSecondaryConstructorRole::SerializationDeserialization,
-            0,
+                Ty::Long,
+            ]),
         );
-
-        let shape = secondary_constructor_shape(
-            &ir,
-            &ir.classes[class_id as usize],
-            0,
-            &ir.classes[class_id as usize].secondary_ctors[0],
-        )
-        .expect("published serialization constructor");
+        assert_eq!(signature.name, "<init>");
         assert_eq!(
-            shape.params,
-            vec![
-                ("primitive".to_string(), Ty::Int),
-                (
-                    "reference".to_string(),
-                    Ty::nullable(Ty::obj("kotlin/String")),
-                ),
-                ("unit".to_string(), Ty::nullable(Ty::Unit)),
-                (
-                    "generic".to_string(),
-                    Ty::nullable(Ty::ty_param("T", Ty::obj("kotlin/Any"))),
-                ),
-                ("value".to_string(), Ty::obj("sample/Value")),
-            ]
+            signature.desc,
+            "(ZILjava/lang/String;Lkotlin/Unit;Ljava/lang/Object;J)V"
         );
-        assert_eq!(
-            shape.descriptor,
-            "(ILjava/lang/String;Lkotlin/Unit;Ljava/lang/Object;J)V"
-        );
-
-        let unrelated = constructor(Some(Visibility::Internal));
-        let unrelated_shape =
-            secondary_constructor_shape(&ir, &ir.classes[class_id as usize], 1, &unrelated)
-                .expect("ordinary published constructor");
-        assert_eq!(unrelated_shape.params, unrelated.named_params);
     }
 
     #[test]
-    fn secondary_constructor_flags_encode_exact_semantic_visibility() {
-        assert_eq!(secondary_constructor_flags(Visibility::Internal), 16);
-        assert_eq!(secondary_constructor_flags(Visibility::Private), 18);
-        assert_eq!(secondary_constructor_flags(Visibility::Protected), 20);
-        assert_eq!(secondary_constructor_flags(Visibility::Public), 22);
+    fn an_enum_constructor_takes_the_name_and_ordinal_first() {
+        let mut class = synthetic_class("sample/Owner");
+        class.is_enum = true;
+        let signature = declared_constructor_signature(&class, &constructor(vec![Ty::Int]));
+        assert_eq!(signature.desc, "(Ljava/lang/String;IZI)V");
+    }
+
+    #[test]
+    fn a_value_class_constructor_names_the_static_handle_kept_for_its_ordinal() {
+        let mut ir = IrFile::default();
+        let class = synthetic_class("sample/Value");
+        // The lowering consumed the class's secondary constructors; only the published ones, the
+        // first and third, keep a handle.
+        ir.jvm_value_class_secondary_ctors.insert(
+            class.fq_name_id(),
+            vec![
+                IrJvmValueClassSecondaryCtor {
+                    ordinal: 0,
+                    descriptor: "(J)I".to_string(),
+                },
+                IrJvmValueClassSecondaryCtor {
+                    ordinal: 2,
+                    descriptor: "(Ljava/lang/String;)I".to_string(),
+                },
+            ],
+        );
+        let signature = secondary_constructor_signature(&ir, &class, 2);
+        assert_eq!(signature.name, "constructor-impl");
+        assert_eq!(signature.desc, "(Ljava/lang/String;)I");
     }
 }

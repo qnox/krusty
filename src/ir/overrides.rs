@@ -73,4 +73,35 @@ impl IrFile {
             .flatten()
             .any(|edge| edge.implementation_function == Some(function))
     }
+
+    /// The member functions of `owner` that override one of `Any`'s `equals`/`hashCode`/`toString`,
+    /// each with the `Any` member it overrides, by the frontend's override edges. A value class
+    /// generates exactly the `Any` members its source does not override.
+    pub(crate) fn any_member_overrides(
+        &self,
+        owner: TypeName,
+    ) -> std::collections::HashMap<FunId, super::IrValueClassAnyMember> {
+        use crate::types::SemanticCallRole;
+        self.function_overrides
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .filter_map(|edge| {
+                let member = match edge.overridden_semantic_role? {
+                    SemanticCallRole::KotlinAnyEquals => super::IrValueClassAnyMember::Equals,
+                    SemanticCallRole::KotlinAnyHashCode => super::IrValueClassAnyMember::HashCode,
+                    SemanticCallRole::KotlinAnyToString => super::IrValueClassAnyMember::ToString,
+                    _ => return None,
+                };
+                let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
+                    edge.implementation
+                else {
+                    return None;
+                };
+                self.checked_callable_functions
+                    .get(&declaration)
+                    .map(|&function| (function, member))
+            })
+            .collect()
+    }
 }

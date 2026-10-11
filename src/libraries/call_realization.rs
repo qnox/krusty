@@ -32,6 +32,76 @@ pub enum ExternalCallableKind {
     StaticFieldWrite,
 }
 
+/// The semantic declaration facts needed to lower one selected KLIB body.
+///
+/// This deliberately excludes every target-realization field carried by
+/// [`ExternalCallableRealization`] and the backend handoff: physical owners, descriptors, ABI
+/// parameter types and physical names do not participate in common-IR lowering. The exact KLIB
+/// signature remains the only join key.
+#[derive(Clone, Copy)]
+pub struct KlibBodyCallable<'a> {
+    name: &'a str,
+    kind: ExternalCallableKind,
+    params: &'a [Ty],
+    ret: Ty,
+    parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
+    context_count: usize,
+    signature: &'a KlibDeclarationSignature,
+}
+
+impl<'a> KlibBodyCallable<'a> {
+    pub(crate) fn new(
+        name: &'a str,
+        kind: ExternalCallableKind,
+        params: &'a [Ty],
+        ret: Ty,
+        parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
+        context_count: usize,
+        signature: Option<&'a KlibDeclarationSignature>,
+    ) -> Option<Self> {
+        Some(Self {
+            name,
+            kind,
+            params,
+            ret,
+            parameter_identities,
+            context_count,
+            signature: signature?,
+        })
+    }
+
+    pub(crate) fn name(self) -> &'a str {
+        self.name
+    }
+
+    pub(crate) fn is_top_level(self) -> bool {
+        matches!(
+            self.kind,
+            ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+        )
+    }
+
+    pub(crate) fn params(self) -> &'a [Ty] {
+        self.params
+    }
+
+    pub(crate) fn ret(self) -> Ty {
+        self.ret
+    }
+
+    pub(crate) fn parameter_identities(self) -> &'a [crate::fir::ResolvedParameterIdentity] {
+        self.parameter_identities
+    }
+
+    pub(crate) fn context_count(self) -> usize {
+        self.context_count
+    }
+
+    pub(crate) fn signature(self) -> &'a KlibDeclarationSignature {
+        self.signature
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExternalCallableRealization {
     pub callable: LibraryCallable,
@@ -48,6 +118,23 @@ pub struct ExternalCallableRealization {
     /// can join this selection to its decoded IR body. Providers without serialized IR publish
     /// `None`; a consumer never reconstructs it from the callable's spelling or shape.
     pub declaration_signature: Option<KlibDeclarationSignature>,
+}
+
+impl ExternalCallableRealization {
+    /// The target-free view of this selected declaration when it carries a serialized KLIB
+    /// identity. Consumers lower through this view instead of importing physical realization
+    /// facts into common lowering.
+    pub fn klib_body_callable(&self) -> Option<KlibBodyCallable<'_>> {
+        KlibBodyCallable::new(
+            &self.callable.name,
+            self.kind,
+            &self.callable.params,
+            self.callable.ret,
+            &self.parameter_identities,
+            self.callable.context_count,
+            self.declaration_signature.as_ref(),
+        )
+    }
 }
 
 /// A provider's realization of one normalized Kotlin property. FIR carries only its opaque

@@ -156,3 +156,42 @@ fn a_member_s_own_type_parameter_shadows_the_call_s_for_the_rest_of_the_copy() {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+const NAMED_PARAMETERS_LIB: &str = r#"
+package lib
+
+class Refusal(message: String) : RuntimeException(message)
+
+inline fun <reified T : Any> rejects(value: Any?): Boolean =
+    T::class.java.isInstance(value) && object : Comparator<String> {
+        override fun compare(left: String, right: String): Int = if (value != null) 0 else 1
+    }.compare("a", "b") == 0
+"#;
+
+const NAMED_PARAMETERS_MAIN: &str = r#"
+import lib.*
+
+fun rejected(): Boolean = rejects<Refusal>(Refusal("no"))
+"#;
+
+/// A library compiled with `-java-parameters` gives its object's constructor and methods
+/// `MethodParameters`. The copy keeps them on the copied methods, and the regenerated constructor
+/// has none, as kotlinc's copy does.
+#[test]
+fn an_object_whose_methods_name_their_parameters_is_regenerated() {
+    let classes = common::classes_against_kotlinc_java_parameters_lib(
+        "NamedParameters",
+        &[("Lib.kt", NAMED_PARAMETERS_LIB)],
+        NAMED_PARAMETERS_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "NamedParametersKt",
+            "NamedParametersKt$rejected$$inlined$rejects$1"
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}

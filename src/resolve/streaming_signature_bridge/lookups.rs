@@ -263,29 +263,27 @@ impl ProductionSignatureSemantics<'_> {
                     })
             })
         {
-            if !self.table.declaration_suppresses_visibility(scope.owner) {
-                let access = self
-                    .with_resolver(scope, |resolver| {
-                        resolver.inaccessible_classifier_access(internal)
-                    })
-                    .ok();
-                crate::trace_compiler!(
-                    "resolve",
-                    "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+            let access = self
+                .with_resolver(scope, |resolver| {
+                    resolver.inaccessible_classifier_access(internal)
+                })
+                .ok();
+            crate::trace_compiler!(
+                "resolve",
+                "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+                scope.owner,
+                scope.source,
+                reference.name,
+                internal,
+            );
+            if let Some(access) = access {
+                self.record_classifier_access_diagnostic_at(
                     scope.owner,
                     scope.source,
-                    reference.name,
+                    reference.span,
                     internal,
+                    super::super::inaccessible_classifier_message(&reference.name, access),
                 );
-                if let Some(access) = access {
-                    self.record_classifier_access_diagnostic_at(
-                        scope.owner,
-                        scope.source,
-                        reference.span,
-                        internal,
-                        super::super::inaccessible_classifier_message(&reference.name, access),
-                    );
-                }
             }
             // The provider-normalized declaration, whichever module or classpath entry supplies it:
             // its variances check the written projections and its formal bounds give each `*` its
@@ -817,20 +815,8 @@ impl ProductionSignatureSemantics<'_> {
             let (selection, failed_segment) =
                 resolver.qualified_type_classifier_binding_in_scope(spelling);
             match selection {
-                crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
-                    return Some((Some(classifier), None));
-                }
-                // Conflicting explicit imports name no complete candidates; the import list
-                // owns that conflict, so the reference reports its unbound root.
-                crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates)
-                    if candidates.is_empty() =>
-                {
-                    return Some((
-                        None,
-                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
-                            failed_segment.unwrap_or_else(|| first.to_string()),
-                        )),
-                    ));
+                crate::symbol_resolver::CandidateSelectionWithTies::Selected(path) => {
+                    return Some((Some(path.classifier), None));
                 }
                 crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates) => {
                     return Some((

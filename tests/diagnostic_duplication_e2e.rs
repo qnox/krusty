@@ -5,7 +5,11 @@ use std::collections::HashMap;
 
 fn diagnostic_counts(sources: &[&str]) -> HashMap<(u32, u32, String), usize> {
     let mut diags = DiagSink::new();
-    analyze_source_set(sources, Box::new(EmptySymbolSource), &mut diags);
+    analyze_source_set(
+        sources,
+        krusty::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &mut diags,
+    );
     let mut counts = HashMap::new();
     for diagnostic in &diags.diags {
         *counts

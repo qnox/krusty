@@ -407,11 +407,12 @@ mod tests {
             "$KOTLIN_STDLIB",
             "$ANNOTATIONS",
         ]);
-        let friend_paths = normalized_path_list(&[
+        let friend_paths = [
             "$ROOT/compiler/util/build/classes/java/main",
             "$ROOT/compiler/util/build/classes/kotlin/main",
             "$ROOT/compiler/util/build/libs/util.jar",
-        ]);
+        ]
+        .join(",");
         let friend_argument = format!("-Xfriend-paths={friend_paths}");
 
         assert_eq!(
@@ -767,23 +768,57 @@ mod tests {
             .exists());
         assert!(module_metadata.is_file());
 
+        // A value-taking option introduced in 2.4.20 must consume its following token only under
+        // that release's grammar. Under 2.4.0/2.4.10, the same token is an unknown -X option and
+        // the following free -d remains visible to the plugin-owned destination check.
+        let _ = std::fs::remove_file(&log);
+        let release_boundary = build()
+            .property("krusty.negative", "release-specific-argument-boundary")
+            .tasks([":compiler:util:compileKotlin"])
+            .run();
+        assert!(
+            release_boundary.is_err(),
+            "release boundary probe succeeded"
+        );
+        if kgp == "2.4.20" {
+            let invocation = single_invocation(&log);
+            assert!(has_pair(
+                &invocation,
+                "-Xescaping-functions",
+                "-d=forbidden"
+            ));
+        } else {
+            let rendered = release_boundary.unwrap_err().to_string();
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(|line| {
+                        line.trim()
+                            == "> freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead"
+                    })
+                    .count(),
+                1,
+                "{kgp}: {rendered}",
+            );
+            assert!(
+                !log.exists(),
+                "{kgp}: release boundary must fail before exec"
+            );
+        }
+
         if kgp == "2.4.10" {
             for (case, expected) in [
                 (
                     "structured-option",
+                    "krusty does not support compilerOptions.extraWarnings",
+                ),
+                (
+                    "progressive-mode",
                     "krusty does not support compilerOptions.progressiveMode",
                 ),
                 (
                     "reserved-free-argument",
                     "freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead",
-                ),
-                (
-                    "duplicate-free-argument",
-                    "duplicate freeCompilerArg '-Xlambdas'",
-                ),
-                (
-                    "unknown-free-argument",
-                    "unsupported freeCompilerArg '-Xdefinitely-unsupported'; use a supported compilerOptions property",
                 ),
                 (
                     "plugin-free-argument",
@@ -802,32 +837,44 @@ mod tests {
                     "compilerOptions.jvmDefault and freeCompilerArg '-jvm-default=disable' are both set; configure exactly one",
                 ),
                 (
-                    "jvm-default-bad-mode",
-                    "unsupported freeCompilerArg '-jvm-default=sideways'; use a supported compilerOptions property",
-                ),
-                (
                     "progressive-free-argument",
                     "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
                 ),
                 (
-                    "jspecify-free-argument",
-                    "unsupported freeCompilerArg '-Xjspecify-annotations=strict'; use a supported compilerOptions property",
+                    "free-end-of-options",
+                    "freeCompilerArg '--' would make the arguments after it sources; add sources to the task's source set instead",
                 ),
                 (
-                    "jdk-release-free-argument",
-                    "unsupported freeCompilerArg '-Xjdk-release=8'; use a supported compilerOptions property",
+                    "free-argfile",
+                    "freeCompilerArg '@overrides.args' is an argument file, which could hide plugin-owned arguments; pass its arguments as freeCompilerArgs instead",
                 ),
                 (
-                    "duplicate-inert-flag",
-                    "duplicate freeCompilerArg '-Xskip-prerelease-check'",
+                    "free-source",
+                    "freeCompilerArg 'Extra.kt' would be compiled as a source; add sources to the task's source set instead",
                 ),
                 (
-                    "all-warnings-as-errors",
-                    "krusty does not support compilerOptions.allWarningsAsErrors",
+                    "classpath-alias",
+                    "freeCompilerArg '-cp' conflicts with the task libraries classpath; configure the structured Gradle input instead",
                 ),
                 (
-                    "free-werror",
-                    "krusty does not support warning policy freeCompilerArg '-Werror'",
+                    "progressive-alias",
+                    "freeCompilerArg '-Xprogressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
+                ),
+                (
+                    "compiler-plugin-alias",
+                    "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
+                ),
+                (
+                    "reference-version-free-argument",
+                    "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
+                ),
+                (
+                    "dependency-policy-free-argument",
+                    "freeCompilerArg '-no-stdlib=false' conflicts with the plugin-owned dependency policy; configure the structured Gradle input instead",
+                ),
+                (
+                    "dev-compiler-version",
+                    "Kotlin compiler 2.4.10-dev-7885 differs from Kotlin Gradle plugin 2.4.10",
                 ),
                 (
                     "empty-opt-in",
@@ -858,7 +905,7 @@ mod tests {
                 let rendered = error.to_string();
                 if case == "compiler-plugin" {
                     assert!(rendered.contains(expected), "{case}: {rendered}");
-                    assert!(rendered.contains("allopen"), "{case}: {rendered}");
+                    assert!(rendered.contains("sam-with-receiver"), "{case}: {rendered}");
                     assert!(log.exists(), "{case} must be rejected by krusty's registry");
                 } else {
                     let expected_line = format!("> {expected}");
@@ -874,25 +921,61 @@ mod tests {
                 }
             }
 
-            // Gradle transports named warning policy without duplicating the compiler's registry.
-            // Malformed policy therefore reaches krusty and is rejected by the same parser as a
-            // direct CLI or Bazel-worker invocation.
-            for (case, argument) in [
+            // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
+            // table. A malformed value and an argument krusty does not implement are refused by
+            // the same parser as a direct CLI or Bazel-worker invocation: krusty exits 2 with its
+            // one error line and writes nothing to the task's emptied destination.
+            let refused = |argument: &str| {
+                format!(
+                    "krusty: error: krusty does not implement the kotlinc argument '{argument}'"
+                )
+            };
+            for (case, argument, expected) in [
+                (
+                    "explicit-api-bad-mode",
+                    "-Xexplicit-api=sideways",
+                    "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. \
+                     Value should be one of {disable, strict, warning}"
+                        .to_owned(),
+                ),
+                (
+                    "jspecify-free-argument",
+                    "-Xjspecify-annotations=strict",
+                    refused("-Xjspecify-annotations=strict"),
+                ),
+                (
+                    "jdk-release-free-argument",
+                    "-Xjdk-release=21",
+                    "krusty: error: '-Xjdk-release=21' option conflicts with '-jvm-target 17'. \
+                     Please remove the '-jvm-target' option"
+                        .to_owned(),
+                ),
                 (
                     "warning-level-bad-severity",
                     "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                    "krusty: error: invalid severity 'loud' in \
+                     -Xwarning-level=REDUNDANT_CLI_ARG:loud; supported severities: error, \
+                     warning, disabled"
+                        .to_owned(),
                 ),
                 (
                     "warning-level-missing-colon",
                     "-Xwarning-level=REDUNDANT_CLI_ARG",
+                    "krusty: error: invalid value 'REDUNDANT_CLI_ARG' for -Xwarning-level: \
+                     expected <NAME>:<error|warning|disabled>"
+                        .to_owned(),
                 ),
             ] {
                 let _ = std::fs::remove_file(&log);
-                let result = build()
+                let rendered = match build()
                     .property("krusty.negative", case)
                     .tasks([":compiler:util:compileKotlin"])
-                    .run();
-                assert!(result.is_err(), "negative case {case} succeeded");
+                    .run()
+                {
+                    Ok(()) => panic!("negative case {case} succeeded"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(log.exists(), "{case} never reached krusty: {rendered}");
                 let invocation = single_invocation(&log);
                 assert_eq!(
                     invocation
@@ -902,6 +985,26 @@ mod tests {
                     1,
                     "{case}: {invocation:?}",
                 );
+                assert_eq!(
+                    rendered
+                        .lines()
+                        .filter(|line| line.trim() == expected)
+                        .count(),
+                    1,
+                    "{case}: {rendered}",
+                );
+                assert_eq!(
+                    rendered
+                        .lines()
+                        .filter(|line| line.contains("exited with 2 for :compiler:util:"))
+                        .count(),
+                    1,
+                    "{case}: {rendered}",
+                );
+                let written = std::fs::read_dir(&kotlin_classes)
+                    .map(|entries| entries.count())
+                    .unwrap_or(0);
+                assert_eq!(written, 0, "{case} wrote to {}", kotlin_classes.display());
             }
 
             // Gradle forwards standard version values without duplicating kotlinc's
@@ -985,6 +1088,75 @@ mod tests {
                     .all(|argument| !argument.starts_with("-Xmetadata-version")),
                 "{language_2_2_run:?}",
             );
+
+            // `-Werror` and `allWarningsAsErrors` both reach krusty as one warning policy. This
+            // module intentionally carries two unresolved opt-in markers, so each form must fail
+            // with the complete ordered compiler diagnostic stream. Setting both is idempotent,
+            // like kotlinc's command line, rather than a transport conflict.
+            let diagnostic_log = root.join("krusty-diagnostics.txt");
+            let expected_werror_diagnostics = "warning: opt-in requirement marker 'krusty.fixture.ExperimentalFirstApi' is unresolved. Make sure it's present in the module dependencies.\n\
+warning: opt-in requirement marker 'krusty.fixture.ExperimentalSecondApi' is unresolved. Make sure it's present in the module dependencies.\n\
+error: warnings found and -Werror specified\n";
+            for case in ["all-warnings-as-errors", "free-werror", "werror-overlap"] {
+                let _ = std::fs::remove_file(&log);
+                let _ = std::fs::remove_file(&diagnostic_log);
+                let result = build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run();
+                let status = match result {
+                    Err(GradleError::Failed { status, .. }) => status,
+                    other => {
+                        panic!("{case}: expected the warning-bearing module to fail, got {other:?}")
+                    }
+                };
+                assert_eq!(status, "exit status: 1", "{case}");
+                assert_eq!(
+                    std::fs::read_to_string(&diagnostic_log).expect("recorded krusty diagnostics"),
+                    expected_werror_diagnostics,
+                    "{case}",
+                );
+                let invocation = single_module_invocation(&log, "kotlin-compiler-util");
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|argument| argument.as_str() == "-Werror")
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}"
+                );
+            }
+
+            // A named level remains an override when the structured global policy is enabled.
+            // `-Xcontext-parameters` is redundant at language level 2.4, so success proves that
+            // the transported `:warning` exception was applied rather than promoted by `-Werror`.
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_file(&diagnostic_log);
+            build()
+                .property("krusty.negative", "werror-warning-exception")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("werror warning exception: {error}"));
+            assert_eq!(
+                std::fs::read_to_string(&diagnostic_log).expect("recorded krusty diagnostics"),
+                "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.\n",
+                "werror warning exception diagnostics",
+            );
+            let invocation = single_module_invocation(&log, "kotlin-compiler-util");
+            for expected in [
+                "-Werror",
+                "-Xcontext-parameters",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:warning",
+            ] {
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|argument| argument.as_str() == expected)
+                        .count(),
+                    1,
+                    "{expected}: {invocation:?}"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1163,7 +1335,7 @@ mod tests {
             Err(error) => error.to_string(),
         };
         assert!(error.contains("unsupported compiler plugin"), "{error}");
-        assert!(error.contains("allopen"), "{error}");
+        assert!(error.contains("sam-with-receiver"), "{error}");
         assert!(
             log.exists(),
             "the compiler registry must inspect the forwarded plugin classpath"
@@ -1230,13 +1402,13 @@ plugins {
     kotlin("plugin.serialization") version "KGP_VERSION"
     kotlin("jvm")
     id("krusty") version "PLUGIN_VERSION" apply false
-    kotlin("plugin.allopen") version "KGP_VERSION" apply false
+    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
     `java-library`
 }
 
 // A plugin applied before krusty, as an earlier `plugins` entry or a convention plugin applies it.
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.allopen")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
 }
 pluginManager.apply("krusty")
 
@@ -1346,15 +1518,15 @@ fun main() {
         let _ = std::fs::remove_file(log);
         let result = fixture
             .build()
-            .property("krusty.negative", "allopen")
+            .property("krusty.negative", "sam-with-receiver")
             .tasks([":app:compileKotlin"])
             .run();
         let error = match result {
-            Ok(()) => panic!("all-open applied beside KSP was ignored"),
+            Ok(()) => panic!("sam-with-receiver applied beside KSP was ignored"),
             Err(error) => error.to_string(),
         };
         assert!(error.contains("unsupported compiler plugin"), "{error}");
-        assert!(error.contains("allopen"), "{error}");
+        assert!(error.contains("sam-with-receiver"), "{error}");
         assert!(
             log.exists(),
             "the compiler registry must inspect the forwarded plugin classpath"
@@ -1485,12 +1657,12 @@ plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
     id("krusty") version "PLUGIN_VERSION"
-    kotlin("plugin.allopen") version "KGP_VERSION" apply false
+    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
     application
 }
 
-if (providers.gradleProperty("krusty.negative").orNull == "allopen") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.allopen")
+if (providers.gradleProperty("krusty.negative").orNull == "sam-with-receiver") {
+    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
 }
 
 dependencies {
@@ -1569,11 +1741,12 @@ fun main() {
             // the recorded invocations carry the resolved path, so the normalization root must too.
             let root = root.canonicalize().expect("canonicalize fixture root");
             let log = root.join("krusty-invocations.txt");
+            let diagnostics = root.join("krusty-diagnostics.txt");
             let proxy = root.join("recording-krusty");
             let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
                 .map(PathBuf::from)
                 .expect("KRUSTY_GRADLE_TEST_BIN must name the built krusty CLI");
-            write_krusty_proxy(&proxy, &log, &actual);
+            write_krusty_proxy(&proxy, &log, &diagnostics, &actual);
             let wrapper = root.join("gradlew");
             std::fs::write(
                 &wrapper,
@@ -1703,12 +1876,13 @@ fun main() {
                 index += 2;
                 continue;
             }
-            if argument.starts_with("-Xfriend-paths=") {
-                let paths = argument.trim_start_matches("-Xfriend-paths=");
-                normalized.push(format!(
-                    "-Xfriend-paths={}",
-                    normalize_paths(paths, root, kotlin_version)
-                ));
+            if let Some(paths) = argument.strip_prefix("-Xfriend-paths=") {
+                // kotlinc's delimiter for friend paths is `,`, not the path separator.
+                let paths = paths
+                    .split(',')
+                    .map(|path| normalize_path(Path::new(path), root, kotlin_version))
+                    .collect::<Vec<_>>();
+                normalized.push(format!("-Xfriend-paths={}", paths.join(",")));
                 index += 1;
                 continue;
             }
@@ -1772,6 +1946,18 @@ fun main() {
         runs.into_iter().next().expect("single invocation")
     }
 
+    /// The one compiler invocation for `module`. A requested task may first rebuild a changed
+    /// dependency, so the complete Gradle build log need not contain only one invocation.
+    fn single_module_invocation(log: &Path, module: &str) -> Vec<String> {
+        let text = std::fs::read_to_string(log).expect("bridge invocation log");
+        let mut runs = invocations(&text)
+            .into_iter()
+            .filter(|arguments| has_pair(arguments, "-module-name", module))
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), 1, "module {module}: {text}");
+        runs.pop().expect("single module invocation")
+    }
+
     fn invocations(text: &str) -> Vec<Vec<String>> {
         let mut out = Vec::new();
         let mut current = Vec::new();
@@ -1790,16 +1976,22 @@ fun main() {
         out
     }
 
-    fn write_krusty_proxy(path: &Path, log: &Path, actual: &Path) {
+    fn write_krusty_proxy(path: &Path, log: &Path, diagnostics: &Path, actual: &Path) {
         let quote = |value: &Path| value.display().to_string().replace('\'', "'\\''");
         let script = r#"#!/bin/sh
 {
   echo "----"
   printf '%s\n' "$@"
 } >> "LOGPATH"
-exec 'ACTUAL' "$@"
+diagnostics="DIAGNOSTICSPATH.$$"
+'ACTUAL' "$@" 2> "$diagnostics"
+status=$?
+cat "$diagnostics" >&2
+mv "$diagnostics" "DIAGNOSTICSPATH"
+exit "$status"
 "#
         .replace("LOGPATH", &quote(log))
+        .replace("DIAGNOSTICSPATH", &quote(diagnostics))
         .replace("ACTUAL", &quote(actual));
         std::fs::write(path, script).expect("write recording krusty");
     }
@@ -2080,7 +2272,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 plugins {
     kotlin("jvm") version "KGP_VERSION"
     id("krusty") version "PLUGIN_VERSION"
-    kotlin("plugin.allopen") version "KGP_VERSION" apply false
+    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
     `java-library`
 }
 
@@ -2091,7 +2283,7 @@ dependencies {
 val krustyNegative = providers.gradleProperty("krusty.negative").orNull
 
 if (krustyNegative == "compiler-plugin") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.allopen")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
 }
 
 abstract class GenerateKotlin : DefaultTask() {
@@ -2112,8 +2304,9 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 }
 
 kotlin {
-    if (krustyNegative == "compiler-version") {
-        compilerVersion.set("2.4.0")
+    when (krustyNegative) {
+        "compiler-version" -> compilerVersion.set("2.4.0")
+        else -> {}
     }
     sourceSets.named("main") {
         kotlin.srcDir("src")
@@ -2122,6 +2315,16 @@ kotlin {
     }
     sourceSets.named("test") {
         kotlin.srcDir("test-src")
+    }
+}
+
+// Override krusty's own task input, not KotlinTopLevelExtension.compilerVersion: changing the
+// latter asks KGP to resolve a different build-tools implementation before krusty can validate it.
+afterEvaluate {
+    if (krustyNegative == "dev-compiler-version") {
+        tasks.withType<krusty.KrustyCompileTask>().configureEach {
+            compilerVersion.set("KGP_VERSION-dev-7885")
+        }
     }
 }
 
@@ -2141,6 +2344,9 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         optIn.set(
             when (krustyNegative) {
                 "empty-opt-in" -> listOf("krusty.fixture.ExperimentalFirstApi", "")
+                // Only the redundant-argument warning may remain, so `-Werror` has nothing else to
+                // promote.
+                "werror-warning-exception" -> emptyList<String>()
                 "duplicate-opt-in" -> listOf(
                     "krusty.fixture.ExperimentalFirstApi",
                     "krusty.fixture.ExperimentalFirstApi",
@@ -2154,23 +2360,40 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
         freeCompilerArgs.add("-Xskip-prerelease-check")
         when (krustyNegative) {
-            "structured-option" -> progressiveMode.set(true)
+            "structured-option" -> extraWarnings.set(true)
             "all-warnings-as-errors" -> allWarningsAsErrors.set(true)
             "reserved-free-argument" -> freeCompilerArgs.add("-d=forbidden")
-            "duplicate-free-argument" -> freeCompilerArgs.addAll(
-                listOf("-Xlambdas=indy", "-Xlambdas=class"),
-            )
-            "unknown-free-argument" -> freeCompilerArgs.add("-Xdefinitely-unsupported")
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
             "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
-            "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
+            "explicit-api-bad-mode" -> freeCompilerArgs.add("-Xexplicit-api=sideways")
             "old-language-version" -> languageVersion.set(KotlinVersion.fromVersion("1.9"))
             "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
+            "progressive-mode" -> progressiveMode.set(true)
+            "free-end-of-options" -> freeCompilerArgs.addAll("--", "-d", "elsewhere")
+            "free-argfile" -> freeCompilerArgs.add("@overrides.args")
+            "free-source" -> freeCompilerArgs.add("Extra.kt")
+            "classpath-alias" -> freeCompilerArgs.addAll("-cp", "elsewhere.jar")
+            "progressive-alias" -> freeCompilerArgs.add("-Xprogressive")
+            "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
+            "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
+            "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
+            "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
+                "-Xescaping-functions",
+                "-d=forbidden",
+            )
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
-            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
-            "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
+            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=21")
             "free-werror" -> freeCompilerArgs.add("-Werror")
+            "werror-overlap" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Werror")
+            }
+            "werror-warning-exception" -> {
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Xcontext-parameters")
+                freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:warning")
+            }
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
             "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
             "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")

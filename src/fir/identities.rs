@@ -33,6 +33,7 @@ u32_id!(SigNameId);
 u32_id!(DeferredCallableSelectionId);
 u32_id!(DeferredMemberSelectionId);
 u32_id!(DeferredValueSelectionId);
+u32_id!(QualifiedCallCoordinateId);
 u32_id!(TypeParameterId);
 u32_id!(DiagnosticId);
 u32_id!(LookupNameId);

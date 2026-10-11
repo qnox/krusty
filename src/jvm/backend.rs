@@ -5,6 +5,7 @@ use crate::ast::{Decl, File};
 use crate::backend::{
     Artifact, Backend, BackendClassifierSource, BackendModuleFacts, CheckedBackendClassifiers,
 };
+use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::frontend::FrontendSymbols;
 use crate::jvm::names::{file_class_name, type_descriptor};
@@ -88,10 +89,12 @@ pub(crate) struct BackendPassFacts {
 /// miscompiles the gate never saw); a unit test below bans direct calls to the individual passes.
 ///
 /// Runs, in order:
-/// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
-///    declarations from the file's annotations; no-op without a trigger annotation.
-///    Once their output is final, freeze any exact dependency identity selected by a generated
-///    `super` call, then realize all checked super calls from those frozen facts.
+/// 1. `plugins::complete_enabled` — compiler-extension plugins (kotlinx.serialization) realize
+///    the declarations they generated at the handoff: bodies, storage and JVM helpers; no-op
+///    without a trigger annotation. The members the JVM publishes beyond the handoff's join each
+///    class's declaration record. Once their output is final, freeze any exact dependency identity
+///    selected by a generated `super` call, then realize all checked super calls from those
+///    frozen facts.
 ///
 /// 2. `realize_top_level_jvm_fields` — select public field storage for eligible top-level
 ///    `@JvmField` declarations through stable property/layout identities.
@@ -152,13 +155,16 @@ pub(crate) fn run_backend_passes(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(
+    crate::plugins::complete_enabled(
         ir,
         plugins.native_plugins,
         plugins.module_name,
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    // The JVM publishes members kotlinc's plugins generate only in IR (serialization's
+    // `write$Self`); they join each class's record before any lowering rewrites one.
+    crate::metadata::class_declarations::add_target_generated_functions(ir);
     // Plugins run after the frontend/backend handoff and may append checked calls selected by an
     // exact dependency identity. Freeze those provider-normalized records now, once plugin output
     // is final and before any realization consumes them. Existing facts remain the original copy.
@@ -405,6 +411,8 @@ pub struct JvmBackend {
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
     java_parameters: bool,
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
+    /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
+    inline_string_concat: bool,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
     param_assertions: bool,
@@ -418,6 +426,9 @@ pub struct JvmBackend {
     /// `LanguageFeature.AnnotationsInMetadata`. This is deliberately independent of the physical
     /// metadata stamp: an internal stamp override must not change source-language semantics.
     annotations_in_metadata: bool,
+    /// Whether the language settings are pre-release, so every `@kotlin.Metadata` carries
+    /// kotlinc's pre-release flag.
+    pre_release_metadata: bool,
 }
 
 impl JvmBackend {
@@ -428,10 +439,12 @@ impl JvmBackend {
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
             java_parameters: false,
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
+            inline_string_concat: false,
             param_assertions: true,
             call_assertions: true,
             metadata_version: None,
             annotations_in_metadata: true,
+            pre_release_metadata: false,
         }
     }
 
@@ -440,6 +453,23 @@ impl JvmBackend {
     pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> JvmBackend {
         self.metadata_version = version;
         self
+    }
+
+    /// Mark every `@kotlin.Metadata` as pre-release, as kotlinc does when
+    /// `LanguageVersionSettings.isPreRelease` holds for the compilation.
+    pub fn with_pre_release_metadata(mut self, pre_release: bool) -> JvmBackend {
+        self.pre_release_metadata = pre_release;
+        self
+    }
+
+    /// The version and pre-release flag of every `@kotlin.Metadata` this backend writes.
+    fn metadata_stamp(&self) -> crate::jvm::classfile::MetadataStamp {
+        crate::jvm::classfile::MetadataStamp {
+            version: self
+                .metadata_version
+                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+            pre_release: self.pre_release_metadata,
+        }
     }
 
     /// Select declaration-annotation record emission from the finalized source-language feature
@@ -477,6 +507,12 @@ impl JvmBackend {
     /// Independently select `-Xlambdas` and `-Xsam-conversions` realization strategies.
     pub fn with_lambda_modes(mut self, modes: crate::jvm::ir_emit::LambdaModes) -> JvmBackend {
         self.lambda_modes = modes;
+        self
+    }
+
+    /// `-Xstring-concat=inline`: never build a string concatenation with `invokedynamic`.
+    pub fn with_inline_string_concat(mut self, inline: bool) -> JvmBackend {
+        self.inline_string_concat = inline;
         self
     }
 
@@ -518,6 +554,7 @@ pub fn shipping_emit_options(
         // Per-invocation strategies; the CLI overrides them on the backend.
         lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
         java_parameters: false,
+        inline_string_concat: false,
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
         // second compilation sees no constructor/member parameter names (named arguments) and no
@@ -537,6 +574,7 @@ pub fn shipping_emit_options(
         // The shipping default language level is 2.4, where this feature is enabled. A configured
         // compiler invocation overrides it through `EmitOptions::with_annotations_in_metadata`.
         annotations_in_metadata: true,
+        pre_release_metadata: false,
     }
 }
 
@@ -836,6 +874,7 @@ impl JvmBackend {
             native_plugins,
             module_name,
             stems,
+            origins: _,
         } = file;
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
@@ -880,8 +919,7 @@ impl JvmBackend {
             (module_name, facade_locals),
             self.param_assertions,
             &classifiers,
-            self.metadata_version
-                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+            self.metadata_stamp(),
             self.annotations_in_metadata,
         );
         let has_facade_members = metadata.is_some();
@@ -948,9 +986,11 @@ impl JvmBackend {
             shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
                 .with_jvm_default(self.jvm_default)
                 .with_lambda_modes(self.lambda_modes)
+                .with_inline_string_concat(self.inline_string_concat)
                 .with_param_assertions(self.param_assertions)
                 .with_metadata_version(self.metadata_version)
                 .with_annotations_in_metadata(self.annotations_in_metadata)
+                .with_pre_release_metadata(self.pre_release_metadata)
                 .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
@@ -1080,6 +1120,10 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
 
 impl Backend for JvmBackend {
     type State = JvmState;
+
+    fn compilation_target(&self) -> CompilationTarget {
+        CompilationTarget::Jvm
+    }
 
     fn lower_ir_file(
         &self,
@@ -1269,7 +1313,7 @@ pub fn facade_package_metadata_from_ir(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     symbols: &dyn crate::backend::BackendClassifierSource,
-    metadata_version: [i32; 3],
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
@@ -1426,7 +1470,7 @@ pub fn facade_package_metadata_from_ir(
         (module_name, locals),
         param_assertions,
         Some(&approximate),
-        metadata_version,
+        metadata_stamp,
         annotations_in_metadata,
     )
 }
@@ -1507,7 +1551,7 @@ fn build_facade_metadata(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
-    metadata_version: [i32; 3],
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
@@ -1523,7 +1567,7 @@ fn build_facade_metadata(
             );
         crate::jvm::ir_emit::KotlinMetadata {
             k: 2,
-            mv: metadata_version.to_vec(),
+            stamp: metadata_stamp,
             xi: 48,
             d1: crate::metadata::encoding::bytes_to_strings(&d1_bytes),
             d2,
@@ -1759,7 +1803,10 @@ mod tests {
             ("main", &[]),
             true,
             &NoClassifierFacts,
-            [2, 4, 0],
+            crate::jvm::classfile::MetadataStamp {
+                version: [2, 4, 0],
+                pre_release: false,
+            },
             true,
         )
         .expect("a package property requires facade metadata");
@@ -1837,7 +1884,7 @@ mod tests {
                 ],
             ),
             (
-                "run_enabled(",
+                "complete_enabled(",
                 &["src/plugins/mod.rs", "src/jvm/backend.rs"],
             ),
             (

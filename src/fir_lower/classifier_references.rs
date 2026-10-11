@@ -346,6 +346,7 @@ impl BodyLowering<'_> {
                     .collect::<Vec<_>>();
                 self.module_constructor_call(ModuleConstructorRequest {
                     classifier,
+                    constructor: declaration,
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,

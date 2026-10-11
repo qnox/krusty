@@ -52,7 +52,12 @@ fn a_generic_class_value_class_default_constructs_the_carrier() {
 
 #[test]
 fn value_class_constructor_defaults_run() {
-    let output = common::compile_and_run_box(SRC, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }

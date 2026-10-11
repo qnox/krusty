@@ -47,12 +47,13 @@ impl SymbolResolver<'_> {
 
     /// File/module accessibility for a top-level function or extension declaration.
     pub(crate) fn non_member_callable_accessible(&self, candidate: &FunctionInfo) -> bool {
-        crate::callable_access::source_callable_accessible(
-            candidate.visibility,
-            candidate.source_file,
-            self.access_file,
-            || self.lib.internal_accessible(candidate.callable.owner),
-        )
+        self.visibility_suppressed
+            || crate::callable_access::source_callable_accessible(
+                candidate.visibility,
+                candidate.source_file,
+                self.access_file,
+                || self.lib.internal_accessible(candidate.callable.owner),
+            )
     }
 
     /// Candidates that may participate in source-argument mapping for this access context.

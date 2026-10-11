@@ -21,7 +21,7 @@ fn checked_analysis(source: &str) -> crate::frontend::SourceSetAnalysis {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Body")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -319,7 +319,7 @@ fn cross_file_source_call_reaches_fir_as_a_stable_callable_identity() {
             SourceInput::kotlin("fun <T> identity(value: T) = value\n").with_file_stem("Identity"),
             SourceInput::kotlin("fun caller() = identity(\"OK\")\n").with_file_stem("Caller"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1507,11 +1507,11 @@ fn mixed_open_end_membership_selects_range_until() {
 
 #[test]
 fn uniform_open_end_double_membership_stays_a_comparison() {
-    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+    if crate::toolchain::stdlib_jar().is_none() {
         return;
-    };
+    }
     let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        crate::toolchain::stdlib_and_jdk_classpath(),
     ))
     .expect("stdlib provider");
     let mut diagnostics = DiagSink::new();
@@ -1520,7 +1520,7 @@ fn uniform_open_end_double_membership_stays_a_comparison() {
             SourceInput::kotlin("fun test(value: Double): Boolean = value in 1.0..<3.0\n")
                 .with_file_stem("Body"),
         ],
-        Box::new(libraries),
+        crate::frontend::PlatformProvider::jvm(Box::new(libraries)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1726,7 +1726,7 @@ fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
             SourceInput::kotlin("fun test(value: Double): Boolean = value in 1.0..3.0\n")
                 .with_file_stem("Body"),
         ],
-        Box::new(libraries),
+        crate::frontend::PlatformProvider::jvm(Box::new(libraries)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1935,14 +1935,14 @@ suspend fun inspect(): Boolean {
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
             "// WITH_REFLECT",
         )),
     ))
     .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("SuspendClassifierTests")],
-        Box::new(platform),
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1995,12 +1995,12 @@ fun invokeRaw(
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for("")),
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for("")),
     ))
     .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("RawSuspendFunctionCast")],
-        Box::new(platform),
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -2037,14 +2037,14 @@ fun box(): String {
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
             "// WITH_REFLECT",
         )),
     ))
     .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("SuspendCastNarrowing")],
-        Box::new(platform),
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
         &LangFeatures::new(),
         &mut diagnostics,
     );

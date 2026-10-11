@@ -300,8 +300,11 @@ fn singleton_member_calls_use_the_shared_source_set_harness() {
             .iter()
             .map(|(_, source)| *source)
             .collect::<Vec<_>>();
-        let diagnostics =
-            common::front_end_diagnostics_files(&source_texts, std::slice::from_ref(&stdlib), None);
+        let diagnostics = common::front_end_diagnostics_files(
+            &source_texts,
+            std::slice::from_ref(&stdlib),
+            Some(&common::jdk_modules()),
+        );
         match case.outcome {
             Outcome::Clean | Outcome::BoxOk => assert!(
                 diagnostics.is_empty(),

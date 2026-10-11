@@ -1,0 +1,402 @@
+class kotlin.Byte: fun dec(): kotlin.Byte
+class kotlin.Byte: fun inc(): kotlin.Byte
+class kotlin.Char: fun dec(): kotlin.Char
+class kotlin.Char: fun inc(): kotlin.Char
+class kotlin.Double: fun bits(): kotlin.Long
+class kotlin.Double: fun dec(): kotlin.Double
+class kotlin.Double: fun inc(): kotlin.Double
+class kotlin.Float: fun bits(): kotlin.Int
+class kotlin.Float: fun dec(): kotlin.Float
+class kotlin.Float: fun inc(): kotlin.Float
+class kotlin.Int: fun dec(): kotlin.Int
+class kotlin.Int: fun inc(): kotlin.Int
+class kotlin.Long: fun dec(): kotlin.Long
+class kotlin.Long: fun inc(): kotlin.Long
+class kotlin.Short: fun dec(): kotlin.Short
+class kotlin.Short: fun inc(): kotlin.Short
+class kotlin.String: fun compareTo(kotlin.String): kotlin.Int
+class kotlin.String: fun equals(kotlin.Any?): kotlin.Boolean
+class kotlin.String: fun hashCode(): kotlin.Int
+class kotlin.String: fun plusImpl(kotlin.String): kotlin.String
+class kotlin.String: fun subSequence(kotlin.Int, kotlin.Int): kotlin.CharSequence
+class kotlin.native.ImmutableBlob: fun get(kotlin.Int): kotlin.Byte
+class kotlin.native.internal.NSArrayAsKList: fun get(kotlin.Int): kotlin.Any?
+class kotlin.native.internal.NSDictionaryAsKMap: fun containsKey(kotlin.Any?): kotlin.Boolean
+class kotlin.native.internal.NSDictionaryAsKMap: fun containsValue(kotlin.Any?): kotlin.Boolean
+class kotlin.native.internal.NSDictionaryAsKMap: fun get(kotlin.Any?): kotlin.Any?
+class kotlin.native.internal.NSEnumeratorAsKIterator: fun computeNext(): kotlin.Unit
+class kotlin.native.internal.NSMutableArrayAsKMutableList: fun add(kotlin.Int, kotlin.Any?): kotlin.Unit
+class kotlin.native.internal.NSMutableArrayAsKMutableList: fun get(kotlin.Int): kotlin.Any?
+class kotlin.native.internal.NSMutableArrayAsKMutableList: fun removeAt(kotlin.Int): kotlin.Any?
+class kotlin.native.internal.NSMutableArrayAsKMutableList: fun set(kotlin.Int, kotlin.Any?): kotlin.Any?
+class kotlin.native.internal.NSSetAsKSet: fun contains(kotlin.Any?): kotlin.Boolean
+class kotlin.native.internal.NSSetAsKSet: fun getElement(kotlin.Any?): kotlin.Any?
+class kotlin.native.internal.NSSetAsKSet: fun iterator(): kotlin.collections.Iterator<kotlin.Any?>
+class kotlin.native.internal.NativePtr: fun plus(kotlin.Long): kotlin.native.internal.NativePtr
+class kotlin.native.internal.NativePtr: fun toLong(): kotlin.Long
+class kotlin.native.internal.NativePtrArray: fun get(kotlin.Int): kotlin.native.internal.NativePtr
+class kotlin.native.internal.NativePtrArray: fun set(kotlin.Int, kotlin.native.internal.NativePtr): kotlin.Unit
+class kotlin.native.internal.concurrent.Monitor$Companion: fun allocate(): kotlin.native.internal.concurrent.Monitor
+class kotlin.native.internal.concurrent.Monitor: fun destroy(): kotlin.Unit
+class kotlin.native.internal.concurrent.Monitor: fun enter(): kotlin.Unit
+class kotlin.native.internal.concurrent.Monitor: fun leave(): kotlin.Unit
+class kotlin.native.internal.concurrent.Monitor: fun notify(): kotlin.Unit
+class kotlin.native.internal.concurrent.Monitor: fun notifyAll(): kotlin.Unit
+class kotlin.native.internal.concurrent.Monitor: fun wait(kotlin.Long): kotlin.Unit
+class kotlin.native.runtime.Debugging: fun dumpMemory(kotlin.Long): kotlin.Boolean
+class kotlin.native.runtime.GC: fun collect(): kotlin.Unit
+class kotlin.native.runtime.GC: fun schedule(): kotlin.Unit
+class kotlinx.cinterop.ObjCWeakReferenceImpl: fun get(): kotlin.Any?
+class kotlinx.cinterop.Vector128: fun getByteAt(kotlin.Int): kotlin.Byte
+class kotlinx.cinterop.Vector128: fun getDoubleAt(kotlin.Int): kotlin.Double
+class kotlinx.cinterop.Vector128: fun getFloatAt(kotlin.Int): kotlin.Float
+class kotlinx.cinterop.Vector128: fun getIntAt(kotlin.Int): kotlin.Int
+class kotlinx.cinterop.Vector128: fun getLongAt(kotlin.Int): kotlin.Long
+class kotlinx.cinterop.Vector128: fun getUByteAt(kotlin.Int): kotlin.UByte
+class kotlinx.cinterop.Vector128: fun getUIntAt(kotlin.Int): kotlin.UInt
+class kotlinx.cinterop.Vector128: fun getULongAt(kotlin.Int): kotlin.ULong
+class kotlinx.cinterop.nativeMemUtils: fun getByte(kotlinx.cinterop.NativePointed): kotlin.Byte
+class kotlinx.cinterop.nativeMemUtils: fun getDouble(kotlinx.cinterop.NativePointed): kotlin.Double
+class kotlinx.cinterop.nativeMemUtils: fun getFloat(kotlinx.cinterop.NativePointed): kotlin.Float
+class kotlinx.cinterop.nativeMemUtils: fun getInt(kotlinx.cinterop.NativePointed): kotlin.Int
+class kotlinx.cinterop.nativeMemUtils: fun getLong(kotlinx.cinterop.NativePointed): kotlin.Long
+class kotlinx.cinterop.nativeMemUtils: fun getNativePtr(kotlinx.cinterop.NativePointed): kotlin.native.internal.NativePtr
+class kotlinx.cinterop.nativeMemUtils: fun getShort(kotlinx.cinterop.NativePointed): kotlin.Short
+class kotlinx.cinterop.nativeMemUtils: fun getVector(kotlinx.cinterop.NativePointed): kotlinx.cinterop.Vector128
+class kotlinx.cinterop.nativeMemUtils: fun putByte(kotlinx.cinterop.NativePointed, kotlin.Byte): kotlin.Unit
+class kotlinx.cinterop.nativeMemUtils: fun putDouble(kotlinx.cinterop.NativePointed, kotlin.Double): kotlin.Unit
+class kotlinx.cinterop.nativeMemUtils: fun putFloat(kotlinx.cinterop.NativePointed, kotlin.Float): kotlin.Unit
+class kotlinx.cinterop.nativeMemUtils: fun putInt(kotlinx.cinterop.NativePointed, kotlin.Int): kotlin.Unit
+class kotlinx.cinterop.nativeMemUtils: fun putLong(kotlinx.cinterop.NativePointed, kotlin.Long): kotlin.Unit
+class kotlinx.cinterop.nativeMemUtils: fun putNativePtr(kotlinx.cinterop.NativePointed, kotlin.native.internal.NativePtr): kotlin.Unit
+class kotlinx.cinterop.nativeMemUtils: fun putShort(kotlinx.cinterop.NativePointed, kotlin.Short): kotlin.Unit
+class kotlinx.cinterop.nativeMemUtils: fun putVector(kotlinx.cinterop.NativePointed, kotlinx.cinterop.Vector128): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.Array<kotlin.Any?>, kotlin.Int, kotlin.Array<kotlin.Any?>, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.BooleanArray, kotlin.Int, kotlin.BooleanArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.ByteArray, kotlin.Int, kotlin.ByteArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.CharArray, kotlin.Int, kotlin.CharArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.DoubleArray, kotlin.Int, kotlin.DoubleArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.FloatArray, kotlin.Int, kotlin.FloatArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.IntArray, kotlin.Int, kotlin.IntArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.LongArray, kotlin.Int, kotlin.LongArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayCopy(kotlin.ShortArray, kotlin.Int, kotlin.ShortArray, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.Array<T>, kotlin.Int, kotlin.Int, T): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.BooleanArray, kotlin.Int, kotlin.Int, kotlin.Boolean): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.ByteArray, kotlin.Int, kotlin.Int, kotlin.Byte): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.CharArray, kotlin.Int, kotlin.Int, kotlin.Char): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.DoubleArray, kotlin.Int, kotlin.Int, kotlin.Double): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.FloatArray, kotlin.Int, kotlin.Int, kotlin.Float): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.IntArray, kotlin.Int, kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.LongArray, kotlin.Int, kotlin.Int, kotlin.Long): kotlin.Unit
+package kotlin.collections: fun arrayFill(kotlin.ShortArray, kotlin.Int, kotlin.Int, kotlin.Short): kotlin.Unit
+package kotlin.concurrent: fun kotlin.Array<T>.atomicGet(kotlin.Int): T
+package kotlin.concurrent: fun kotlin.Array<T>.atomicSet(kotlin.Int, T): kotlin.Unit
+package kotlin.concurrent: fun kotlin.Array<T>.compareAndExchange(kotlin.Int, T, T): T
+package kotlin.concurrent: fun kotlin.Array<T>.compareAndSet(kotlin.Int, T, T): kotlin.Boolean
+package kotlin.concurrent: fun kotlin.Array<T>.getAndSet(kotlin.Int, T): T
+package kotlin.concurrent: fun kotlin.IntArray.atomicGet(kotlin.Int): kotlin.Int
+package kotlin.concurrent: fun kotlin.IntArray.atomicSet(kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.concurrent: fun kotlin.IntArray.compareAndExchange(kotlin.Int, kotlin.Int, kotlin.Int): kotlin.Int
+package kotlin.concurrent: fun kotlin.IntArray.compareAndSet(kotlin.Int, kotlin.Int, kotlin.Int): kotlin.Boolean
+package kotlin.concurrent: fun kotlin.IntArray.getAndAdd(kotlin.Int, kotlin.Int): kotlin.Int
+package kotlin.concurrent: fun kotlin.IntArray.getAndSet(kotlin.Int, kotlin.Int): kotlin.Int
+package kotlin.concurrent: fun kotlin.LongArray.atomicGet(kotlin.Int): kotlin.Long
+package kotlin.concurrent: fun kotlin.LongArray.atomicSet(kotlin.Int, kotlin.Long): kotlin.Unit
+package kotlin.concurrent: fun kotlin.LongArray.compareAndExchange(kotlin.Int, kotlin.Long, kotlin.Long): kotlin.Long
+package kotlin.concurrent: fun kotlin.LongArray.compareAndSet(kotlin.Int, kotlin.Long, kotlin.Long): kotlin.Boolean
+package kotlin.concurrent: fun kotlin.LongArray.getAndAdd(kotlin.Int, kotlin.Long): kotlin.Long
+package kotlin.concurrent: fun kotlin.LongArray.getAndSet(kotlin.Int, kotlin.Long): kotlin.Long
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<T>.atomicGetField(): T
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<T>.atomicSetField(T): kotlin.Unit
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<T>.compareAndExchangeField(T, T): T
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<T>.compareAndSetField(T, T): kotlin.Boolean
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<T>.getAndSetField(T): T
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<kotlin.Byte>.getAndAddField(kotlin.Byte): kotlin.Byte
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<kotlin.Int>.getAndAddField(kotlin.Int): kotlin.Int
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<kotlin.Long>.getAndAddField(kotlin.Long): kotlin.Long
+package kotlin.concurrent: fun kotlin.reflect.KMutableProperty0<kotlin.Short>.getAndAddField(kotlin.Short): kotlin.Short
+package kotlin.enums: fun enumEntriesIntrinsic(): kotlin.enums.EnumEntries<T>
+package kotlin.io: fun printlnToStdErr(kotlin.String): kotlin.Unit
+package kotlin.io: fun readLine(): kotlin.String?
+package kotlin.io: fun readlnOrNull(): kotlin.String?
+package kotlin.math: fun abs(kotlin.Double): kotlin.Double
+package kotlin.math: fun abs(kotlin.Float): kotlin.Float
+package kotlin.math: fun abs(kotlin.Int): kotlin.Int
+package kotlin.math: fun abs(kotlin.Long): kotlin.Long
+package kotlin.math: fun acos(kotlin.Double): kotlin.Double
+package kotlin.math: fun acos(kotlin.Float): kotlin.Float
+package kotlin.math: fun acosh(kotlin.Double): kotlin.Double
+package kotlin.math: fun acosh(kotlin.Float): kotlin.Float
+package kotlin.math: fun asin(kotlin.Double): kotlin.Double
+package kotlin.math: fun asin(kotlin.Float): kotlin.Float
+package kotlin.math: fun asinh(kotlin.Double): kotlin.Double
+package kotlin.math: fun asinh(kotlin.Float): kotlin.Float
+package kotlin.math: fun atan(kotlin.Double): kotlin.Double
+package kotlin.math: fun atan(kotlin.Float): kotlin.Float
+package kotlin.math: fun atan2(kotlin.Double, kotlin.Double): kotlin.Double
+package kotlin.math: fun atan2(kotlin.Float, kotlin.Float): kotlin.Float
+package kotlin.math: fun atanh(kotlin.Double): kotlin.Double
+package kotlin.math: fun atanh(kotlin.Float): kotlin.Float
+package kotlin.math: fun cbrt(kotlin.Double): kotlin.Double
+package kotlin.math: fun cbrt(kotlin.Float): kotlin.Float
+package kotlin.math: fun ceil(kotlin.Double): kotlin.Double
+package kotlin.math: fun ceil(kotlin.Float): kotlin.Float
+package kotlin.math: fun cos(kotlin.Double): kotlin.Double
+package kotlin.math: fun cos(kotlin.Float): kotlin.Float
+package kotlin.math: fun cosh(kotlin.Double): kotlin.Double
+package kotlin.math: fun cosh(kotlin.Float): kotlin.Float
+package kotlin.math: fun exp(kotlin.Double): kotlin.Double
+package kotlin.math: fun exp(kotlin.Float): kotlin.Float
+package kotlin.math: fun expm1(kotlin.Double): kotlin.Double
+package kotlin.math: fun expm1(kotlin.Float): kotlin.Float
+package kotlin.math: fun floor(kotlin.Double): kotlin.Double
+package kotlin.math: fun floor(kotlin.Float): kotlin.Float
+package kotlin.math: fun hypot(kotlin.Double, kotlin.Double): kotlin.Double
+package kotlin.math: fun hypot(kotlin.Float, kotlin.Float): kotlin.Float
+package kotlin.math: fun kotlin.Double.IEEErem(kotlin.Double): kotlin.Double
+package kotlin.math: fun kotlin.Double.nextDown(): kotlin.Double
+package kotlin.math: fun kotlin.Double.nextTowards(kotlin.Double): kotlin.Double
+package kotlin.math: fun kotlin.Double.nextUp(): kotlin.Double
+package kotlin.math: fun kotlin.Double.pow(kotlin.Double): kotlin.Double
+package kotlin.math: fun kotlin.Double.withSign(kotlin.Double): kotlin.Double
+package kotlin.math: fun kotlin.Float.IEEErem(kotlin.Float): kotlin.Float
+package kotlin.math: fun kotlin.Float.nextDown(): kotlin.Float
+package kotlin.math: fun kotlin.Float.nextTowards(kotlin.Float): kotlin.Float
+package kotlin.math: fun kotlin.Float.nextUp(): kotlin.Float
+package kotlin.math: fun kotlin.Float.pow(kotlin.Float): kotlin.Float
+package kotlin.math: fun kotlin.Float.withSign(kotlin.Float): kotlin.Float
+package kotlin.math: fun ln(kotlin.Double): kotlin.Double
+package kotlin.math: fun ln(kotlin.Float): kotlin.Float
+package kotlin.math: fun ln1p(kotlin.Double): kotlin.Double
+package kotlin.math: fun ln1p(kotlin.Float): kotlin.Float
+package kotlin.math: fun log10(kotlin.Double): kotlin.Double
+package kotlin.math: fun log10(kotlin.Float): kotlin.Float
+package kotlin.math: fun log2(kotlin.Double): kotlin.Double
+package kotlin.math: fun log2(kotlin.Float): kotlin.Float
+package kotlin.math: fun round(kotlin.Double): kotlin.Double
+package kotlin.math: fun round(kotlin.Float): kotlin.Float
+package kotlin.math: fun sin(kotlin.Double): kotlin.Double
+package kotlin.math: fun sin(kotlin.Float): kotlin.Float
+package kotlin.math: fun sinh(kotlin.Double): kotlin.Double
+package kotlin.math: fun sinh(kotlin.Float): kotlin.Float
+package kotlin.math: fun sqrt(kotlin.Double): kotlin.Double
+package kotlin.math: fun sqrt(kotlin.Float): kotlin.Float
+package kotlin.math: fun tan(kotlin.Double): kotlin.Double
+package kotlin.math: fun tan(kotlin.Float): kotlin.Float
+package kotlin.math: fun tanh(kotlin.Double): kotlin.Double
+package kotlin.math: fun tanh(kotlin.Float): kotlin.Float
+package kotlin.native.concurrent: fun currentInternal(): kotlin.Int
+package kotlin.native.concurrent: fun executeAfterInternal(kotlin.Int, kotlin.native.internal.NativePtr, kotlin.Long): kotlin.Unit
+package kotlin.native.concurrent: fun executeInternal(kotlin.Int, kotlin.native.internal.NativePtr, kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<*>>): kotlin.Int
+package kotlin.native.concurrent: fun getActiveWorkersInternal(): kotlin.IntArray
+package kotlin.native.concurrent: fun getPlatfromThreadIdInternal(kotlin.Int): kotlin.ULong
+package kotlin.native.concurrent: fun getWorkerNameInternal(kotlin.Int): kotlin.native.internal.NativePtr
+package kotlin.native.concurrent: fun parkInternal(kotlin.Int, kotlin.Long, kotlin.Boolean): kotlin.Boolean
+package kotlin.native.concurrent: fun processQueueInternal(kotlin.Int): kotlin.Boolean
+package kotlin.native.concurrent: fun requestTerminationInternal(kotlin.Int, kotlin.Boolean): kotlin.Int
+package kotlin.native.concurrent: fun startInternal(kotlin.Boolean, kotlin.native.internal.NativePtr): kotlin.Int
+package kotlin.native.concurrent: fun stateOfFuture(kotlin.Int): kotlin.Int
+package kotlin.native.concurrent: fun versionToken(): kotlin.Int
+package kotlin.native.concurrent: fun waitForAnyFuture(kotlin.Int, kotlin.Int): kotlin.Boolean
+package kotlin.native.concurrent: fun waitWorkerTermination(kotlin.native.concurrent.Worker): kotlin.Unit
+package kotlin.native.internal.concurrent: fun currentThreadId(): kotlin.ULong
+package kotlin.native.internal.ref: fun createRetainedExternalRCRef(kotlin.Any?): kotlin.native.internal.NativePtr
+package kotlin.native.internal.ref: fun createUnretainedExternalRCRef(kotlin.Any?): kotlin.native.internal.NativePtr
+package kotlin.native.internal.ref: fun dereferenceExternalRCRef(kotlin.native.internal.NativePtr): kotlin.Any?
+package kotlin.native.internal.ref: fun dereferenceExternalRCRefOrNull(kotlin.native.internal.NativePtr): kotlin.Any?
+package kotlin.native.internal.ref: fun disposeExternalRCRef(kotlin.native.internal.NativePtr): kotlin.Unit
+package kotlin.native.internal.ref: fun releaseExternalRCRef(kotlin.native.internal.NativePtr): kotlin.Unit
+package kotlin.native.internal.ref: fun retainExternalRCRef(kotlin.native.internal.NativePtr): kotlin.Unit
+package kotlin.native.internal: fun T.reinterpret(): R
+package kotlin.native.internal: fun areEqualByValue(kotlin.Boolean, kotlin.Boolean): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlin.Byte, kotlin.Byte): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlin.Double, kotlin.Double): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlin.Float, kotlin.Float): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlin.Int, kotlin.Int): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlin.Long, kotlin.Long): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlin.Short, kotlin.Short): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlin.native.internal.NativePtr, kotlin.native.internal.NativePtr): kotlin.Boolean
+package kotlin.native.internal: fun areEqualByValue(kotlinx.cinterop.Vector128, kotlinx.cinterop.Vector128): kotlin.Boolean
+package kotlin.native.internal: fun createEmptyString(): kotlin.String
+package kotlin.native.internal: fun createUninitializedArray(kotlin.Int): T
+package kotlin.native.internal: fun createUninitializedInstance(): T
+package kotlin.native.internal: fun enumValueOfIntrinsic(kotlin.String): T
+package kotlin.native.internal: fun enumValuesIntrinsic(): kotlin.Array<T>
+package kotlin.native.internal: fun getCachedBooleanBox(kotlin.Boolean): kotlin.Boolean?
+package kotlin.native.internal: fun getCachedByteBox(kotlin.Byte): kotlin.Byte?
+package kotlin.native.internal: fun getCachedCharBox(kotlin.Char): kotlin.Char?
+package kotlin.native.internal: fun getCachedIntBox(kotlin.Int): kotlin.Int?
+package kotlin.native.internal: fun getCachedLongBox(kotlin.Long): kotlin.Long?
+package kotlin.native.internal: fun getCachedShortBox(kotlin.Short): kotlin.Short?
+package kotlin.native.internal: fun getContinuation(): kotlin.coroutines.Continuation<T>
+package kotlin.native.internal: fun getNativeNullPtr(): kotlin.native.internal.NativePtr
+package kotlin.native.internal: fun getObjectTypeInfo(kotlin.Any): kotlin.native.internal.NativePtr
+package kotlin.native.internal: fun ieee754Equals(kotlin.Double, kotlin.Double): kotlin.Boolean
+package kotlin.native.internal: fun ieee754Equals(kotlin.Float, kotlin.Float): kotlin.Boolean
+package kotlin.native.internal: fun immutableBlobOfImpl(kotlin.String): kotlin.native.ImmutableBlob
+package kotlin.native.internal: fun inBooleanBoxCache(kotlin.Boolean): kotlin.Boolean
+package kotlin.native.internal: fun inByteBoxCache(kotlin.Byte): kotlin.Boolean
+package kotlin.native.internal: fun inCharBoxCache(kotlin.Char): kotlin.Boolean
+package kotlin.native.internal: fun inIntBoxCache(kotlin.Int): kotlin.Boolean
+package kotlin.native.internal: fun inLongBoxCache(kotlin.Long): kotlin.Boolean
+package kotlin.native.internal: fun inShortBoxCache(kotlin.Short): kotlin.Boolean
+package kotlin.native.internal: fun initInstance(kotlin.Any, kotlin.Any): kotlin.Unit
+package kotlin.native.internal: fun isInstance(kotlin.Any, kotlin.native.internal.NativePtr): kotlin.Boolean
+package kotlin.native.internal: fun isSubtype(kotlin.native.internal.NativePtr): kotlin.Boolean
+package kotlin.native.internal: fun kotlin.Any.isPermanent(): kotlin.Boolean
+package kotlin.native.internal: fun kotlin.Any.isStack(): kotlin.Boolean
+package kotlin.native.internal: fun restoreCoroutineState(): kotlin.Unit
+package kotlin.native.internal: fun returnIfSuspended(kotlin.Any?): T
+package kotlin.native.internal: fun saveCoroutineState(): kotlin.Unit
+package kotlin.native.internal: fun theUnitInstance(): kotlin.Unit
+package kotlin.native.internal: fun trapOnUndeclaredException(kotlin.Throwable): kotlin.Unit
+package kotlin.native.internal: fun undefined(): T
+package kotlin.native.ref: fun getWeakReferenceImpl(kotlin.Any): kotlin.native.ref.WeakReferenceImpl
+package kotlin.native: fun immutableBlobOf(kotlin.ShortArray): kotlin.native.ImmutableBlob
+package kotlin.native: fun kotlin.Any?.identityHashCode(): kotlin.Int
+package kotlin.native: fun kotlin.ByteArray.getCharAt(kotlin.Int): kotlin.Char
+package kotlin.native: fun kotlin.ByteArray.getDoubleAt(kotlin.Int): kotlin.Double
+package kotlin.native: fun kotlin.ByteArray.getFloatAt(kotlin.Int): kotlin.Float
+package kotlin.native: fun kotlin.ByteArray.getIntAt(kotlin.Int): kotlin.Int
+package kotlin.native: fun kotlin.ByteArray.getLongAt(kotlin.Int): kotlin.Long
+package kotlin.native: fun kotlin.ByteArray.getShortAt(kotlin.Int): kotlin.Short
+package kotlin.native: fun kotlin.ByteArray.getUIntAt(kotlin.Int): kotlin.UInt
+package kotlin.native: fun kotlin.ByteArray.getULongAt(kotlin.Int): kotlin.ULong
+package kotlin.native: fun kotlin.ByteArray.getUShortAt(kotlin.Int): kotlin.UShort
+package kotlin.native: fun kotlin.ByteArray.setCharAt(kotlin.Int, kotlin.Char): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setDoubleAt(kotlin.Int, kotlin.Double): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setFloatAt(kotlin.Int, kotlin.Float): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setIntAt(kotlin.Int, kotlin.Int): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setLongAt(kotlin.Int, kotlin.Long): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setShortAt(kotlin.Int, kotlin.Short): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setUByteAt(kotlin.Int, kotlin.UByte): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setUIntAt(kotlin.Int, kotlin.UInt): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setULongAt(kotlin.Int, kotlin.ULong): kotlin.Unit
+package kotlin.native: fun kotlin.ByteArray.setUShortAt(kotlin.Int, kotlin.UShort): kotlin.Unit
+package kotlin.native: fun kotlin.native.ImmutableBlob.toByteArray(kotlin.Int, kotlin.Int): kotlin.ByteArray
+package kotlin.native: fun kotlin.native.ImmutableBlob.toUByteArray(kotlin.Int, kotlin.Int): kotlin.UByteArray
+package kotlin.native: fun processUnhandledException(kotlin.Throwable): kotlin.Unit
+package kotlin.native: fun terminateWithUnhandledException(kotlin.Throwable): kotlin.Nothing
+package kotlin.native: fun vectorOf(kotlin.Float, kotlin.Float, kotlin.Float, kotlin.Float): kotlinx.cinterop.Vector128
+package kotlin.native: fun vectorOf(kotlin.Int, kotlin.Int, kotlin.Int, kotlin.Int): kotlinx.cinterop.Vector128
+package kotlin.system: fun exitProcess(kotlin.Int): kotlin.Nothing
+package kotlin.system: fun getTimeMicros(): kotlin.Long
+package kotlin.system: fun getTimeMillis(): kotlin.Long
+package kotlin.system: fun getTimeNanos(): kotlin.Long
+package kotlin.text.regex: fun decomposeCodePoint(kotlin.Int, kotlin.IntArray, kotlin.Int): kotlin.Int
+package kotlin.text.regex: fun decomposeString(kotlin.IntArray, kotlin.Int, kotlin.IntArray): kotlin.Int
+package kotlin.text.regex: fun getCanonicalClassInternal(kotlin.Int): kotlin.Int
+package kotlin.text.regex: fun getDecompositionInternal(kotlin.Int): kotlin.IntArray?
+package kotlin.text.regex: fun hasSingleCodepointDecompositionInternal(kotlin.Int): kotlin.Boolean
+package kotlin.text: fun insertInt(kotlin.CharArray, kotlin.Int, kotlin.Int): kotlin.Int
+package kotlin.text: fun insertString(kotlin.CharArray, kotlin.Int, kotlin.String, kotlin.Int, kotlin.Int): kotlin.Int
+package kotlin.text: fun intToString(kotlin.Int, kotlin.Int): kotlin.String
+package kotlin.text: fun kotlin.ByteArray.unsafeStringFromUtf8(kotlin.Int, kotlin.Int): kotlin.String
+package kotlin.text: fun kotlin.ByteArray.unsafeStringFromUtf8OrThrow(kotlin.Int, kotlin.Int): kotlin.String
+package kotlin.text: fun kotlin.Char.isHighSurrogate(): kotlin.Boolean
+package kotlin.text: fun kotlin.Char.isISOControl(): kotlin.Boolean
+package kotlin.text: fun kotlin.Char.isLowSurrogate(): kotlin.Boolean
+package kotlin.text: fun kotlin.String.nativeIndexOf(kotlin.Char, kotlin.Int): kotlin.Int
+package kotlin.text: fun kotlin.String.nativeIndexOf(kotlin.String, kotlin.Int): kotlin.Int
+package kotlin.text: fun kotlin.String.nativeLastIndexOf(kotlin.Char, kotlin.Int): kotlin.Int
+package kotlin.text: fun kotlin.String.unsafeStringToUtf8(kotlin.Int, kotlin.Int): kotlin.ByteArray
+package kotlin.text: fun kotlin.String.unsafeStringToUtf8OrThrow(kotlin.Int, kotlin.Int): kotlin.ByteArray
+package kotlin.text: fun longToString(kotlin.Long, kotlin.Int): kotlin.String
+package kotlin.text: fun unsafeStringFromCharArray(kotlin.CharArray, kotlin.Int, kotlin.Int): kotlin.String
+package kotlin.time: fun formatToExactDecimals(kotlin.Double, kotlin.Int): kotlin.String
+package kotlin: fun fromBits(kotlin.Int): kotlin.Float
+package kotlin: fun fromBits(kotlin.Long): kotlin.Double
+package kotlin: fun kotlin.Double.isInfinite(): kotlin.Boolean
+package kotlin: fun kotlin.Double.isNaN(): kotlin.Boolean
+package kotlin: fun kotlin.Float.isInfinite(): kotlin.Boolean
+package kotlin: fun kotlin.Float.isNaN(): kotlin.Boolean
+package kotlin: fun kotlin.Int.countOneBits(): kotlin.Int
+package kotlin: fun kotlin.Long.countOneBits(): kotlin.Int
+package kotlinx.cinterop.internal: fun convertBlockPtrToKotlinFunction(kotlin.native.internal.NativePtr): R
+package kotlinx.cinterop.internal: fun detachObjCObject(kotlinx.cinterop.ObjCObject): kotlin.Unit
+package kotlinx.cinterop.internal: fun interopCallMarker(T): T
+package kotlinx.cinterop: fun Block_copy(kotlin.native.internal.NativePtr): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun T.initBy(T): T
+package kotlinx.cinterop: fun bitsToDouble(kotlin.Long): kotlin.Double
+package kotlinx.cinterop: fun bitsToFloat(kotlin.Int): kotlin.Float
+package kotlinx.cinterop: fun createKotlinObjectHolder(kotlin.Any?): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun createObjCObjectHolder(kotlin.native.internal.NativePtr): kotlin.Any?
+package kotlinx.cinterop: fun createObjCSuperStruct(kotlin.native.internal.NativePtr, kotlin.native.internal.NativePtr): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun getMessenger(kotlin.native.internal.NativePtr): kotlinx.cinterop.CPointer<out kotlinx.cinterop.CPointed>?
+package kotlinx.cinterop: fun getMessengerStret(kotlin.native.internal.NativePtr): kotlinx.cinterop.CPointer<out kotlinx.cinterop.CPointed>?
+package kotlinx.cinterop: fun getObjCClass(): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun getPointerSize(): kotlin.Int
+package kotlinx.cinterop: fun interpretCPointer(kotlin.native.internal.NativePtr): kotlinx.cinterop.CPointer<T>?
+package kotlinx.cinterop: fun interpretNullablePointed(kotlin.native.internal.NativePtr): T?
+package kotlinx.cinterop: fun interpretObjCPointerOrNull(kotlin.native.internal.NativePtr): T?
+package kotlinx.cinterop: fun kotlin.Any?.objcPtr(): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun kotlin.Byte.convert(): R
+package kotlinx.cinterop: fun kotlin.Int.convert(): R
+package kotlinx.cinterop: fun kotlin.Long.convert(): R
+package kotlinx.cinterop: fun kotlin.Number.narrow(): R
+package kotlinx.cinterop: fun kotlin.Number.signExtend(): R
+package kotlinx.cinterop: fun kotlin.Short.convert(): R
+package kotlinx.cinterop: fun kotlin.UByte.convert(): R
+package kotlinx.cinterop: fun kotlin.UInt.convert(): R
+package kotlinx.cinterop: fun kotlin.ULong.convert(): R
+package kotlinx.cinterop: fun kotlin.UShort.convert(): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<*>.getRawValue(): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.ByteVarOf<kotlin.Byte>>.toKStringFromUtf8Impl(): kotlin.String
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function0<R>>>.invoke(): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function10<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function11<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function12<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function13<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function14<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function15<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function16<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function17<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function18<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function19<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function1<P1, R>>>.invoke(P1): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function20<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function21<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function22<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function2<P1, P2, R>>>.invoke(P1, P2): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function3<P1, P2, P3, R>>>.invoke(P1, P2, P3): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function4<P1, P2, P3, P4, R>>>.invoke(P1, P2, P3, P4): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function5<P1, P2, P3, P4, P5, R>>>.invoke(P1, P2, P3, P4, P5): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function6<P1, P2, P3, P4, P5, P6, R>>>.invoke(P1, P2, P3, P4, P5, P6): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function7<P1, P2, P3, P4, P5, P6, P7, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function8<P1, P2, P3, P4, P5, P6, P7, P8, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8): R
+package kotlinx.cinterop: fun kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function9<P1, P2, P3, P4, P5, P6, P7, P8, P9, R>>>.invoke(P1, P2, P3, P4, P5, P6, P7, P8, P9): R
+package kotlinx.cinterop: fun kotlinx.cinterop.NativePointed.getRawPointer(): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun objCGetSelector(kotlin.String): kotlinx.cinterop.CPointer<out kotlinx.cinterop.CPointed>
+package kotlinx.cinterop: fun objc_autoreleasePoolPop(kotlin.native.internal.NativePtr): kotlin.Unit
+package kotlinx.cinterop: fun objc_autoreleasePoolPush(): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun objc_release(kotlin.native.internal.NativePtr): kotlin.Unit
+package kotlinx.cinterop: fun objc_retain(kotlin.native.internal.NativePtr): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun objc_retainAutoreleaseReturnValue(kotlin.native.internal.NativePtr): kotlin.native.internal.NativePtr
+package kotlinx.cinterop: fun readBits(kotlin.native.internal.NativePtr, kotlin.Long, kotlin.Int, kotlin.Boolean): kotlin.Long
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function0<R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function0<R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function10<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function10<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function11<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function11<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function12<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function12<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function13<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function13<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function14<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function14<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function15<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function15<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function16<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function16<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function17<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function17<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function18<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function18<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function19<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function19<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function1<P1, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function1<P1, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function20<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function20<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function21<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function21<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function22<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function22<P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P11, P12, P13, P14, P15, P16, P17, P18, P19, P20, P21, P22, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function2<P1, P2, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function2<P1, P2, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function3<P1, P2, P3, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function3<P1, P2, P3, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function4<P1, P2, P3, P4, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function4<P1, P2, P3, P4, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function5<P1, P2, P3, P4, P5, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function5<P1, P2, P3, P4, P5, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function6<P1, P2, P3, P4, P5, P6, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function6<P1, P2, P3, P4, P5, P6, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function7<P1, P2, P3, P4, P5, P6, P7, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function7<P1, P2, P3, P4, P5, P6, P7, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function8<P1, P2, P3, P4, P5, P6, P7, P8, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function8<P1, P2, P3, P4, P5, P6, P7, P8, R>>>
+package kotlinx.cinterop: fun staticCFunction(kotlin.Function9<P1, P2, P3, P4, P5, P6, P7, P8, P9, R>): kotlinx.cinterop.CPointer<kotlinx.cinterop.CFunction<kotlin.Function9<P1, P2, P3, P4, P5, P6, P7, P8, P9, R>>>
+package kotlinx.cinterop: fun unwrapKotlinObjectHolderImpl(kotlin.native.internal.NativePtr): kotlin.Any
+package kotlinx.cinterop: fun vectorOf(kotlin.Float, kotlin.Float, kotlin.Float, kotlin.Float): kotlinx.cinterop.Vector128
+package kotlinx.cinterop: fun vectorOf(kotlin.Int, kotlin.Int, kotlin.Int, kotlin.Int): kotlinx.cinterop.Vector128
+package kotlinx.cinterop: fun writeBits(kotlin.native.internal.NativePtr, kotlin.Long, kotlin.Int, kotlin.Long): kotlin.Unit

@@ -1149,6 +1149,7 @@ mod tests {
         IrClass {
             fq_name: name.into(),
             is_source_declared: true,
+            is_compiler_generated: false,
             is_anonymous_object: false,
             enclosure: None,
             is_inner_class: false,

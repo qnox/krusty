@@ -49,7 +49,8 @@ impl ProductionSignatureSemantics<'_> {
             &module,
             &packages,
         )
-        .with_access_context(access_package, scope.source.raw(), Vec::new());
+        .with_access_context(access_package, scope.source.raw(), Vec::new())
+        .with_visibility_suppression(self.scope_suppresses_visibility(scope));
         select(package, &resolver)
     }
 

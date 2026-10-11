@@ -5,7 +5,7 @@ fn production_module(source: &str) -> crate::fir::FrontendModule {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,

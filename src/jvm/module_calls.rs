@@ -407,11 +407,16 @@ pub(super) fn realize_default_calls(
                         static_owner(provider.placement, provider.source, stems).ok_or(failure)?
                     }
                 };
-                let stub_boxed =
+                let mut stub_boxed =
                     super::default_parameter_representation::defaulted_primitive_bounds(
                         &params,
                         &provider.default_parameters,
                     );
+                stub_boxed.extend(provider.default_parameters.iter().filter_map(|&parameter| {
+                    let declared = *provider.parameters.get(parameter)?;
+                    super::default_parameter_representation::default_stub_takes_box(ir, declared)
+                        .then_some((parameter, declared))
+                }));
                 let (mut params, mut args, mut plan) = realize_default_arguments(
                     ir,
                     params,

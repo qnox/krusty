@@ -22,6 +22,7 @@ use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
 use super::host::Host;
+use super::objects::ObjectRoot;
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
 /// host's own use (a WASI iovec).
@@ -45,6 +46,8 @@ pub(super) struct Runtime {
     pub(super) write_string: u32,
     pub(super) i32_div: u32,
     pub(super) i64_div: u32,
+    /// The object model's root types and `kotlin.Any`'s members.
+    pub(super) objects: ObjectRoot,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -94,6 +97,7 @@ impl Runtime {
             write_string: module.declare(),
             i32_div: module.declare(),
             i64_div: module.declare(),
+            objects: ObjectRoot::declare(module, ValType::nullable(string)),
             constants: HashMap::new(),
         };
         runtime.define_string_equals(module);

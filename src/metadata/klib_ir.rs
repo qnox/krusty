@@ -18,13 +18,17 @@ use super::id_signature::{
     decode_public_id_signature, KlibIdSignatureDecodeError, KlibPublicIdSignature,
 };
 
+#[cfg(test)]
+mod arena_fixtures;
 mod symbols;
 pub mod tree;
 mod tree_decoding;
 mod wire;
 
 pub use symbols::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
-pub use tree_decoding::{read_declaration_trees, KlibIrDeclarationTree, KlibIrModuleTrees};
+pub use tree_decoding::{
+    read_declaration_trees, read_declaration_trees_where, KlibIrDeclarationTree, KlibIrModuleTrees,
+};
 
 use wire::{
     declaration_index, entries, message, packed_field, read_per_file_table, required_bytes_field,

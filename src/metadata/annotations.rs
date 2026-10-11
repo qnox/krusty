@@ -56,6 +56,11 @@ impl MetadataAnnotations {
     pub fn records(&self) -> &[AppliedAnnotation] {
         &self.records
     }
+
+    /// The annotation records, for a target renaming the classifiers they name.
+    pub(crate) fn records_mut(&mut self) -> &mut [AppliedAnnotation] {
+        &mut self.records
+    }
 }
 
 /// What `@Metadata` records about a property's accessors' own annotations: the getter's and the

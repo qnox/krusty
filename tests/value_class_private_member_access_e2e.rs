@@ -56,8 +56,13 @@ fn assert_same_method(src: &str, class: &str, member: &str) {
 }
 
 fn assert_runs(src: &str) {
-    let output = common::compile_and_run_box(src, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        src,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }
 

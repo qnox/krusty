@@ -4,8 +4,8 @@
 
 use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
 
+use krusty::backend::Backend as _;
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, Entry, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -20,8 +20,10 @@ fn expect_ok_everywhere(source: &str, stem: &str) {
 /// linker or runtime: the allocation decision is already final in the Cranelift object.
 fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     let target = NativeTarget::host()?;
-    let jar = krusty::toolchain::stdlib_jar().expect("the native tests require the stdlib jar");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    krusty::toolchain::stdlib_jar().expect("the native tests require the stdlib jar");
+    krusty::toolchain::jdk_modules()?;
+    // The JVM front end resolves against the classpath kotlinc would: the stdlib and the JDK.
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -29,10 +31,11 @@ fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     let inputs = [SourceInput::kotlin(source).with_file_stem(stem)];
     let features = krusty::features::LangFeatures::new();
     let mut diags = DiagSink::new();
+    let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
+    let platform = krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform);
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
     let artifacts =
         krusty::compiler::emit_analyzed(analysis, &[stem.to_string()], &backend, stem, &mut diags);
     let messages = diags
@@ -50,11 +53,32 @@ fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     objects.pop()
 }
 
+/// Calls to the allocator from the program's own code. A module constructor's exported entry point
+/// (`kt_modctor_*`) allocates for whichever file constructs that class, so its allocation says
+/// nothing about where this file's constructions place their objects and is not counted.
 fn allocation_relocations(object: &[u8]) -> usize {
     let file = object::File::parse(object).expect("the native object parses");
+    let entry_points: Vec<_> = file
+        .symbols()
+        .filter(|symbol| {
+            symbol
+                .name()
+                .is_ok_and(|name| name.starts_with("kt_modctor_"))
+        })
+        .filter_map(|symbol| {
+            let section = symbol.section_index()?;
+            Some((section, symbol.address()..symbol.address() + symbol.size()))
+        })
+        .collect();
     let mut count = 0;
     for section in file.sections() {
-        for (_, relocation) in section.relocations() {
+        for (offset, relocation) in section.relocations() {
+            if entry_points
+                .iter()
+                .any(|(owner, range)| *owner == section.index() && range.contains(&offset))
+            {
+                continue;
+            }
             let RelocationTarget::Symbol(index) = relocation.target() else {
                 continue;
             };
@@ -179,5 +203,53 @@ fn a_class_whose_constructor_does_more_than_store_stays_on_the_heap() {
          \x20   return \"OK\"\n\
          }\n",
         "HeapClasses",
+    );
+}
+
+#[test]
+fn a_frame_object_read_inside_a_lambda_of_its_function_keeps_its_fields() {
+    // The lambda runs while the function that made the object is still running, and reads the
+    // object only for a field. Whether or not the object lives in the frame, the lambda must see
+    // the values the construction gave it.
+    expect_ok_everywhere(
+        "class Pair2(val a: Int, val b: String)\n\
+         fun box(): String {\n\
+         \x20   val p = Pair2(4, \"four\")\n\
+         \x20   val read = { p.b + p.a }\n\
+         \x20   val direct = p.a\n\
+         \x20   return if (read() == \"four4\" && direct == 4) \"OK\" else \"fail: ${read()}\"\n\
+         }\n",
+        "FrameLambda",
+    );
+}
+
+#[test]
+fn a_frame_object_converts_and_guards_its_fields_as_the_heap_object_does() {
+    // Fields of every carrier the constructor converts into, a nullable one left null, a
+    // `lateinit` one no constructor assigns (read before assignment raises Kotlin's exception),
+    // and a class whose companion the construction creates first.
+    expect_ok_everywhere(
+        "var created = 0\n\
+         class Mixed(val d: Double, val f: Float, val l: Long, val c: Char, val b: Boolean, val n: String?) {\n\
+         \x20   lateinit var later: String\n\
+         \x20   companion object { init { created++ } }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   var total = 0.0\n\
+         \x20   for (i in 0 until 3) {\n\
+         \x20       val m = Mixed(i + 0.5, i * 2f, i * 10L, 'a' + i, i % 2 == 0, null)\n\
+         \x20       total += m.d + m.f + m.l + m.c.code + (if (m.b) 1 else 0) + (m.n?.length ?: 0)\n\
+         \x20   }\n\
+         \x20   if (total != 336.5 || created != 1) return \"fail: $total $created\"\n\
+         \x20   val m = Mixed(0.0, 0f, 0L, 'x', false, \"set\")\n\
+         \x20   try {\n\
+         \x20       m.later.length\n\
+         \x20       return \"fail: read an unassigned lateinit\"\n\
+         \x20   } catch (e: UninitializedPropertyAccessException) {\n\
+         \x20       if (e.message != \"lateinit property later has not been initialized\") return \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         \x20   return if (m.n == \"set\") \"OK\" else \"fail n\"\n\
+         }\n",
+        "FrameMixed",
     );
 }

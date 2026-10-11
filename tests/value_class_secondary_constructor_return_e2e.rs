@@ -45,7 +45,12 @@ fn a_return_operand_is_evaluated_before_the_constructed_value() {
 
 #[test]
 fn secondary_constructor_returns_run() {
-    let output = common::compile_and_run_box(SRC, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }

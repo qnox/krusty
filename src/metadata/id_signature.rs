@@ -20,7 +20,7 @@ pub use metadata_declarations::{
     constructor_signature, enum_class_member_signatures, member_property_accessor_signature,
     member_signature, metadata_class_signature, metadata_enum_entry_signature,
     package_function_signature, package_property_accessor_signature, package_property_signature,
-    MetadataAccessor, MetadataClass, MetadataContainer,
+    EnumClassMemberSignatures, MetadataAccessor, MetadataClass, MetadataContainer,
 };
 
 /// One exact qualified path in a public KLIB signature.

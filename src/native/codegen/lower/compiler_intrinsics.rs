@@ -42,24 +42,24 @@ impl BodyLowering<'_, '_, '_> {
         match intrinsic {
             Some(crate::backend::BackendCompilerIntrinsic::StringPlus) => {
                 let (Some(receiver), [argument]) = (receiver, args) else {
-                    return Some(Err("a malformed `String.plus`".to_string()));
+                    return Some(Err("a malformed `String.plus`".into()));
                 };
                 Some(self.string_plus(receiver, *argument, ret))
             }
             Some(crate::backend::BackendCompilerIntrinsic::BooleanNot) => {
                 let (Some(receiver), []) = (receiver, args) else {
-                    return Some(Err("a malformed `Boolean.not`".to_string()));
+                    return Some(Err("a malformed `Boolean.not`".into()));
                 };
                 if self.type_of(receiver).map(Ty::non_null) != Some(Ty::Boolean) {
                     return Some(Err(
-                        "a `Boolean.not` receiver with a non-Boolean type".to_string()
+                        "a `Boolean.not` receiver with a non-Boolean type".into()
                     ));
                 }
                 Some(self.boolean_not(receiver, ret))
             }
             Some(crate::backend::BackendCompilerIntrinsic::UnsignedCompare { carrier }) => {
                 let (None, [left, right]) = (receiver, args) else {
-                    return Some(Err("a malformed unsigned comparison".to_string()));
+                    return Some(Err("a malformed unsigned comparison".into()));
                 };
                 Some(self.unsigned_compare_intrinsic(carrier, *left, *right, ret))
             }

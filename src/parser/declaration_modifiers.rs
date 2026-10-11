@@ -1,9 +1,38 @@
-//! Source locations retained for declaration modifiers with modifier-owned diagnostics.
+//! Declaration modifiers: the source locations kept for modifier-owned diagnostics, and the
+//! modality a modifier list selects.
 
 use super::{Parser, TokenKind};
 use crate::ast::{AnnotationRef, DeclarationPrefix, ExprId};
 use crate::diag::Span;
 use crate::types::Visibility;
+
+/// Map parsed class modifiers to their declaration modality. `sealed` wins because it implies
+/// abstract and open; otherwise an explicit abstract/open modifier wins over the final default.
+pub(super) fn modality_of(
+    is_open: bool,
+    is_abstract: bool,
+    is_sealed: bool,
+) -> crate::ast::Modality {
+    use crate::ast::Modality;
+    if is_sealed {
+        Modality::Sealed
+    } else if is_abstract {
+        Modality::Abstract
+    } else if is_open {
+        Modality::Open
+    } else {
+        Modality::Final
+    }
+}
+
+pub(super) fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
+    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
+    modality_of(
+        sealed || modifiers.iter().any(|modifier| modifier == "open"),
+        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
+        sealed,
+    )
+}
 
 /// The modifier list of the declaration being parsed, accumulated across its `skip_decl_prefix`
 /// runs (a context clause or `companion` may separate them) until the declaration records it.
@@ -212,6 +241,7 @@ impl Parser<'_> {
         let prefix = std::mem::take(&mut self.declaration_prefix);
         let after = self.tok().span;
         let mut keys = vec![start, after.lo];
+        let mut classifier_keyword = None;
         let mut index = self.i;
         while self.t.get(index).is_some_and(|token| {
             ["data", "enum", "annotation", "companion"]
@@ -231,6 +261,7 @@ impl Parser<'_> {
                 || self.token_keyword_text(**token, "interface")
         }) {
             keys.push(keyword.span.lo);
+            classifier_keyword = Some(keyword.span);
             if let Some(name) = self.t.get(index + 1).filter(|t| t.kind == TokenKind::Ident) {
                 keys.push(name.span.lo);
             }
@@ -240,6 +271,8 @@ impl Parser<'_> {
             DeclarationPrefix {
                 start: prefix.first_modifier.unwrap_or(after),
                 visibility: prefix.visibility,
+                declaration_start: start,
+                classifier_keyword,
             },
         );
     }

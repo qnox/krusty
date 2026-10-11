@@ -153,7 +153,7 @@ pub(super) fn emit_annotation_class(
         .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
     if let Some(m) = class_meta.or(computed.as_ref()) {
-        cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
+        cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
     cw.finish()
 }

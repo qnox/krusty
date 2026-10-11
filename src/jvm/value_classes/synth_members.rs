@@ -98,37 +98,6 @@ pub(super) fn record_renamed_functions(
     );
 }
 
-/// Source functions that the frontend bound to Kotlin `Any` members, keyed by their exact common
-/// IR realization. A same-spelled function without that checked override edge is deliberately
-/// absent, regardless of its physical name or arity.
-fn custom_any_roles(ir: &IrFile, owner: TypeName) -> HashMap<u32, crate::types::SemanticCallRole> {
-    ir.function_overrides
-        .get(&owner)
-        .into_iter()
-        .flatten()
-        .filter_map(|edge| {
-            let role = edge.overridden_semantic_role?;
-            if !matches!(
-                role,
-                crate::types::SemanticCallRole::KotlinAnyEquals
-                    | crate::types::SemanticCallRole::KotlinAnyHashCode
-                    | crate::types::SemanticCallRole::KotlinAnyToString
-            ) {
-                return None;
-            }
-            let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
-                edge.implementation
-            else {
-                return None;
-            };
-            ir.checked_callable_functions
-                .get(&declaration)
-                .copied()
-                .map(|function| (function, role))
-        })
-        .collect()
-}
-
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, not common lowering): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
@@ -236,7 +205,7 @@ pub(super) fn synth_value_members(
     // the first static parameter slot, so the body itself needs no slot rewrite; value-class property
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
-    let custom_any_roles = custom_any_roles(ir, internal_name);
+    let custom_any_roles = ir.any_member_overrides(internal_name);
     let mut custom_equals = false;
     let mut custom_hash_code = false;
     let mut custom_to_string = false;
@@ -246,15 +215,15 @@ pub(super) fn synth_value_members(
             continue;
         };
         let custom_impl = match custom_any_roles.get(&fid) {
-            Some(crate::types::SemanticCallRole::KotlinAnyEquals) => {
+            Some(crate::ir::IrValueClassAnyMember::Equals) => {
                 custom_equals = true;
                 Some("equals-impl")
             }
-            Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => {
+            Some(crate::ir::IrValueClassAnyMember::HashCode) => {
                 custom_hash_code = true;
                 Some("hashCode-impl")
             }
-            Some(crate::types::SemanticCallRole::KotlinAnyToString) => {
+            Some(crate::ir::IrValueClassAnyMember::ToString) => {
                 custom_to_string = true;
                 Some("toString-impl")
             }
@@ -679,20 +648,17 @@ pub(super) fn synth_value_members(
         }
     }
 
-    // A secondary constructor becomes a static `constructor-impl` overload. Preserve its semantic
-    // declaration shape before consuming the instance-constructor IR: downstream Kotlin compilation
-    // selects the source constructor from metadata, then follows the exact static realization handle.
+    // A secondary constructor becomes a static `constructor-impl` overload. The class's declaration
+    // record already describes the source constructor; keep the exact static realization handle a
+    // downstream Kotlin compilation follows from it, by the constructor's ordinal.
     let secondary_metadata = ir.classes[class_id as usize]
         .secondary_ctors
         .iter()
-        .filter_map(|constructor| {
-            let metadata_visibility = constructor.metadata_visibility?;
-            Some(crate::ir::IrJvmValueClassSecondaryCtor {
-                params: constructor.named_params.clone(),
-                param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
-                vararg_index: constructor.vararg_index,
-                annotations: constructor.annotations.clone(),
-                metadata_visibility,
+        .enumerate()
+        .filter(|(_, constructor)| constructor.metadata_visibility.is_some())
+        .map(
+            |(ordinal, constructor)| crate::ir::IrJvmValueClassSecondaryCtor {
+                ordinal,
                 descriptor: method_descriptor(
                     &jvm_tys(
                         &constructor
@@ -703,8 +669,8 @@ pub(super) fn synth_value_members(
                     ),
                     ir_ty_to_jvm(&eu),
                 ),
-            })
-        })
+            },
+        )
         .collect::<Vec<_>>();
     if !secondary_metadata.is_empty() {
         ir.jvm_value_class_secondary_ctors
@@ -1142,13 +1108,13 @@ mod tests {
         ir.function_overrides
             .insert(owner, vec![override_edge(owner, declaration, None)]);
 
-        assert!(custom_any_roles(&ir, owner).is_empty());
+        assert!(ir.any_member_overrides(owner).is_empty());
 
         ir.function_overrides.get_mut(&owner).unwrap()[0].overridden_semantic_role =
             Some(crate::types::SemanticCallRole::KotlinAnyEquals);
         assert_eq!(
-            custom_any_roles(&ir, owner),
-            HashMap::from([(function, crate::types::SemanticCallRole::KotlinAnyEquals)])
+            ir.any_member_overrides(owner),
+            HashMap::from([(function, crate::ir::IrValueClassAnyMember::Equals)])
         );
     }
 }

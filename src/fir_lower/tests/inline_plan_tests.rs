@@ -155,22 +155,31 @@ fn dependency_scope_plans_invoke_every_checked_function_expression() {
         .position(|function| function.name == "id")
         .and_then(|function| crate::ir::FunId::try_from(function).ok())
         .expect("id function");
+    let producer = ir
+        .functions
+        .iter()
+        .position(|function| function.name == "make")
+        .and_then(|function| crate::ir::FunId::try_from(function).ok())
+        .expect("make function");
     for (name, expected) in [
         (
             "property",
-            SelectedCall::FunctionValue {
+            vec![SelectedCall::FunctionValue {
                 parameters: vec![Ty::String],
                 result: Ty::Int,
-            },
+            }],
         ),
         (
             "computed",
-            SelectedCall::FunctionValue {
-                parameters: vec![Ty::String],
-                result: Ty::Int,
-            },
+            vec![
+                SelectedCall::Local(producer),
+                SelectedCall::FunctionValue {
+                    parameters: vec![Ty::String],
+                    result: Ty::Int,
+                },
+            ],
         ),
-        ("reference", SelectedCall::Local(identity)),
+        ("reference", vec![SelectedCall::Local(identity)]),
     ] {
         let body = ir
             .functions
@@ -180,7 +189,7 @@ fn dependency_scope_plans_invoke_every_checked_function_expression() {
             .unwrap_or_else(|| panic!("missing lowered body for {name}"));
         assert_eq!(
             selected_call_ledger(&ir, body),
-            [expected],
+            expected,
             "selected call ledger for {name}"
         );
     }

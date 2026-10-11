@@ -94,9 +94,13 @@ fn counted_loops_still_iterate_correctly() {
                \x20   for (i in Long.MAX_VALUE - 1..Long.MAX_VALUE) longs += 1L\n\
                \x20   return \"$top $bottom $empty $bound $chars $longs\"\n\
                }\n";
-    let actual =
-        common::compile_and_run_box(src, "counted_loop_edges", &[common::stdlib_jar()], None)
-            .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        src,
+        "counted_loop_edges",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "3 3 0 4 xyzcba 2");
 }
 
@@ -140,9 +144,13 @@ fn progression_values_still_iterate_correctly() {
                \x20   for (c in letters) chars += c\n\
                \x20   return \"$down $up $empty $top $bottom $chars\"\n\
                }\n";
-    let actual =
-        common::compile_and_run_box(src, "progression_values", &[common::stdlib_jar()], None)
-            .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        src,
+        "progression_values",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "22 15 0 2 3 ace");
 }
 
@@ -213,7 +221,7 @@ fn stepped_char_progressions_still_iterate_correctly() {
         src,
         "stepped_char_progressions",
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "geca abcdefghij ifc jhfdb");

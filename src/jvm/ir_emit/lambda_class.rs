@@ -212,7 +212,7 @@ pub(super) fn emit_lambda_class(
         if lambda.public_inline_abi {
             xi |= super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
         }
-        cw.set_kotlin_metadata(3, &[2, 4, 0], xi, &[], &[]);
+        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &[], &[]);
         env.run.finish_class(cw)
     } else {
         finish_local_synthetic_class(cw, env)

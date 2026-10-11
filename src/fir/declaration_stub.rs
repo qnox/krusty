@@ -104,6 +104,11 @@ impl DeclarationFlags {
     /// A compiler-generated structural identity member of a data or value class. This role is
     /// declaration-owned: consumers must not rediscover it from the callable's spelling.
     pub const GENERATED_STRUCTURAL_MEMBER: u64 = 1 << 42;
+    /// A classifier or property wrote `final`. A classifier's [`Self::FINAL`] is its effective
+    /// modality and a property records no `FINAL`, so this is what tells a written `final` from the
+    /// default when a compiler plugin changes the default modality (all-open) and must keep an
+    /// explicit one. A function's written `final` is its `FINAL`.
+    pub const FINAL_MODIFIER: u64 = 1 << 43;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

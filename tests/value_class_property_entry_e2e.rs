@@ -94,7 +94,7 @@ fn value_class_property_entries_answer_interface_calls() {
         SOURCE,
         "ValueClassPropertyEntryBox",
         &[common::stdlib_jar()],
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");

@@ -68,9 +68,13 @@ val chain = object : Base() {
 #[test]
 fn repeated_compiles_emit_identical_classes() {
     let compile = || {
-        let mut classes =
-            common::compile_in_process(SOURCE, "deterministic", &[common::stdlib_jar()], None)
-                .expect("the fixture compiles");
+        let mut classes = common::compile_in_process(
+            SOURCE,
+            "deterministic",
+            &[common::stdlib_jar()],
+            Some(&common::jdk_modules()),
+        )
+        .expect("the fixture compiles");
         classes.sort();
         classes
     };

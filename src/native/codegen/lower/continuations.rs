@@ -147,11 +147,11 @@ impl<'a> FileLowering<'a> {
         match (resume_with, context) {
             (None, None) => Ok(None),
             (Some(resume_with), Some(context)) => Ok(Some((resume_with, context))),
-            (Some(_), None) => Err(format!(
+            (Some(_), None) => Err(declined!(
                 "a `Continuation` implementation `{}` with no exact `context` override edge",
                 self.ir.classes[class as usize].fq_name()
             )),
-            (None, Some(_)) => Err(format!(
+            (None, Some(_)) => Err(declined!(
                 "a `Continuation` implementation `{}` with no exact `resumeWith` override edge",
                 self.ir.classes[class as usize].fq_name()
             )),
@@ -169,7 +169,7 @@ impl<'a> FileLowering<'a> {
         };
         let (resume_params, _) = self.slot_signature(class, resume_slot)?;
         let [result_param] = resume_params.as_slice() else {
-            return Err(format!(
+            return Err(declined!(
                 "a `resumeWith` of `{}` that takes no one operand",
                 self.ir.classes[class as usize].fq_name()
             ));
@@ -188,7 +188,7 @@ impl<'a> FileLowering<'a> {
             &mut |body, params| {
                 let carried = body.file.values.project(result_param);
                 let Some(result) = body.convert_carriers(params[1], Some(any()), carried)? else {
-                    return Err(format!("a `Unit` result in `{name}`"));
+                    return Err(declined!("a `Unit` result in `{name}`"));
                 };
                 body.dispatch(params[0], resume_slot, &[result_param], Ty::Unit, &[result])?;
                 body.builder.ins().return_(&[]);
@@ -203,10 +203,10 @@ impl<'a> FileLowering<'a> {
         self.emit_function(context, signature, any(), &name, &mut |body, params| {
             let Some(produced) = body.dispatch(params[0], context_slot, &[], context_ret, &[])?
             else {
-                return Err(format!("a `Unit` answer from `{name}`"));
+                return Err(declined!("a `Unit` answer from `{name}`"));
             };
             let Some(value) = body.convert(produced, Some(context_ret), any())? else {
-                return Err(format!("a `Unit` answer from `{name}`"));
+                return Err(declined!("a `Unit` answer from `{name}`"));
             };
             body.builder.ins().return_(&[value]);
             body.terminate();
@@ -236,7 +236,7 @@ impl<'a> FileLowering<'a> {
                 return Ok((Vec::new(), field.ty));
             }
             other => {
-                return Err(format!(
+                return Err(declined!(
                     "a continuation member in the vtable entry {other:?}"
                 ))
             }

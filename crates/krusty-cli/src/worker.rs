@@ -42,6 +42,8 @@ pub struct WorkUnit {
     pub kotlinc_args: Vec<String>,
     /// Worker options that were understood but have no effect on krusty's output.
     pub inert: Vec<String>,
+    /// kotlinc-compatible warnings produced while parsing modeled compiler arguments.
+    pub argument_warnings: Vec<String>,
     /// Resource groups from `--resources`, in request order. Each group is one
     /// `strip_prefix:add_prefix:file` argument, the spelling `builder-args.bzl` emits.
     pub resources: Vec<ResourceGroup>,
@@ -103,7 +105,7 @@ const LIST_FLAGS: &[&str] = &[
 /// `None` is understood but changes nothing krusty emits.
 fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
     Some(match flag {
-        "--progressive" => None,
+        "--progressive" => Some("-progressive"),
         "--x_allow_kotlin_package" => Some("-Xallow-kotlin-package"),
         "--x_allow_result_return_type" => Some("-Xallow-result-return-type"),
         "--x_allow_unstable_dependencies" => Some("-Xallow-unstable-dependencies"),
@@ -137,19 +139,6 @@ fn translate_language_features(
     value: &str,
     source_flag: &str,
 ) -> Result<(), Refusal> {
-    const MODELED: &[&str] = &[
-        "AllowAccessToProtectedFieldFromSuperCompanion",
-        "ContextParameters",
-        "DataClassCopyRespectsConstructorVisibility",
-        "EnableNameBasedDestructuringShortForm",
-        "ExplicitBackingFields",
-        "ExplicitContextArguments",
-        "ImplicitSignedToUnsignedIntegerConversion",
-        "MultiDollarInterpolation",
-        "MultiPlatformProjects",
-        "NameBasedDestructuring",
-        "WhenGuards",
-    ];
     let tokens = value.split(',').collect::<Vec<_>>();
     if tokens.iter().any(|token| token.is_empty()) {
         return Err(Refusal::Malformed(format!(
@@ -167,9 +156,7 @@ fn translate_language_features(
                 "{source_flag} {token}: feature name is empty"
             )));
         }
-        if name == "AllowEagerSupertypeAccessibilityChecks" {
-            unit.inert.push(format!("{source_flag} {token}"));
-        } else if MODELED.contains(&name) {
+        if krusty::features::LangFeatures::models(name) {
             unit.kotlinc_args.push(format!("-XXLanguage:{token}"));
         } else {
             return Err(Refusal::Unsupported(format!(
@@ -178,6 +165,17 @@ fn translate_language_features(
         }
     }
     Ok(())
+}
+
+/// Whether a forwarded kotlinc argument selects an input or output the structured work request
+/// owns. Kotlinc accepts both `-name value` and `-name=value`; checking only the complete token lets
+/// the attached form override the structured value when `compile_work_unit` appends these options.
+fn is_worker_owned_kotlinc_option(argument: &str) -> bool {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    matches!(
+        name,
+        "-d" | "-cp" | "-classpath" | "-class-path" | "-module-name"
+    ) || argument.starts_with('@')
 }
 
 /// Translate one `jvm-inc-builder` argument list into a [`WorkUnit`].
@@ -380,11 +378,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             // not spell would silently not reach the compiler.
             "--kotlinc-arg" => {
                 let value = value_of(index, flag)?;
-                if matches!(
-                    value.as_str(),
-                    "-d" | "-cp" | "-classpath" | "-class-path" | "-module-name"
-                ) || value.starts_with('@')
-                {
+                if is_worker_owned_kotlinc_option(&value) {
                     return Err(Refusal::Unsupported(format!(
                         "{flag} {value}: output, module, sources, and classpath are owned by the work request"
                     )));
@@ -392,9 +386,6 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                     translate_language_features(&mut unit, features, flag)?;
                 } else {
                     match value.as_str() {
-                        // Diagnostics/current-language policy only; the compiler already implements
-                        // its current semantics and records these no-ops for Bazel to print.
-                        "-progressive" | "-nowarn" => unit.inert.push(value),
                         "-Xexplicit-api=disable" => unit.inert.push(value),
                         // kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with only a "flag is
                         // not supported by this version of the compiler" warning and emits
@@ -424,7 +415,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             "--warn" => {
                 let value = value_of(index, flag)?;
                 if value == "off" {
-                    unit.inert.push(format!("--warn {value}"));
+                    unit.kotlinc_args.push("-nowarn".to_string());
                 } else {
                     return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
@@ -491,8 +482,21 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     // ignoring an unknown target option can emit a different artifact. Everything intentionally
     // inert was removed above; every remaining option must be genuinely modeled by the CLI.
     let parsed = crate::cli::parse(unit.kotlinc_args.clone());
+    if !parsed.argument_errors.is_empty() {
+        return Err(Refusal::Unsupported(parsed.argument_errors.join("; ")));
+    }
     if !parsed.errors.is_empty() {
         return Err(Refusal::Unsupported(parsed.errors.join("; ")));
+    }
+    let feature_errors: Vec<&str> = parsed
+        .language_feature_problems
+        .iter()
+        .filter(|problem| problem.is_error)
+        .map(|problem| problem.message.as_str())
+        .chain(parsed.configuration_errors.iter().map(String::as_str))
+        .collect();
+    if !feature_errors.is_empty() {
+        return Err(Refusal::Unsupported(feature_errors.join("; ")));
     }
     if !parsed.ignored.is_empty() {
         return Err(Refusal::Unsupported(format!(
@@ -501,12 +505,13 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
         )));
     }
     // A warn-and-ignore flag (`-Xwasm-kclass-fqn`) must be intercepted as an INERT value above so
-    // Bazel sees the no-effect note; reaching this parse means a cli.rs addition has no matching
-    // worker arm — refuse rather than accept it with neither kotlinc's warning nor an inert report.
-    if !parsed.unsupported_flag_warnings.is_empty() {
+    // Bazel sees the no-effect note. Other syntax warnings can belong to fully modeled arguments —
+    // a deprecated alias or repeated value, for example — and must reach the response rather than
+    // being misclassified as missing semantics.
+    if !parsed.unknown_extra_flags.is_empty() {
         return Err(Refusal::Unsupported(format!(
             "warn-and-ignore option(s) missing a worker inert arm: {}",
-            parsed.unsupported_flag_warnings.join(", ")
+            parsed.unknown_extra_flags.join(", ")
         )));
     }
     if !parsed.sources.is_empty() {
@@ -515,6 +520,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             parsed.sources.join(", ")
         )));
     }
+    unit.argument_warnings = parsed.argument_warnings;
     Ok(unit)
 }
 
@@ -707,11 +713,17 @@ pub fn serve(
             // Report what was understood but had no effect. `WorkResponse::output` is the channel
             // bazel prints, and silently dropping an option the target set is the habit this module
             // exists to avoid.
-            let note = if unit.inert.is_empty() {
-                String::new()
-            } else {
-                format!("krusty: no effect on output: {}\n", unit.inert.join(" "))
-            };
+            let mut note = unit
+                .argument_warnings
+                .iter()
+                .map(|warning| format!("warning: {}\n", crate::kotlinc_arguments::render(warning)))
+                .collect::<String>();
+            if !unit.inert.is_empty() {
+                note.push_str(&format!(
+                    "krusty: no effect on output: {}\n",
+                    unit.inert.join(" ")
+                ));
+            }
             match compile(unit) {
                 Ok(()) => WorkResponse {
                     exit_code: 0,
@@ -822,7 +834,13 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        let unit = translate(&intellij_request()).expect("must translate");
+        // `--progressive` is part of the real request but refused while it turns on features krusty
+        // does not implement. Keep exercising every other field of that request here.
+        let request = intellij_request()
+            .into_iter()
+            .filter(|argument| argument != "--progressive")
+            .collect::<Vec<_>>();
+        let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
         assert_eq!(unit.abi_jar, Some(PathBuf::from("out/util.abi.jar")));
         assert_eq!(
@@ -859,12 +877,31 @@ mod tests {
                 unit.kotlinc_args
             );
         }
-        for inert in [
-            "--progressive",
-            "--warn off",
-            "--x_xlanguage +AllowEagerSupertypeAccessibilityChecks",
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            crate::cli::WarningDisposition::Disabled
+        );
+    }
+
+    /// The worker and batch surfaces must not disagree about a semantic option. Until progressive
+    /// language features are implemented, neither the rule-owned spelling nor a forwarded
+    /// kotlinc spelling may compile while silently using ordinary language semantics.
+    #[test]
+    fn progressive_is_refused_through_every_worker_surface() {
+        for progressive in [
+            vec!["--progressive"],
+            vec!["--kotlinc-arg", "-progressive"],
+            vec!["--kotlinc-arg", "-Xprogressive"],
         ] {
-            assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
+            let mut request = progressive;
+            request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
+            let refusal = translate(&args(&request)).unwrap_err();
+            assert_eq!(
+                refusal,
+                Refusal::Unsupported(
+                    "krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()
+                )
+            );
         }
     }
 
@@ -1233,8 +1270,6 @@ mod tests {
         let unit = translate(&args(&[
             "--kotlinc-arg",
             "-Xjvm-default=all",
-            "--kotlinc-arg",
-            "-progressive",
             "--srcs",
             "A.kt",
             "--out",
@@ -1242,7 +1277,7 @@ mod tests {
         ]))
         .expect("must translate");
         assert_eq!(unit.kotlinc_args, vec!["-Xjvm-default=all".to_string()]);
-        assert_eq!(unit.inert, vec!["-progressive".to_string()]);
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
     }
 
     /// intellij-community's fleet.multiplatform.shims and fleet.util.codepoints targets forward
@@ -1372,7 +1407,19 @@ mod tests {
 
     #[test]
     fn forwarded_flags_cannot_replace_worker_owned_inputs_or_outputs() {
-        for option in ["-d", "-classpath", "-module-name", "@other.args"] {
+        for option in [
+            "-d",
+            "-d=elsewhere.jar",
+            "-cp",
+            "-cp=other.jar",
+            "-classpath",
+            "-classpath=other.jar",
+            "-class-path",
+            "-class-path=other.jar",
+            "-module-name",
+            "-module-name=other",
+            "@other.args",
+        ] {
             let refusal = translate(&args(&[
                 "--kotlinc-arg",
                 option,
@@ -1382,7 +1429,12 @@ mod tests {
                 "o.jar",
             ]))
             .unwrap_err();
-            assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+            assert_eq!(
+                refusal,
+                Refusal::Unsupported(format!(
+                    "--kotlinc-arg {option}: output, module, sources, and classpath are owned by the work request"
+                ))
+            );
         }
     }
 
@@ -1441,10 +1493,10 @@ mod tests {
     }
 
     #[test]
-    fn name_based_destructuring_complete_is_accepted() {
+    fn modeled_name_based_destructuring_mode_is_accepted() {
         let unit = translate(&args(&[
             "--kotlinc-arg",
-            "-Xname-based-destructuring=complete",
+            "-Xname-based-destructuring=only-syntax",
             "--srcs",
             "A.kt",
             "--out",
@@ -1457,7 +1509,7 @@ mod tests {
             .language_settings
             .features
             .has("NameBasedDestructuring"));
-        assert!(parsed
+        assert!(!parsed
             .language_settings
             .features
             .has("EnableNameBasedDestructuringShortForm"));
@@ -1557,11 +1609,67 @@ mod tests {
             cancel: false,
         };
         let response = serve(&request, &|_unit| Ok(()));
-        assert_eq!(response.exit_code, 0);
-        assert!(
-            response.output.contains("--x_explicit_api disable"),
-            "an inert option must be surfaced: {:?}",
-            response.output
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "krusty: no effect on output: --x_explicit_api disable\n".to_string(),
+                request_id: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn modeled_argument_warnings_are_reported_in_the_response() {
+        let request = WorkRequest {
+            arguments: args(&[
+                "--kotlinc-arg",
+                "-Xopt-in=marker.Experimental",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            request_id: 5,
+            cancel: false,
+        };
+        let response = serve(&request, &|_unit| Ok(()));
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "warning: argument -Xopt-in is deprecated. Please use -opt-in instead\n"
+                    .to_string(),
+                request_id: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn repeated_modeled_arguments_warn_without_becoming_unhandled() {
+        let request = WorkRequest {
+            arguments: args(&[
+                "--kotlinc-arg",
+                "-Xlambdas=class",
+                "--kotlinc-arg",
+                "-Xlambdas=indy",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            request_id: 6,
+            cancel: false,
+        };
+        let response = serve(&request, &|_unit| Ok(()));
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "warning: argument '-Xlambdas' is passed multiple times: 'class', 'indy'. The last value will be used.\n"
+                    .to_string(),
+                request_id: 6,
+            }
         );
     }
 

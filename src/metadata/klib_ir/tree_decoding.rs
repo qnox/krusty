@@ -72,6 +72,22 @@ impl KlibIrModuleTrees {
         self.functions.len()
     }
 
+    /// The linkable identity of every function [`Self::function`] answers for.
+    pub fn function_signatures(&self) -> impl Iterator<Item = &KlibIrSignature> {
+        self.functions.keys()
+    }
+
+    /// Index trees built by hand, as decoding indexes the trees it reads.
+    #[cfg(test)]
+    pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {
+        let mut module = Self {
+            trees,
+            functions: HashMap::new(),
+        };
+        module.index()?;
+        Ok(module)
+    }
+
     fn index(&mut self) -> Result<(), KlibIrDecodeError> {
         for (tree_index, tree) in self.trees.iter().enumerate() {
             for (function_index, function) in tree.arena.functions.iter().enumerate() {
@@ -104,6 +120,15 @@ impl KlibIrModuleTrees {
 /// Decode every top-level declaration tree a KLIB serializes.
 pub fn read_declaration_trees(
     archive: &KlibArchive,
+) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
+    read_declaration_trees_where(archive, |_| true)
+}
+
+/// Decode the top-level declaration trees whose own identity `keep` accepts. A declaration that is
+/// left out costs only reading its identity; its members and bodies are never decoded.
+pub fn read_declaration_trees_where(
+    archive: &KlibArchive,
+    mut keep: impl FnMut(&KlibIrSignature) -> bool,
 ) -> Result<KlibIrModuleTrees, KlibIrDecodeError> {
     let files = read_per_file_table(archive, "files.knf")?;
     let strings = read_per_file_table(archive, "strings.knt")?;
@@ -150,8 +175,12 @@ pub fn read_declaration_trees(
                     format!("references absent declaration id {id}"),
                 )
             })?;
+            let msg = Msg::parse(bytes, 0, DECLARATIONS)?;
+            if !keep(&top_level_signature(&mut file, &msg)?) {
+                continue;
+            }
             let mut decoder = TreeDecoder::new(&mut file);
-            let declaration = decoder.member(&Msg::parse(bytes, 0, DECLARATIONS)?)?;
+            let declaration = decoder.member(&msg)?;
             module.trees.push(KlibIrDeclarationTree {
                 arena: decoder.arena,
                 declaration,
@@ -160,6 +189,24 @@ pub fn read_declaration_trees(
     }
     module.index()?;
     Ok(module)
+}
+
+/// The identity of the declaration `msg` serializes, read from its base without decoding the rest.
+fn top_level_signature(
+    file: &mut FileTables<'_>,
+    msg: &Msg<'_>,
+) -> Result<KlibIrSignature, KlibIrDecodeError> {
+    let (kind, declaration) = msg
+        .oneof(1..=12, "IrDeclaration")?
+        .ok_or_else(|| msg.error("declaration is empty"))?;
+    // A constructor or function nests its declaration base inside its function base.
+    let declaration = match kind {
+        3 | 6 => declaration.required(1, "function base")?,
+        _ => declaration,
+    };
+    let base = declaration.required(1, "declaration base")?;
+    let code = base.required_varint(1, "declaration symbol")?;
+    Ok(file.signatures.symbol(code)?.signature)
 }
 
 struct FileTables<'a> {

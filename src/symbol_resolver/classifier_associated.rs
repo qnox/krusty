@@ -45,6 +45,9 @@ impl SymbolResolver<'_> {
     /// access site. A current-module declaration is in this module; a dependency's `internal` one
     /// is visible only through the provider's friend-module rule, and its `private` one never.
     pub(crate) fn associated_property_accessible(&self, property: &PropertyInfo) -> bool {
+        if self.visibility_suppressed {
+            return true;
+        }
         let current_module = property.source_key.is_some() || property.stable_declaration.is_some();
         match property.visibility {
             Visibility::Public => true,
@@ -150,7 +153,9 @@ impl SymbolResolver<'_> {
 
     pub(crate) fn associated_function_accessible(&self, function: &FunctionInfo) -> bool {
         match (function.visibility, function.associated_access_owner) {
-            (Visibility::Private, Some(owner)) => self.lexically_inside(owner),
+            (Visibility::Private, Some(owner)) => {
+                self.visibility_suppressed || self.lexically_inside(owner)
+            }
             _ => self.non_member_callable_accessible(function),
         }
     }

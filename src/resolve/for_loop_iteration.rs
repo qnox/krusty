@@ -3,7 +3,7 @@
 //! members kotlinc's `ForLoopsLowering` reads instead of iterating, and for a `CharSequence` the
 //! `length` and `get` it indexes with.
 
-use crate::ast::{ExprId, StmtId};
+use crate::ast::{ExprId, ForRange, StmtId};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 use crate::libraries::TypeEnhancement;
@@ -11,7 +11,11 @@ use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
 use std::collections::HashMap;
 
-use super::{Checker, CheckerScope, IncDecSite, IteratorProtocolTarget};
+use super::{
+    operator_calls::{range_operator, SelectedBuiltinOperatorAccess},
+    scope::ScopeKind,
+    Checker, CheckerScope, ForRangeIteratorTarget, IncDecSite, IteratorProtocolTarget,
+};
 
 /// The members of a `kotlin.ranges` progression class a counted loop reads, selected from the
 /// class's own declarations. Only the class identity is compiler-known (`wk::progression_class`);
@@ -128,6 +132,165 @@ pub struct LoopMemberProperty {
 }
 
 impl Checker<'_> {
+    pub(super) fn stmt_for(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: StmtId,
+        name: String,
+        range: ForRange,
+        body: ExprId,
+        label: Option<String>,
+    ) {
+        let st = self.expr(scope, range.start);
+        let et = self.expr(scope, range.end);
+        let semantic_st = self.builtin_operator_operand(scope, st);
+        let semantic_et = self.builtin_operator_operand(scope, et);
+        let convention = range_operator(range.kind);
+        self.resolved_stmt_operator_calls
+            .remove(&(statement, convention.key));
+        self.resolved_stmt_builtin_operator_accesses
+            .remove(&(statement, convention.key));
+        // The counter type is the (uniform) bound type — `Int`, but also `Long` and the
+        // unsigned `UInt`/`ULong` (whose loop the backend emits with unsigned comparison).
+        // A `Byte`/`Short` range widens to an `IntRange` (kotlinc's `Short.rangeTo(Short): IntRange`),
+        // so the counter is `Int` and the bounds coerce up — exactly like a range *value*.
+        let counter = if st == Ty::Nothing {
+            semantic_et.range_counter_type()
+        } else if et == Ty::Nothing {
+            semantic_st.range_counter_type()
+        } else {
+            Ty::range_counter_type_for(semantic_st, semantic_et)
+        };
+        let elem = if let Some(counter) = counter {
+            // The loop counts over a range class's selected members and helpers.
+            self.record_progression_plans();
+            let span = self.file.stmt_spans[statement.0 as usize];
+            if let Some((_, selected)) = self.operator_call_ret(
+                scope,
+                range.start,
+                st,
+                convention.name,
+                &[et],
+                &[range.end],
+                span,
+                None,
+            ) {
+                if let Some(access) = SelectedBuiltinOperatorAccess::selected(&selected) {
+                    self.resolved_stmt_builtin_operator_accesses
+                        .insert((statement, convention.key), access);
+                }
+            }
+            counter
+        } else {
+            let span = self.file.stmt_spans[statement.0 as usize];
+            match self.operator_call_ret(
+                scope,
+                range.start,
+                st,
+                convention.name,
+                &[et],
+                &[range.end],
+                span,
+                None,
+            ) {
+                Some((range_ty, range_call)) if range_ty != Ty::Error => {
+                    match self.iterator_protocol_target(
+                        scope,
+                        Some(statement),
+                        range_ty,
+                        span,
+                        true,
+                    ) {
+                        Ok(Some(protocol)) => {
+                            let elem = protocol.elem_ty;
+                            self.resolved_stmt_operator_calls
+                                .insert((statement, convention.key), range_call.clone());
+                            self.resolved_stmt_operator_arg_slots
+                                .insert((statement, convention.key), vec![Some(range.end)]);
+                            self.for_range_iterator_protocols.insert(
+                                statement,
+                                ForRangeIteratorTarget {
+                                    range: Box::new(range_call),
+                                    protocol,
+                                },
+                            );
+                            elem
+                        }
+                        Ok(None) => {
+                            self.diags.error(
+                                span,
+                                format!(
+                                    "krusty: 'for' over '{}' is not supported (missing iterator convention)",
+                                    range_ty.source_name()
+                                ),
+                            );
+                            Ty::Error
+                        }
+                        Err(()) => Ty::Error,
+                    }
+                }
+                Some(_) => Ty::Error,
+                None => {
+                    self.diags.error(
+                        span,
+                        format!(
+                            "operator '{}' cannot be applied to '{}' and '{}'",
+                            convention.name,
+                            st.source_name(),
+                            et.source_name()
+                        ),
+                    );
+                    Ty::Error
+                }
+            }
+        };
+        let body_scope = scope.child(ScopeKind::Block);
+        let scope = &body_scope;
+        self.declare(scope, &name, elem, true); // loop variable (mutated by the lowering)
+        self.check_loop_body(scope, body, &label);
+    }
+
+    pub(super) fn stmt_for_each(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: StmtId,
+        name: String,
+        iterable: ExprId,
+        body: ExprId,
+        label: Option<String>,
+    ) {
+        let it = self.expr(scope, iterable);
+        self.record_iteration_plans(scope, statement, iterable);
+        // Java collection accessors yield flexible platform types (`Set<E>!`). A `for` loop is a
+        // value-consuming operation, so it selects the non-null lower bound exactly as a member call
+        // would; source `Set<E>?` remains nullable and is still rejected.
+        let iteration_ty = it.platform_lower_bound();
+        // An array element type covers primitive arrays and a boxed `Array<T>`
+        // (`Obj("kotlin/Array", [T])`) — iterate either as an array. The variable is a read of
+        // that element: `Array<out T>` and `Array<*>` yield `T`, not the projection wrapper.
+        let elem = if let Some(element) = iteration_ty.array_read_elem() {
+            element
+        } else if iteration_ty == Ty::String {
+            Ty::Char // iterating a String yields its chars
+        } else if iteration_ty == Ty::Error {
+            Ty::Error
+        } else {
+            match self.record_iterator_protocol(scope, Some(statement), iterable, iteration_ty) {
+                Ok(Some(elem)) => elem,
+                Ok(None) => {
+                    self.diags.error(self.span(iterable), format!("krusty: 'for' over '{}' is not supported (only arrays, String, and Iterables)", it.source_name()));
+                    Ty::Error
+                }
+                Err(()) => Ty::Error,
+            }
+        };
+        let body_scope = scope.child(ScopeKind::Block);
+        let scope = &body_scope;
+        let flow_identity = self.declare(scope, &name, elem, false);
+        self.record_enhanced_loop_variable(flow_identity, iterable);
+        self.check_loop_body(scope, body, &label);
+    }
+
     pub(super) fn iterator_protocol_target(
         &mut self,
         scope: &CheckerScope<'_>,

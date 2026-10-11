@@ -30,6 +30,8 @@ use crate::value_classes::{
 #[derive(Debug, Default)]
 pub(super) struct NativeValueClasses {
     declarations: UnderlyingTypes,
+    /// The value classes this module's sources declare, in this file or another.
+    module_declared: HashSet<TypeName>,
 }
 
 /// This target's answer to the one question the shared traversal leaves to a backend: whether a
@@ -73,6 +75,34 @@ impl NativeValueClasses {
                 for ty in params.iter().chain([ret]) {
                     crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
                 }
+            }
+        }
+        // A declaration another file of the module defines is called through the ABI its
+        // declared types fix, and the defining file carries those types by its own inventory. So
+        // the classifiers they name are this file's to know as well: otherwise a value class
+        // projected to its value there would travel as a reference here.
+        for property in ir.referenced_module_properties.values() {
+            pending.extend(property.owner);
+            for ty in property
+                .context_parameters
+                .iter()
+                .chain(&property.extension_receiver)
+                .chain([&property.ty])
+            {
+                crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
+            }
+        }
+        for callable in ir.referenced_module_callables.values() {
+            pending.extend(callable.owner);
+            for ty in callable.parameters.iter().chain([&callable.result]) {
+                crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
+            }
+        }
+        for constructor in ir.module_constructions.records.values() {
+            pending.push(constructor.owner);
+            pending.extend(constructor.outer);
+            for ty in constructor.parameters.iter() {
+                crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
             }
         }
         pending.extend(ir.classes.iter().filter_map(|class| {
@@ -144,6 +174,24 @@ impl NativeValueClasses {
     /// Whether `classifier` is a value class.
     pub(super) fn is_value_class(&self, classifier: TypeName) -> bool {
         self.declarations.contains_key(&classifier)
+    }
+
+    /// This inventory, knowing which of its value classes the module's own sources declare: the
+    /// ones another file of the module boxes through entry points the declaring file defines.
+    pub(super) fn declared_in_module(
+        mut self,
+        classifiers: impl IntoIterator<Item = TypeName>,
+    ) -> Self {
+        self.module_declared = classifiers
+            .into_iter()
+            .filter(|classifier| self.declarations.contains_key(classifier))
+            .collect();
+        self
+    }
+
+    /// Whether `classifier` is a value class the module's own sources declare.
+    pub(super) fn is_module_declared(&self, classifier: TypeName) -> bool {
+        self.module_declared.contains(&classifier)
     }
 
     /// The underlying type `classifier` declares, when it is a value class.

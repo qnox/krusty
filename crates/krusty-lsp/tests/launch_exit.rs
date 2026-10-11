@@ -34,7 +34,8 @@ Usage: krusty-lsp [options]
   -deps-sources, -no-deps-sources
   --dev
   -h, --help
-      Compiler -X language flags are accepted as well.
+      kotlinc language arguments are accepted as well: -language-version, -api-version,
+      -progressive, -XXLanguage:, and the -X arguments that switch language features.
 ";
     let output = Command::new(env!("CARGO_BIN_EXE_krusty-lsp"))
         .arg("--help")

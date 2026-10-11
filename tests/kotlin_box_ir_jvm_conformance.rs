@@ -274,6 +274,101 @@ impl Drop for OverlayGuard {
     }
 }
 
+/// The command line krusty compiles one unit of `case` under: the directive arguments the reference
+/// compile of the same unit receives ([`krusty::conformance::unit_compiler_configuration`]).
+/// Ordinary arguments pass through krusty's compatible CLI; exact levels additionally use the
+/// harness's typed configuration channel, which also carries historical levels. `Err` carries every
+/// refusal, in order.
+fn unit_options<'a>(
+    case: &str,
+    unit: impl IntoIterator<Item = &'a str>,
+) -> Result<krusty_cli::cli::Options, String> {
+    let configuration = krusty::conformance::unit_compiler_configuration(case, unit)?;
+    let mut options = krusty_cli::cli::parse(configuration.arguments.clone());
+    let refusals: Vec<&str> = options
+        .argument_errors
+        .iter()
+        .chain(&options.errors)
+        .map(String::as_str)
+        .collect();
+    if !refusals.is_empty() {
+        return Err(refusals.join("\n"));
+    }
+    if configuration.language_version.is_some() || configuration.api_version.is_some() {
+        let language_version = configuration
+            .language_version
+            .unwrap_or(options.language_settings.language_version);
+        let api_version = configuration.api_version.or_else(|| {
+            configuration
+                .language_version
+                .is_none()
+                .then_some(options.language_settings.api_version)
+        });
+        // The command line already read the feature settings; only the levels change.
+        let feature_settings = options.language_settings.feature_settings();
+        options.override_language_versions(language_version, api_version, &feature_settings)?;
+    }
+    Ok(options)
+}
+
+/// Whether the corpus case targets this gate. Compiler coverage is deliberately absent: a targeted
+/// case whose selected configuration krusty cannot compile is an applicable failure, never an
+/// applicability exclusion.
+fn gate_applicable(src: &str, no_run: bool) -> bool {
+    if no_run {
+        frontend_applicable(src, krusty::conformance::BACKENDS)
+    } else {
+        backend_applicable(src, krusty::conformance::BACKENDS)
+    }
+}
+
+#[test]
+fn historical_levels_reach_the_typed_configuration_channel() {
+    let source = "// LANGUAGE_VERSION: 1.9\n// API_VERSION: 1.8\nfun box() = \"OK\"\n";
+    assert!(gate_applicable(source, false));
+    let options = unit_options(source, []).expect("historical levels are typed harness inputs");
+    assert_eq!(
+        options.language_settings.language_version,
+        krusty::language_version::LanguageVersion::new(1, 9)
+    );
+    assert_eq!(
+        options.language_settings.api_version,
+        krusty::language_version::LanguageVersion::new(1, 8)
+    );
+}
+
+#[test]
+fn typed_levels_preserve_every_other_language_setting() {
+    let source = "// LANGUAGE_VERSION: 1.9\n\
+                  // API_VERSION: 1.8\n\
+                  // LANGUAGE: +MultiPlatformProjects\n\
+                  // OPT_IN: sample.ExperimentalApi\n\
+                  // EXPLICIT_API_MODE: STRICT\n\
+                  // ASSERTIONS_MODE: always-disable\n\
+                  fun box() = \"OK\"\n";
+    let options = unit_options(source, []).expect("the complete typed configuration is retained");
+    let features = &options.language_settings.features;
+
+    assert!(!features.has("ContextParameters"));
+    assert!(features.has("MultiPlatformProjects"));
+    assert!(features.has("ExplicitApiStrict"));
+    assert!(features.has("AssertionsAlwaysDisable"));
+    assert_eq!(
+        features.opted_in().collect::<Vec<_>>(),
+        ["sample.ExperimentalApi"]
+    );
+}
+
+/// The JVM library provider a unit analyzes against, at the API version its command line selects.
+fn jvm_libraries(
+    cp: &std::rc::Rc<Classpath>,
+    options: &krusty_cli::cli::Options,
+) -> krusty::jvm::jvm_libraries::JvmLibraries {
+    krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+        .expect("JVM provider initialization")
+        .with_api_version(options.language_settings.api_version)
+}
+
 fn compile_source(
     src: &str,
     stem: &str,
@@ -282,7 +377,7 @@ fn compile_source(
     progress: &dyn Fn(&str),
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(src);
+    let options = unit_options(src, [src]).ok()?;
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
     // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
@@ -296,19 +391,16 @@ fn compile_source(
     let cp = harness_classpath(cp_paths);
     progress("two-pass FIR");
     let started = std::time::Instant::now();
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
-            .expect("JVM provider initialization"),
-    );
+    let platform = Box::new(jvm_libraries(&cp, &options));
     let inputs = [krusty::source::SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(platform),
+        &options.language_settings.features,
+        &mut diags,
     );
-    let modes = krusty::conformance::UnitCodegenModes::of_unit([src]);
-    let backend = krusty::jvm::JvmBackend::new(cp)
-        .with_jvm_default(modes.jvm_default)
-        .with_lambda_modes(modes.lambdas);
+    let backend = options.jvm_backend(cp);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -393,18 +485,9 @@ fn compile_multifile(
         }
     }
 
-    // `// LANGUAGE:` directives live in the preamble before the first `// FILE:` — read them from the
-    // whole source and apply to every block.
-    let features = krusty::features::LangFeatures::from_source(src);
-    let compiled = compile_blocks(
-        &blocks,
-        cp_jars,
-        &[],
-        jdk_modules,
-        &features,
-        None,
-        &java_classes,
-    );
+    // Case-wide directives live in the preamble before the first `// FILE:`, so each unit's
+    // arguments are read from the whole case.
+    let compiled = compile_blocks(src, &blocks, cp_jars, &[], jdk_modules, None, &java_classes);
     let mut out = compiled?;
     out.extend(java_classes);
     Some(out)
@@ -421,9 +504,7 @@ fn compile_kotlin_first(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let java_blocks = sources.java;
-    let features = krusty::features::LangFeatures::from_source(src);
-    let kotlin_classes =
-        compile_blocks_mixed(sources, cp_jars, &[], jdk_modules, &features, None, &[])?;
+    let kotlin_classes = compile_blocks_mixed(src, sources, cp_jars, &[], jdk_modules, None, &[])?;
 
     static UID: AtomicU64 = AtomicU64::new(0);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
@@ -450,18 +531,20 @@ fn compile_kotlin_first(
     result
 }
 
-/// Compile a set of already-split source blocks `(stem, content)` as ONE krusty module against the
-/// given classpath through the production two-pass FIR driver, returning all emitted classes.
+/// Compile a set of already-split source blocks `(stem, content)` of `case` as ONE krusty module
+/// against the given classpath through the production two-pass FIR driver, returning all emitted
+/// classes.
 fn compile_blocks(
+    case: &str,
     blocks: &[(String, String)],
     cp_jars: &[std::path::PathBuf],
     friend_paths: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
-    features: &krusty::features::LangFeatures,
     progress: Option<&dyn Fn(&str)>,
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
     compile_blocks_mixed(
+        case,
         UnitSources {
             kotlin: blocks,
             common: 0,
@@ -470,7 +553,6 @@ fn compile_blocks(
         cp_jars,
         friend_paths,
         jdk_modules,
-        features,
         progress,
         overlay,
     )
@@ -485,12 +567,13 @@ struct UnitSources<'a> {
     java: &'a [(String, String)],
 }
 
+/// Compile one unit of `case` under the command line its directives select ([`unit_options`]).
 fn compile_blocks_mixed(
+    case: &str,
     sources: UnitSources<'_>,
     cp_jars: &[std::path::PathBuf],
     friend_paths: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
-    features: &krusty::features::LangFeatures,
     progress: Option<&dyn Fn(&str)>,
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
@@ -504,6 +587,7 @@ fn compile_blocks_mixed(
             progress(phase);
         }
     };
+    let options = unit_options(case, blocks.iter().map(|(_, source)| source.as_str())).ok()?;
     let mut diags = DiagSink::new();
     report("module classpath");
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
@@ -513,10 +597,7 @@ fn compile_blocks_mixed(
     let cp = harness_classpath_with_friends(cp_paths, friend_paths.to_vec());
     let _overlay = OverlayGuard::set(&cp, overlay);
     report("module two-pass FIR");
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
-            .expect("JVM provider initialization"),
-    );
+    let platform = Box::new(jvm_libraries(&cp, &options));
     let stems: Vec<String> = blocks
         .iter()
         .chain(java_blocks)
@@ -540,14 +621,12 @@ fn compile_blocks_mixed(
             .map(|(stem, content)| krusty::source::SourceInput::java(content).with_file_stem(stem)),
     );
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, features, &mut diags,
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(platform),
+        &options.language_settings.features,
+        &mut diags,
     );
-    let modes = krusty::conformance::UnitCodegenModes::of_unit(
-        blocks.iter().map(|(_, source)| source.as_str()),
-    );
-    let backend = krusty::jvm::JvmBackend::new(cp)
-        .with_jvm_default(modes.jvm_default)
-        .with_lambda_modes(modes.lambdas);
+    let backend = options.jvm_backend(cp);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()
@@ -620,7 +699,6 @@ fn compile_module_test(
     if krusty::conformance::directive(src, "WITH_COROUTINES") {
         krusty::conformance::inject_support_module(&mut modules, COROUTINE_HELPERS);
     }
-    let features = krusty::features::LangFeatures::from_source(src);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_modtest_{}_{uid}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
@@ -679,11 +757,11 @@ fn compile_module_test(
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
             compile_blocks_mixed(
+                src,
                 kotlin_only,
                 &cp,
                 &friend_paths,
                 jdk_modules,
-                &features,
                 Some(&report),
                 &[],
             )
@@ -703,11 +781,11 @@ fn compile_module_test(
                         // directory/jar entries contribute to — an overlaid dependency module
                         // loses them (measured: -95 box passes).
                         compile_blocks_mixed(
+                            src,
                             kotlin_only,
                             &cp,
                             &friend_paths,
                             jdk_modules,
-                            &features,
                             None,
                             &java_classes,
                         )
@@ -1622,12 +1700,7 @@ fn kotlin_codegen_box_conformance() {
                 );
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let applicable = if no_run {
-                        frontend_applicable(&src, krusty::conformance::BACKENDS)
-                    } else {
-                        backend_applicable(&src, krusty::conformance::BACKENDS)
-                    };
-                    if !applicable {
+                    if !gate_applicable(&src, no_run) {
                         return (
                             file.clone(),
                             TestResult::NotApplicable,
@@ -1795,12 +1868,7 @@ fn kotlin_codegen_box_conformance() {
                     // box outcome stays FAIL (carrying the panic diagnostics) for the manifest gate,
                     // and a reference-infrastructure failure still fails the run closed.
                     let case_score = if score_on {
-                        let applicable = if no_run {
-                            frontend_applicable(&src, krusty::conformance::BACKENDS)
-                        } else {
-                            backend_applicable(&src, krusty::conformance::BACKENDS)
-                        };
-                        if applicable {
+                        if gate_applicable(&src, no_run) {
                             let stem = file
                                 .file_stem()
                                 .and_then(|s| s.to_str())
@@ -2440,13 +2508,12 @@ fun callableNamedClass(): Any {
     let stem = "NamingContract";
     let classpath = vec![common::stdlib_jar()];
     let jdk = krusty::jvm::classpath::platform_jdk_modules(None);
-    let features = krusty::features::LangFeatures::from_source(source);
     let krusty = compile_blocks(
+        source,
         &[(stem.to_string(), source.to_string())],
         &classpath,
         &[],
         jdk.as_deref(),
-        &features,
         None,
         &[],
     )

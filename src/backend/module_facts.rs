@@ -862,7 +862,7 @@ mod tests {
         let mut diagnostics = crate::diag::DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Audit")],
-            Box::new(crate::libraries::EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
             &crate::features::LangFeatures::new(),
             &mut diagnostics,
         );
@@ -893,7 +893,7 @@ mod tests {
         let mut diagnostics = crate::diag::DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Nested")],
-            Box::new(crate::libraries::EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
             &crate::features::LangFeatures::new(),
             &mut diagnostics,
         );
@@ -923,7 +923,7 @@ mod tests {
         let mut diagnostics = crate::diag::DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features(
             &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Companion")],
-            Box::new(crate::libraries::EmptySymbolSource),
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
             &crate::features::LangFeatures::new(),
             &mut diagnostics,
         );

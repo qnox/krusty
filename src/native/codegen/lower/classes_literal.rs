@@ -30,10 +30,10 @@ impl BodyLowering<'_, '_, '_> {
             return self.runtime_call("kt_class_of", &[any()], kclass(), &[object]);
         }
         let Some(ty) = classifier else {
-            return Err("a class literal naming neither a type nor a value".to_string());
+            return Err("a class literal naming neither a type nor a value".into());
         };
         let Some(descriptor) = self.file.type_descriptor(ty)? else {
-            return Err(format!("a class literal of `{ty:?}`"));
+            return Err(declined!("a class literal of `{ty:?}`"));
         };
         let address = self.data_address(descriptor);
         self.runtime_call("kt_class_literal", &[Ty::Long], kclass(), &[address])

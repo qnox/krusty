@@ -2,6 +2,7 @@
 //! A reified `T::class` inside the accessor is therefore the call site's class. Calling the
 //! erased accessor instead answers `Object` and the read returns the failure branch.
 use super::common;
+use krusty::compilation_target::CompilationTarget;
 
 #[test]
 fn inline_reified_extension_property_uses_the_call_site_class() {
@@ -318,7 +319,7 @@ fn compile_files_diagnostics(
         Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()).expect("JVM provider"));
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        common::with_native_plugins(platform),
+        common::with_native_plugins(CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::default(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,

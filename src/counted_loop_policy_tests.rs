@@ -23,7 +23,7 @@ fn realized(policy: CountedLoopPolicy) -> IrFile {
 fn realized_source(source: &str, stem: &str, policy: CountedLoopPolicy) -> IrFile {
     let platform = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
                 "// WITH_STDLIB",
             )),
         ))

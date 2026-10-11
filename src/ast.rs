@@ -12,6 +12,7 @@ use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
 pub(crate) use return_labels::ReturnLabelSpans;
 use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
+mod binary_reference_tokens;
 mod call_shape;
 mod classifier_owners;
 mod constructors;
@@ -20,7 +21,9 @@ pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod operators;
 mod type_refs;
+pub use type_refs::TrFlags;
 mod use_site_annotations;
+pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
@@ -540,87 +543,8 @@ pub struct ForRange {
     pub start: ExprId,
     pub end: ExprId,
     pub kind: RangeKind,
-}
-
-/// Bit-packed [`TypeRef`] flags.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TrFlags(u16);
-
-impl TrFlags {
-    const NULLABLE: u16 = 1 << 0;
-    const DEFINITELY_NON_NULL: u16 = 1 << 1;
-    const FUN_HAS_RECEIVER: u16 = 1 << 2;
-    const FUN_SUSPEND: u16 = 1 << 3;
-    const IN_PROJECTION: u16 = 1 << 4;
-    const OUT_PROJECTION: u16 = 1 << 5;
-    const IMPORT: u16 = 1 << 6;
-    // Parsing still represents `*` as its semantic upper bound (`Any?`) for ordinary type
-    // resolution, but an `is FunctionN<*, ...>` check must distinguish that runtime-checkable
-    // projection from an explicitly written `Any?`. Preserve the source distinction in the last
-    // available flag bit instead of recovering it from source text in individual consumers.
-    const STAR_PROJECTION: u16 = 1 << 7;
-    // Annotation classifier references are also present in `detached_type_refs` so Pass 1 can bind
-    // their identities before compact header projection. The declaration annotation checker is the
-    // sole diagnostic authority, however; marking the duplicate detached occurrence prevents a
-    // file-scope fallback from rechecking it outside its declaration's lexical suppression scope.
-    const ANNOTATION: u16 = 1 << 8;
-    /// The element type written on a `vararg` parameter; the parameter's type is its array.
-    const VARARG_ELEMENT: u16 = 1 << 9;
-
-    #[inline]
-    const fn with(mut self, mask: u16, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u16) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_nullable(self, on: bool) -> Self {
-        self.with(Self::NULLABLE, on)
-    }
-    #[inline]
-    pub const fn with_definitely_non_null(self, on: bool) -> Self {
-        self.with(Self::DEFINITELY_NON_NULL, on)
-    }
-    #[inline]
-    pub const fn with_fun_has_receiver(self, on: bool) -> Self {
-        self.with(Self::FUN_HAS_RECEIVER, on)
-    }
-    #[inline]
-    pub const fn with_fun_suspend(self, on: bool) -> Self {
-        self.with(Self::FUN_SUSPEND, on)
-    }
-    #[inline]
-    pub const fn with_in_projection(self, on: bool) -> Self {
-        self.with(Self::IN_PROJECTION, on)
-    }
-    #[inline]
-    pub const fn with_out_projection(self, on: bool) -> Self {
-        self.with(Self::OUT_PROJECTION, on)
-    }
-    #[inline]
-    pub const fn with_import(self, on: bool) -> Self {
-        self.with(Self::IMPORT, on)
-    }
-    #[inline]
-    pub const fn with_star_projection(self, on: bool) -> Self {
-        self.with(Self::STAR_PROJECTION, on)
-    }
-    #[inline]
-    pub const fn with_annotation(self, on: bool) -> Self {
-        self.with(Self::ANNOTATION, on)
-    }
-    #[inline]
-    pub const fn with_vararg_element(self, on: bool) -> Self {
-        self.with(Self::VARARG_ELEMENT, on)
-    }
+    /// The `..`, `..<`, `until` or `downTo` token.
+    pub operator_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -988,6 +912,8 @@ pub struct PropParam {
     pub is_override: bool,
     /// `open` or `override` without `final`.
     pub is_open: bool,
+    /// The declaration wrote `final`.
+    pub is_final: bool,
     /// Declaration visibility (`public` by default), from the constructor-parameter modifier list.
     /// A `private` property's backing field gets NO accessor (kotlinc reads it directly in-class), so
     /// the accessor synthesis skips it; `internal`/`protected` currently accessor like `public`.
@@ -1124,6 +1050,9 @@ pub struct ClassDecl {
     /// Span of the `value` keyword. Absent for a legacy `inline class` and for an ordinary class.
     /// The missing-`@JvmInline` diagnostic points here.
     pub value_modifier_span: Option<Span>,
+    /// Span of the primary constructor's parameter list, `(` through `)`. Absent when the class
+    /// writes no parameter list.
+    pub primary_constructor_parameters_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
@@ -1134,6 +1063,9 @@ pub struct ClassDecl {
     /// `is_open` + `is_abstract` + `is_sealed` booleans; read via the `is_open()` / `is_abstract()` /
     /// `is_sealed()` accessors (which preserve the prior bool semantics, incl. `sealed ⟹ abstract+open`).
     pub modality: Modality,
+    /// The declaration wrote `final`. [`Self::modality`] is `Final` by default too; a compiler
+    /// plugin that changes the default modality (all-open) keeps an explicit one.
+    pub final_modifier: bool,
     /// `inner class` — captures the enclosing instance: emitted with a synthetic `this$0` field of the
     /// outer type (the first field + first constructor parameter). `Some(outer_class_simple_name)`.
     pub inner_of: Option<String>,
@@ -1397,6 +1329,8 @@ pub struct PropDecl {
     /// `open` or `override` (without `final`) — the accessors are overridable, so the JVM backend
     /// must not emit `ACC_FINAL` on them (same rule as `FunDecl::is_open`).
     pub is_open: bool,
+    /// The declaration wrote `final`.
+    pub is_final: bool,
     pub is_override: bool,
     /// No initializer was written for `None`. This is valid syntax for abstract, expect, external,
     /// lateinit, deferred, and accessor-defined properties; semantic validation decides whether the
@@ -1723,6 +1657,12 @@ pub struct File {
     /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
     /// expression node.
     pub exact_member_name_spans: std::collections::HashMap<u32, Span>,
+    /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
+    /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
+    /// sparse rather than widening those expression nodes.
+    pub operator_token_spans: std::collections::HashMap<u32, Span>,
+    /// The assignment tokens kotlinc's binary-expression diagnostic positioning searches.
+    pub binary_reference_tokens: BinaryReferenceTokens,
     /// Callable references whose classifier receiver was written nullable (`A?::member`). The
     /// receiver expression still names classifier `A`; this sparse marker preserves the source type
     /// so extension-reference selection does not silently narrow it to `A`.
@@ -1856,6 +1796,10 @@ pub struct File {
     /// argument's `ExprId.0`. The checker/lowerer reorder the base args to the base constructor's
     /// parameter order before use. Absent ⇒ all base args are positional.
     pub base_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
+    /// The callee name of a superclass constructor call (`Base` in `: pkg.Base(args)`), keyed by
+    /// the start offset of the class's `base_class_span`. The call's access diagnostic is reported
+    /// there, apart from the type reference's own.
+    pub base_class_callee_spans: std::collections::HashMap<u32, Span>,
     /// Declared return type of an anonymous function (`fun (…): T = …`), keyed by the desugared
     /// lambda's `ExprId.0`. A block body that ends in `return` has body type `Nothing`, so the checker
     /// must take the function's type from this annotation, not from the (diverging) body value.
@@ -1910,6 +1854,10 @@ pub struct File {
     /// [`Self::type_annotations`]: `class C<@Ann T>` annotates the declaration of `T`, not a type use.
     pub declaration_type_parameter_annotations:
         std::collections::HashMap<u32, Vec<AnnotatedTypeParameter>>,
+    /// The declaring type parameter of each upper bound, keyed by the start of the bound's type
+    /// reference: `<T : B>` and `where T : B` both map `B` to the parameter as `<…>` wrote it,
+    /// annotations and inline bound included, which is where kotlinc reports about the parameter.
+    pub type_parameter_bound_owners: std::collections::HashMap<u32, crate::diag::Span>,
     /// Signature starts for typealiases with declaration type parameters. Typealiases currently live
     /// in the structural alias tables rather than `Decl`; this exact owner set lets semantic annotation
     /// resolution use file scope without guessing from names or source text.
@@ -1953,6 +1901,9 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// `+AllowEagerSupertypeAccessibilityChecks`: a missing supertype found at a constructor call
+    /// (or behind a dispatch receiver already reported) is an error rather than a warning.
+    pub allow_eager_supertype_accessibility_checks: bool,
     /// Before Kotlin language level 2.4, a lambda implementation keeps the body's inferred result
     /// separately from the caller-facing function result. The checked FIR boundary records that
     /// semantic choice so a backend never needs its own language-version switch.
@@ -2006,6 +1957,8 @@ impl File {
         self.call_arg_name_spans = Default::default();
         self.empty_call_open_paren_spans = Default::default();
         self.exact_member_name_spans = Default::default();
+        self.operator_token_spans = Default::default();
+        self.binary_reference_tokens = Default::default();
         self.nullable_callable_ref_receivers = Default::default();
         self.class_literal_references = Default::default();
         self.non_adjacent_member_dot_spans = Default::default();
@@ -2939,111 +2892,4 @@ fn unop(op: UnOp) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn span() -> Span {
-        Span::new(0, 0)
-    }
-
-    #[test]
-    fn binary_operator_location_does_not_widen_the_expression_arena_entry() {
-        assert!(
-            std::mem::size_of::<Expr>() <= 104,
-            "Expr grew to {} bytes",
-            std::mem::size_of::<Expr>()
-        );
-    }
-
-    #[test]
-    fn expr_uses_name_stops_at_nested_lambdas() {
-        let mut file = File::default();
-        let outer = file.add_expr(Expr::Name("outer".to_string()), span());
-        let lambda = file.add_expr(
-            Expr::Lambda {
-                params: Vec::new(),
-                body: outer,
-            },
-            span(),
-        );
-
-        assert!(!file.expr_uses_name(lambda, "outer"));
-        assert!(file.expr_uses_name_deep(lambda, "outer"));
-    }
-
-    #[test]
-    fn expr_uses_name_deep_respects_lambda_parameter_shadowing() {
-        let mut file = File::default();
-        let outer = file.add_expr(Expr::Name("outer".to_string()), span());
-        let lambda = file.add_expr(
-            Expr::Lambda {
-                params: vec!["outer".to_string()],
-                body: outer,
-            },
-            span(),
-        );
-
-        assert!(!file.expr_uses_name_deep(lambda, "outer"));
-    }
-
-    #[test]
-    fn expr_uses_name_counts_assignment_targets_and_values() {
-        let mut file = File::default();
-        let value = file.add_expr(Expr::Name("value".to_string()), span());
-        let assign = file.add_stmt(
-            Stmt::Assign {
-                name: "target".to_string(),
-                value,
-            },
-            span(),
-        );
-        let block = file.add_expr(
-            Expr::Block {
-                stmts: vec![assign],
-                trailing: None,
-            },
-            span(),
-        );
-
-        assert!(file.expr_uses_name(block, "target"));
-        assert!(file.expr_uses_name(block, "value"));
-        assert!(!file.expr_uses_name(block, "missing"));
-    }
-
-    #[test]
-    fn const_string_value_renders_a_char_as_its_code_unit() {
-        let mut file = File::default();
-        let dollar = file.add_expr(Expr::CharLit(b'$' as u16), span());
-        let surrogate = file.add_expr(Expr::CharLit(0xD800), span());
-
-        assert_eq!(file.const_string_value(dollar), Some(KtString::from("$")));
-        // A lone surrogate is a legal `Char` with no Unicode-scalar form. It must survive the fold
-        // as its code unit rather than make the whole constant unrepresentable.
-        let folded = file.const_string_value(surrogate).expect("lone surrogate");
-        assert_eq!(folded.units().collect::<Vec<_>>(), vec![0xD800]);
-        assert_eq!(folded.as_str(), None);
-    }
-
-    #[test]
-    fn const_string_value_joins_a_template_in_code_units() {
-        // The two halves of U+1F600 arriving as separate `Char` parts must rejoin into the ordinary
-        // two-unit string, not stay in the degraded form.
-        let mut file = File::default();
-        let high = file.add_expr(Expr::CharLit(0xD83D), span());
-        let low = file.add_expr(Expr::CharLit(0xDE00), span());
-        let template = file.add_expr(
-            Expr::Template(vec![
-                TemplatePart::Str(KtString::from("[")),
-                TemplatePart::Expr(high),
-                TemplatePart::Expr(low),
-                TemplatePart::Str(KtString::from("]")),
-            ]),
-            span(),
-        );
-
-        assert_eq!(
-            file.const_string_value(template),
-            Some(KtString::from("[\u{1F600}]"))
-        );
-    }
-}
+mod tests;

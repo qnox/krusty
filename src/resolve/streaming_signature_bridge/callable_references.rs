@@ -519,7 +519,7 @@ struct SignatureMemberSite<'site, 'data> {
 
 impl super::super::access_control::SourceMemberSite for SignatureMemberSite<'_, '_> {
     fn visibility_suppressed(&self) -> bool {
-        false
+        self.semantics.scope_suppresses_visibility(self.scope)
     }
 
     fn source_package(&self) -> Option<crate::types::TypeName> {

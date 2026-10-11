@@ -254,11 +254,7 @@ impl BodyLowering<'_> {
         let slot = self.value_slot(with_index.index);
         let current = self.ir.add_expr(IrExpr::GetValue(slot));
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let next = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: current,
-            rhs: one,
-        });
+        let next = self.ir.add_arithmetic(IrBinOp::Add, current, one, Ty::Int);
         let step = self.ir.add_expr(IrExpr::SetValue {
             var: slot,
             value: next,

@@ -236,14 +236,15 @@ impl Checker<'_> {
         true
     }
 
-    /// Commit a subscript operator's value-parameter slots. `param_defaults` is the selected
-    /// signature's full table. The flags are its value-parameter suffix; a missing suffix does
-    /// not fall back to that full table.
+    /// Commit a selected subscript operator: its value-parameter slots and, for a generic
+    /// operator, the type arguments its selection solved (as every other generic call publishes
+    /// them). The selected signature's default flags are its full table; the flags used are its
+    /// value-parameter suffix, and a missing suffix does not fall back to that full table.
     pub(super) fn commit_indexed_operator_arguments(
         &mut self,
         expression: ExprId,
-        param_defaults: &[bool],
-        context_count: usize,
+        selected: &crate::libraries::FunctionInfo,
+        bindings: &crate::symbol_resolver::GSigBinds,
         params: &[Ty],
         vararg: Option<usize>,
         indices: &[ExprId],
@@ -255,11 +256,24 @@ impl Checker<'_> {
                 return false;
             }
         };
-        let Some(defaults) = value_parameter_defaults(param_defaults, context_count, slots.len())
-        else {
+        let Some(defaults) = value_parameter_defaults(
+            &selected.call_sig.param_defaults,
+            selected.context_count,
+            slots.len(),
+        ) else {
             self.report_inconsistent_parameter_defaults(expression);
             return false;
         };
+        if let Some(signature) = selected.generic_sig.as_ref() {
+            let resolved = signature
+                .formals
+                .iter()
+                .map(|formal| bindings.get(formal).copied())
+                .collect::<Vec<_>>();
+            if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
+                self.resolved_call_type_args.insert(expression, resolved);
+            }
+        }
         self.commit_selected_argument_slots(expression, slots, defaults)
     }
 

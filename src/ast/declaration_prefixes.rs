@@ -17,6 +17,10 @@ pub struct DeclarationPrefix {
     pub start: Span,
     /// The visibility modifier the declaration wrote, if any.
     pub visibility: Option<Visibility>,
+    /// Where the whole declaration starts, annotations included.
+    pub declaration_start: u32,
+    /// A classifier's `class`, `object` or `interface` keyword, when the declaration has one.
+    pub classifier_keyword: Option<Span>,
 }
 
 /// Declaration prefixes keyed by the offsets of the tokens that identify their declaration: the
