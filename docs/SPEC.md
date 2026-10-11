@@ -6868,6 +6868,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/method_pool_order_e2e.rs::a_class_an_elided_type_check_named_interns_where_a_later_body_names_it`,
   `::a_field_an_elided_read_named_interns_after_the_next_body_s_header` and
   `::an_object_s_elided_instance_read_interns_its_name_at_the_static_initializer`.
+- **A removed instruction's constant interns at the header or code that names it again.** A
+  step loop over a non-constant step checks the step (`Step must be positive, was: …`) and the
+  rewrite removes that check once the step is known positive. The check had interned
+  `StringBuilder.<init>()V`, which the file's `<clinit>` names again. kotlinc interns `()V` with
+  the `<clinit>` header, right after its name, and the constructor reference with that body, before
+  `@Metadata`. The relayout settled a header's orphan at the previous method's end, which kept
+  `()V` ahead of `<clinit>`, and left a code orphan of the last method to the next fresh class
+  attribute (`SourceFile`). A code orphan now goes right after its method's last entry as soon as
+  that code ends, a header orphan right after the header's last entry, and orphans sharing an anchor
+  keep their visit order. Test:
+  `tests/rewritten_orphan_pool_e2e.rs::a_static_initializer_reinterns_what_a_removed_step_check_named`.
+  Corpus: `controlflow/for_loops.kt`, `controlflow/for_loops_overflow.kt`.
 - **Inherited forwarders and bridges precede `<clinit>`.** kotlinc appends a class's
   default-method forwarders and then its bridges to the lowered declarations, and writes the
   static initializer last, so an object's forwarder and an enum's erased bridge come before

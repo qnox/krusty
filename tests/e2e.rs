@@ -2336,6 +2336,8 @@ mod result_companion_targs_e2e;
 mod result_e2e;
 #[path = "result_property_carrier_e2e.rs"]
 mod result_property_carrier_e2e;
+#[path = "rewritten_orphan_pool_e2e.rs"]
+mod rewritten_orphan_pool_e2e;
 #[path = "root_package_cast_message_e2e.rs"]
 mod root_package_cast_message_e2e;
 #[path = "run_catching_inline_e2e.rs"]
