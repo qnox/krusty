@@ -553,6 +553,15 @@ pub(super) fn demo(
     shapes: &[Shape],
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> Demo {
+    demo_with(shapes, Vec::new(), build)
+}
+
+/// [`demo`], with `extra` trees serialized by the same library beside the `demo` functions.
+pub(super) fn demo_with(
+    shapes: &[Shape],
+    extra: Vec<KlibIrDeclarationTree>,
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> Demo {
     let libraries = KlibLibraries::from_packages(vec![(
         vec!["demo".to_owned()],
         KotlinPackage {
@@ -635,6 +644,7 @@ pub(super) fn demo(
                 declaration: KlibIrMember::Function(function),
             }
         })
+        .chain(extra)
         .collect();
     let trees = KlibIrModuleTrees::from_trees(trees).expect("one tree defines each identity once");
     let bodies = KlibDeclarationBodies::from_libraries(vec![trees]).expect("one library");

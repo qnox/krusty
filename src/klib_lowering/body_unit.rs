@@ -2,8 +2,11 @@
 //!
 //! Lowering one selected declaration also lowers every dependency declaration its body calls,
 //! transitively, so the unit is closed over calls: each call names a function of the same unit.
-//! A declaration is lowered once per signature, and a call cycle links back to the function it
-//! already declared. If any reached body declines, the unit is left exactly as it was.
+//! A callee is joined to its serialized declaration by exact signature, as a body is, and declared
+//! from that declaration's header; a provider record of the same identity, when a checked call
+//! selected one, is cross-checked against the header. A declaration is lowered once per signature,
+//! and a call cycle links back to the function it already declared. If any reached body declines,
+//! the unit is left exactly as it was.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -16,7 +19,7 @@ use crate::ir::{ExprId, FunId, IrFile};
 use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature};
 use crate::metadata::id_signature::KlibPublicIdSignature;
-use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrBody, KlibIrStatement};
+use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrBody, KlibIrFunction, KlibIrStatement};
 use crate::metadata::klib_ir::KlibIrSymbol;
 
 /// Lowered dependency bodies in one common-IR file, one function per declaration signature.
@@ -36,8 +39,8 @@ impl Default for DependencyBodyUnit {
     }
 }
 
-/// Where a unit reads the declarations it lowers: their serialized bodies, and the frozen
-/// declarations of the callees those bodies may call.
+/// Where a unit reads the declarations it lowers: their serialized declarations and bodies, and
+/// the provider records of the callees a checked call selected.
 #[derive(Clone, Copy)]
 struct Sources<'a> {
     bodies: &'a KlibDeclarationBodies,
@@ -46,7 +49,7 @@ struct Sources<'a> {
 
 /// A declared function whose body is still to be lowered.
 struct PendingBody<'a> {
-    signature: &'a KlibDeclarationSignature,
+    signature: KlibDeclarationSignature,
     arena: &'a KlibIrArena,
     symbol: &'a KlibIrSymbol,
     statements: &'a [KlibIrStatement],
@@ -58,16 +61,26 @@ impl DependencyBodyUnit {
     /// The function holding `callable`'s body, lowering it, and every body it reaches through
     /// calls, the first time its signature is seen. A declined body leaves the unit as it was.
     ///
-    /// `callees` holds the frozen declarations the body may call; a call of any other dependency
-    /// declaration declines.
+    /// `callees` holds the provider records of the callees a checked call selected; a callee it
+    /// does not hold is described by its serialized header alone.
     pub fn lower_function<'a>(
         &mut self,
         callable: KlibBodyCallable<'a>,
         bodies: &'a KlibDeclarationBodies,
         callees: &'a KlibCalleeFacts<'a>,
     ) -> Result<FunId, KlibBodyDecline> {
-        if let Some(function) = self.functions.get(callable.signature()) {
-            return Ok(*function);
+        if let Some(function) = self.functions.get(callable.signature()).copied() {
+            // Declared before, perhaps from its header alone as another body's callee: the
+            // selection it is now asked for must describe it too.
+            let (arena, declaration) = bodies.function(callable.signature()).ok_or_else(|| {
+                KlibBodyDecline::new(
+                    callable.signature().clone(),
+                    KlibBodyDeclineReason::Unjoined,
+                )
+            })?;
+            function_header(Some(callable), arena, declaration)
+                .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
+            return Ok(function);
         }
         let checkpoint = UnitCheckpoint::of(self);
         let lowered = self.lower_reachable(callable, Sources { bodies, callees });
@@ -100,8 +113,19 @@ impl DependencyBodyUnit {
             root: callable,
             sources,
         };
-        let root = linker
-            .declare(&mut self.ir, callable)
+        let root = sources
+            .bodies
+            .function(callable.signature())
+            .ok_or(KlibBodyDeclineReason::Unjoined)
+            .and_then(|(arena, function)| {
+                linker.declare(
+                    &mut self.ir,
+                    callable.signature(),
+                    Some(callable),
+                    arena,
+                    function,
+                )
+            })
             .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
         while let Some(body) = linker.pending.pop_front() {
             let function = LoweredFunction {
@@ -119,7 +143,7 @@ impl DependencyBodyUnit {
             .body(body.statements)
             .map_err(|reason| match reason {
                 KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
-                reason => KlibBodyDecline::new(body.signature.clone(), reason),
+                reason => KlibBodyDecline::new(body.signature, reason),
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
@@ -152,27 +176,55 @@ impl<'s> Linker<'_, 's> {
         } else {
             self.sources.callees.get(&signature)
         };
-        let callable = match selection {
-            None => {
-                return Err(KlibBodyDeclineReason::UnselectedCallee(Box::new(
-                    callee.clone(),
-                )))
-            }
+        let selected = match selection {
+            None => None,
             Some(KlibCalleeFact::Ambiguous) => {
                 return Err(KlibBodyDeclineReason::AmbiguousCallee(Box::new(
                     callee.clone(),
                 )))
             }
-            Some(KlibCalleeFact::Selected(callable)) => callable,
+            Some(KlibCalleeFact::Selected(callable)) => Some(callable),
         };
+        let callee_declined = |reason| {
+            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
+                signature.clone(),
+                reason,
+            )))
+        };
+        let Some((arena, declaration)) = self.sources.bodies.function(&signature) else {
+            return Err(match selected {
+                Some(_) => callee_declined(KlibBodyDeclineReason::Unjoined),
+                // A signature nested in a class names a member. A member the libraries do not
+                // serialize is, in a complete library set, a fake override: the real declaration
+                // is reached through the serialized class declarations, which lowering does not
+                // follow yet.
+                None if callee.declaration().segments().len() > 1 => {
+                    KlibBodyDeclineReason::UnsupportedOperation(
+                        "a call of a member no library serializes, such as a fake override",
+                    )
+                }
+                None => KlibBodyDeclineReason::UndeclaredCallee(Box::new(callee.clone())),
+            });
+        };
+        if declaration.dispatch_receiver.is_some() {
+            // A member call passes its dispatch receiver apart from its arguments and dispatches
+            // virtually unless the member is final; lowering models neither yet.
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of a member function",
+            ));
+        }
         let function = match self.functions.get(&signature) {
-            Some(function) => *function,
-            None => self.declare(ir, callable).map_err(|reason| {
-                KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
-                    signature.clone(),
-                    reason,
-                )))
-            })?,
+            Some(function) => {
+                // The function was declared under another lowering's selection, or from its
+                // header alone; this lowering's selection must describe it too.
+                if let Some(selected) = selected {
+                    function_header(Some(selected), arena, declaration).map_err(callee_declined)?;
+                }
+                *function
+            }
+            None => self
+                .declare(ir, &signature, selected, arena, declaration)
+                .map_err(callee_declined)?,
         };
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
@@ -183,28 +235,26 @@ impl<'s> Linker<'_, 's> {
         })
     }
 
-    /// Declare `callable`'s function and queue its body.
+    /// Declare the serialized function `function`, signed `signature` and described also by the
+    /// provider record `selected` when there is one, and queue its body.
     fn declare(
         &mut self,
         ir: &mut IrFile,
-        callable: KlibBodyCallable<'s>,
+        signature: &KlibDeclarationSignature,
+        selected: Option<KlibBodyCallable<'s>>,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
     ) -> Result<FunId, KlibBodyDeclineReason> {
-        let (arena, function) = self
-            .sources
-            .bodies
-            .function(callable.signature())
-            .ok_or(KlibBodyDeclineReason::Unjoined)?;
         let statements = match &function.body {
             None => return Err(KlibBodyDeclineReason::NoBody),
             Some(KlibIrBody::Synthetic(_)) => return Err(KlibBodyDeclineReason::SyntheticBody),
             Some(KlibIrBody::Block(statements)) => statements,
         };
-        let header = function_header(callable, arena, function)?;
-        let declared = declare_function(ir, callable, &header);
-        self.functions
-            .insert(callable.signature().clone(), declared);
+        let header = function_header(selected, arena, function)?;
+        let declared = declare_function(ir, &header);
+        self.functions.insert(signature.clone(), declared);
         self.pending.push_back(PendingBody {
-            signature: callable.signature(),
+            signature: signature.clone(),
             arena,
             symbol: &function.base.symbol,
             statements,
