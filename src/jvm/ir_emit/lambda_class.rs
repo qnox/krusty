@@ -46,7 +46,7 @@ pub(super) fn emit_lambda_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
-    if inline_default.is_some() {
+    if lambda.inline_origin {
         let lines = u16::try_from(ir.source_line_count)
             .unwrap_or(u16::MAX)
             .max(1);

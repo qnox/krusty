@@ -21,6 +21,9 @@ pub struct IrLambdaClass {
     /// from [`Self::public_inline`]: a private inline default still needs a public JVM class for
     /// cross-package module calls, but does not receive Kotlin's public-ABI metadata flag.
     pub public_inline_abi: bool,
+    /// The class is written inside an `inline` function, so kotlinc gives it the identity source
+    /// map of a class generated for inlining (`visitSMAP(…, intoInline = true)`).
+    pub inline_origin: bool,
     /// The closure's semantic function type mentions a reified parameter of the inline declaration
     /// that exposes it. The JVM marks both singleton initialization and the default expression that
     /// loads it so an inliner regenerates the type-specialized class.

@@ -1163,6 +1163,8 @@ mod inline_erased_capture_e2e;
 mod inline_erased_parameter_e2e;
 #[path = "inline_finally_marker_e2e.rs"]
 mod inline_finally_marker_e2e;
+#[path = "inline_function_lambda_class_e2e.rs"]
+mod inline_function_lambda_class_e2e;
 #[path = "inline_lambda_as_value_e2e.rs"]
 mod inline_lambda_as_value_e2e;
 #[path = "inline_lambda_caller_loop_jump_e2e.rs"]

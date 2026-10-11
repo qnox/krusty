@@ -11496,6 +11496,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
   against kotlinc; the whole source at run time; the exact error for the unrealized shape) and
   `tests/inline_value_class_lambda_e2e.rs`.
+- **A lambda written in an `inline` function is the same class.** kotlinc never compiles a lambda in
+  an inline function's body to an `invokedynamic`: `inline fun plain() = take { "plain$it" }` writes
+  `final class InlineScopeKt$plain$1 implements Function1` over `Object`, whatever the lambda's
+  signature, and no `plain$lambda$0`. The rule follows the lexical scope outward, through an
+  enclosing lambda (`nested$1$1`, whose `EnclosingMethod` is `nested$1.invoke`) and through an
+  anonymous object's or local class's method (`inObject$1$area$1`), to an inline function, member or
+  `private inline` alike. A lambda written in an inline call's lambda argument is the caller's and
+  keeps indy. The class and its constructor are public, since a caller in another package
+  constructs it, and its metadata carries the public-ABI flag unless the inline function is
+  private; one written directly in the inline function's body (not a nested one) also carries the
+  identity `SourceDebugExtension` source map of a class generated for inlining. A caller that inlines
+  the function, in the same file or another, constructs that declaring class
+  (`new InlineScopeKt$capturing$1(prefix)`, `InlineScopeKt$plain$1.INSTANCE`) rather than a class of
+  its own. Not yet covered: a lambda in an inline property accessor (`inline val p get() = take {
+  … }`), and the anonymous object's own public-ABI flag and source map. Tests:
+  `tests/inline_function_lambda_class_e2e.rs` (each class byte for byte against kotlinc, the facades
+  of both files included, and the whole source at run time).
 - **A lambda with a `Nothing`/`Nothing?` type the factory cannot adapt is the same class, with a raw
   supertype.** kotlinc's `computeParameterTypeAdaptationConstraint` also returns CONFLICT when the
   adaptee type `isNothing() || isNullableNothing()`: a parameter typed `Nothing`/`Nothing?` by the
