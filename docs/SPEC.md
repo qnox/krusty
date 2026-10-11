@@ -10285,9 +10285,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   meta-annotation nor an annotation on a subinterface that inherits the method applies, while a
   subinterface inheriting an annotated interface's method does. Java interfaces and Kotlin `fun
   interface`s alike, through a SAM-converted argument and a SAM constructor; a method with no
-  value parameters is unchanged. kotlinc's `SUPPORTED_PRESETS` is empty, so `preset=` adds
-  nothing. An abstract method that already declares an extension receiver keeps its own shape in
-  krusty. kotlinc 2.4.20's frontend instead drops that receiver and makes the first value
+  value parameters is unchanged. Although kotlinc's implementation contains an unused preset
+  option, its command-line processor does not register `preset=`, so requesting one is an
+  unsupported plugin option. An abstract method that already declares an extension receiver keeps
+  its own shape in krusty. kotlinc 2.4.20's frontend instead drops that receiver and makes the first value
   parameter the receiver, but its backend then fails every such lambda conversion with an
   internal error (`LambdaMetafactoryArgumentsBuilder.validateMethodParameters`: "Mismatching
   lambda and instance method parameters"), so there is no kotlinc output to match. The convention is a frontend fact (`SymbolSource::sam_with_receiver_annotations`, read
@@ -10296,7 +10297,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Kotlin interfaces, an inherited annotated method, a meta-annotation, an annotated subinterface of
   an unannotated method, a parameterless method, byte-identical to kotlinc and run),
   `plugins::sam_with_receiver` and `plugins::registry` unit tests
-  (`sam_with_receiver_resolves_to_native_and_reads_its_options`).
+  (`sam_with_receiver_resolves_to_native_and_rejects_its_unregistered_preset_option`).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,

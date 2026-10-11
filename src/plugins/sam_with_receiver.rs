@@ -7,8 +7,8 @@
 //! `this` rather than `it`. Gradle's `Action<T>` (`@HasImplicitReceiver`) is the best-known user.
 //! The frontend applies the convention where it derives a SAM conversion's function type (see
 //! `symbol_resolver::semantic_sam_signature`); this module owns only the plugin's configuration:
-//! the `annotation` and `preset` options. kotlinc's `SamWithReceiverPluginNames.SUPPORTED_PRESETS`
-//! is empty, so a preset never contributes an annotation.
+//! the `annotation` option. Although kotlinc's implementation contains an unused preset option,
+//! its command-line processor does not register that option, so requesting it is an error.
 
 use crate::plugins::cli::PluginOption;
 use crate::plugins::IrPlugin;
@@ -57,14 +57,10 @@ mod tests {
     }
 
     #[test]
-    fn annotations_configure_the_convention_and_presets_add_nothing() {
-        let plugin = SamWithReceiverPlugin::from_options(&[
-            option("annotation", "test.WithReceiver"),
-            option("preset", "gradle-kotlin-dsl"),
-        ]);
+    fn annotations_configure_the_convention() {
+        let plugin =
+            SamWithReceiverPlugin::from_options(&[option("annotation", "test.WithReceiver")]);
         let annotations = plugin.sam_with_receiver_annotations();
-        assert!(annotations.contains(&crate::types::type_name("test/WithReceiver")));
-        assert!(!annotations.iter().any(|annotation| *annotation
-            == crate::types::type_name("org/gradle/api/HasImplicitReceiver")));
+        assert_eq!(annotations, [crate::types::type_name("test/WithReceiver")]);
     }
 }

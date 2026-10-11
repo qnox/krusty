@@ -368,7 +368,7 @@ impl PluginRegistry {
             plugin_id: SAM_WITH_RECEIVER_PLUGIN_ID,
             registrar: "org.jetbrains.kotlin.samWithReceiver.SamWithReceiverComponentRegistrar",
             kind: ExtensionKind::Native(build_sam_with_receiver),
-            option_keys: Some(&["annotation", "preset"]),
+            option_keys: Some(&["annotation"]),
             unimplemented_options: &[],
         });
         r.register(RegisteredExtension {
@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn sam_with_receiver_resolves_to_native_and_reads_its_options() {
+    fn sam_with_receiver_resolves_to_native_and_rejects_its_unregistered_preset_option() {
         let jar = plugin_jar(
             "sam-with-receiver-compiler-plugin.jar",
             &[registrar_of(SAM_WITH_RECEIVER_PLUGIN_ID)],
@@ -787,11 +787,21 @@ mod tests {
         );
         assert_eq!(
             resolved.diagnostics,
-            vec![PluginDiagnostic::NativeSubstitution {
-                plugin_id: SAM_WITH_RECEIVER_PLUGIN_ID.to_string(),
-                jar: Some(jar),
-            }]
+            vec![
+                PluginDiagnostic::UnsupportedOption {
+                    option: PluginOption {
+                        id: SAM_WITH_RECEIVER_PLUGIN_ID.to_string(),
+                        key: "preset".to_string(),
+                        value: "gradle-kotlin-dsl".to_string(),
+                    },
+                },
+                PluginDiagnostic::NativeSubstitution {
+                    plugin_id: SAM_WITH_RECEIVER_PLUGIN_ID.to_string(),
+                    jar: Some(jar),
+                },
+            ]
         );
+        assert!(resolved.has_errors());
         assert!(resolved
             .native
             .host("app")
