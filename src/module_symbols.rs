@@ -1678,6 +1678,7 @@ mod tests {
             stable_declaration: None,
             source_file: 0,
             source_decl: None,
+            name_span: crate::diag::Span::new(0, 0),
             is_nested: false,
             visibility: Visibility::Public,
             annotations: vec![],

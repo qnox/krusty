@@ -428,7 +428,12 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             body_locals = std::mem::take(&mut e.open_locals);
         }
         if !sec_diverges {
-            sctor.ret_void();
+            if sc.generated_debug.fallthrough_line().is_some() {
+                // The producer maps this return to its own line, so the writer must know where.
+                sctor.implicit_ret_void();
+            } else {
+                sctor.ret_void();
+            }
         }
         // Body locals precede `this` and the parameters in kotlinc's table, as in a method, and
         // stay in scope through the return.
@@ -542,6 +547,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 entries.push((pc, line));
             }
             cw.set_method_lines("<init>", &sc_desc, &entries);
+        } else if let (Some(start), Some(fallthrough)) = (
+            sc.generated_debug.line(),
+            sc.generated_debug.fallthrough_line(),
+        ) {
+            // A body-less generated constructor whose producer asked for a closing entry: the
+            // delegation on the declaration's line and the implicit return on `fallthrough`.
+            if let Some(return_pc) = cw
+                .method_implicit_void_return_pc("<init>", &sc_desc)
+                .filter(|&pc| pc > 0 && start != fallthrough)
+            {
+                cw.set_method_lines("<init>", &sc_desc, &[(0, start), (return_pc, fallthrough)]);
+            }
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
@@ -550,7 +567,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             if sc.annotations.deprecated() {
                 cw.mark_method_deprecated("<init>", &sc_desc);
             }
-            if sc.annotations.deprecated_hidden() {
+            if super::function_annotations::hidden_realization_is_synthetic(&sc.annotations) {
                 cw.set_method_synthetic("<init>", &sc_desc);
             }
         }

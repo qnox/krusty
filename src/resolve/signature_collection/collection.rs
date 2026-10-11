@@ -3428,6 +3428,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
                             source_decl: Some(d),
+                            name_span: c.name_span,
                             is_nested,
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,

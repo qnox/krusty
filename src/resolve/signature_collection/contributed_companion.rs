@@ -52,6 +52,7 @@ fn synthesized_companion(contribution: ContributedCompanion) -> ClassSig {
         stable_declaration: None,
         source_file: contribution.source_file,
         source_decl: None,
+        name_span: crate::diag::Span::new(0, 0),
         is_nested: true,
         visibility: Visibility::Public,
         annotations: Vec::new(),

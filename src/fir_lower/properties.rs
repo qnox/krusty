@@ -1764,8 +1764,10 @@ fn merge_class_initialization(
         // secondary constructor that delegates directly to `super`, before that constructor's own
         // body. A `this(...)` secondary must not repeat them: its eventual direct-super target owns
         // the single execution. Encode that ordering into the common constructor bodies instead of
-        // asking a backend to rediscover it from constructor shape.
+        // asking a backend to rediscover it from constructor shape. A compiler-generated
+        // constructor (no-arg's) runs none: kotlinc builds its body without the class initializer.
         if !ir.classes[class_id as usize].has_primary_ctor {
+            let owner = ir.classes[class_id as usize].fq_name_id();
             let constructor_value_count = ir.classes[class_id as usize]
                 .secondary_ctors
                 .iter()
@@ -1779,6 +1781,9 @@ fn merge_class_initialization(
                 .secondary_ctors
                 .iter()
                 .enumerate()
+                .filter(|(ordinal, _)| {
+                    !ir.is_generated_secondary_constructor(owner, *ordinal as u32)
+                })
                 .filter_map(|(ordinal, constructor)| {
                     matches!(
                         constructor.delegate,
