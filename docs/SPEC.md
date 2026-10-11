@@ -6544,6 +6544,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
   argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
   a leaf there (varargs recurse into their elements). Test: `tests/suspend_collection_hof_e2e.rs`.
+- **A top-level default setter interns `<set-?>` as it finishes its body.** kotlinc writes each
+  method's `LocalVariableTable` as the method ends, so a static default setter's value-parameter
+  name joins the constant pool right after the body's own constants (the `putstatic` field
+  reference) and before the next method's name. A primitive setter has no `checkNotNullParameter`
+  that would intern it earlier, and the name had gone to the end of the pool. Test:
+  `tests/top_level_setter_pool_e2e.rs`.
 - **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
   List<String>` becomes a static field of the FILE FACADE, whose field table is built by
   `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
