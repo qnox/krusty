@@ -275,7 +275,7 @@ fn add_late_member_field(
     let physical_name = instance_field_jvm_name(ir, run, c, field_index);
     let descriptor = ir_type_desc(&field.ty);
     let nullability = field_visibility::publishes_field_nullability(c, field_index)
-        .then(|| nullability_annotation(field_nullability_kind(ir, fq_name, &field.name, field.ty)))
+        .then(|| nullability_annotation(field_nullability_kind(field.ty)))
         .flatten();
     cw.add_field_late_sig(
         acc,

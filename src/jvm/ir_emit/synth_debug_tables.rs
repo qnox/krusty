@@ -128,11 +128,9 @@ pub(super) fn attach_synth_debug_tables(
         let acc_desc = format!("({}{MARKER})V", ctor_field_descs(c));
         cw.set_method_debug("<init>", &acc_desc, None, &acc_locals);
     }
-    // Synthesized property setters use the declaration's recorded nullability policy. This is
-    // independent of the constructor's exact `IrCtorArg.check` facts above: a value class may omit
-    // its private-constructor guard while its public mutable-property setter still requires one.
-    let is_nonnull_ref =
-        |name: &str, ty: Ty| -> bool { is_nonnull_reference_field(ir, &c.fq_name(), name, ty) };
+    // Synthesized property setters guard by the declared type's nullability, independent of the
+    // constructor's exact `IrCtorArg.check` facts above: a value class may omit its
+    // private-constructor guard while its public mutable-property setter still requires one.
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
     for (field_index, f) in c.fields.iter().enumerate() {
@@ -181,7 +179,7 @@ pub(super) fn attach_synth_debug_tables(
             let pd = desc(f.ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
-            let set_pc = if param_assertions && is_nonnull_ref(&f.name, f.ty) {
+            let set_pc = if param_assertions && is_nonnull_reference_field(f.ty) {
                 aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
             } else {
                 0
@@ -230,7 +228,7 @@ pub(super) fn attach_synth_debug_tables(
             } else {
                 pline
             };
-            let set_pc = if param_assertions && is_nonnull_ref(&property.name, hoisted.ty) {
+            let set_pc = if param_assertions && is_nonnull_reference_field(hoisted.ty) {
                 aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
             } else {
                 0

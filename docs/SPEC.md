@@ -14846,6 +14846,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Test: `tests/type_parameter_accessor_pool_e2e.rs::a_nullable_type_parameter_getter_interns_its_annotation_with_its_header`.
   Corpus: `bridges/test21.kt`.
 
+- **A type-parameter position's nullability annotation comes from its declared occurrence.**
+  kotlinc's `AnnotationCodegen` classifies the declared type of each field, getter, setter,
+  constructor or function parameter, and result: a bare type parameter whose upper-bound chain
+  admits null (`<T>`, `<T : Cargo?>`, `<A : Cargo?, B : A>`) is unannotated, a marked `T?` is
+  `@Nullable`, and a non-null bound `<T : Cargo>` or a definitely-non-null `T & Any` is `@NotNull`.
+  The occurrence answers, not the class's declared bound: `class C<T>(val v: T & Any)` is
+  `@NotNull` on the field, getter and constructor parameter, and on a `var` setter, which is also
+  guarded. Probed on kotlinc 2.4.20 with javap:
+
+  | position type        | field / getter / setter / parameter / result |
+  |----------------------|----------------------------------------------|
+  | `T : Cargo`          | `@NotNull`                                   |
+  | `T : Cargo?`, `<T>`  | none                                         |
+  | `T & Any`            | `@NotNull`                                   |
+  | `T?`                 | `@Nullable`                                  |
+
+  A value class follows the same rule on its field, getter and member `-impl` statics. Its
+  `constructor-impl` declares the constructor's parameters and returns the class type, so the
+  parameter follows the table while the result is always `@NotNull`, even for a carrier that admits
+  null (`value class N(val s: String?)`, `<T : Cargo?>`). `box-impl` and `unbox-impl` carry no
+  nullability annotation. The getter's annotation is interned with its header, so a value class
+  whose underlying is typed by a type parameter interned `@NotNull` late, after the members; and its
+  generic field `Signature` (`TT;`) interns before `@JvmInline`, as kotlinc visits the field with
+  its annotations ahead of the class annotations. Tests:
+  `tests/type_parameter_nullability_annotations_e2e.rs`. Corpus:
+  `inlineClasses/hiddenConstructor/delegatingSuperConstructorCallInSecondaryConstructorGeneric.kt`
+  (annotations; its private constructor's line table is a separate gap).
+
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
   guarded region saw the finalizer's line where the source says otherwise:
