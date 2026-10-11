@@ -6857,6 +6857,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`dup; Intrinsics.checkNotNull`) and only then applies the `checkcast` to the substituted type.
   The assertion reads the call's selected erasure, whether the declaration is in the same file,
   another file of the module, or a dependency. Tests: `tests/generic_result_assertion_e2e.rs`.
+- **A dependency's `@JvmField` property keeps its declared type.** The property is a Kotlin
+  declaration realized as a public field, so its type comes from the class's `@Metadata` property
+  signature, arguments and nullability included (`Map<String, String>`, `String?`, a class type
+  parameter), and never from the field's erased classifier. Test:
+  `tests/classpath_jvmfield_property_type_e2e.rs`.
 - **A primitive class literal is the primitive's class.** `Int::class` loads `Integer.TYPE` (the
   `int` class) before `Reflection.getOrCreateKotlinClass`, as kotlinc's `generateClassInstance`
   does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the

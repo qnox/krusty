@@ -947,15 +947,12 @@ impl JvmLibraries {
         })
     }
 
-    /// The type Kotlin metadata declares for a property named `name` on `internal`, or on its
-    /// companion — the semantic type, as opposed to the JVM field descriptor that stores it.
     fn metadata_property_ty(&self, internal: TypeName, name: &str) -> Option<Ty> {
         let declared = |ci: &crate::jvm::classreader::ClassInfo| {
             super::metadata::class_properties(ci)
                 .iter()
                 .find(|property| property.name == name)
-                .and_then(|property| property.ret_class)
-                .map(kotlin_type_name_to_ty)
+                .and_then(|property| static_properties::declared_property_ty(property, None))
         };
         let ci = self.cp.find_name(internal)?;
         if let Some(ty) = declared(&ci) {
@@ -971,8 +968,7 @@ impl JvmLibraries {
             .meta_properties_name(internal)
             .iter()
             .find(|property| property.name == name)
-            .and_then(|property| property.ret_class)
-            .map(kotlin_type_name_to_ty)
+            .and_then(|property| static_properties::declared_property_ty(property, None))
         {
             return Some(ty);
         }

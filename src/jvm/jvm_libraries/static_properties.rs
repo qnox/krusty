@@ -114,7 +114,7 @@ impl JvmLibraries {
                 && field.descriptor == signature.desc
                 && field.access & 0x0019 == 0x0019 // PUBLIC | STATIC | FINAL
         })?;
-        let ty = declared_property_ty(declaration, declared_desc_to_ty(&field.descriptor));
+        let ty = declared_property_ty(declaration, Some(declared_desc_to_ty(&field.descriptor)))?;
         let constant = field.const_value.as_ref().map(|value| LibraryConst {
             ty,
             value: Self::library_const(value),
@@ -353,22 +353,25 @@ impl JvmLibraries {
     }
 }
 
-/// A metadata property's declared Kotlin type: its generic signature's return, else its return
-/// class with metadata nullability, else the `physical` JVM type when metadata names no class.
-fn declared_property_ty(declaration: &super::metadata::MetaProp, physical: Ty) -> Ty {
-    declaration.generic_sig.as_ref().map_or_else(
-        || {
-            let ty = declaration
-                .ret_class
-                .map_or(physical, kotlin_type_name_to_ty);
-            if declaration.ret_nullable {
-                Ty::nullable(ty)
-            } else {
-                ty
-            }
-        },
-        |signature| signature.ret,
-    )
+/// A metadata property's declared Kotlin type, using the physical field/accessor type only when
+/// metadata has no return classifier. The optional fallback lets metadata-only consumers reject an
+/// absent semantic type instead of silently publishing the JVM representation.
+pub(super) fn declared_property_ty(
+    declaration: &super::metadata::MetaProp,
+    physical: Option<Ty>,
+) -> Option<Ty> {
+    if let Some(signature) = &declaration.generic_sig {
+        return Some(signature.ret);
+    }
+    let ty = declaration
+        .ret_class
+        .map(kotlin_type_name_to_ty)
+        .or(physical)?;
+    Some(if declaration.ret_nullable {
+        Ty::nullable(ty)
+    } else {
+        ty
+    })
 }
 
 /// A static accessor that realizes a metadata property: the class holding it, and whether it is
@@ -448,17 +451,7 @@ impl JvmLibraries {
             .as_ref()
             .map(|signature| signature.params.clone())
             .unwrap_or_else(|| gparams[..context_count].to_vec());
-        let fallback_ret = mp.ret_class.map_or(gret, kotlin_type_name_to_ty);
-        let property_ty = property_gsig.as_ref().map_or_else(
-            || {
-                if mp.ret_nullable {
-                    Ty::nullable(fallback_ret)
-                } else {
-                    fallback_ret
-                }
-            },
-            |gsig| gsig.ret,
-        );
+        let property_ty = declared_property_ty(mp, Some(gret))?;
         let property_kind = if mp.is_extension {
             PropKind::Extension
         } else {
