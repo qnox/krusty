@@ -66,13 +66,34 @@ impl<'a> RegenerationSite<'a> {
         descriptor: &str,
         symbols: &'a dyn BackendClassifierSource,
     ) -> RegenerationSite<'a> {
+        Self::special("<init>", descriptor, symbols)
+    }
+
+    /// The site of a JVM special method. Copies are numbered under `$special` and retain this
+    /// method as their `EnclosingMethod`; unlike a source function, no Kotlin name participates in
+    /// the generated class name.
+    pub(in crate::jvm::ir_emit) fn special(
+        method: &str,
+        descriptor: &str,
+        symbols: &'a dyn BackendClassifierSource,
+    ) -> RegenerationSite<'a> {
         RegenerationSite {
-            method: "<init>".to_string(),
+            method: method.to_string(),
             descriptor: descriptor.to_string(),
             function: String::new(),
             special: true,
             symbols,
         }
+    }
+
+    pub(in crate::jvm::ir_emit) fn class_initializer(
+        symbols: &'a dyn BackendClassifierSource,
+    ) -> RegenerationSite<'a> {
+        Self::special("<clinit>", "()V", symbols)
+    }
+
+    pub(in crate::jvm::ir_emit) fn is_class_initializer(&self) -> bool {
+        self.special && self.method == "<clinit>" && self.descriptor == "()V"
     }
 }
 
@@ -100,9 +121,9 @@ pub(super) struct CallObjects<'a> {
     site: Option<RegenerationSite<'a>>,
     call_expression: u32,
     major: u16,
-    /// The `@Metadata` version the caller writes: the inlining module's `mv`, as kotlinc's
-    /// `AnonymousObjectTransformer` rewrites the copied class's annotation with it.
-    metadata_version: [i32; 3],
+    /// The `@Metadata` stamp the caller writes: the inlining module's `mv` and pre-release flag, as
+    /// kotlinc's `AnonymousObjectTransformer` rewrites the copied class's annotation with them.
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     callee: String,
     commit: bool,
     /// The caller's source map as the call's lambdas left it: their lines are lines of it.
@@ -125,6 +146,7 @@ impl<'a> Emitter<'a> {
             self.ir,
             call_expression,
             &self.facade,
+            self.ir.recursive_type_of,
             &|ty| self.rendered_inlined_cast_target(ty),
         );
         CallObjects {
@@ -135,7 +157,7 @@ impl<'a> Emitter<'a> {
             site: self.regeneration_site.clone(),
             call_expression,
             major: self.cw.major(),
-            metadata_version: self.metadata_version,
+            metadata_stamp: self.metadata_stamp,
             callee: callee.to_string(),
             commit,
             caller_lines,
@@ -215,7 +237,7 @@ impl AnonymousObjects for CallObjects<'_> {
             type_arguments: &type_arguments,
             prior_classes,
             major: self.major,
-            metadata_version: &self.metadata_version,
+            metadata_stamp: self.metadata_stamp,
             lambdas,
             caller_lines: &self.caller_lines,
             classes: &self.bodies,

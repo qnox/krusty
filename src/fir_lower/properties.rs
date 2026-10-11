@@ -112,14 +112,12 @@ pub(super) fn predeclare_properties(
     inline_payload_declarations: &std::collections::HashSet<DeclarationId>,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(raw as u32);
+    for declaration in super::declarations_for_lowering(index, source, inline_payload_declarations)
+    {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };
-        if (anchor.source != source && !inline_payload_declarations.contains(&declaration))
-            || anchor.kind != DeclarationKind::Property
-        {
+        if anchor.kind != DeclarationKind::Property {
             continue;
         }
         let body_local = index.is_body_local_declaration(declaration);
@@ -182,6 +180,8 @@ pub(super) fn predeclare_properties(
                         source_order,
                         decl_line: 0,
                         decl_start_line: 0,
+                        getter_decl_line: 0,
+                        setter_decl_line: 0,
                         initialization_order: header.initialization_order,
                         class,
                         name,
@@ -193,6 +193,7 @@ pub(super) fn predeclare_properties(
                         visibility: header.visibility,
                         flags: header.flags,
                         initializer: None,
+                        has_constant_initializer: false,
                         delegate: None,
                         delegate_plan: None,
                         getter: None,
@@ -320,6 +321,7 @@ pub(super) fn finalize_properties(
         let declaration = property.declaration;
         let decl_line = property.decl_line;
         let decl_start_line = property.decl_start_line;
+        let accessor_lines = (property.getter_decl_line, property.setter_decl_line);
         let shape = index
             .property(property_id)
             .ok_or(FirFileLoweringFailure::MissingProperty(
@@ -388,7 +390,7 @@ pub(super) fn finalize_properties(
                 .get(&property_id)
                 .cloned()
                 .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
-            apply_property_decl_line(ir, &layout, decl_line);
+            apply_property_decl_line(ir, &layout, decl_line, accessor_lines);
             // A constructor property additionally publishes where its declaration STARTS, which is
             // the line the constructor's store of it maps to. Attach the role to the exact backing
             // field selected above; emission must not rediscover it from the field's spelling.
@@ -411,6 +413,7 @@ pub(super) fn finalize_properties(
     realize_backing_field_operations(index, ir, &realizations)?;
     publish_foreign_accessor_layouts(index, ir, &mut realizations)?;
     ir.local_property_layouts.extend(realizations);
+    attach_declared_accessor_annotations(ir);
     // Accessor functions exist now, and checked reads still carry the call site's type arguments.
     // Splice `inline` accessors before a backend turns the read into a call and drops those
     // arguments: a reified `T::class` in the accessor is the call site's class.
@@ -419,8 +422,15 @@ pub(super) fn finalize_properties(
     Ok(())
 }
 
-pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalPropertyLayout, line: u32) {
-    match layout {
+/// Anchor `layout`'s storage and accessors on the property's line, and an accessor written with a
+/// body of its own on that accessor's line (`accessor_lines`, getter then setter; 0 when none).
+pub(super) fn apply_property_decl_line(
+    ir: &mut IrFile,
+    layout: &IrLocalPropertyLayout,
+    line: u32,
+    accessor_lines: (u32, u32),
+) {
+    let (getter, setter) = match layout {
         IrLocalPropertyLayout::TopLevelStorage {
             storage,
             getter,
@@ -430,16 +440,10 @@ pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalProperty
             if let Some(storage) = ir.statics.get_mut(*storage as usize) {
                 storage.line = line;
             }
-            for function in getter.iter().chain(setter.iter()) {
-                ir.fn_decl_lines.insert(*function, line);
-            }
+            (*getter, *setter)
         }
-        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
-            ir.fn_decl_lines.insert(*getter, line);
-            if let Some(setter) = setter {
-                ir.fn_decl_lines.insert(*setter, line);
-            }
-        }
+        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+        | IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => (Some(*getter), *setter),
         IrLocalPropertyLayout::Member {
             class,
             owner,
@@ -456,15 +460,19 @@ pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalProperty
             {
                 property.decl_line = line;
             }
-            for function in getter.iter().chain(setter.iter()) {
-                ir.fn_decl_lines.insert(*function, line);
-            }
+            (*getter, *setter)
         }
-        IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
-            ir.fn_decl_lines.insert(*getter, line);
-            if let Some(setter) = setter {
-                ir.fn_decl_lines.insert(*setter, line);
-            }
+    };
+    let own = |accessor_line: u32| {
+        if accessor_line == 0 {
+            line
+        } else {
+            accessor_line
+        }
+    };
+    for (function, accessor_line) in [(getter, accessor_lines.0), (setter, accessor_lines.1)] {
+        if let Some(function) = function {
+            ir.fn_decl_lines.insert(function, own(accessor_line));
         }
     }
 }
@@ -599,6 +607,7 @@ fn materialize_member_extension_property(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            source_order,
             receiver,
             ty: property.ty,
             is_var: mutable,
@@ -962,6 +971,48 @@ struct MemberProperty {
     context_parameters: Vec<Ty>,
 }
 
+/// Hand the annotations on each declared accessor to that accessor function, and those on a
+/// declared setter's value parameter to its last parameter. A default accessor has no function
+/// here; a backend realizes it from [`IrFile::accessor_annotations`].
+fn attach_declared_accessor_annotations(ir: &mut IrFile) {
+    let declared = ir
+        .accessor_annotations
+        .iter()
+        .filter_map(|(property, annotations)| {
+            let (getter, setter) = match ir.local_property_layouts.get(property)? {
+                IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
+                | IrLocalPropertyLayout::Member { getter, setter, .. } => (*getter, *setter),
+                IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+                | IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
+                    (Some(*getter), *setter)
+                }
+            };
+            Some((getter, setter, annotations.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (getter, setter, annotations) in declared {
+        if let Some(getter) = getter.filter(|_| annotations.getter.declares_annotations()) {
+            ir.function_annotations.insert(getter, annotations.getter);
+        }
+        let Some(setter) = setter else {
+            continue;
+        };
+        if annotations.setter.declares_annotations() {
+            ir.function_annotations.insert(setter, annotations.setter);
+        }
+        if annotations.setter_parameter.declares_annotations() {
+            let mut parameters = vec![
+                crate::ir::DeclarationAnnotations::default();
+                ir.functions[setter as usize].params.len()
+            ];
+            if let Some(value) = parameters.last_mut() {
+                *value = annotations.setter_parameter;
+            }
+            ir.fn_param_annotations.insert(setter, parameters);
+        }
+    }
+}
+
 fn materialize_member_property(
     index: &ResolvedModuleIndex,
     member: MemberProperty,
@@ -1083,13 +1134,13 @@ fn materialize_member_property(
             let classifier = anchor.owner.ok_or(FirFileLoweringFailure::MissingProperty(
                 property.declaration,
             ))?;
-            let source_parameter_count = (0..index.declaration_count())
-                .find_map(|raw| {
-                    let constructor = DeclarationId::from_raw(raw as u32);
+            let source_parameter_count = index
+                .owned_declarations(classifier)
+                .iter()
+                .copied()
+                .find_map(|constructor| {
                     index.declaration_anchor(constructor).and_then(|candidate| {
-                        (candidate.kind == DeclarationKind::Constructor
-                            && candidate.owner == Some(classifier)
-                            && candidate.sibling == 0)
+                        (candidate.kind == DeclarationKind::Constructor && candidate.sibling == 0)
                             .then(|| index.signature(constructor).map(|sig| sig.parameters.len()))
                             .flatten()
                     })
@@ -1357,6 +1408,7 @@ fn materialize_member_property(
             class_flags.has(DeclarationFlags::INTERFACE),
         ),
         delegate_field: None,
+        has_constant_initializer: property.has_constant_initializer,
         is_private: property.visibility.is_private(),
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter,
@@ -1364,6 +1416,11 @@ fn materialize_member_property(
         getter_jvm_name: None,
         setter_jvm_name: None,
         needs_access_bridge: needs_property_reference_bridge,
+        accessor_annotations: ir
+            .accessor_annotations
+            .get(&property_id)
+            .cloned()
+            .unwrap_or_default(),
     });
     realizations.insert(
         property_id,
@@ -1554,15 +1611,15 @@ fn setter_declaration(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
 ) -> Option<DeclarationId> {
-    (0..index.declaration_count())
-        .map(|raw| DeclarationId::from_raw(raw as u32))
+    index
+        .owned_declarations(declaration)
+        .iter()
         .find(|accessor| {
-            index.declaration_anchor(*accessor).is_some_and(|anchor| {
-                anchor.kind == DeclarationKind::Accessor
-                    && anchor.owner == Some(declaration)
-                    && anchor.sibling == 1
+            index.declaration_anchor(**accessor).is_some_and(|anchor| {
+                anchor.kind == DeclarationKind::Accessor && anchor.sibling == 1
             })
         })
+        .copied()
 }
 
 /// A property's setter visibility: the setter declaration's own, else the property's.
@@ -1707,8 +1764,10 @@ fn merge_class_initialization(
         // secondary constructor that delegates directly to `super`, before that constructor's own
         // body. A `this(...)` secondary must not repeat them: its eventual direct-super target owns
         // the single execution. Encode that ordering into the common constructor bodies instead of
-        // asking a backend to rediscover it from constructor shape.
+        // asking a backend to rediscover it from constructor shape. A compiler-generated
+        // constructor (no-arg's) runs none: kotlinc builds its body without the class initializer.
         if !ir.classes[class_id as usize].has_primary_ctor {
+            let owner = ir.classes[class_id as usize].fq_name_id();
             let constructor_value_count = ir.classes[class_id as usize]
                 .secondary_ctors
                 .iter()
@@ -1722,6 +1781,9 @@ fn merge_class_initialization(
                 .secondary_ctors
                 .iter()
                 .enumerate()
+                .filter(|(ordinal, _)| {
+                    !ir.is_generated_secondary_constructor(owner, *ordinal as u32)
+                })
                 .filter_map(|(ordinal, constructor)| {
                     matches!(
                         constructor.delegate,
@@ -1981,6 +2043,18 @@ pub(super) fn accept_property_body(
         .map(|statement| statement.origin);
     let is_setter = anchor.kind == DeclarationKind::Accessor && anchor.sibling == 1;
     let setter_exit = is_setter.then(|| setter_exit_line(&body)).flatten();
+    let declared_ty = ir
+        .checked_properties
+        .get(&property_id)
+        .ok_or(FirFileLoweringFailure::MissingProperty(
+            property_declaration,
+        ))?
+        .ty;
+    let has_constant_initializer = anchor.kind == DeclarationKind::Property
+        && index
+            .property(property_id)
+            .is_some_and(|property| !property.mutable)
+        && super::metadata_constants::has_constant_initializer(&body, index, declared_ty);
     let lowered = lower_body_with_context(body, index, ir, local_callables)
         .map_err(FirFileLoweringFailure::Body)?;
     if !lowered.defaults.is_empty() {
@@ -2000,20 +2074,14 @@ pub(super) fn accept_property_body(
     if let Some(exit) = setter_exit {
         ir.record_accessor_body_exit(value, exit);
     }
-    let has_constant_initializer = anchor.kind == DeclarationKind::Property
-        && anchor.owner.is_none()
-        && index
-            .property(property_id)
-            .is_some_and(|property| !property.mutable)
-        && !ir.folded_constants.contains(&value)
-        && super::constant_folding::is_metadata_constant(ir.expr(value));
     let companion_block_member = index
         .declaration_header(property_declaration)
         .is_some_and(|header| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER));
-    if has_constant_initializer && companion_block_member {
+    let package_member = anchor.owner.is_none();
+    if has_constant_initializer && package_member && companion_block_member {
         // Recorded on its classifier's property record instead of the package's.
         ir.companion_blocks.mark_constant_initializer(property_id);
-    } else if has_constant_initializer {
+    } else if has_constant_initializer && package_member {
         let package_property = ir
             .package_properties
             .iter_mut()
@@ -2026,6 +2094,9 @@ pub(super) fn accept_property_body(
     let property = ir.checked_properties.get_mut(&property_id).ok_or(
         FirFileLoweringFailure::MissingProperty(property_declaration),
     )?;
+    if has_constant_initializer {
+        property.has_constant_initializer = true;
+    }
     if let Some(storage) = lowered.property_storage_type {
         if property.storage_ty.replace(storage).is_some() {
             return Err(FirFileLoweringFailure::MissingProperty(declaration));

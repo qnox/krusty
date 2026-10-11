@@ -12,8 +12,11 @@ pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+mod capture_order;
 mod lifting_sites;
+mod local_type_parameters;
 pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
+pub use local_type_parameters::FirLocalTypeParameter;
 mod origins;
 pub use origins::{Origin, OriginStore, SyntheticOriginKind};
 mod branches;
@@ -28,6 +31,11 @@ mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
 mod with_index;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
+mod callable_dispatch;
+pub use callable_dispatch::{
+    dispatch_checked_body, CheckedBodySink, ResolvedCallableHeader, ResolvedCallableName,
+    ResolvedCallableShape,
+};
 mod property_access;
 pub use property_access::{
     FirClassifierProperty, FirInlineAccessorSplice, FirInlineTypeSubstitution, FirPropertyDispatch,
@@ -37,17 +45,15 @@ pub use property_access::{
 use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName};
 
-use super::body_work::BodyWorkItem;
 use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture};
 use super::header::{
-    next_id, BodyOwnerId, CallableId, ControlTargetId, DeclarationId, DeclarationNameId, FirExprId,
+    next_id, BodyOwnerId, CallableId, ControlTargetId, DeclarationId, FirExprId,
     FirPlatformNarrowingId, FirSamConversionId, FirStatementId, LocalCallableId, LocalValueId,
     OriginId, PropertyId, SourceFileId, TypeParameterId,
 };
 use super::identities::ExternalCallableId;
 use super::inline_body::FirInlineBodyPlan;
 use super::local_class_capture::FirLocalClassCapture;
-use super::retained_bodies::InlineBodyStore;
 use super::signature::ResolvedTy;
 use super::source_lambda::FirSourceLambda;
 
@@ -95,6 +101,9 @@ pub struct FirSamConversion {
     /// The abstract method the conversion implements, as the checker selected it.
     pub method_target: FirSamMethod,
     pub parameters: Box<[ResolvedTy]>,
+    /// Parameters whose specialization came through a contravariant use-site capture. This is
+    /// semantic provenance only; a backend owns any erased adapter representation it requires.
+    pub contravariant_parameters: Box<[bool]>,
     pub result: ResolvedTy,
     pub declared_parameters: Box<[ResolvedTy]>,
     pub declared_result: ResolvedTy,
@@ -177,6 +186,10 @@ pub struct FirTypeSubstitution {
     /// Whether this exact declaration parameter carries Kotlin's `reified` capability.
     pub reified: bool,
     pub value: ResolvedTy,
+    /// Classifier a reified operation records. Equals [`Self::value`] except when that argument is
+    /// an intersection: the frontend selects the single common supertype, and a backend encodes
+    /// this identity without walking a classifier hierarchy.
+    pub reified_runtime: ResolvedTy,
     /// Additional constituents of an inferred flow-intersection type argument. `value` is the
     /// primary/JVM-erasure constituent; these bounds retain the rest of the checked Kotlin type for
     /// reified inline operations without introducing a lookup-visible synthetic classifier.
@@ -299,6 +312,10 @@ pub enum FirCallTarget {
         /// to the checked call, not to its provider-owned physical realization: a nearer override
         /// may inherit the role without changing its stable dependency identity.
         semantic_role: Option<crate::types::SemanticCallRole>,
+        /// Exact identities of the declarations the selected declaration overrides, as the member
+        /// hierarchy proved them. Lowering freezes them with the stable dependency identity, so a
+        /// target keys a specially implemented language declaration on them, never on the call.
+        overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
         suspend: bool,
         can_inline: bool,
         inline_plan: Option<Box<FirInlineBodyPlan>>,
@@ -411,6 +428,8 @@ pub struct FirCall {
 pub(crate) struct LocalBinding {
     pub(crate) value: LocalValueId,
     pub(crate) ty: ResolvedTy,
+    /// A `var` (or `lateinit var`): the binding can be reassigned after it is read.
+    pub(crate) mutable: bool,
     pub(crate) lateinit: bool,
 }
 
@@ -833,6 +852,9 @@ pub enum FirCallableReferenceTarget {
         /// override. The generated adapter call preserves the same checked identity as a direct
         /// call and must not reconstruct it from owner or name spellings.
         semantic_role: Option<crate::types::SemanticCallRole>,
+        /// Exact declarations the referenced declaration overrides; see
+        /// [`FirCallTarget::External`]'s field of the same name.
+        overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
         /// The declaration itself is `suspend`; a suspend-converted reference to an ordinary
         /// function is not.
         suspend: bool,
@@ -1761,6 +1783,10 @@ pub struct FirBody {
     constructor_context_parameter_count: u32,
     receiver_type: Option<ResolvedTy>,
     result_type: Option<ResolvedTy>,
+    /// A lambda body's own inferred result when the selected language level keeps it as the
+    /// implementation signature (before 2.4). `result_type` is the caller-facing boundary. Its
+    /// absence at current language levels is a checked semantic decision, not missing inference.
+    inferred_result_type: Option<ResolvedTy>,
     implicit_return: bool,
     default_fragment: bool,
     property_storage_type: Option<ResolvedTy>,
@@ -1779,6 +1805,10 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
+    /// Constants that are the selected value of a `const val` or a Java constant field, as opposed
+    /// to a literal. Both are `FirExprKind::Constant`; metadata's constant-initializer rule
+    /// tells them apart.
+    constant_reads: HashSet<FirExprId>,
     /// This callable's own lifting site, for a lambda or local function body.
     lifting_site: Option<FirLiftingSite>,
     /// Target-realized callables declared in this body that have no common FIR body: the accessors
@@ -1789,6 +1819,7 @@ pub struct FirBody {
     pub(super) interface_delegate_calls: Vec<super::FirInterfaceDelegateCalls>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
+    type_parameters: Box<[FirLocalTypeParameter]>,
     /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
     /// this once; common lowering copies it without consulting declaration headers or types.
     inline_parameter_modifiers: Vec<crate::types::InlineParameterModifier>,
@@ -1796,6 +1827,7 @@ pub struct FirBody {
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
+    capture_declaration_ordinals: Box<[u32]>,
     implicit_receiver_captures: Vec<FirImplicitReceiverCapture>,
     sam_conversions: Vec<FirSamConversion>,
     platform_narrowings: Vec<FirPlatformNarrowing>,
@@ -1829,6 +1861,7 @@ impl FirBody {
             constructor_context_parameter_count: 0,
             receiver_type: None,
             result_type: None,
+            inferred_result_type: None,
             implicit_return: false,
             default_fragment: false,
             property_storage_type: None,
@@ -1841,17 +1874,20 @@ impl FirBody {
             destructuring_loop_containers: HashSet::new(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::new(),
+            constant_reads: HashSet::new(),
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
             interface_delegate_calls: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
+            type_parameters: Box::default(),
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
+            capture_declaration_ordinals: Box::default(),
             implicit_receiver_captures: Vec::new(),
             sam_conversions: Vec::new(),
             platform_narrowings: Vec::new(),
@@ -1938,6 +1974,17 @@ impl FirBody {
         self.result_type
     }
 
+    pub fn set_inferred_result_type(&mut self, result: ResolvedTy) {
+        assert!(
+            self.inferred_result_type.replace(result).is_none(),
+            "a FIR body may publish its language-selected inferred result type only once"
+        );
+    }
+
+    pub const fn inferred_result_type(&self) -> Option<ResolvedTy> {
+        self.inferred_result_type
+    }
+
     pub(crate) fn replace_result_type_with_property_storage(&mut self, storage: ResolvedTy) {
         assert!(
             self.result_type.is_some(),
@@ -2005,43 +2052,12 @@ impl FirBody {
         self.debug_name.as_deref()
     }
 
-    pub fn set_lifting_site(&mut self, site: FirLiftingSite) {
-        assert!(
-            self.lifting_site.replace(site).is_none(),
-            "a FIR body has one lifting site"
-        );
-    }
-
-    pub fn lifting_site(&self) -> Option<&FirLiftingSite> {
-        self.lifting_site.as_ref()
-    }
-
-    pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
-        self.bodiless_lifting_sites.push(site);
-    }
-
     pub(crate) fn add_local_delegate_plan(&mut self, plan: FirLocalDelegatePlan) {
         self.local_delegate_plans.push(plan);
     }
 
     pub(crate) fn local_delegate_plans(&self) -> &[FirLocalDelegatePlan] {
         &self.local_delegate_plans
-    }
-
-    /// Every lifting site this body and the callables nested in it declare, its own included.
-    pub fn collect_lifting_sites<'a>(&'a self, out: &mut Vec<&'a FirLiftingSite>) {
-        out.extend(self.lifting_site.iter());
-        out.extend(self.bodiless_lifting_sites.iter());
-        for statement in &self.statements {
-            if let FirStatementKind::LocalFunction { body, .. } = &statement.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
-        for expression in &self.expressions {
-            if let FirExprKind::Lambda { body, .. } = &expression.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
     }
 
     pub fn mark_source_lambda(&mut self, lambda: FirSourceLambda) {
@@ -2519,6 +2535,15 @@ impl FirBody {
         id
     }
 
+    pub(crate) fn record_constant_read(&mut self, expression: FirExprId) {
+        self.constant_reads.insert(expression);
+    }
+
+    /// Whether this constant is a read of a constant declaration rather than a literal.
+    pub fn is_constant_read(&self, expression: FirExprId) -> bool {
+        self.constant_reads.contains(&expression)
+    }
+
     pub(crate) fn set_generated_class_provenance(
         &mut self,
         expression: FirExprId,
@@ -2799,7 +2824,9 @@ impl FirBody {
             + self.debug_lines.payload_bytes()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
+            + self.type_parameter_payload_bytes()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
+            + self.capture_declaration_ordinals.len() * std::mem::size_of::<u32>()
             + self.implicit_receiver_captures.len()
                 * std::mem::size_of::<FirImplicitReceiverCapture>()
             + self
@@ -2894,103 +2921,5 @@ impl FirBody {
                         + context.receivers.len() * std::mem::size_of::<ClassCaptureBinding>()
                 })
                 .sum::<usize>()
-    }
-}
-
-/// Callable facts published by signature finalization. Construction is crate-private so syntax
-/// alone cannot claim that a declaration is semantically inline.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResolvedCallableHeader {
-    pub id: CallableId,
-    pub declaration: DeclarationId,
-    pub name: ResolvedCallableName,
-    pub shape: ResolvedCallableShape,
-    inline: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResolvedCallableName {
-    Function(DeclarationNameId),
-    Constructor,
-}
-
-/// Backend-neutral callable parameter layout. The resolved signature stores context receivers and
-/// declared value parameters; the independently selected extension receiver stays here rather than
-/// masquerading as a value argument.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResolvedCallableShape {
-    pub context_parameter_count: u32,
-    /// Leading context parameters represented as named lexical values. Remaining context
-    /// parameters are legacy receiver slots and therefore participate in the implicit-receiver
-    /// tower without creating source-visible value bindings.
-    pub context_value_count: u32,
-    pub extension_receiver: Option<ResolvedTy>,
-}
-
-impl ResolvedCallableHeader {
-    pub(super) const fn new(
-        id: CallableId,
-        declaration: DeclarationId,
-        name: ResolvedCallableName,
-        shape: ResolvedCallableShape,
-        inline: bool,
-    ) -> Self {
-        Self {
-            id,
-            declaration,
-            name,
-            shape,
-            inline,
-        }
-    }
-
-    pub const fn is_inline(self) -> bool {
-        self.inline
-    }
-}
-
-/// Ordinary bodies cross the frontend boundary by value. Implementations lower and emit during
-/// this call; the frontend keeps no body collection alongside the persistent module.
-pub trait CheckedBodySink {
-    /// Consume a body after the checked-FIR boundary has finalized all nested capture forwarding.
-    fn accept_finalized(&mut self, owner: BodyOwnerId, body: FirBody);
-
-    /// Finalization belongs to this boundary, rather than to individual body-kind dispatchers:
-    /// constructors, scripts, enum entries, and default fragments have no callable header and must
-    /// still obey exactly the same capture-ownership invariant as ordinary functions.
-    fn accept(&mut self, owner: BodyOwnerId, mut body: FirBody) {
-        assert_eq!(
-            body.owner(),
-            owner,
-            "checked FIR owner must match the consumed body unit"
-        );
-        body.finalize_capture_forwarding();
-        self.accept_finalized(owner, body);
-    }
-}
-
-/// Route a checked body according to its resolved inline flag. Inline bodies are prepared before
-/// callers; all other bodies are immediately consumed by the lowering/backend sink.
-pub fn dispatch_checked_body(
-    callable: ResolvedCallableHeader,
-    work: BodyWorkItem,
-    mut body: FirBody,
-    inline_bodies: &mut InlineBodyStore,
-    ordinary_sink: &mut impl CheckedBodySink,
-) {
-    assert_eq!(
-        callable.declaration, work.declaration,
-        "resolved callable must identify the scheduled declaration"
-    );
-    assert_eq!(
-        body.owner(),
-        work.owner,
-        "checked FIR owner must match its scheduled body unit"
-    );
-    if callable.is_inline() {
-        body.finalize_capture_forwarding();
-        inline_bodies.insert(callable, body);
-    } else {
-        ordinary_sink.accept(work.owner, body);
     }
 }

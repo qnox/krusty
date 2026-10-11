@@ -1,0 +1,9 @@
+A tag is reported where the reader meets its value, among the file's other problems; unknown properties are reported last.
+--- project.yaml
+modules: [libs/a]
+--- libs/a/module.yaml
+unknown: 1
+product: !foo jvm/lib
+other: !bar 2
+layout: !baz default
+description: !qux [a]

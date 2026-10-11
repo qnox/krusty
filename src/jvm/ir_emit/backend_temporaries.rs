@@ -144,7 +144,10 @@ impl Emitter<'_> {
 
     fn lease(&mut self, slot: u16, ty: Ty, entered: Option<TempSlot>) -> TemporaryLease {
         debug_assert!(
-            !self.slots.values().any(|(held, _)| *held == slot),
+            !self
+                .slots
+                .iter()
+                .any(|(value, (held, _))| *held == slot && !self.unassigned_values.contains(value)),
             "backend temporary at slot {slot} aliases a semantic local"
         );
         // A temporary released before the plan is read is invisible to it otherwise, and a spill

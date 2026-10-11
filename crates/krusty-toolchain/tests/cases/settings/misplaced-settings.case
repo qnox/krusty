@@ -1,0 +1,14 @@
+Settings for another product type or platform are reported where they are written.
+--- module.yaml
+product: jvm/lib
+apply: [ native.module-template.yaml ]
+settings:
+  jvm:
+    mainClass: example.MainKt
+  kotlin:
+    jsPlainObjects:
+      enabled: true
+--- native.module-template.yaml
+settings:
+  kotlin:
+    debug: true

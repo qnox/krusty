@@ -77,6 +77,42 @@ suspend fun maybe(t: Tag?): Tag? = pass(t)\n";
     );
 }
 
+/// A concrete value class over another value class shares the innermost carrier. Its property read
+/// is not an erased generic slot: both a synchronously completed suspend call and a resumed call
+/// must hand the raw `Any` carrier through without casting it to the inner value-class box.
+#[test]
+fn a_nested_any_carrier_survives_direct_and_resumed_suspend_results() {
+    let source = r#"
+import kotlin.coroutines.*
+
+@JvmInline value class Inner(val value: Any)
+@JvmInline value class Outer(val inner: Inner)
+
+var parked: Continuation<Any?>? = null
+
+@Suppress("UNCHECKED_CAST")
+suspend fun <T> park(): T = suspendCoroutine { parked = it as Continuation<Any?> }
+suspend fun <T> pass(value: T): T = value
+suspend fun direct(): Outer = pass(Outer(Inner("OK")))
+suspend fun resumed(): Outer = pass(Outer(park<Inner>()))
+
+fun box(): String {
+    var result: Any = "fail direct"
+    val done = Continuation<Unit>(EmptyCoroutineContext) { it.getOrThrow() }
+
+    suspend { result = direct().inner.value }.startCoroutine(done)
+    if (result != "OK") return "fail direct: $result"
+
+    result = "fail resumed"
+    suspend { result = resumed().inner.value }.startCoroutine(done)
+    parked!!.resume(Inner("OK"))
+    return result as String
+}
+"#;
+
+    common::expect_box_ok_with_stdlib(source, "NestedAnyCarrierSuspendResults");
+}
+
 /// A type parameter bounded by a nullable value class still crosses its generic suspend boundary
 /// as the value-class box. The star-projected caller must not reinterpret that box as the carrier.
 #[test]

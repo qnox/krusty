@@ -21,7 +21,7 @@ fn checked_analysis(source: &str) -> crate::frontend::SourceSetAnalysis {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("Body")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -319,7 +319,7 @@ fn cross_file_source_call_reaches_fir_as_a_stable_callable_identity() {
             SourceInput::kotlin("fun <T> identity(value: T) = value\n").with_file_stem("Identity"),
             SourceInput::kotlin("fun caller() = identity(\"OK\")\n").with_file_stem("Caller"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1507,11 +1507,11 @@ fn mixed_open_end_membership_selects_range_until() {
 
 #[test]
 fn uniform_open_end_double_membership_stays_a_comparison() {
-    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+    if crate::toolchain::stdlib_jar().is_none() {
         return;
-    };
+    }
     let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        crate::toolchain::stdlib_and_jdk_classpath(),
     ))
     .expect("stdlib provider");
     let mut diagnostics = DiagSink::new();
@@ -1520,7 +1520,7 @@ fn uniform_open_end_double_membership_stays_a_comparison() {
             SourceInput::kotlin("fun test(value: Double): Boolean = value in 1.0..<3.0\n")
                 .with_file_stem("Body"),
         ],
-        Box::new(libraries),
+        crate::frontend::PlatformProvider::jvm(Box::new(libraries)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1726,7 +1726,7 @@ fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
             SourceInput::kotlin("fun test(value: Double): Boolean = value in 1.0..3.0\n")
                 .with_file_stem("Body"),
         ],
-        Box::new(libraries),
+        crate::frontend::PlatformProvider::jvm(Box::new(libraries)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1925,6 +1925,8 @@ suspend fun target(value: Int): Int = value
 suspend fun inspect(): Boolean {
     val reference = ::target
     val lambda = suspend { value: Int -> value }
+    @Suppress("UNCHECKED_CAST")
+    lambda as Function2<Int, Continuation<Int>, Any?>
     return reference is KSuspendFunction1<Int, Any?> &&
         reference is SuspendFunction1<Int, Any?> &&
         lambda !is KSuspendFunction1<Int, Any?> &&
@@ -1933,14 +1935,14 @@ suspend fun inspect(): Boolean {
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
             "// WITH_REFLECT",
         )),
     ))
     .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("SuspendClassifierTests")],
-        Box::new(platform),
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1965,7 +1967,7 @@ suspend fun inspect(): Boolean {
     assert_eq!(runtime_targets.len(), 4);
     assert!(matches!(
         runtime_targets[0],
-        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
         runtime_targets[1],
@@ -1973,7 +1975,7 @@ suspend fun inspect(): Boolean {
     ));
     assert!(matches!(
         runtime_targets[2],
-        Ty::Obj(name, _) if name.matches("kotlin/reflect/KSuspendFunction1")
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
     ));
     assert!(matches!(
         runtime_targets[3],
@@ -1993,16 +1995,99 @@ fun invokeRaw(
 "#;
     let mut diagnostics = DiagSink::new();
     let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for("")),
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for("")),
     ))
     .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("RawSuspendFunctionCast")],
-        Box::new(platform),
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
 
     assert!(analysis.types[0].is_some(), "body must build checked FIR");
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+}
+
+#[test]
+fn a_suspend_reference_keeps_its_type_after_an_unrelated_function_cast() {
+    let source = r#"
+import kotlin.coroutines.*
+import kotlin.reflect.KFunction2
+import kotlin.reflect.KSuspendFunction1
+
+class Foo(val x: Int) {
+    suspend fun bar(y: Int) = y + x
+}
+
+fun box(): String {
+    val ref = Foo(42)::bar
+    (ref as KFunction2<Int, Continuation<Int>, Any?>)
+    (ref as Function2<Int, Continuation<Int>, Any?>)
+    val k = ref is KSuspendFunction1<Int, Any?>
+    val s = ref is SuspendFunction1<Int, Any?>
+    val ref1 = suspend { x: Int -> x }
+    val notK = ref1 !is KSuspendFunction1<Int, Any?>
+    val notF = ref1 !is KFunction2<*, *, *>
+    (ref1 as Function2<Int, Continuation<Int>, Any?>)
+    val s1 = ref1 is SuspendFunction1<Int, Any?>
+    val f1 = ref1 is Function2<Int, Continuation<Int>, Any?>
+    return "$k$s$notK$notF$s1$f1"
+}
+"#;
+    let mut diagnostics = DiagSink::new();
+    let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
+            "// WITH_REFLECT",
+        )),
+    ))
+    .expect("JVM provider initialization");
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("SuspendCastNarrowing")],
+        crate::frontend::PlatformProvider::jvm(Box::new(platform)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let file = &analysis.files[0];
+    let info = analysis.types[0].as_ref().expect("checked file");
+    let runtime_targets = file
+        .expr_arena
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expression)| {
+            matches!(expression, Expr::Is { .. })
+                .then(|| info.expr_lowers.get(&crate::ast::ExprId(index as u32)))
+                .flatten()
+        })
+        .filter_map(|lowering| match lowering {
+            crate::resolve::ExprLowering::RuntimeTypeOperand(target) => Some(*target),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(runtime_targets.len(), 6);
+    assert!(matches!(
+        runtime_targets[0],
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
+    ));
+    assert!(matches!(
+        runtime_targets[1],
+        Ty::Fun(signature) if signature.suspend && signature.params.len() == 1
+    ));
+    assert!(matches!(
+        runtime_targets[2],
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KSuspendFunction1")
+    ));
+    assert!(matches!(
+        runtime_targets[3],
+        Ty::Obj(name, _) if name == crate::types::type_name("kotlin/reflect/KFunction2")
+    ));
+    assert!(matches!(
+        runtime_targets[4],
+        Ty::Fun(signature) if signature.suspend && signature.params.len() == 1
+    ));
+    assert!(matches!(
+        runtime_targets[5],
+        Ty::Fun(signature) if !signature.suspend && signature.params.len() == 2
+    ));
 }

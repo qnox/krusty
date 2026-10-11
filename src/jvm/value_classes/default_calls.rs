@@ -43,5 +43,14 @@ pub(super) fn supplied_provider_parameters<'a>(
         .parameters
         .iter()
         .enumerate()
-        .filter_map(move |(ordinal, ty)| (!omitted.contains(&(ordinal as u32))).then_some(*ty))
+        .filter_map(move |(ordinal, &ty)| {
+            // The `$default` stub takes this parameter boxed, supplied or not.
+            let boxed = callable.default_parameters.contains(&ordinal)
+                && crate::jvm::default_parameter_representation::default_stub_takes_box(ir, ty);
+            (!omitted.contains(&(ordinal as u32))).then_some(if boxed {
+                Ty::nullable(ty)
+            } else {
+                ty
+            })
+        })
 }

@@ -775,6 +775,9 @@ impl BodyFirChecker<'_> {
                         SelectedPropertyView {
                             mutable: property.setter.is_some(),
                             receiver_type,
+                            reflection_owner: (!target_is_extension)
+                                .then(|| property.reflection_owner.kotlin_class_internal())
+                                .flatten(),
                             extension_receiver: target_is_extension,
                             property_type: property.prop_ty,
                             getter_name: &property.getter.name,
@@ -821,6 +824,7 @@ impl BodyFirChecker<'_> {
                         SelectedPropertyView {
                             mutable: property.setter.is_some(),
                             receiver_type: None,
+                            reflection_owner: None,
                             extension_receiver: false,
                             property_type: property.ty,
                             getter_name: &property.getter.name,
@@ -999,6 +1003,7 @@ impl BodyFirChecker<'_> {
             default_provider,
             compiler_intrinsic,
             semantic_role,
+            overridden_declarations,
             receiver,
             declared_receiver,
             declared_result,
@@ -1065,13 +1070,16 @@ impl BodyFirChecker<'_> {
                 let value = value.ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
+                let reified = reified_type_parameter_ordinals.contains(&ordinal);
+                let value = resolved(value)?;
                 Ok(FirTypeSubstitution {
                     parameter: FirTypeParameterRef::External {
                         callable: declaration,
                         ordinal,
                     },
-                    reified: reified_type_parameter_ordinals.contains(&ordinal),
-                    value: resolved(value)?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds: Box::new([]),
                 })
             })
@@ -1092,6 +1100,7 @@ impl BodyFirChecker<'_> {
                 declared_result: declared_result.map(resolved).transpose()?,
                 suspend,
                 semantic_role,
+                overridden_declarations: overridden_declarations.into(),
             },
             function_type: self.reference_function_type(expression)?,
             reflective: self.reference_is_reflective(expression),
@@ -1121,6 +1130,7 @@ impl BodyFirChecker<'_> {
         let SelectedPropertyView {
             mutable,
             receiver_type,
+            reflection_owner,
             extension_receiver: extension_receiver_target,
             property_type,
             getter_name,
@@ -1176,6 +1186,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::PropertyReference {
             target: FirPropertyReferenceTarget::SpecializedModule {
                 property: target,
+                reflection_owner,
                 getter_name: getter_name.into(),
                 setter_name: setter_name.map(Into::into),
                 receiver: receiver_type.map(resolved).transpose()?,
@@ -1325,6 +1336,8 @@ impl BodyFirChecker<'_> {
             result: resolved(callable.ret)?,
             extension_receiver_parameter: None,
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
+
+            metadata_constant_read: false,
         })
     }
 
@@ -1351,13 +1364,16 @@ impl BodyFirChecker<'_> {
                 let value = value.ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
+                let reified = reified_type_parameter_ordinals.contains(&ordinal);
+                let value = resolved(value)?;
                 Ok(FirTypeSubstitution {
                     parameter: FirTypeParameterRef::External {
                         callable: declaration,
                         ordinal,
                     },
-                    reified: reified_type_parameter_ordinals.contains(&ordinal),
-                    value: resolved(value)?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds: Box::new([]),
                 })
             })
@@ -1433,6 +1449,9 @@ struct ReferenceReceivers {
 struct SelectedPropertyView<'a> {
     mutable: bool,
     receiver_type: Option<Ty>,
+    /// Exact written classifier retained by the winning property candidate. This is distinct from
+    /// both the selected receiver's specialized type and the accessor's declaring owner.
+    reflection_owner: Option<crate::types::TypeName>,
     extension_receiver: bool,
     property_type: Ty,
     getter_name: &'a str,
@@ -1445,6 +1464,7 @@ struct ExternalReferenceDeclaration<'a> {
     default_provider: Option<ExternalCallableId>,
     compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     semantic_role: Option<crate::types::SemanticCallRole>,
+    overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     /// The receiver type a member or extension is referenced on.
     receiver: Option<Ty>,
     /// The provider's declared receiver and result, before call-site substitution.
@@ -1466,6 +1486,7 @@ impl<'a> ExternalReferenceDeclaration<'a> {
             default_provider: callable.external_default_provider,
             compiler_intrinsic: callable.compiler_intrinsic,
             semantic_role: callable.semantic_role,
+            overridden_declarations: &callable.overridden_declarations,
             receiver: None,
             declared_receiver: callable.source_receiver,
             declared_result: callable.declared_ret,
@@ -1483,6 +1504,7 @@ impl<'a> ExternalReferenceDeclaration<'a> {
             default_provider: member.external_default_provider,
             compiler_intrinsic: None,
             semantic_role: member.semantic_role,
+            overridden_declarations: &member.overridden_declarations,
             receiver: None,
             declared_receiver: None,
             declared_result: member.declared_ret,

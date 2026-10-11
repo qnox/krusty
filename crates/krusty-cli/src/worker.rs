@@ -14,6 +14,8 @@
 //! What krusty CANNOT do here is stated as a failed work response rather than a silently wrong jar:
 //! it has no Java front end, so a target whose action carries `.java` sources or source jars is
 //! refused, and it produces no reduced ABI jar, so `--abi-out` receives a copy of the full jar.
+//! `--resources` groups (`strip_prefix:add_prefix:file`) are copied into the output jar after the
+//! classes, under the same entry names the module jar uses.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -40,6 +42,21 @@ pub struct WorkUnit {
     pub kotlinc_args: Vec<String>,
     /// Worker options that were understood but have no effect on krusty's output.
     pub inert: Vec<String>,
+    /// kotlinc-compatible warnings produced while parsing modeled compiler arguments.
+    pub argument_warnings: Vec<String>,
+    /// Resource groups from `--resources`, in request order. Each group is one
+    /// `strip_prefix:add_prefix:file` argument, the spelling `builder-args.bzl` emits.
+    pub resources: Vec<ResourceGroup>,
+}
+
+/// One `--resources` argument: files copied into the jar after their strip prefix is removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceGroup {
+    /// Directory prefix removed from each file path. Empty keeps the path as the entry name.
+    pub strip_prefix: String,
+    /// Directory prepended to the stripped path. Empty leaves the stripped path unchanged.
+    pub add_prefix: String,
+    pub files: Vec<PathBuf>,
 }
 
 /// Why a work request cannot be served.
@@ -81,13 +98,14 @@ const LIST_FLAGS: &[&str] = &[
     "--x_warning_level",
     "--x_xlanguage",
     "--add-export",
+    "--resources",
 ];
 
 /// Boolean worker options with no value, and how each maps to kotlinc's own spelling. An entry with
 /// `None` is understood but changes nothing krusty emits.
 fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
     Some(match flag {
-        "--progressive" => None,
+        "--progressive" => Some("-progressive"),
         "--x_allow_kotlin_package" => Some("-Xallow-kotlin-package"),
         "--x_allow_result_return_type" => Some("-Xallow-result-return-type"),
         "--x_allow_unstable_dependencies" => Some("-Xallow-unstable-dependencies"),
@@ -121,19 +139,6 @@ fn translate_language_features(
     value: &str,
     source_flag: &str,
 ) -> Result<(), Refusal> {
-    const MODELED: &[&str] = &[
-        "AllowAccessToProtectedFieldFromSuperCompanion",
-        "ContextParameters",
-        "DataClassCopyRespectsConstructorVisibility",
-        "EnableNameBasedDestructuringShortForm",
-        "ExplicitBackingFields",
-        "ExplicitContextArguments",
-        "ImplicitSignedToUnsignedIntegerConversion",
-        "MultiDollarInterpolation",
-        "MultiPlatformProjects",
-        "NameBasedDestructuring",
-        "WhenGuards",
-    ];
     let tokens = value.split(',').collect::<Vec<_>>();
     if tokens.iter().any(|token| token.is_empty()) {
         return Err(Refusal::Malformed(format!(
@@ -151,9 +156,7 @@ fn translate_language_features(
                 "{source_flag} {token}: feature name is empty"
             )));
         }
-        if name == "AllowEagerSupertypeAccessibilityChecks" {
-            unit.inert.push(format!("{source_flag} {token}"));
-        } else if MODELED.contains(&name) {
+        if krusty::features::LangFeatures::models(name) {
             unit.kotlinc_args.push(format!("-XXLanguage:{token}"));
         } else {
             return Err(Refusal::Unsupported(format!(
@@ -162,6 +165,17 @@ fn translate_language_features(
         }
     }
     Ok(())
+}
+
+/// Whether a forwarded kotlinc argument selects an input or output the structured work request
+/// owns. Kotlinc accepts both `-name value` and `-name=value`; checking only the complete token lets
+/// the attached form override the structured value when `compile_work_unit` appends these options.
+fn is_worker_owned_kotlinc_option(argument: &str) -> bool {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    matches!(
+        name,
+        "-d" | "-cp" | "-classpath" | "-class-path" | "-module-name"
+    ) || argument.starts_with('@')
 }
 
 /// Translate one `jvm-inc-builder` argument list into a [`WorkUnit`].
@@ -213,11 +227,10 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 "--friends" => unit
                     .friend_paths
                     .extend(values.into_iter().map(PathBuf::from)),
-                // krusty does not enforce opt-in requirements, so supplying an opt-in changes no
-                // emitted bytes today. Report that fact instead of pretending the CLI consumed it.
+                // Accepted opt-in markers select diagnostics; the batch CLI checks them.
                 "--opt_in" => unit
-                    .inert
-                    .extend(values.into_iter().map(|value| format!("--opt_in {value}"))),
+                    .kotlinc_args
+                    .extend(values.into_iter().map(|value| format!("-opt-in={value}"))),
                 // Preserve warning policy as the standard kotlinc spelling. The batch parser owns
                 // the diagnostic-name registry and duplicate checks, so the worker does not grow
                 // a second, drifting copy.
@@ -247,6 +260,18 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         "--plugin_options: krusty does not run compiler plugins supplied by the build"
                             .to_string(),
                     ));
+                }
+                // `strip_prefix:add_prefix:file` groups. Packaged after compilation.
+                "--resources" => {
+                    if values.is_empty() {
+                        return Err(Refusal::Malformed(
+                            "--resources requires at least one strip_prefix:add_prefix:file group"
+                                .to_string(),
+                        ));
+                    }
+                    for value in values {
+                        unit.resources.push(parse_resource_group(&value)?);
+                    }
                 }
                 // Understood, but they do not change the bytes krusty writes.
                 _ => unit.inert.push(flag.to_string()),
@@ -353,11 +378,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             // not spell would silently not reach the compiler.
             "--kotlinc-arg" => {
                 let value = value_of(index, flag)?;
-                if matches!(
-                    value.as_str(),
-                    "-d" | "-cp" | "-classpath" | "-class-path" | "-module-name"
-                ) || value.starts_with('@')
-                {
+                if is_worker_owned_kotlinc_option(&value) {
                     return Err(Refusal::Unsupported(format!(
                         "{flag} {value}: output, module, sources, and classpath are owned by the work request"
                     )));
@@ -365,9 +386,6 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                     translate_language_features(&mut unit, features, flag)?;
                 } else {
                     match value.as_str() {
-                        // Diagnostics/current-language policy only; the compiler already implements
-                        // its current semantics and records these no-ops for Bazel to print.
-                        "-progressive" | "-nowarn" => unit.inert.push(value),
                         "-Xexplicit-api=disable" => unit.inert.push(value),
                         // kotlinc 2.4.10 (JVM) accepts `-Xwasm-kclass-fqn` with only a "flag is
                         // not supported by this version of the compiler" warning and emits
@@ -397,7 +415,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             "--warn" => {
                 let value = value_of(index, flag)?;
                 if value == "off" {
-                    unit.inert.push(format!("--warn {value}"));
+                    unit.kotlinc_args.push("-nowarn".to_string());
                 } else {
                     return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
@@ -409,15 +427,6 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 return Err(Refusal::Unsupported(format!(
                     "{flag}: krusty does not load compiler plugins supplied by the build"
                 )));
-            }
-            // `--resources` is followed by colon-joined `strip_prefix:add_prefix:file…` groups.
-            // krusty's jar writer emits class files and the `kotlin_module` index, nothing else, so a
-            // target with resources would get a jar silently missing them.
-            "--resources" => {
-                return Err(Refusal::Unsupported(
-                    "--resources: krusty does not package resources into the output jar"
-                        .to_string(),
-                ));
             }
             // `--reduced-classpath-mode true` (and the `--direct-dependencies` list that accompanies
             // it) narrow what the builder puts on the classpath. Ignoring the optimization is safe:
@@ -473,8 +482,21 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     // ignoring an unknown target option can emit a different artifact. Everything intentionally
     // inert was removed above; every remaining option must be genuinely modeled by the CLI.
     let parsed = crate::cli::parse(unit.kotlinc_args.clone());
+    if !parsed.argument_errors.is_empty() {
+        return Err(Refusal::Unsupported(parsed.argument_errors.join("; ")));
+    }
     if !parsed.errors.is_empty() {
         return Err(Refusal::Unsupported(parsed.errors.join("; ")));
+    }
+    let feature_errors: Vec<&str> = parsed
+        .language_feature_problems
+        .iter()
+        .filter(|problem| problem.is_error)
+        .map(|problem| problem.message.as_str())
+        .chain(parsed.configuration_errors.iter().map(String::as_str))
+        .collect();
+    if !feature_errors.is_empty() {
+        return Err(Refusal::Unsupported(feature_errors.join("; ")));
     }
     if !parsed.ignored.is_empty() {
         return Err(Refusal::Unsupported(format!(
@@ -483,12 +505,13 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
         )));
     }
     // A warn-and-ignore flag (`-Xwasm-kclass-fqn`) must be intercepted as an INERT value above so
-    // Bazel sees the no-effect note; reaching this parse means a cli.rs addition has no matching
-    // worker arm — refuse rather than accept it with neither kotlinc's warning nor an inert report.
-    if !parsed.unsupported_flag_warnings.is_empty() {
+    // Bazel sees the no-effect note. Other syntax warnings can belong to fully modeled arguments —
+    // a deprecated alias or repeated value, for example — and must reach the response rather than
+    // being misclassified as missing semantics.
+    if !parsed.unknown_extra_flags.is_empty() {
         return Err(Refusal::Unsupported(format!(
             "warn-and-ignore option(s) missing a worker inert arm: {}",
-            parsed.unsupported_flag_warnings.join(", ")
+            parsed.unknown_extra_flags.join(", ")
         )));
     }
     if !parsed.sources.is_empty() {
@@ -497,6 +520,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             parsed.sources.join(", ")
         )));
     }
+    unit.argument_warnings = parsed.argument_warnings;
     Ok(unit)
 }
 
@@ -517,6 +541,135 @@ pub fn expand_flagfiles(arguments: &[String]) -> std::io::Result<Vec<String>> {
         }
     }
     Ok(expanded)
+}
+
+fn parse_resource_group(value: &str) -> Result<ResourceGroup, Refusal> {
+    let mut parts = value.split(':');
+    let strip_prefix = parts.next().unwrap_or("");
+    let Some(add_prefix) = parts.next() else {
+        return Err(Refusal::Malformed(format!(
+            "--resources {value}: expected strip_prefix:add_prefix:file"
+        )));
+    };
+    let files: Vec<PathBuf> = parts.map(PathBuf::from).collect();
+    if files.is_empty() || files.iter().any(|file| file.as_os_str().is_empty()) {
+        return Err(Refusal::Malformed(format!(
+            "--resources {value}: expected strip_prefix:add_prefix:file"
+        )));
+    }
+    Ok(ResourceGroup {
+        strip_prefix: strip_prefix.to_string(),
+        add_prefix: add_prefix.to_string(),
+        files,
+    })
+}
+
+/// Jar entry for one resource file. `strip_prefix` is removed and `add_prefix` is prepended, which
+/// is how `jvm_library` names entries in the module jar.
+pub fn resource_entry_name(
+    strip_prefix: &str,
+    add_prefix: &str,
+    path: &std::path::Path,
+) -> Result<String, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "resource path is not UTF-8".to_string())?
+        .replace('\\', "/");
+    let relative = if strip_prefix.is_empty() {
+        path.strip_prefix("./").unwrap_or(&path).to_string()
+    } else {
+        let normalized_prefix = strip_prefix.replace('\\', "/");
+        let prefix = normalized_prefix.trim_end_matches('/');
+        let rest = path
+            .strip_prefix(prefix)
+            .ok_or_else(|| format!("resource {path} is outside strip prefix {prefix}"))?;
+        let rest = rest
+            .strip_prefix('/')
+            .filter(|rest| !rest.is_empty())
+            .ok_or_else(|| format!("resource {path} is outside strip prefix {prefix}"))?;
+        rest.to_string()
+    };
+    let add = add_prefix.replace('\\', "/");
+    let entry = if add.is_empty() {
+        relative
+    } else {
+        format!("{add}/{relative}")
+    };
+    let has_drive_prefix = entry
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':');
+    if entry.is_empty()
+        || entry.starts_with('/')
+        || has_drive_prefix
+        || entry.chars().any(char::is_control)
+        || entry
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(format!(
+            "resource entry {entry:?} is not a canonical relative jar path"
+        ));
+    }
+    Ok(entry)
+}
+
+/// Copy `--resources` into an existing jar. Entry names follow [`resource_entry_name`].
+pub fn package_resources(jar: &std::path::Path, groups: &[ResourceGroup]) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    let mut planned: Vec<(String, PathBuf)> = Vec::new();
+    for group in groups {
+        for listed in &group.files {
+            let name = resource_entry_name(&group.strip_prefix, &group.add_prefix, listed)?;
+            planned.push((name, listed.clone()));
+        }
+    }
+    if planned.is_empty() {
+        return Ok(());
+    }
+
+    let existing = {
+        let file = std::fs::File::open(jar)
+            .map_err(|error| format!("cannot open {}: {error}", jar.display()))?;
+        let archive = zip::ZipArchive::new(file)
+            .map_err(|error| format!("cannot read {}: {error}", jar.display()))?;
+        archive
+            .file_names()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    };
+    let mut seen = existing;
+    for (name, _) in &planned {
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate jar entry {name}"));
+        }
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(jar)
+        .map_err(|error| format!("cannot open {}: {error}", jar.display()))?;
+    let mut writer = zip::ZipWriter::new_append(file)
+        .map_err(|error| format!("cannot append to {}: {error}", jar.display()))?;
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, path) in planned {
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read resource {}: {error}", path.display()))?;
+        writer
+            .start_file(name, options)
+            .map_err(|error| format!("cannot add resource to {}: {error}", jar.display()))?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| format!("cannot add resource to {}: {error}", jar.display()))?;
+    }
+    writer
+        .finish()
+        .map_err(|error| format!("cannot finish {}: {error}", jar.display()))?;
+    Ok(())
 }
 
 /// One request of bazel's JSON worker protocol. Only the fields this worker reads are modelled;
@@ -560,11 +713,17 @@ pub fn serve(
             // Report what was understood but had no effect. `WorkResponse::output` is the channel
             // bazel prints, and silently dropping an option the target set is the habit this module
             // exists to avoid.
-            let note = if unit.inert.is_empty() {
-                String::new()
-            } else {
-                format!("krusty: no effect on output: {}\n", unit.inert.join(" "))
-            };
+            let mut note = unit
+                .argument_warnings
+                .iter()
+                .map(|warning| format!("warning: {}\n", crate::kotlinc_arguments::render(warning)))
+                .collect::<String>();
+            if !unit.inert.is_empty() {
+                note.push_str(&format!(
+                    "krusty: no effect on output: {}\n",
+                    unit.inert.join(" ")
+                ));
+            }
             match compile(unit) {
                 Ok(()) => WorkResponse {
                     exit_code: 0,
@@ -675,7 +834,13 @@ mod tests {
 
     #[test]
     fn the_real_argument_surface_translates() {
-        let unit = translate(&intellij_request()).expect("must translate");
+        // `--progressive` is part of the real request but refused while it turns on features krusty
+        // does not implement. Keep exercising every other field of that request here.
+        let request = intellij_request()
+            .into_iter()
+            .filter(|argument| argument != "--progressive")
+            .collect::<Vec<_>>();
+        let unit = translate(&request).expect("must translate");
         assert_eq!(unit.output_jar, PathBuf::from("out/util.jar"));
         assert_eq!(unit.abi_jar, Some(PathBuf::from("out/util.abi.jar")));
         assert_eq!(
@@ -712,12 +877,31 @@ mod tests {
                 unit.kotlinc_args
             );
         }
-        for inert in [
-            "--progressive",
-            "--warn off",
-            "--x_xlanguage +AllowEagerSupertypeAccessibilityChecks",
+        assert_eq!(
+            parsed.warning_policy.compiler_disposition(),
+            crate::cli::WarningDisposition::Disabled
+        );
+    }
+
+    /// The worker and batch surfaces must not disagree about a semantic option. Until progressive
+    /// language features are implemented, neither the rule-owned spelling nor a forwarded
+    /// kotlinc spelling may compile while silently using ordinary language semantics.
+    #[test]
+    fn progressive_is_refused_through_every_worker_surface() {
+        for progressive in [
+            vec!["--progressive"],
+            vec!["--kotlinc-arg", "-progressive"],
+            vec!["--kotlinc-arg", "-Xprogressive"],
         ] {
-            assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
+            let mut request = progressive;
+            request.extend(["--srcs", "A.kt", "--out", "o.jar"]);
+            let refusal = translate(&args(&request)).unwrap_err();
+            assert_eq!(
+                refusal,
+                Refusal::Unsupported(
+                    "krusty does not implement the language feature 'ErrorAboutDataClassCopyVisibilityChange' selected by '-progressive'".to_string()
+                )
+            );
         }
     }
 
@@ -934,20 +1118,147 @@ mod tests {
         assert!(matches!(malformed, Refusal::Malformed(_)), "{malformed:?}");
     }
 
-    /// Resources would be dropped from the jar, so the target is refused rather than shipped
-    /// incomplete.
+    /// intellij-community's module jar names a resource by stripping the resource root. The worker
+    /// argument is `strip_prefix:add_prefix:file`, and an empty add prefix is two adjacent colons
+    /// (`platform/icons-api/resources::…/intellij.platform.icons.api.xml`).
     #[test]
-    fn a_target_with_resources_is_refused() {
-        let refusal = translate(&args(&[
+    fn resources_keep_the_module_jar_entry_name() {
+        let unit = translate(&args(&[
             "--resources",
-            "res:prefix:a.txt",
+            "platform/icons-api/resources::platform/icons-api/resources/intellij.platform.icons.api.xml",
+            "res:com/example:res/a.txt:res/b.txt",
             "--srcs",
             "A.kt",
             "--out",
             "o.jar",
         ]))
+        .expect("resources must translate");
+        assert_eq!(
+            unit.resources,
+            vec![
+                ResourceGroup {
+                    strip_prefix: "platform/icons-api/resources".to_string(),
+                    add_prefix: String::new(),
+                    files: vec![PathBuf::from(
+                        "platform/icons-api/resources/intellij.platform.icons.api.xml"
+                    )],
+                },
+                ResourceGroup {
+                    strip_prefix: "res".to_string(),
+                    add_prefix: "com/example".to_string(),
+                    files: vec![PathBuf::from("res/a.txt"), PathBuf::from("res/b.txt")],
+                },
+            ]
+        );
+        assert_eq!(
+            resource_entry_name(
+                &unit.resources[0].strip_prefix,
+                &unit.resources[0].add_prefix,
+                &unit.resources[0].files[0],
+            )
+            .expect("entry"),
+            "intellij.platform.icons.api.xml"
+        );
+        assert_eq!(
+            resource_entry_name("res", "com/example", std::path::Path::new("res/a.txt"))
+                .expect("entry"),
+            "com/example/a.txt"
+        );
+
+        for value in ["res", "res:prefix", "res:prefix:"] {
+            let refusal = translate(&args(&["--resources", value, "--out", "o.jar"])).unwrap_err();
+            assert_eq!(
+                refusal,
+                Refusal::Malformed(format!(
+                    "--resources {value}: expected strip_prefix:add_prefix:file"
+                ))
+            );
+        }
+        let missing = translate(&args(&["--resources", "--out", "o.jar"])).unwrap_err();
+        assert_eq!(
+            missing,
+            Refusal::Malformed(
+                "--resources requires at least one strip_prefix:add_prefix:file group".to_string()
+            )
+        );
+        let outside =
+            resource_entry_name("res", "", std::path::Path::new("other/a.txt")).unwrap_err();
+        assert_eq!(outside, "resource other/a.txt is outside strip prefix res");
+
+        for (add, path, entry) in [
+            ("../outside", "res/a.txt", "../outside/a.txt"),
+            ("/absolute", "res/a.txt", "/absolute/a.txt"),
+            ("\\absolute", "res/a.txt", "/absolute/a.txt"),
+            ("C:", "res/a.txt", "C:/a.txt"),
+            ("com/./example", "res/a.txt", "com/./example/a.txt"),
+            ("com//example", "res/a.txt", "com//example/a.txt"),
+            ("bad\0name", "res/a.txt", "bad\0name/a.txt"),
+        ] {
+            assert_eq!(
+                resource_entry_name("res", add, std::path::Path::new(path)).unwrap_err(),
+                format!("resource entry {entry:?} is not a canonical relative jar path")
+            );
+        }
+        assert_eq!(
+            resource_entry_name("", "", std::path::Path::new("../a.txt")).unwrap_err(),
+            "resource entry \"../a.txt\" is not a canonical relative jar path"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'a', 0xff]));
+            assert_eq!(
+                resource_entry_name("", "", &path).unwrap_err(),
+                "resource path is not UTF-8"
+            );
+        }
+    }
+
+    #[test]
+    fn packaged_resources_land_in_the_jar() {
+        let dir = std::env::temp_dir().join(format!("krusty-resources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        std::fs::write(dir.join("resources/mod.xml"), b"<module/>").unwrap();
+        let jar = dir.join("out.jar");
+        {
+            use zip::write::SimpleFileOptions;
+            let file = std::fs::File::create(&jar).expect("create jar");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("META-INF/MANIFEST.MF", SimpleFileOptions::default())
+                .expect("manifest entry");
+            std::io::Write::write_all(&mut writer, b"Manifest-Version: 1.0\r\n\r\n")
+                .expect("manifest bytes");
+            writer.finish().expect("finish jar");
+        }
+        package_resources(
+            &jar,
+            &[ResourceGroup {
+                strip_prefix: dir.join("resources").display().to_string(),
+                add_prefix: String::new(),
+                files: vec![dir.join("resources/mod.xml")],
+            }],
+        )
+        .expect("package");
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("mod.xml").unwrap(), &mut xml).unwrap();
+        assert_eq!(xml, "<module/>");
+        assert!(archive.by_name("META-INF/MANIFEST.MF").is_ok());
+
+        let duplicate = package_resources(
+            &jar,
+            &[ResourceGroup {
+                strip_prefix: dir.join("resources").display().to_string(),
+                add_prefix: String::new(),
+                files: vec![dir.join("resources/mod.xml")],
+            }],
+        )
         .unwrap_err();
-        assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+        assert_eq!(duplicate, "duplicate jar entry mod.xml");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The rule forwards a target's `kotlinc_opts` as `--kotlinc-arg` each. Without a passthrough
@@ -959,8 +1270,6 @@ mod tests {
         let unit = translate(&args(&[
             "--kotlinc-arg",
             "-Xjvm-default=all",
-            "--kotlinc-arg",
-            "-progressive",
             "--srcs",
             "A.kt",
             "--out",
@@ -968,7 +1277,7 @@ mod tests {
         ]))
         .expect("must translate");
         assert_eq!(unit.kotlinc_args, vec!["-Xjvm-default=all".to_string()]);
-        assert_eq!(unit.inert, vec!["-progressive".to_string()]);
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
     }
 
     /// intellij-community's fleet.multiplatform.shims and fleet.util.codepoints targets forward
@@ -1098,7 +1407,19 @@ mod tests {
 
     #[test]
     fn forwarded_flags_cannot_replace_worker_owned_inputs_or_outputs() {
-        for option in ["-d", "-classpath", "-module-name", "@other.args"] {
+        for option in [
+            "-d",
+            "-d=elsewhere.jar",
+            "-cp",
+            "-cp=other.jar",
+            "-classpath",
+            "-classpath=other.jar",
+            "-class-path",
+            "-class-path=other.jar",
+            "-module-name",
+            "-module-name=other",
+            "@other.args",
+        ] {
             let refusal = translate(&args(&[
                 "--kotlinc-arg",
                 option,
@@ -1108,7 +1429,12 @@ mod tests {
                 "o.jar",
             ]))
             .unwrap_err();
-            assert!(matches!(refusal, Refusal::Unsupported(_)), "{refusal:?}");
+            assert_eq!(
+                refusal,
+                Refusal::Unsupported(format!(
+                    "--kotlinc-arg {option}: output, module, sources, and classpath are owned by the work request"
+                ))
+            );
         }
     }
 
@@ -1167,10 +1493,10 @@ mod tests {
     }
 
     #[test]
-    fn name_based_destructuring_complete_is_accepted() {
+    fn modeled_name_based_destructuring_mode_is_accepted() {
         let unit = translate(&args(&[
             "--kotlinc-arg",
-            "-Xname-based-destructuring=complete",
+            "-Xname-based-destructuring=only-syntax",
             "--srcs",
             "A.kt",
             "--out",
@@ -1183,7 +1509,7 @@ mod tests {
             .language_settings
             .features
             .has("NameBasedDestructuring"));
-        assert!(parsed
+        assert!(!parsed
             .language_settings
             .features
             .has("EnableNameBasedDestructuringShortForm"));
@@ -1283,11 +1609,67 @@ mod tests {
             cancel: false,
         };
         let response = serve(&request, &|_unit| Ok(()));
-        assert_eq!(response.exit_code, 0);
-        assert!(
-            response.output.contains("--x_explicit_api disable"),
-            "an inert option must be surfaced: {:?}",
-            response.output
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "krusty: no effect on output: --x_explicit_api disable\n".to_string(),
+                request_id: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn modeled_argument_warnings_are_reported_in_the_response() {
+        let request = WorkRequest {
+            arguments: args(&[
+                "--kotlinc-arg",
+                "-Xopt-in=marker.Experimental",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            request_id: 5,
+            cancel: false,
+        };
+        let response = serve(&request, &|_unit| Ok(()));
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "warning: argument -Xopt-in is deprecated. Please use -opt-in instead\n"
+                    .to_string(),
+                request_id: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn repeated_modeled_arguments_warn_without_becoming_unhandled() {
+        let request = WorkRequest {
+            arguments: args(&[
+                "--kotlinc-arg",
+                "-Xlambdas=class",
+                "--kotlinc-arg",
+                "-Xlambdas=indy",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            request_id: 6,
+            cancel: false,
+        };
+        let response = serve(&request, &|_unit| Ok(()));
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "warning: argument '-Xlambdas' is passed multiple times: 'class', 'indy'. The last value will be used.\n"
+                    .to_string(),
+                request_id: 6,
+            }
         );
     }
 

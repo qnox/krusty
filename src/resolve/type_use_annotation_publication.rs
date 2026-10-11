@@ -79,6 +79,18 @@ pub(crate) fn publish_checked_type_use_annotations(
             checked.insert(occurrence, recorded);
         }
     }
+    let mut annotation_spans = Vec::new();
+    for (&declaration, spellings) in &table.stable_declared_spellings {
+        collect_annotation_spans(
+            declaration,
+            &spellings.ret,
+            &mut Vec::new(),
+            &checked,
+            &mut annotation_spans,
+        );
+    }
+    table.type_use_annotation_spans.extend(annotation_spans);
+
     let mut unchecked = Vec::new();
     for spellings in table.stable_declared_spellings.values_mut() {
         spellings.seal(&checked, &mut unchecked);
@@ -99,6 +111,50 @@ pub(crate) fn publish_checked_type_use_annotations(
                 "internal error: a type-use annotation application was not checked",
             );
         }
+    }
+}
+
+fn collect_annotation_spans(
+    declaration: crate::fir::DeclarationId,
+    spelling: &crate::spelling::Spelled,
+    path: &mut Vec<u32>,
+    checked: &CheckedTypeUseAnnotations,
+    out: &mut Vec<(
+        (
+            crate::fir::DeclarationId,
+            Box<[u32]>,
+            crate::types::TypeName,
+        ),
+        Span,
+    )>,
+) {
+    for annotation in spelling
+        .annotations
+        .iter()
+        .chain(&spelling.expansion_annotations)
+    {
+        let crate::spelling::TypeUseAnnotation::Bound(occurrence) = annotation else {
+            continue;
+        };
+        let Some(Some(application)) = checked.get(occurrence) else {
+            continue;
+        };
+        out.push((
+            (
+                declaration,
+                path.clone().into_boxed_slice(),
+                application.annotation,
+            ),
+            occurrence.span,
+        ));
+    }
+    for (ordinal, argument) in spelling.args.iter().enumerate() {
+        let Ok(ordinal) = u32::try_from(ordinal) else {
+            continue;
+        };
+        path.push(ordinal);
+        collect_annotation_spans(declaration, argument, path, checked, out);
+        path.pop();
     }
 }
 

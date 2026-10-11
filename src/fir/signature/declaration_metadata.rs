@@ -2,7 +2,70 @@
 
 use super::*;
 
+/// The superclass constructor a generated no-arg constructor (kotlinc's no-arg plugin) delegates
+/// to, selected by the frontend.
+///
+/// A selected constructor with parameters has a default for every one of them; the generated
+/// constructor calls it with all of them omitted, as kotlinc does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoArgSuperConstructor {
+    /// A source constructor of the superclass, by declaration.
+    Declared(DeclarationId),
+    /// A dependency superclass's constructor, with its parameter types.
+    External {
+        declaration: ExternalCallableId,
+        parameters: Vec<ResolvedTy>,
+    },
+    /// A constructor any subclass may call as `<init>()`: `Any`'s, or the no-arg constructor the
+    /// plugin generates for a matched superclass.
+    Unrestricted,
+}
+
 impl ResolvedModuleIndex {
+    /// The position `declaration`'s continuation class takes in its scope's generated-class
+    /// sequence, or `None` when the declaration is not a source `suspend` function.
+    pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {
+        self.continuation_ordinals.get(&declaration).copied()
+    }
+
+    pub fn publish_continuation_ordinal(&mut self, declaration: DeclarationId, ordinal: u32) {
+        assert!(
+            self.continuation_ordinals
+                .insert(declaration, ordinal)
+                .is_none_or(|existing| existing == ordinal),
+            "a suspend declaration holds exactly one continuation ordinal"
+        );
+    }
+
+    /// The superclass constructor `classifier`'s generated no-arg constructor delegates to, or
+    /// `None` when the no-arg plugin gives it none.
+    pub fn no_arg_constructor(&self, classifier: DeclarationId) -> Option<&NoArgSuperConstructor> {
+        self.no_arg_constructors.get(&classifier)
+    }
+
+    /// The annotations kotlinc's sam-with-receiver plugin is configured with
+    /// ([`crate::symbol_source::SymbolSource::sam_with_receiver_annotations`]).
+    pub fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &self.sam_with_receiver_annotations
+    }
+
+    pub fn publish_sam_with_receiver_annotations(&mut self, annotations: &[TypeName]) {
+        self.sam_with_receiver_annotations = annotations.into();
+    }
+
+    pub fn publish_no_arg_constructor(
+        &mut self,
+        classifier: DeclarationId,
+        superclass_constructor: NoArgSuperConstructor,
+    ) {
+        assert!(
+            self.no_arg_constructors
+                .insert(classifier, superclass_constructor)
+                .is_none(),
+            "a classifier holds at most one generated no-arg constructor"
+        );
+    }
+
     /// Every published type alias's expansion spelling, for the one stable-metadata step that
     /// seals its type-use annotations (see [`crate::spelling::TypeUseAnnotation`]).
     pub(crate) fn type_alias_spellings_mut(
@@ -80,6 +143,12 @@ impl ResolvedModuleIndex {
         self.serialization_custom_serializer_constructors
             .get(&declaration)
             .map(|(constructor, operands)| (*constructor, operands.as_ref()))
+    }
+
+    pub fn serialization_type_use_serializer_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&(TypeName, u32), &ResolvedTypeUseSerializerConstruction)> {
+        self.serialization_type_use_serializer_constructors.iter()
     }
 
     pub fn publish_declaration_annotations(
@@ -205,5 +274,25 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a source classifier may publish only one custom serializer constructor"
         );
+    }
+
+    pub fn publish_serialization_type_use_serializer_constructor(
+        &mut self,
+        type_argument_count: u32,
+        construction: ResolvedTypeUseSerializerConstruction,
+    ) {
+        let key = (construction.serializer, type_argument_count);
+        if let Some(existing) = self
+            .serialization_type_use_serializer_constructors
+            .get(&key)
+        {
+            assert_eq!(
+                existing, &construction,
+                "equal checked serializer occurrences must select one constructor declaration"
+            );
+            return;
+        }
+        self.serialization_type_use_serializer_constructors
+            .insert(key, construction);
     }
 }

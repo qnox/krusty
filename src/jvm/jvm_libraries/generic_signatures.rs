@@ -159,9 +159,9 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
 /// Collection<E>]`). The supertypes carry their own type arguments (in terms of this class's formals),
 /// which is what lets a type argument propagate up the hierarchy (`List<Int>` → `Collection<Int>`).
-type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
+pub(in crate::jvm) type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
 
-pub(super) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
+pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
     let (formals, formal_bounds, mut s) = parse_formals(sig);
     let mut supers = Vec::new();
     while !s.is_empty() {
@@ -267,7 +267,7 @@ impl JvmLibraries {
             .map(|signature| self.semanticize_jvm_generic_sig(signature))?;
         for (index, parameter) in generic.params.iter_mut().enumerate() {
             *parameter = java_type_nullability(
-                *parameter,
+                java_collection_return_lower_bound(*parameter),
                 parameter_nullability.get(index).copied().flatten(),
             );
         }

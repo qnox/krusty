@@ -43,7 +43,7 @@ pub(super) enum CollectionTransformDecode {
     NotRecognized,
     Rejected,
     Unavailable,
-    Plan(InlineBodyPlan),
+    Plan(Box<InlineBodyPlan>),
 }
 
 fn plain(instruction: Option<&Insn>, op: u8) -> bool {
@@ -671,14 +671,14 @@ impl JvmLibraries {
                 InlineCollectionAppend::Extension(Box::new(callable))
             }
         };
-        CollectionTransformDecode::Plan(InlineBodyPlan::CollectionTransform {
+        CollectionTransformDecode::Plan(Box::new(InlineBodyPlan::CollectionTransform {
             lambda_parameter: recognized.lambda_parameter,
             traversal,
             local_names: recognized.local_names,
             factory: Box::new(factory),
             capacity,
             append,
-        })
+        }))
     }
 }
 

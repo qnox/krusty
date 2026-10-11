@@ -3,15 +3,22 @@
 use protobuf::Pb;
 
 pub mod annotations;
-pub use annotations::{MetadataAnnotations, NO_ANNOTATIONS};
+pub use annotations::{AccessorMetadataAnnotations, MetadataAnnotations, NO_ANNOTATIONS};
 pub mod builder;
 pub mod class_builder;
+pub(crate) mod class_declarations;
+pub(crate) mod contract_decoder;
+pub(crate) mod declaration_flags;
+pub(crate) mod declaration_records;
 pub(crate) mod decode;
 pub mod encoding;
 pub mod id_signature;
+pub mod klib_fragment;
 pub mod klib_ir;
 pub(crate) mod lambda_function;
+pub(crate) mod local_classifiers;
 pub mod local_properties;
+pub(crate) mod member_order;
 pub mod module;
 pub mod protobuf;
 pub mod semantic;
@@ -29,13 +36,15 @@ pub(crate) mod function_flags {
     pub const VISIBILITY_MASK: u64 = 0b1110;
     pub const VISIBILITY_PRIVATE: u64 = 1 << 1;
     pub const IS_INLINE: u64 = 1 << 10;
+    /// An `external` declaration: its implementation is supplied by the target, never by a body.
+    pub const IS_EXTERNAL: u64 = 1 << 12;
     pub const IS_SUSPEND: u64 = 1 << 13;
+    pub const IS_EXPECT: u64 = 1 << 14;
     /// Low bit of the 2-bit `ReturnValueStatus` field (bits 16-17), which follows
     /// `hasNonStableParameterNames` (bit 15).
     pub const RETURN_VALUE_STATUS_SHIFT: u32 = 16;
-    /// A companion-associated function (`companion { fun … }` or `companion fun C.name`), the
-    /// function counterpart of [`super::property_flags::IS_COMPANION`].
-    pub const IS_COMPANION: u64 = 1 << 18;
+    /// The schema's `isStatic` bit.
+    pub const IS_STATIC: u64 = 1 << 18;
     /// Bits 6-7 are `MemberKind`. DELEGATION (2) is a function realized by `interface by`.
     pub const MEMBER_KIND_DELEGATION: u64 = 2 << 6;
 }
@@ -56,14 +65,14 @@ pub(crate) mod property_flags {
     pub const MEMBER_KIND_DELEGATION: u64 = 2 << 6;
     pub const IS_LATEINIT: u64 = 1 << 12;
     pub const IS_DELEGATED: u64 = 1 << 15;
+    pub const IS_EXPECT: u64 = 1 << 16;
     /// Accessor flag word bit 6: the accessor is not the compiler default.
     pub const ACCESSOR_IS_NOT_DEFAULT: u64 = 1 << 6;
     /// Both modality bits (4-5). Shared by the property word and the accessor word, which is how an
     /// accessor's default is derived from its property.
     pub const MODALITY_MASK: u64 = 0b11_0000;
-    /// A companion-associated property (`companion { val … }` or `companion val C.name`): kotlinc
-    /// sets this bit on both, the extension additionally recording its classifier receiver.
-    pub const IS_COMPANION: u64 = 1 << 19;
+    /// The schema's `isStatic` bit.
+    pub const IS_STATIC: u64 = 1 << 19;
 }
 
 /// The `Type` a `vararg` parameter RECORDS: `Array<out E>`, not the invariant `Array<E>` the
@@ -85,6 +94,19 @@ pub(crate) fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
         }
         _ => ty,
     }
+}
+
+/// Convert a source vararg element declaration into the type and spelling pair Kotlin metadata
+/// records for the parameter/property. Keeping the pair together prevents an element alias from
+/// being attached to the synthetic array classifier itself.
+pub(crate) fn vararg_recorded_declaration(
+    ty: crate::types::Ty,
+    element_spelling: &crate::spelling::Spelled,
+) -> (crate::types::Ty, crate::spelling::Spelled) {
+    (
+        vararg_recorded_type(ty),
+        element_spelling.as_array_element(),
+    )
 }
 
 /// Whether a signature position forces the declaration to record an explicit

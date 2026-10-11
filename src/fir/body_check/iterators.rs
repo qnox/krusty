@@ -65,7 +65,8 @@ impl BodyFirChecker<'_> {
                 )
             })?
             .ty;
-        let iterator_enhanced = has_enhanced_result(&protocol.iterator);
+        let iterator_enhanced =
+            has_enhanced_result(&protocol.iterator) || protocol.enhancement.iterator.head();
         let mut iterator =
             self.iterator_protocol_call(span, origin, &protocol.iterator, iterable_ty)?;
         let has_next =
@@ -74,18 +75,10 @@ impl BodyFirChecker<'_> {
         if iterator_enhanced {
             iterator.result_check = self.protocol_result_check(&protocol.iterator);
         }
-        // The element a stored iterator yields keeps the enhancement of that iterator's type
-        // argument: a Java `Iterator<E>` result enhanced from `MutableIterator<E>` carries a not-null
-        // `E`, which `next()`, declared to return the iterator's type parameter, hands back.
-        let element_enhanced = has_enhanced_result(&protocol.next)
-            || iterator_enhanced
-                && matches!(
-                    &next.target,
-                    FirCallTarget::External {
-                        declared_result: Some(declared),
-                        ..
-                    } if matches!(declared.get(), crate::types::Ty::TyParam(..))
-                );
+        // The checker substituted the iterable's marks through `iterator()` and `next()`: a Java
+        // `Iterator<E>` enhanced from `MutableIterator<E>` yields a marked `E`.
+        let element_enhanced =
+            has_enhanced_result(&protocol.next) || protocol.enhancement.element.head();
         // kotlinc's `acceptsNullValues`: a type parameter whose bound admits `null` accepts it.
         let element = variable_ty.get();
         let element_rejects_null = !element.admits_null()

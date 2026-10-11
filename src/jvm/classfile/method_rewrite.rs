@@ -47,6 +47,10 @@ pub(super) struct RewriteSource {
     /// The pool entries the coroutine transformer interned for the body it put in place of this
     /// one. That body is final, and no rewrite reads the emitter's labels for it.
     pub transformed: Option<std::ops::Range<u16>>,
+    /// The pool entries the transformer named for the class ahead of that body (a suspend
+    /// lambda's spill fields and `@DebugMetadata`), which kotlinc's writer interns before the
+    /// body's code.
+    pub transformed_leading: Vec<u16>,
 }
 
 impl RewriteSource {
@@ -59,6 +63,7 @@ impl RewriteSource {
             decided: None,
             pool_end: None,
             transformed: None,
+            transformed_leading: Vec::new(),
         })
     }
 }
@@ -194,6 +199,7 @@ impl ClassWriter {
                 relaid.push(RelaidMethod {
                     index,
                     added: added_after + 1..previous_end.max(added_after) + 1,
+                    leading: std::mem::take(&mut source.transformed_leading),
                     interned,
                 });
                 continue;
@@ -220,6 +226,7 @@ impl ClassWriter {
                     relaid.push(RelaidMethod {
                         index,
                         added: added_after + 1..previous_end.max(added_after) + 1,
+                        leading: Vec::new(),
                         interned: interned_after + 1..self.cp.slot_count() + 1,
                     });
                 }
@@ -229,6 +236,7 @@ impl ClassWriter {
             relaid.push(RelaidMethod {
                 index,
                 added: added_after + 1..previous_end.max(added_after) + 1,
+                leading: Vec::new(),
                 interned: interned_after + 1..self.cp.slot_count() + 1,
             });
             crate::trace_compiler!("bytecode", "rewrote {}{}", source.name, source.desc);
@@ -361,7 +369,7 @@ impl ClassWriter {
             );
             return None;
         }
-        self.optimized(method, identity, node, implicit_return, pool)
+        self.optimized(method, identity, node, implicit_return, false, pool)
     }
 
     /// kotlinc's optimizer passes (see [`pipeline`]) over `node`, the body `method` currently holds
@@ -377,6 +385,7 @@ impl ClassWriter {
         source: MethodIdentity<'_>,
         mut node: MethodNode,
         implicit_return: Option<LabelId>,
+        post_coroutine: bool,
         pool: &mut PoolLookup<'_>,
     ) -> Option<Rewritten> {
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
@@ -400,6 +409,7 @@ impl ClassWriter {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots: u16::try_from(entry.len()).ok()?,
+            post_coroutine,
         };
         let removed_locals = match pipeline::optimize(&mut node, &context) {
             Outcome::Changed { removed_locals } => removed_locals,

@@ -13,9 +13,13 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
+mod arithmetic_result_types;
 mod callable_body_returns;
 mod catch_clauses;
+mod checked_hierarchy;
 mod checked_substitutions;
+mod external_references;
+mod inline_plan_tests;
 mod integral_constants;
 mod local_classifier_provenance;
 mod lowering_temporaries;
@@ -239,40 +243,30 @@ fn range_loop_records_an_exact_type_stable_bound_read() {
     assert_eq!(ir.logical_types.get(&end), Some(&Ty::Int));
 }
 
+/// fir2ir holds an elvis's left side in a temporary of its own (nullable) type even over a safe
+/// call with a non-null selector; the JVM's bytecode passes, not common lowering, decide whether
+/// the boxed value and its null check survive.
 #[test]
-fn nonnull_safe_call_selector_flows_directly_into_elvis_result() {
+fn an_elvis_over_a_safe_call_holds_the_nullable_value_in_its_own_temporary() {
     let ir = lower_single_source(
         "fun length(value: String?): Int = value?.length ?: -1\n",
         "SafeCallElvis",
     );
-    assert!(ir.exprs.iter().any(|expression| {
-        matches!(
-            expression,
-            IrExpr::Call {
-                callee: Callee::Intrinsic {
-                    operation: IrIntrinsic::StringLength,
+    let temporaries = ir
+        .exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::Variable {
+                    ty,
+                    named: false,
                     ..
-                },
-                ..
-            }
-        )
-    }));
-    assert!(!ir.exprs.iter().any(|expression| {
-        matches!(
-            expression,
-            IrExpr::Variable {
-                ty,
-                named: false,
-                ..
-            } if *ty == Ty::nullable(Ty::Int)
-        ) || matches!(
-            expression,
-            IrExpr::TypeOp {
-                type_operand,
-                ..
-            } if *type_operand == Ty::nullable(Ty::Int)
-        )
-    }));
+                } if *ty == Ty::nullable(Ty::Int)
+            )
+        })
+        .count();
+    assert_eq!(temporaries, 1);
 }
 
 #[test]
@@ -440,39 +434,6 @@ fn disabled_assertion_drops_its_unlowered_operand_graph() {
             args,
         } if args.is_empty()
     ));
-}
-
-#[test]
-fn common_ir_receives_the_complete_applied_classifier_hierarchy() {
-    let ir = lower_single_source(
-        "interface Root<T>\n\
-         interface Middle<U> : Root<U>\n\
-         class Leaf : Middle<String>\n",
-        "Hierarchy",
-    );
-    let leaf = crate::types::type_name("Leaf");
-    let middle = crate::types::type_name("Middle");
-    let root = crate::types::type_name("Root");
-    let hierarchy = ir
-        .classifier_hierarchies
-        .get(&leaf)
-        .expect("source class hierarchy must cross the FIR/common-IR boundary");
-
-    assert_eq!(
-        hierarchy
-            .iter()
-            .map(|entry| (entry.classifier, entry.applied, entry.depth))
-            .collect::<Vec<_>>(),
-        vec![
-            (leaf, Ty::obj("Leaf"), 0),
-            (middle, Ty::obj_args("Middle", &[Ty::String]), 1),
-            (root, Ty::obj_args("Root", &[Ty::String]), 2),
-            // A classifier that declares no supertype still has Kotlin's implicit root.
-            (crate::types::wk::any(), Ty::obj("kotlin/Any"), 3),
-        ]
-    );
-    ir.validate_determined_types()
-        .expect("applied hierarchy types must be pending-free");
 }
 
 #[test]
@@ -705,6 +666,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
                 inline_plan: None,
                 extension_receiver_parameter: None,
                 semantic_role: None,
+                overridden_declarations: Box::new([]),
             },
             dispatch_receiver: None,
             extension_receiver: None,
@@ -758,6 +720,8 @@ fn external_property_function_reference_is_materialized_without_lookup() {
             result: resolved(Ty::Int),
             extension_receiver_parameter: None,
             dispatch: crate::fir::FirPropertyDispatch::Ordinary,
+
+            metadata_constant_read: false,
         }),
         setter: None,
         extension_receiver: false,
@@ -854,6 +818,8 @@ fn external_member_extension_property_uses_published_receiver_coordinate() {
                 result: resolved(Ty::String),
                 extension_receiver_parameter: Some(0),
                 dispatch: crate::fir::FirPropertyDispatch::Ordinary,
+
+                metadata_constant_read: false,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: dispatch,
@@ -923,6 +889,8 @@ fn external_super_property_dispatch_survives_common_lowering() {
                     owner,
                     interface: false,
                 },
+
+                metadata_constant_read: false,
             },
             dispatch_receiver: Some(FirReceiver {
                 value: receiver,
@@ -953,78 +921,6 @@ fn external_super_property_dispatch_survives_common_lowering() {
             receiver: Some(_),
             ..
         }) if *target == property && *selected_owner == owner
-    )));
-}
-
-#[test]
-fn external_unbound_reference_trusts_the_checked_receiver_widening() {
-    let origin = OriginId::from_raw(0);
-    let declaration = ExternalCallableId::from_raw(19);
-    let function_type = Ty::Fun(crate::types::intern_fnsig(crate::types::FnSig {
-        params: vec![Ty::String],
-        ret: Ty::Boolean,
-        context_count: 0,
-        has_receiver: false,
-        suspend: false,
-    }));
-    let mut body = FirBody::new(BodyOwnerId::from_raw(5));
-    let reference = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(function_type),
-        kind: FirExprKind::CallableReference {
-            target: FirCallableReferenceTarget::External {
-                declaration,
-                default_provider: None,
-                receiver: Some(resolved(Ty::nullable(Ty::String))),
-                declared_receiver: Some(resolved(Ty::nullable(Ty::String))),
-                extension_receiver: true,
-                parameters: Box::new([]),
-                result: resolved(Ty::Boolean),
-                declared_result: Some(resolved(Ty::Boolean)),
-                suspend: false,
-                semantic_role: None,
-            },
-            function_type: resolved(function_type),
-            reflective: false,
-            binding: FirCallableReferenceBinding::Unbound,
-            dispatch_receiver: None,
-            extension_receiver: None,
-            substitutions: Box::new([]),
-            adaptation: None,
-            reflection_owner: None,
-        },
-    });
-    let root = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(reference),
-    });
-    body.push_root(root);
-
-    let mut ir = IrFile::default();
-    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    let IrExpr::CallableReference(reference) = ir.expr(lowered.roots[0]) else {
-        panic!("an external reference lowers to a callable reference");
-    };
-    assert!(matches!(
-        reference.target,
-        crate::ir::IrCallableReferenceTarget::External {
-            declaration: target,
-            receiver: Some(receiver),
-        } if target == declaration && receiver == Ty::nullable(Ty::String)
-    ));
-    assert!(reference.captures.is_empty() && reference.bound_receiver.is_none());
-    // The adapter takes the function type's `String`; the declaration's `String?` receiver accepts
-    // it as checked, with no cast of its own.
-    assert_eq!(
-        ir.functions[reference.adapter as usize].params,
-        [Ty::String]
-    );
-    assert!(ir.exprs.iter().any(|expression| matches!(
-        expression,
-        IrExpr::Call {
-            callee: crate::ir::Callee::External { target, .. },
-            ..
-        } if *target == declaration
     )));
 }
 
@@ -1085,7 +981,7 @@ fn positional_member_call_keeps_its_receiver_direct() {
 }
 
 #[test]
-fn suspending_call_operand_is_materialized_before_outer_construction() {
+fn suspending_call_operand_stays_a_direct_constructor_argument() {
     let ir = lower_single_source(
         "class Pair(val first: Int, val second: Int)\n\
          suspend fun next(): Int = 2\n\
@@ -1110,32 +1006,49 @@ fn suspending_call_operand_is_materialized_before_outer_construction() {
             )
         })
         .expect("checked suspend call") as u32;
-    let slot = ir
-        .exprs
-        .iter()
-        .find_map(|expression| match expression {
+    // kotlinc keeps `1` on the stack across the suspension (its FixStack saves and restores it),
+    // so the suspending operand is passed in place rather than through a temporary.
+    assert!(
+        !ir.exprs.iter().any(|expression| matches!(
+            expression,
             IrExpr::Variable {
-                index,
                 init: Some(initializer),
                 named: false,
                 ..
-            } if *initializer == call => Some(*index),
+            } if *initializer == call
+        )),
+        "a suspending operand must not be materialized into a temporary"
+    );
+    let constructions = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::New { internal, args, .. } if *internal == crate::types::type_name("Pair") => {
+                Some(args.clone())
+            }
             _ => None,
         })
-        .expect("suspending operand must be materialized before its outer construction");
-    assert!(ir.exprs.iter().any(|expression| matches!(
-        expression,
-        IrExpr::New { internal, args, .. }
-            if internal.render() == "Pair"
-                && args.iter().any(|argument| matches!(ir.expr(*argument), IrExpr::GetValue(value) if *value == slot))
-    )));
+        .collect::<Vec<_>>();
+    assert_eq!(constructions.len(), 1, "one Pair construction");
+    let arguments = &constructions[0];
+    assert_eq!(arguments.len(), 2);
+    assert!(matches!(
+        ir.expr(arguments[0]),
+        IrExpr::Const(crate::ir::IrConst::Int(1))
+    ));
+    assert_eq!(
+        arguments[1], call,
+        "the suspend call is the second argument itself"
+    );
 }
 
 #[test]
 fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
     let ir = lower_single_source(
-        "fun selected(left: Int, right: Int): Int = left\n\
-         fun caller(): Int = selected(right = 2, left = 1)\n",
+        "fun one(): Int = 1\n\
+         fun two(): Int = 2\n\
+         fun selected(left: Int, right: Int): Int = left\n\
+         fun caller(): Int = selected(right = two(), left = one())\n",
         "NamedCalls",
     );
     let selected = ir
@@ -1174,13 +1087,16 @@ fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
                 init: Some(initializer),
                 ..
             } => match ir.expr(*initializer) {
-                IrExpr::Const(IrConst::Int(value)) => *value,
+                IrExpr::Call {
+                    callee: crate::ir::Callee::Local(target),
+                    ..
+                } => ir.functions[*target as usize].name.as_str(),
                 other => panic!("unexpected named argument initializer: {other:?}"),
             },
             other => panic!("unexpected named argument spill: {other:?}"),
         })
         .collect::<Vec<_>>();
-    assert_eq!(initializers, [2, 1]);
+    assert_eq!(initializers, ["two", "one"]);
     let IrExpr::Block {
         value: Some(call), ..
     } = ir.expr(wrapper)
@@ -2144,26 +2060,6 @@ fn nested_generic_inline_expansion_specializes_its_result_storage() {
 }
 
 #[test]
-fn unused_foreign_inline_body_is_not_lowered_into_the_active_source() {
-    let ir = lower_source_from_set(
-        &[
-            (
-                "inline fun <reified T> unused(value: Any): T = value as T",
-                "Library",
-            ),
-            ("fun use(): String = \"OK\"", "Consumer"),
-        ],
-        1,
-    );
-
-    assert!(ir.foreign_inline_templates.is_empty());
-    assert!(ir
-        .functions
-        .iter()
-        .all(|function| function.name != "unused"));
-}
-
-#[test]
 fn consuming_sink_attaches_member_body_through_stable_classifier_identity() {
     let ir = lower_single_source(
         "class Box { fun answer(): Int = 42 }\n\
@@ -2341,10 +2237,65 @@ fn enclosing_receiver_path_lowers_from_stable_classifier_edges() {
 }
 
 #[test]
+fn named_call_passes_constants_and_vals_in_place_when_reordered() {
+    let ir = lower_single_source(
+        "fun one(): Int = 1\n\
+         fun selected(left: Int, middle: Int, right: Int): Int = left\n\
+         fun caller(fixed: Int): Int = selected(right = 2, middle = fixed, left = one())\n",
+        "NamedConstants",
+    );
+    let selected = ir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    let (statements, call) = ir
+        .exprs
+        .iter()
+        .find_map(|expression| {
+            let IrExpr::Block {
+                stmts,
+                value: Some(call),
+            } = expression
+            else {
+                return None;
+            };
+            matches!(
+                ir.expr(*call),
+                IrExpr::Call {
+                    callee: crate::ir::Callee::Local(target),
+                    ..
+                } if *target == selected
+            )
+            .then_some((stmts.clone(), *call))
+        })
+        .expect("named call normalization block");
+    let [spill] = statements.as_slice() else {
+        panic!("expected only the call operand to be stored: {statements:?}");
+    };
+    assert!(matches!(
+        ir.expr(*spill),
+        IrExpr::Variable { init: Some(initializer), .. }
+            if matches!(ir.expr(*initializer), IrExpr::Call { .. })
+    ));
+    let IrExpr::Call { args, .. } = ir.expr(call) else {
+        unreachable!()
+    };
+    let [left, middle, right] = args.as_slice() else {
+        panic!("expected three arguments: {args:?}");
+    };
+    assert!(matches!(ir.expr(*left), IrExpr::GetValue(_)));
+    assert!(matches!(ir.expr(*middle), IrExpr::GetValue(_)));
+    assert!(matches!(ir.expr(*right), IrExpr::Const(IrConst::Int(2))));
+}
+
+#[test]
 fn consuming_sink_keeps_primary_and_secondary_constructor_semantics() {
     let ir = lower_single_source(
-        "class Built(val number: Int, val text: String = \"default\") {\n\
-             constructor(flag: Boolean = true) : this(text = \"chosen\", number = 1) { flag }\n\
+        "fun chosen(): String = \"chosen\"\n\
+         fun one(): Int = 1\n\
+         class Built(val number: Int, val text: String = \"default\") {\n\
+             constructor(flag: Boolean = true) : this(text = chosen(), number = one()) { flag }\n\
          }\n",
         "Built",
     );
@@ -2543,7 +2494,9 @@ fn enum_entries_keep_the_selected_secondary_constructor_parameters() {
         class.enum_entries[0].constructor_parameter_types,
         [Ty::obj("kotlin/String")]
     );
+    assert_eq!(class.enum_entries[0].constructor.ordinal, 1);
     assert!(class.enum_entries[1].constructor_parameter_types.is_empty());
+    assert_eq!(class.enum_entries[1].constructor.ordinal, 2);
 }
 
 #[test]
@@ -3058,7 +3011,7 @@ fn common_ir_sink_consumes_scheduled_function_body_and_defaults() {
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(source).with_file_stem("Sink")],
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3106,7 +3059,7 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(source).with_file_stem("InlineSink")],
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3227,7 +3180,7 @@ pub(crate) fn lower_single_source_with_platform(
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(source).with_file_stem(stem)],
-        platform,
+        crate::frontend::PlatformProvider::jvm(platform),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );
@@ -3300,7 +3253,7 @@ pub(crate) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usi
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::libraries::EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );

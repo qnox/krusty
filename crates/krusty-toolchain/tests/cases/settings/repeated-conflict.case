@@ -1,0 +1,16 @@
+Templates that conflict on a list's item and on a nested value.
+--- module.yaml
+product: jvm/app
+apply: [ a.module-template.yaml, b.module-template.yaml, c.module-template.yaml ]
+--- a.module-template.yaml
+settings:
+  jvm:
+    mainClass: a.MainKt
+--- b.module-template.yaml
+settings:
+  jvm:
+    mainClass: b.MainKt
+--- c.module-template.yaml
+settings:
+  jvm:
+    mainClass: a.MainKt

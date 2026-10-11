@@ -1,0 +1,181 @@
+# name	short	deprecated	type	delimiter	deprecatedIn	removedIn	obsolete	deprecation	enables	disables	origin
+-P			array	,							jvm
+-Werror			bool	,							jvm
+-Wextra			bool	,							jvm
+-X			bool	,							jvm
+-XXLanguage			array								jvm
+-XXdebug-level-compiler-checks			bool	,							jvm
+-XXdump-model			string	,							jvm
+-XXexplicit-return-types			string	,							jvm
+-XXlenient-mode			bool	,							jvm
+-Xabi-stability			string	,							jvm
+-Xadd-modules			array	,							jvm
+-Xallow-any-scripts-in-source-roots			bool	,						SkipStandaloneScriptsInSourceRoots	jvm
+-Xallow-condition-implies-returns-contracts			bool	,					ConditionImpliesReturnsContracts		jvm
+-Xallow-contracts-on-more-functions			bool	,					AllowCheckForErasedTypesInContracts;AllowContractsOnSomeOperators;AllowContractsOnPropertyAccessors		jvm
+-Xallow-holdsin-contract			bool	,					HoldsInContracts		jvm
+-Xallow-kotlin-package			bool	,							jvm
+-Xallow-no-source-files			bool	,							jvm
+-Xallow-reified-type-in-catch			bool	,					AllowReifiedTypeInCatchClause		jvm
+-Xallow-returns-result-of			bool	,					AllowReturnsResultOfContract		jvm
+-Xallow-unstable-dependencies			bool	,							jvm
+-Xannotation-default-target			string	,					AnnotationDefaultTargetMigrationWarning=first-only-warn;PropertyParamAnnotationDefaultTargetMode=param-property	AnnotationDefaultTargetMigrationWarning=first-only;PropertyParamAnnotationDefaultTargetMode=first-only;PropertyParamAnnotationDefaultTargetMode=first-only-warn	jvm
+-Xannotation-target-all			bool	,					AnnotationAllUseSiteTarget		jvm
+-Xannotations-in-metadata			bool	,					AnnotationsInMetadata		jvm
+-Xassertions			string	,							jvm
+-Xbackend-threads			string	,							jvm
+-Xbuild-file		-module	string	,							jvm
+-Xcheck-phase-conditions			bool	,							jvm
+-Xcollection-literals			bool	,					CollectionLiterals		jvm
+-Xcommon-sources			array	,							jvm
+-Xcompiler-plugin			array								jvm
+-Xcompiler-plugin-order			array								jvm
+-Xconsistent-data-class-copy-visibility			bool	,					DataClassCopyRespectsConstructorVisibility		jvm
+-Xcontext-parameters			bool	,					ContextParameters		jvm
+-Xcontext-receivers			bool	,					ContextReceivers		jvm
+-Xcontext-sensitive-resolution			bool	,					ContextSensitiveResolutionUsingExpectedType		jvm
+-Xdata-flow-based-exhaustiveness			bool	,					DataFlowBasedExhaustiveness		jvm
+-Xdebug			bool	,							jvm
+-Xdefault-script-extension			string	,							jvm
+-Xdetailed-perf			bool	,							jvm
+-Xdirect-java-actualization			bool	,					DirectJavaActualization		jvm
+-Xdisable-default-scripting-plugin			bool	,							jvm
+-Xdisable-phases			array	,							jvm
+-Xdisable-standard-script			bool	,							jvm
+-Xdont-sort-source-files			bool	,							jvm
+-Xdont-warn-on-error-suppression			bool	,							jvm
+-Xdump-directory			string	,							jvm
+-Xdump-fqname			string	,							jvm
+-Xdump-perf			string	,							jvm
+-Xemit-jvm-type-annotations			bool	,							jvm
+-Xenable-incremental-compilation			bool	,							jvm
+-Xenhance-type-parameter-types-to-def-not-null			bool	,					ProhibitUsingNullableTypeParameterAgainstNotNullAnnotated		jvm
+-Xenhanced-coroutines-debugging			bool	,							jvm
+-Xexpect-actual-classes			bool	,							jvm
+-Xexplicit-api			string	,							jvm
+-Xexplicit-backing-fields			bool	,					ExplicitBackingFields		jvm
+-Xexplicit-context-arguments			bool	,					ExplicitContextArguments		jvm
+-Xfragment-dependency			array								jvm
+-Xfragment-friend-dependency			array								jvm
+-Xfragment-refines			array	,							jvm
+-Xfragment-sources			array	,							jvm
+-Xfragments			array	,							jvm
+-Xfriend-paths			array	,							jvm
+-Xgenerate-strict-metadata-version			bool	,							jvm
+-Xheader-mode			bool	,							jvm
+-Xheader-mode-type			string	,							jvm
+-Xignore-const-optimization-errors			bool	,							jvm
+-Xignored-annotations-for-bridges			array	,							jvm
+-Xindy-allow-annotated-lambdas			bool	,							jvm
+-Xinline-classes			bool	,					InlineClasses		jvm
+-Xintellij-plugin-root			string	,							jvm
+-Xintrinsic-const-evaluation			bool	,					IntrinsicConstEvaluation		jvm
+-Xir-do-not-clear-binding-context			bool	,							jvm
+-Xjava-package-prefix			string	,							jvm
+-Xjava-source-roots			array	,							jvm
+-Xjdk-release			string	,							jvm
+-Xjspecify-annotations			string	,							jvm
+-Xjsr305		-Xjsr305-annotations	array	,							jvm
+-Xjvm-default			string	,							jvm
+-Xjvm-enable-preview			bool	,							jvm
+-Xjvm-expose-boxed			bool	,							jvm
+-Xklib			string	,							jvm
+-Xlambdas			string	,							jvm
+-Xlink-via-signatures			bool	,							jvm
+-Xlist-phases			bool	,							jvm
+-Xlocal-type-aliases			bool	,					LocalTypeAliases		jvm
+-Xmetadata-klib		-Xexpect-actual-linker	bool	,							jvm
+-Xmetadata-version			string	,							jvm
+-Xmodule-path			string	,							jvm
+-Xmulti-dollar-interpolation			bool	,					MultiDollarInterpolation		jvm
+-Xmulti-platform			bool	,					MultiPlatformProjects		jvm
+-Xmultifile-parts-inherit			bool	,							jvm
+-Xname-based-destructuring			string	,					NameBasedDestructuring=only-syntax;NameBasedDestructuring=name-mismatch;NameBasedDestructuring=complete;DeprecateNameMismatchInShortDestructuringWithParentheses=name-mismatch;DeprecateNameMismatchInShortDestructuringWithParentheses=complete;EnableNameBasedDestructuringShortForm=complete		jvm
+-Xnested-type-aliases			bool	,					NestedTypeAliases		jvm
+-Xnew-inference			bool	,					NewInference;SamConversionPerArgument;FunctionReferenceWithDefaultValueAsOtherType;DisableCompatibilityModeForNewInference		jvm
+-Xno-call-assertions			bool	,							jvm
+-Xno-check-actual			bool	,							jvm
+-Xno-inline			bool	,							jvm
+-Xno-new-java-annotation-targets			bool	,							jvm
+-Xno-optimize			bool	,							jvm
+-Xno-param-assertions			bool	,							jvm
+-Xno-receiver-assertions			bool	,							jvm
+-Xno-reset-jar-timestamps			bool	,							jvm
+-Xno-source-debug-extension			bool	,							jvm
+-Xno-unified-null-checks			bool	,							jvm
+-Xnon-local-break-continue			bool	,					BreakContinueInInlineLambdas		jvm
+-Xnullability-annotations			array	,							jvm
+-Xoutput-builtins-metadata			bool	,							jvm
+-Xphases-to-dump			array	,							jvm
+-Xphases-to-dump-after			array	,							jvm
+-Xphases-to-dump-before			array	,							jvm
+-Xphases-to-validate			array	,							jvm
+-Xphases-to-validate-after			array	,							jvm
+-Xphases-to-validate-before			array	,							jvm
+-Xplugin			array	,							jvm
+-Xprint-configuration			bool	,							jvm
+-Xprofile			string	,							jvm
+-Xprofile-phases			bool	,							jvm
+-Xrender-internal-diagnostic-names			bool	,							jvm
+-Xrepl			bool	,							jvm
+-Xreport-all-warnings			bool	,							jvm
+-Xreport-output-files			bool	,							jvm
+-Xreport-perf			bool	,							jvm
+-Xreturn-value-checker			string	,							jvm
+-Xsam-conversions			string	,							jvm
+-Xsanitize-parentheses			bool	,							jvm
+-Xscript-resolver-environment			array	,							jvm
+-Xseparate-kmp-compilation			bool	,							jvm
+-Xskip-metadata-version-check			bool	,							jvm
+-Xskip-prerelease-check			bool	,							jvm
+-Xstdlib-compilation			bool	,							jvm
+-Xstring-concat			string	,							jvm
+-Xsupport-compatqual-checker-framework-annotations			string	,							jvm
+-Xsuppress-api-version-greater-than-language-version-error			bool	,							jvm
+-Xsuppress-deprecated-jvm-target-warning			bool	,							jvm
+-Xsuppress-missing-builtins-error			bool	,							jvm
+-Xsuppress-version-warnings			bool	,							jvm
+-Xsuppress-warning			array	,							jvm
+-Xtype-enhancement-improvements-strict-mode			bool	,					TypeEnhancementImprovementsInStrictMode		jvm
+-Xunrestricted-builder-inference			bool	,					UnrestrictedBuilderInference		jvm
+-Xuse-14-inline-classes-mangling-scheme			bool	,							jvm
+-Xuse-fast-jar-file-system			bool	,							jvm
+-Xuse-fir-experimental-checkers			bool	,							jvm
+-Xuse-fir-ic			bool	,							jvm
+-Xuse-fir-lt			bool	,							jvm
+-Xuse-inline-scopes-numbers			bool	,							jvm
+-Xuse-k2			bool	,			obsolete				jvm
+-Xuse-old-class-files-reading			bool	,							jvm
+-Xuse-type-table			bool	,							jvm
+-Xvalidate-bytecode			bool	,							jvm
+-Xvalue-classes			bool	,					JvmInlineMultiFieldValueClasses		jvm
+-Xverbose-phases			array	,							jvm
+-Xverify-ir			string	,							jvm
+-Xverify-ir-nested-offsets			bool	,							jvm
+-Xverify-ir-visibility			bool	,							jvm
+-Xwarning-level			array	,							jvm
+-Xwhen-expressions			string	,							jvm
+-Xwhen-guards			bool	,					WhenGuards		jvm
+-api-version			string	,							jvm
+-classpath	-cp		string	,							jvm
+-d			string	,							jvm
+-expression	-e		string	,							jvm
+-help	-h		bool	,							jvm
+-include-runtime			bool	,							jvm
+-java-parameters			bool	,							jvm
+-jdk-home			string	,							jvm
+-jvm-default			string	,							jvm
+-jvm-target			string	,							jvm
+-kotlin-home			string	,							jvm
+-language-version			string	,							jvm
+-module-name			string	,							jvm
+-no-jdk			bool	,							jvm
+-no-reflect			bool	,							jvm
+-no-stdlib			bool	,							jvm
+-nowarn			bool	,							jvm
+-opt-in		-Xopt-in	array	,							jvm
+-progressive		-Xprogressive	bool	,							jvm
+-script			bool	,							jvm
+-script-templates			array	,							jvm
+-verbose			bool	,							jvm
+-version			bool	,							jvm

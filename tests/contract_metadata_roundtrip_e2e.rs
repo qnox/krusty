@@ -85,3 +85,39 @@ fn context_parameter_contract_round_trip_cross_module() {
         "OK"
     );
 }
+
+const MEMBER_LIB: &str = "import kotlin.contracts.ExperimentalContracts\n\
+import kotlin.contracts.contract\n\
+sealed class Opt<A> {\n\
+    class Some<A>(val value: A) : Opt<A>()\n\
+    class None<A> : Opt<A>()\n\
+}\n\
+class Checker<A> {\n\
+    @OptIn(ExperimentalContracts::class)\n\
+    fun isSome(o: Opt<A>): Boolean {\n\
+        contract { returns(true) implies (o is Opt.Some<A>) }\n\
+        return o is Opt.Some<A>\n\
+    }\n\
+}\n";
+
+/// A member's contract names its class's type parameter (`o is Opt.Some<A>`, the shape of
+/// arrow-core's `Either.isLeft()`). Reading it back needs the class's type parameters in scope;
+/// without them the contract was invalid metadata, and both classes failed to resolve.
+#[test]
+fn a_member_contract_naming_a_class_type_parameter_loads() {
+    const MAIN: &str =
+        "fun box(): String = if (Checker<String>().isSome(Opt.Some(\"OK\"))) \"OK\" else \"FAIL\"\n";
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let lib = common::compile_lib("member_class_tparam", MEMBER_LIB).expect("the library compiles");
+    assert_eq!(
+        common::compile_and_run_box(
+            MAIN,
+            "Main",
+            &[lib, stdlib, jdk.clone()],
+            Some(jdk.as_path())
+        )
+        .as_deref(),
+        Some("OK")
+    );
+}

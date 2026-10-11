@@ -1,9 +1,38 @@
-//! Source locations retained for declaration modifiers with modifier-owned diagnostics.
+//! Declaration modifiers: the source locations kept for modifier-owned diagnostics, and the
+//! modality a modifier list selects.
 
 use super::{Parser, TokenKind};
 use crate::ast::{AnnotationRef, DeclarationPrefix, ExprId};
 use crate::diag::Span;
 use crate::types::Visibility;
+
+/// Map parsed class modifiers to their declaration modality. `sealed` wins because it implies
+/// abstract and open; otherwise an explicit abstract/open modifier wins over the final default.
+pub(super) fn modality_of(
+    is_open: bool,
+    is_abstract: bool,
+    is_sealed: bool,
+) -> crate::ast::Modality {
+    use crate::ast::Modality;
+    if is_sealed {
+        Modality::Sealed
+    } else if is_abstract {
+        Modality::Abstract
+    } else if is_open {
+        Modality::Open
+    } else {
+        Modality::Final
+    }
+}
+
+pub(super) fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
+    let sealed = modifiers.iter().any(|modifier| modifier == "sealed");
+    modality_of(
+        sealed || modifiers.iter().any(|modifier| modifier == "open"),
+        sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
+        sealed,
+    )
+}
 
 /// The modifier list of the declaration being parsed, accumulated across its `skip_decl_prefix`
 /// runs (a context clause or `companion` may separate them) until the declaration records it.
@@ -74,13 +103,11 @@ impl Parser<'_> {
                 let (qname, annotation_span) = self.parse_annotation_reference();
                 let args = self.parse_annotation_args();
                 if !qname.is_empty() {
-                    self.file.file_annotations.push((
-                        AnnotationRef {
-                            name: qname,
-                            span: annotation_span,
-                        },
-                        args,
-                    ));
+                    let annotation = AnnotationRef {
+                        name: qname,
+                        span: annotation_span,
+                    };
+                    self.file.file_annotations.push((annotation, args));
                 }
                 if self.at(TokenKind::Comma) {
                     self.bump();
@@ -92,13 +119,11 @@ impl Parser<'_> {
         let (qname, annotation_span) = self.parse_annotation_reference();
         let args = self.parse_annotation_args();
         if target == "file" && !qname.is_empty() {
-            self.file.file_annotations.push((
-                AnnotationRef {
-                    name: qname.clone(),
-                    span: annotation_span,
-                },
-                args.clone(),
-            ));
+            let annotation = AnnotationRef {
+                name: qname.clone(),
+                span: annotation_span,
+            };
+            self.file.file_annotations.push((annotation, args.clone()));
         }
         if use_site || qname.is_empty() {
             (None, args)
@@ -157,6 +182,9 @@ impl Parser<'_> {
                         .visibility
                         .get_or_insert(Visibility::from_modifier(&text));
                 }
+                if text == "value" {
+                    self.value_modifier_span = Some(self.tok().span);
+                }
                 mods.push(text);
                 self.bump();
             } else {
@@ -182,6 +210,17 @@ impl Parser<'_> {
 }
 
 impl Parser<'_> {
+    /// The `value` keyword in `modifiers`, if this prefix wrote one. Cleared so a nested class
+    /// parsed next records its own keyword.
+    pub(super) fn take_value_modifier_span(&mut self, modifiers: &[String]) -> Option<Span> {
+        let span = self.value_modifier_span.take();
+        modifiers
+            .iter()
+            .any(|modifier| modifier == "value")
+            .then_some(span)
+            .flatten()
+    }
+
     /// Start a declaration whose modifier list [`Parser::record_declaration_prefix`] will keep.
     pub(super) fn begin_declaration_prefix(&mut self) {
         self.declaration_prefix = PrefixInProgress::default();
@@ -202,6 +241,7 @@ impl Parser<'_> {
         let prefix = std::mem::take(&mut self.declaration_prefix);
         let after = self.tok().span;
         let mut keys = vec![start, after.lo];
+        let mut classifier_keyword = None;
         let mut index = self.i;
         while self.t.get(index).is_some_and(|token| {
             ["data", "enum", "annotation", "companion"]
@@ -221,6 +261,7 @@ impl Parser<'_> {
                 || self.token_keyword_text(**token, "interface")
         }) {
             keys.push(keyword.span.lo);
+            classifier_keyword = Some(keyword.span);
             if let Some(name) = self.t.get(index + 1).filter(|t| t.kind == TokenKind::Ident) {
                 keys.push(name.span.lo);
             }
@@ -230,6 +271,8 @@ impl Parser<'_> {
             DeclarationPrefix {
                 start: prefix.first_modifier.unwrap_or(after),
                 visibility: prefix.visibility,
+                declaration_start: start,
+                classifier_keyword,
             },
         );
     }
@@ -237,7 +280,8 @@ impl Parser<'_> {
 
 /// The function flags a modifier list declares.
 pub(super) fn function_flags(modifiers: &[String]) -> crate::ast::FdFlags {
-    let mut flags = crate::ast::FdFlags::default();
+    let mut flags = crate::ast::FdFlags::default()
+        .with_has_visibility_modifier(has_visibility_modifier(modifiers));
     let mut is_final = false;
     let mut is_open = false;
     for modifier in modifiers {
@@ -276,6 +320,14 @@ pub(super) fn visibility_of(modifiers: &[String]) -> Visibility {
         .find(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
         .map(|m| Visibility::from_modifier(m))
         .unwrap_or_default()
+}
+
+/// Whether the modifier list wrote a visibility keyword. An `override` with none keeps the
+/// overridden member's visibility rather than defaulting to `public`.
+pub(super) fn has_visibility_modifier(modifiers: &[String]) -> bool {
+    modifiers
+        .iter()
+        .any(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
 }
 
 /// Return the source span of `modifier` when it was present in the parsed modifier set.

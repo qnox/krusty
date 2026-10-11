@@ -26,6 +26,8 @@ mod escaping_lambda;
 mod property_accessors;
 
 #[cfg(test)]
+mod escaping_inline_object;
+#[cfg(test)]
 mod escaping_reified_lambda;
 #[cfg(test)]
 mod escaping_reified_object;
@@ -51,6 +53,28 @@ pub(super) fn specialize_inline_copy(
     bindings: &HashMap<String, Ty>,
     runtime: &HashMap<String, Ty>,
 ) -> Option<()> {
+    // Keep the declaration type of an unnamed, non-reified generic temporary as provenance. The
+    // copied expression itself is still specialized semantically; a backend can use the retained
+    // declaration type when choosing the temporary's physical representation.
+    let declared_temporary = match ir.expr(expression) {
+        IrExpr::Variable {
+            ty, named: false, ..
+        } => match ty.non_null() {
+            Ty::TyParam(name, _) if !runtime.contains_key(name) => Some(*ty),
+            Ty::DefinitelyNotNull(inner)
+                if inner
+                    .ty_param_name()
+                    .is_some_and(|name| !runtime.contains_key(name)) =>
+            {
+                Some(*ty)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(declared) = declared_temporary {
+        ir.record_inline_declared_type(expression, declared);
+    }
     specialize_recorded_facts(ir, expression, bindings, runtime);
     {
         let expression = ir.exprs.get_mut(expression as usize)?;
@@ -58,6 +82,15 @@ pub(super) fn specialize_inline_copy(
         specialize_dependency_substitutions(expression, runtime);
     }
     Some(())
+}
+
+/// A return an inline expansion leaves through: the `return` node, its value, and whether a nested
+/// lambda's template holds it.
+#[derive(Clone, Copy)]
+struct InlineReturn {
+    returned: ExprId,
+    value: Option<ExprId>,
+    nested: bool,
 }
 
 /// What one physical operand position of an inline expansion fills.
@@ -159,7 +192,7 @@ fn checked_substitution_bindings<'a>(
         .filter(|substitution| substitution.reified)
         .filter_map(|substitution| match substitution.parameter {
             FirTypeParameterRef::Module(parameter) => module_parameter_name(parameter)
-                .map(|name| (name.to_owned(), substitution.value.get())),
+                .map(|name| (name.to_owned(), substitution.reified_runtime.get())),
             FirTypeParameterRef::External { .. } => None,
         })
         .collect::<HashMap<_, _>>();
@@ -263,11 +296,12 @@ impl BodyLowering<'_> {
         let close_line = self.ir.fn_close_lines.get(&function).copied();
         // The name its inline frames are opened under.
         let callee = self.index.callable_name(target)?.to_owned();
+        let callable = self.index.callable(target)?;
         let source_owner = self
             .index
-            .callable(target)
-            .and_then(|callable| self.index.enclosing_classifier(callable.declaration))
+            .enclosing_classifier(callable.declaration)
             .map(|classifier| classifier.classifier);
+        let callee_source = self.index.declaration_anchor(callable.declaration)?.source;
         let caller_source_name = match self.body.debug_name() {
             Some(name) => name.to_owned(),
             None => match self.expansion_enclosure {
@@ -504,6 +538,7 @@ impl BodyLowering<'_> {
         }
         let mut operand_declarations = Vec::new();
         let mut defaulted = Vec::new();
+        let mut staging_failed = false;
         let operand_slots = plans
             .into_iter()
             .zip(operands.iter())
@@ -511,7 +546,23 @@ impl BodyLowering<'_> {
             .enumerate()
             .map(
                 |(index, ((plan, operand), (specialized_ty, declared_ty)))| match plan {
-                    InlineOperandPlan::Splice => None,
+                    InlineOperandPlan::Splice => {
+                        // A spliced reference is not a value, but its receiver and captures are
+                        // ordinary argument expressions: they run here, before the next argument,
+                        // and the body reads the values.
+                        if let Some(operand) = *operand {
+                            if self
+                                .stage_spliced_reference_operands(
+                                    operand,
+                                    &mut operand_declarations,
+                                )
+                                .is_none()
+                            {
+                                staging_failed = true;
+                            }
+                        }
+                        None
+                    }
                     InlineOperandPlan::Reuse(slot) => Some(slot),
                     InlineOperandPlan::Default => {
                         let slot = self.allocate_temporary();
@@ -529,7 +580,7 @@ impl BodyLowering<'_> {
                         });
                         self.ir.call_operand_bindings.insert(declaration);
                         self.ir
-                            .record_inline_operand_declared_type(declaration, *declared_ty);
+                            .record_inline_declared_type(declaration, *declared_ty);
                         if let Some(parameter) = parameter_names.get(index) {
                             if let Some(source_name) = parameter.source_name.clone() {
                                 self.ir.value_names.insert(declaration, source_name);
@@ -545,12 +596,21 @@ impl BodyLowering<'_> {
                 },
             )
             .collect::<Vec<_>>();
+        if staging_failed {
+            return None;
+        }
         let mut inline_lambdas = inline_lambdas.to_vec();
         // A copied lambda is a value. Leaving it in this table would replace every read with a
         // fresh copy of the literal, so `x === x` would compare two objects.
         for (lambda, splice) in inline_lambdas.iter_mut().zip(&splice_lambda) {
             if !splice {
                 *lambda = None;
+            } else if let Some(reference) = *lambda {
+                if matches!(self.ir.expr(reference), IrExpr::CallableReference(_)) {
+                    self.ir
+                        .inline_callable_reference_arguments
+                        .insert(reference);
+                }
             }
         }
         let mut default_lambda_implementations = Vec::new();
@@ -649,7 +709,7 @@ impl BodyLowering<'_> {
         // and a break per return — so nothing is reserved or allocated until the shape is known.
         // Reserving first left a hole in the local numbering and a pair of unreachable arena nodes
         // behind every successful tail promotion, which shifts every later local identity.
-        let mut returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
+        let mut returns: Vec<InlineReturn> = Vec::new();
         // Copies whose `GetValue` of an inline parameter was replaced by that parameter's lambda.
         // A capture temporary initialized from one of these is the lambda, even though the
         // invocation still reads the temporary.
@@ -663,7 +723,8 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
         for &(source, copy) in &copies {
-            self.ir.record_inline_copy_owner(copy, source_owner);
+            self.ir
+                .record_inline_copy_owner(copy, function, source_owner, callee_source);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
             // A deferred source local carries explicit declaration provenance instead: its
             // semantic type specializes normally, and each backend selects its physical zero.
@@ -709,15 +770,49 @@ impl BodyLowering<'_> {
                 }
             }
             if protected.contains(&source) {
+                // A nested lambda's template keeps its own numbering, but a return it carries that
+                // its boundaries already moved to this declaration leaves this expansion too.
+                if let (IrExpr::Return(value), Some(0)) = (
+                    self.ir.expr(copy).clone(),
+                    self.ir.checked_return_depths.get(&copy).copied(),
+                ) {
+                    returns.push(InlineReturn {
+                        returned: copy,
+                        value,
+                        nested: true,
+                    });
+                    self.ir.checked_return_depths.remove(&copy);
+                }
                 continue;
             }
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
-                    self.ir.exprs[copy as usize] = self.ir.expr(*lambda).clone();
+                    let lambda = *lambda;
+                    self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
+                    // The parameter read's end line is the callee's `block(this)`. The splice's
+                    // closing `nop` belongs on the call-site lambda's `}`.
+                    if let Some(&end) = self.ir.expr_end_lines.get(&lambda) {
+                        self.ir.expr_end_lines.insert(copy, end);
+                    }
+                    // The parameter read carried the inline body's line. A callable reference is
+                    // the call site's expression: the spliced invocation keeps that line, and the
+                    // frame-closing nop can then return to the inlined call.
+                    if matches!(self.ir.expr(lambda), IrExpr::CallableReference(_)) {
+                        // A copy that an invocation splices is marked there. A copy the body
+                        // evaluates (an object capturing the reference) stays a carrier.
+                        match self.ir.expr_source_lines.get(&lambda).copied() {
+                            Some(line) => {
+                                self.ir.expr_source_lines.insert(copy, line);
+                            }
+                            None => {
+                                self.ir.expr_source_lines.remove(&copy);
+                            }
+                        }
+                    }
                     substituted_inline_lambdas.insert(copy);
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
-                    if let Some(ty) = self.ir.logical_types.get(lambda).copied() {
+                    if let Some(ty) = self.ir.logical_types.get(&lambda).copied() {
                         self.ir.logical_types.insert(copy, ty);
                     }
                     continue;
@@ -735,7 +830,11 @@ impl BodyLowering<'_> {
                 _ => None,
             };
             if let Some(value) = returned {
-                returns.push((copy, value));
+                returns.push(InlineReturn {
+                    returned: copy,
+                    value,
+                    nested: false,
+                });
                 // This return has crossed its checked callable boundary and will be represented by
                 // the block that replaces it, in EITHER shape. The sparse depth fact belongs to the
                 // old `Return` node; leaving it on the replacement makes an enclosing inline-lambda
@@ -803,10 +902,7 @@ impl BodyLowering<'_> {
                 matches!(
                     self.ir.expr(*expression),
                     IrExpr::InvokeFunction { func, .. }
-                        if matches!(
-                            self.ir.expr(*func),
-                            IrExpr::Lambda { inline_body: Some(_), .. }
-                        )
+                        if lambda_invocation_is_spliceable(self.ir, *expression, *func)
                 )
             })
             .collect::<Vec<_>>();
@@ -852,8 +948,13 @@ impl BodyLowering<'_> {
         // emits — it leaves it on the operand stack. The loop form costs an unnamed local, and when
         // the expansion crosses a suspension that local takes a continuation field kotlinc has no
         // counterpart for.
-        if let [(tail, value)] = returns[..] {
-            if produce_sole_tail_return(self.ir, cloned_root, tail, value, close_line) {
+        if let [InlineReturn {
+            returned: tail,
+            value,
+            nested: false,
+        }] = returns[..]
+        {
+            if produce_sole_tail_return(self.ir, cloned_root, tail, value, result_ty, close_line) {
                 let mut statements = operand_declarations;
                 statements.push(cloned_root);
                 let value = statements.pop();
@@ -867,17 +968,26 @@ impl BodyLowering<'_> {
         // The loop shape, and only now: the result local is reserved here, so a promoted expansion
         // above leaves no hole in the numbering, and each return is rewritten into the break that
         // carries it out.
-        let result_slot = (result_ty != Ty::Unit).then(|| {
+        // A generic return specialized to `Unit` still carries the semantic Unit value through a
+        // `finally`; a function declared to return `Unit` has no value to carry.
+        let declared_ret = self.ir.functions[function as usize].ret;
+        let generic_unit_result =
+            result_ty == Ty::Unit && declared_ret.non_null().ty_param_name().is_some();
+        let result_slot = (result_ty != Ty::Unit || generic_unit_result).then(|| {
             let slot = self.next_temporary;
             self.next_temporary += 1;
             slot
         });
         let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
-        for (copy, value) in returns {
-            let exit = self.ir.add_expr(IrExpr::Break {
-                label: Some(label.clone()),
-            });
-            self.ir.exprs[copy as usize] = inline_return_exit(self.ir, result_slot, value, exit);
+        for found in returns {
+            self.ir.exprs[found.returned as usize] = super::inline_returns::frame_exit(
+                self.ir,
+                &label,
+                result_slot,
+                found.nested,
+                found.value,
+                found.returned,
+            );
         }
 
         let mut statements = operand_declarations;
@@ -885,12 +995,24 @@ impl BodyLowering<'_> {
             let initial = self
                 .ir
                 .add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
-            statements.push(self.ir.add_expr(IrExpr::Variable {
+            let declaration = self.ir.add_expr(IrExpr::Variable {
                 index: slot,
                 ty: stored_value_ty(result_ty),
                 init: Some(initial),
                 named: false,
-            }));
+            });
+            if declared_ret
+                .non_null()
+                .ty_param_name()
+                .is_some_and(|name| !reified_bindings.contains_key(name))
+            {
+                self.ir
+                    .record_inline_declared_type(declaration, declared_ret);
+            }
+            self.ir
+                .inline_return_frames
+                .insert(declaration, label.clone());
+            statements.push(declaration);
         }
         let fallthrough = self.ir.add_expr(IrExpr::Break {
             label: Some(label.clone()),
@@ -910,7 +1032,8 @@ impl BodyLowering<'_> {
         let value = match result_slot {
             None => {
                 let unit = self.ir.add_expr(IrExpr::UnitInstance);
-                self.ir.record_inline_copy_owner(unit, source_owner);
+                self.ir
+                    .record_inline_copy_owner(unit, function, source_owner, callee_source);
                 if let Some(line) = close_line {
                     self.ir.expr_source_lines.insert(unit, line);
                 }
@@ -955,10 +1078,63 @@ impl BodyLowering<'_> {
         expression
     }
 
+    /// Evaluate a spliced callable reference's receiver and captures before the inline body.
+    ///
+    /// The reference itself is not a value: the body invokes it. The expressions that build it
+    /// are still arguments of the call, so they run in that argument's place and the reference
+    /// reads the stored values. A local read has already run.
+    pub(super) fn stage_spliced_reference_operands(
+        &mut self,
+        reference: ExprId,
+        declarations: &mut Vec<ExprId>,
+    ) -> Option<()> {
+        let IrExpr::CallableReference(mut callable) = self.ir.expr(reference).clone() else {
+            return Some(());
+        };
+        let mut operands = Vec::new();
+        if let Some(receiver) = callable.bound_receiver {
+            operands.push(receiver);
+        }
+        operands.extend(callable.captures.iter().copied());
+        if operands.is_empty() {
+            return Some(());
+        }
+        let mut staged = Vec::with_capacity(operands.len());
+        for value in operands {
+            if matches!(self.ir.expr(value), IrExpr::GetValue(_)) {
+                staged.push(value);
+                continue;
+            }
+            let ty = self.ir.logical_types.get(&value).copied()?;
+            let slot = self.allocate_temporary();
+            let declaration = self.ir.add_expr(IrExpr::Variable {
+                index: slot,
+                ty: stored_value_ty(ty),
+                init: Some(value),
+                named: false,
+            });
+            declarations.push(declaration);
+            let read = self.ir.add_expr(IrExpr::GetValue(slot));
+            self.ir.logical_types.insert(read, ty);
+            staged.push(read);
+        }
+        let bound = usize::from(callable.bound_receiver.is_some());
+        if bound == 1 {
+            callable.bound_receiver = Some(staged[0]);
+        }
+        callable.captures = staged[bound..].to_vec();
+        self.ir.exprs[reference as usize] = IrExpr::CallableReference(callable);
+        Some(())
+    }
+
     /// Record an inline-depth frame boundary named `callee`, live to the end of the block that
     /// declares it. It is not a value: the JVM debug boundary materializes the slot, the zero
     /// store, and the spelling.
-    fn inline_marker(&mut self, callee: String, provenance: IrDebugLocalProvenance) -> ExprId {
+    pub(super) fn inline_marker(
+        &mut self,
+        callee: String,
+        provenance: IrDebugLocalProvenance,
+    ) -> ExprId {
         let declaration = self.ir.add_expr(IrExpr::InlineFrameMarker);
         self.ir.value_names.insert(declaration, callee);
         self.ir.set_debug_local_provenance(declaration, provenance);
@@ -982,14 +1158,23 @@ impl BodyLowering<'_> {
         if !lambda_invocation_is_spliceable(self.ir, invocation, func) {
             return None;
         }
-        let IrExpr::Lambda {
-            impl_fn,
-            captures,
-            inline_body: Some(inline_body),
-            ..
-        } = self.ir.expr(func).clone()
-        else {
-            return None;
+        let (impl_fn, captures, inline_body, indexed_parameters) = match self.ir.expr(func).clone()
+        {
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                inline_body: Some(inline_body),
+                ..
+            } => (impl_fn, captures, inline_body, false),
+            IrExpr::CallableReference(_) => {
+                let (impl_fn, captures, inline_body, _) =
+                    super::source_calls::inline_argument_template(self.ir, func)?;
+                // This node stays a callable reference after the invocation is replaced. It is
+                // not a value: a carrier for it would keep the adapter off the inline marker.
+                self.ir.inline_callable_reference_arguments.insert(func);
+                (impl_fn, captures, inline_body, true)
+            }
+            _ => return None,
         };
         let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
 
@@ -1035,17 +1220,26 @@ impl BodyLowering<'_> {
                 declarations.push(declaration);
                 slot
             } else {
-                let source_name = (parameter as usize >= capture_count)
-                    .then(|| {
-                        lambda_parameter_identities
-                            .as_ref()
-                            .and_then(|identities| identities.get(parameter as usize))
-                            .and_then(|identity| identity.source_name.clone())
-                    })
+                let reference_parameter = indexed_parameters
+                    .then(|| (parameter as usize).checked_sub(capture_count))
                     .flatten();
+                let source_name = if reference_parameter.is_some() {
+                    None
+                } else {
+                    (parameter as usize >= capture_count)
+                        .then(|| {
+                            lambda_parameter_identities
+                                .as_ref()
+                                .and_then(|identities| identities.get(parameter as usize))
+                                .and_then(|identity| identity.source_name.clone())
+                        })
+                        .flatten()
+                };
                 match (self.ir.expr(value), &source_name, binding) {
-                    (IrExpr::GetValue(slot), None, _)
-                    | (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
+                    // A callable-reference parameter is `pN` even when the argument already
+                    // lives in a slot. Reusing that slot would drop the local kotlinc writes.
+                    (IrExpr::GetValue(slot), None, _) if reference_parameter.is_none() => *slot,
+                    (IrExpr::GetValue(slot), _, LambdaParameterBinding::Remapped) => *slot,
                     (_, _, LambdaParameterBinding::Remapped) => return None,
                     _ => {
                         let slot = self.allocate_temporary();
@@ -1058,6 +1252,18 @@ impl BodyLowering<'_> {
                         self.ir.call_operand_bindings.insert(declaration);
                         if let Some(name) = source_name {
                             self.ir.value_names.insert(declaration, name);
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
+                            );
+                        }
+                        if let Some(ordinal) = reference_parameter {
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::InlineCallableReferenceParameter {
+                                    ordinal: u32::try_from(ordinal).ok()?,
+                                },
+                            );
                         }
                         declarations.push(declaration);
                         slot
@@ -1080,8 +1286,32 @@ impl BodyLowering<'_> {
                 },
             ));
         }
-
         let (body, _) = crate::ir::clone_expression_dag(self.ir, inline_body);
+        // An empty spliced body has no instruction after its parameter/frame locals begin. Keep
+        // the invocation's semantic source point on its terminal Unit so a backend can close the
+        // locals first and then anchor the surrounding inline body. Non-empty bodies already
+        // restore that line through their emitted effect and must not gain a duplicate boundary.
+        if let Some(unit) = unit_only_body_result(self.ir, body) {
+            if let Some(line) = self.ir.expr_source_lines.get(&invocation).copied() {
+                // With no body instruction, argument evaluation is the invocation's first
+                // physical instruction. Put that source point on the generated bindings; an
+                // enclosing inline copy maps it through the caller frame retained below.
+                for &declaration in &declarations {
+                    self.ir.expr_lines.insert(declaration, line);
+                    self.ir.copy_inline_copy_mark(invocation, declaration);
+                }
+                self.ir.copy_inline_copy_mark(invocation, unit);
+                self.ir.expr_source_lines.insert(unit, line);
+                self.ir.retain_inline_unit_line(unit);
+            }
+        }
+        if indexed_parameters {
+            if let Some(line) = self.ir.expr_source_lines.get(&func).copied() {
+                // The adapter was built as its own method and has no source position. The splice
+                // is the reference expression, so this call keeps that line.
+                self.ir.expr_source_lines.insert(body, line);
+            }
+        }
         let local_base = self.next_temporary;
         let local_count = super::source_calls::rehome_inline_body_values(
             self.ir,
@@ -1090,12 +1320,21 @@ impl BodyLowering<'_> {
             local_base,
         )?;
         self.next_temporary = local_base.checked_add(local_count)?;
-        self.ir.inline_only_fns.insert(impl_fn);
-        self.ir.functions.get_mut(impl_fn as usize)?.body = None;
+        // A callable-reference adapter may still be the invoke of a carrier realized for another
+        // use of the same reference. Only a source lambda's implementation is consumed by the splice.
+        if !indexed_parameters {
+            self.ir.inline_only_fns.insert(impl_fn);
+            self.ir.functions.get_mut(impl_fn as usize)?.body = None;
+        }
         self.ir.exprs[invocation as usize] = IrExpr::Block {
             stmts: declarations,
             value: Some(body),
         };
+        // The closing `nop` is the lambda literal's last line (its `}`), which is otherwise a
+        // line that already holds the call and the nop cleanup would delete.
+        if let Some(end) = self.ir.expr_end_lines.get(&func).copied() {
+            self.ir.expr_end_lines.insert(invocation, end);
+        }
         // The spliced body's own calls are the suspension points now, not the invocation.
         self.ir.suspend_calls.remove(&invocation);
         self.ir.suspend_call_overridden_results.remove(&invocation);
@@ -1114,23 +1353,37 @@ fn lambda_invocation_is_spliceable(
     let IrExpr::InvokeFunction { args, .. } = ir.expr(invocation) else {
         return false;
     };
-    let IrExpr::Lambda {
-        impl_fn,
-        arity,
-        captures,
-        inline_body: Some(_),
-        ..
-    } = ir.expr(lambda)
-    else {
-        return false;
-    };
-    // A suspend lambda's arity counts the continuation its invocation passes implicitly.
-    let suspend = ir.suspend_funs.contains(impl_fn);
-    args.len() + usize::from(suspend) == *arity as usize
-        && ir
-            .functions
-            .get(*impl_fn as usize)
-            .is_some_and(|function| function.params.len() == captures.len() + args.len())
+    let arg_count = args.len();
+    match ir.expr(lambda).clone() {
+        IrExpr::Lambda {
+            impl_fn,
+            arity,
+            captures,
+            inline_body: Some(_),
+            ..
+        } => {
+            // A suspend lambda's arity counts the continuation its invocation passes implicitly.
+            let suspend = ir.suspend_funs.contains(&impl_fn);
+            arg_count + usize::from(suspend) == usize::from(arity)
+                && ir
+                    .functions
+                    .get(impl_fn as usize)
+                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
+        }
+        IrExpr::CallableReference(_) => {
+            let Some((impl_fn, captures, _, arity)) =
+                super::source_calls::inline_argument_template(ir, lambda)
+            else {
+                return false;
+            };
+            arg_count == arity
+                && ir
+                    .functions
+                    .get(impl_fn as usize)
+                    .is_some_and(|function| function.params.len() == captures.len() + arg_count)
+        }
+        _ => false,
+    }
 }
 
 /// How a spliced lambda's parameters meet the arguments of its invocation.
@@ -1336,6 +1589,7 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::GetValue(_)
         | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::SetValue { .. }
+        | IrExpr::SetFrameResult { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
@@ -1468,6 +1722,7 @@ fn specialize_checked_substitution(
     bindings: &HashMap<String, Ty>,
 ) {
     specialize_ty(&mut substitution.value, bindings);
+    specialize_ty(&mut substitution.reified_runtime, bindings);
     specialize_tys(&mut substitution.additional_bounds, bindings);
 }
 
@@ -1742,26 +1997,28 @@ fn specialize_checked_operation(
     }
 }
 
-/// The block that replaces one cloned `return` inside an expansion's exit loop.
-///
-/// A non-`Unit` result is stored and read after the loop. A `Unit` result has no slot, but
-/// `return expr` still evaluates `expr`: the call in `return f2(y)` is that expression.
-fn inline_return_exit(
-    ir: &mut crate::ir::IrFile,
-    result_slot: Option<u32>,
-    value: Option<ExprId>,
-    exit: ExprId,
-) -> IrExpr {
-    let mut stmts = Vec::new();
-    if let Some(value) = value {
-        if let Some(slot) = result_slot {
-            stmts.push(ir.add_expr(IrExpr::SetValue { var: slot, value }));
-        } else {
-            stmts.push(value);
+/// The terminal Unit of a body made only of empty block scaffolding and Unit values. Such a body
+/// emits no operation of its own, unlike an ordinary Unit body whose effects restore the caller's
+/// line naturally.
+fn unit_only_body_result(ir: &crate::ir::IrFile, root: ExprId) -> Option<ExprId> {
+    fn is_scaffolding(ir: &crate::ir::IrFile, expression: ExprId) -> bool {
+        match ir.expr(expression) {
+            IrExpr::UnitInstance => true,
+            IrExpr::Block { stmts, value } => {
+                stmts.iter().all(|&statement| is_scaffolding(ir, statement))
+                    && value.is_none_or(|value| is_scaffolding(ir, value))
+            }
+            _ => false,
         }
     }
-    stmts.push(exit);
-    IrExpr::Block { stmts, value: None }
+
+    let IrExpr::Block {
+        value: Some(unit), ..
+    } = ir.expr(root)
+    else {
+        return None;
+    };
+    (matches!(ir.expr(*unit), IrExpr::UnitInstance) && is_scaffolding(ir, root)).then_some(*unit)
 }
 
 /// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.
@@ -1777,12 +2034,35 @@ fn produce_sole_tail_return(
     root: ExprId,
     tail: ExprId,
     value: Option<ExprId>,
+    result_ty: Ty,
     close_line: Option<u32>,
 ) -> bool {
     let Some(chain) = tail_statement_block_chain(ir, root, tail) else {
         return false;
     };
-    let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+    let mut produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+    if result_ty == Ty::Unit && !matches!(ir.expr(produced), IrExpr::UnitInstance) {
+        let effect = produced;
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        ir.copy_inline_copy_mark(tail, unit);
+        if let Some(line) = ir
+            .expr_source_lines
+            .get(&tail)
+            .copied()
+            .or_else(|| ir.expr_source_lines.get(&effect).copied())
+            .or_else(|| ir.fallthrough_return_line(tail))
+            .or_else(|| ir.expr_end_lines.get(&tail).copied())
+            .or_else(|| ir.expr_end_lines.get(&root).copied())
+            .or(close_line)
+        {
+            ir.expr_source_lines.insert(unit, line);
+        }
+        ir.retain_inline_unit_line(unit);
+        produced = ir.add_expr(IrExpr::Block {
+            stmts: vec![effect],
+            value: Some(unit),
+        });
+    }
     if matches!(ir.expr(produced), IrExpr::UnitInstance) {
         ir.copy_inline_copy_mark(tail, produced);
         if !ir.expr_source_lines.contains_key(&produced) {
@@ -1859,12 +2139,14 @@ mod expansion_mode_tests {
                 parameter: FirTypeParameterRef::Module(ordinary),
                 reified: false,
                 value: ResolvedTy::new(Ty::String).unwrap(),
+                reified_runtime: ResolvedTy::new(Ty::String).unwrap(),
                 additional_bounds: Box::new([]),
             },
             FirTypeSubstitution {
                 parameter: FirTypeParameterRef::Module(reified),
                 reified: true,
                 value: ResolvedTy::new(Ty::Int).unwrap(),
+                reified_runtime: ResolvedTy::new(Ty::Int).unwrap(),
                 additional_bounds: Box::new([]),
             },
         ];
@@ -1949,6 +2231,7 @@ mod value_rebasing_tests {
 mod tail_promotion_tests {
     use super::{produce_sole_tail_return, tail_statement_block_chain};
     use crate::ir::{ExprId, IrConst, IrExpr, IrFile};
+    use crate::types::Ty;
 
     fn statement(ir: &mut IrFile, value: i32) -> ExprId {
         ir.add_expr(IrExpr::Const(IrConst::Int(value)))
@@ -1990,6 +2273,7 @@ mod tail_promotion_tests {
             block,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_block(&ir, block, &[first], Some(tail));
@@ -2013,6 +2297,7 @@ mod tail_promotion_tests {
             outer,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_block(&ir, outer, &[], Some(inner));
@@ -2037,6 +2322,7 @@ mod tail_promotion_tests {
             block,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
@@ -2054,7 +2340,14 @@ mod tail_promotion_tests {
         let block = statement_block(&mut ir, vec![tail, after]);
         let before = arena(&ir);
 
-        assert!(!produce_sole_tail_return(&mut ir, block, tail, None, None,));
+        assert!(!produce_sole_tail_return(
+            &mut ir,
+            block,
+            tail,
+            None,
+            Ty::Unit,
+            None,
+        ));
         assert_eq!(
             arena(&ir),
             before,
@@ -2079,6 +2372,7 @@ mod tail_promotion_tests {
             outer,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
@@ -2103,6 +2397,7 @@ mod tail_promotion_tests {
             block,
             tail,
             Some(returned),
+            Ty::Int,
             None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");

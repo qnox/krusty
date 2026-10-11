@@ -27,7 +27,7 @@ const SRC: &str = "@JvmInline value class R<T>(val a: T)\n\
 
 /// The source file is `Main.kt`, so the functions live in the facade `MainKt`.
 fn assert_same_method(method: &str) {
-    match common::method_code_diff_against_kotlinc("Main", &[], SRC, "MainKt", method) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], SRC, "MainKt", method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{method}: reference toolchain unavailable"),
@@ -61,7 +61,12 @@ fn a_generic_carrier_read_into_a_generic_parameter_keeps_the_box() {
 
 #[test]
 fn values_stored_in_a_generic_carrier_keep_their_boxes() {
-    let output = common::compile_and_run_box(SRC, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }

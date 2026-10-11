@@ -16,7 +16,7 @@ use crate::jvm::classfile::{CodeBuilder, Label};
 use crate::types::Ty;
 
 use super::frame_map::{FrameKey, TempRole, TempSlot};
-use super::{debug_lines, ir_ty_to_jvm, load, local_variable_desc, store, Emitter};
+use super::{discard, ir_ty_to_jvm, load, local_variable_desc, slot_words, store, Emitter};
 
 /// The operands of an IR `try` being emitted, as `IrExpr::Try` holds them.
 pub(super) struct TryParts<'a> {
@@ -94,6 +94,42 @@ impl Emitter<'_> {
         self.close_region_segment(index, code);
     }
 
+    /// Emit one copy of a `finally` body. An `inline` function brackets it with
+    /// `InlineMarker.finallyStart(depth)` and `finallyEnd(depth)`, where `depth` counts this copy.
+    pub(super) fn emit_finalizer_copy(&mut self, finalizer: u32, code: &mut CodeBuilder) {
+        if self.finally_markers {
+            self.finally_marker_depth = self
+                .finally_marker_depth
+                .checked_add(1)
+                .expect("finally marker nesting exceeds u32");
+            self.mark_finally(true, code);
+        }
+        self.emit(finalizer, code);
+        if self.finally_markers {
+            // kotlinc has no dead end marker after a finalizer that returns, throws, breaks, or
+            // continues. Apart from matching its marker contract, omitting that instruction keeps
+            // an unreachable call from requiring a verifier frame of its own.
+            if !self.discarding_diverges(finalizer) {
+                self.mark_finally(false, code);
+            }
+            self.finally_marker_depth = self
+                .finally_marker_depth
+                .checked_sub(1)
+                .expect("finally marker nesting underflow");
+        }
+    }
+
+    fn mark_finally(&mut self, start: bool, code: &mut CodeBuilder) {
+        let depth = i32::try_from(self.finally_marker_depth)
+            .expect("finally marker nesting exceeds the JVM Int argument");
+        code.push_int(depth, self.cw);
+        let name = if start { "finallyStart" } else { "finallyEnd" };
+        let method = self
+            .cw
+            .methodref("kotlin/jvm/internal/InlineMarker", name, "(I)V");
+        code.invokestatic(method, 1, 0);
+    }
+
     /// End the open segments a transfer leaves ahead of the copy of `finalizer` it is about to
     /// inline: that finalizer's own, and those of every `try` nested inside its `try`. A nested
     /// region that is not open — a finalizer's whose copy the transfer already ran, or one whose
@@ -131,6 +167,22 @@ impl Emitter<'_> {
         self.protected_regions.remove(index).segments
     }
 
+    /// The type a `try` leaves on the stack. A spliced inline lambda has a value even when its
+    /// semantic type is `Unit`: kotlinc parks `Unit.INSTANCE` across `finally` and only discards it
+    /// at the landing, so every consumer of such a `try` sees that reference. This is a JVM
+    /// representation choice over the semantic `try` result recorded by common IR.
+    pub(super) fn try_physical_result(
+        &self,
+        expression: u32,
+        result: crate::types::Ty,
+    ) -> crate::types::Ty {
+        if self.ir.inline_cleanup_results.contains(&expression) {
+            crate::types::stored_value_ty(result)
+        } else {
+            result
+        }
+    }
+
     /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
     /// stored into a result temp, then loaded at the merge — mirroring kotlinc. The protected region
     /// covers the body+store; each catch is an exception-table handler whose frame has the caught
@@ -149,9 +201,11 @@ impl Emitter<'_> {
             finally,
             result,
         } = parts;
-        let rt = ir_ty_to_jvm(&result);
+        let inline_cleanup_result = self.ir.inline_cleanup_results.contains(&expression);
+        let physical_result = self.try_physical_result(expression, result);
+        let rt = ir_ty_to_jvm(&physical_result);
         // A discarded `try` runs its branches as statements: no value reaches the result temporary.
-        let is_stmt = discarded || matches!(rt, Ty::Unit | Ty::Nothing);
+        let is_stmt = !inline_cleanup_result && (discarded || matches!(rt, Ty::Unit | Ty::Nothing));
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.is_some_and(|f| self.discarding_diverges(f));
 
@@ -179,6 +233,11 @@ impl Emitter<'_> {
             self.return_finalizers.push(finalizer);
         }
         let stores_body = !is_stmt && !body_diverges;
+        // A diverging body stores nothing. The result temporary, when one is entered below, only
+        // reserves its slot for the handlers. The size here is the frame before the body, so a
+        // local the body leaves can be told apart from a value the body keeps, such as an
+        // inline-return result.
+        let frame_at_body = self.frame.size();
         if stores_body {
             self.emit_value(body, code);
             // kotlinc materializes the body and every catch at the `try`'s own type before the
@@ -190,12 +249,15 @@ impl Emitter<'_> {
             // Statement, or a diverging body (`throw`/`return`): no value reaches the result temp.
             self.emit(body, code);
         }
-        // kotlinc's `visitTry` enters a result temporary for every `try` that is not `Unit` once
-        // the body is emitted, so it takes the slot the body's locals have just left and the catch
-        // parameters sit above it. A `Nothing` one's is a `java/lang/Void` nothing stores.
-        // A discarded `try` still enters it, at the `try`'s own type: kotlinc stores each branch
-        // there and drops the stores once nothing reads them.
-        let result_temp = (rt != Ty::Unit).then(|| {
+        // kotlinc's `visitTryWithInfo` enters a result temporary for every non-`Unit` `try`
+        // once the body is emitted, in the slot the body's locals have just left, so the catch
+        // parameters sit above it. A `Nothing` one's is a `java/lang/Void` nothing stores. The
+        // store after a diverging body is dead and is not emitted; when that index was never
+        // written, the unused-slot pass closes the gap and the catch reuses it. A local the body
+        // left, or a return spill stored into the same index, keeps the slot. An inline-return
+        // result that is still live already occupies the saved-value slot, and another temporary
+        // would sit above it. A `Unit` `try` does not enter one.
+        let result_temp = (rt != Ty::Unit && self.frame.size() <= frame_at_body).then(|| {
             let temp_ty = if rt == Ty::Nothing {
                 Ty::obj("java/lang/Void")
             } else {
@@ -208,6 +270,13 @@ impl Emitter<'_> {
             .filter(|_| !is_stmt)
             .map(TempSlot::slot);
         if stores_body {
+            // The call's line owns the synthetic result store. A trailing same-line `nop` already
+            // carries that mark and will be removed onto the store; otherwise force a fresh mark
+            // after the inlined body's own closing line.
+            if inline_cleanup_result && !code.line_marked_on_trailing_nop() {
+                code.forget_line();
+                self.mark_expression_start(expression, code);
+            }
             store(rt, result_slot.unwrap(), code);
         }
         if let Some(finalizer) = finally {
@@ -242,14 +311,21 @@ impl Emitter<'_> {
                 // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
                 // with this copy: the handler copies below are reached on edges that never stored it.
                 let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                self.emit(f, code);
+                self.emit_finalizer_copy(f, code);
+                if inline_cleanup_result && !fin_diverges {
+                    load(
+                        rt,
+                        result_slot.expect("an inline cleanup result owns a temporary"),
+                        code,
+                    );
+                }
                 if let Some(parked) = parked {
                     self.release_temporary(parked);
                 }
             } // `finally` inlined on the normal path
             if !fin_diverges {
                 if let Some(f) = finally {
-                    debug_lines::mark_block_exit(self.ir, f, code);
+                    self.mark_block_exit(f, code);
                 }
                 code.goto(after);
                 after_reachable = true;
@@ -269,7 +345,7 @@ impl Emitter<'_> {
             // kotlinc marks the clause's own line, its `catch` keyword's, at the handler's entry: the
             // store of the caught exception belongs to the clause, not to its body's first line.
             if let Some(line) = c.line {
-                code.mark_line(line);
+                self.mark_expression_line(expression, line, code);
             }
             let exc_name = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(c.jvm_class());
             let exc_internal = exc_name.jvm_binary_name();
@@ -355,27 +431,39 @@ impl Emitter<'_> {
                 });
                 if let (Some(name), Some(start_pc)) = (rendered.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
-                    code.add_local_entry(
+                    let entry = (
                         start_pc,
                         Some(end_pc.saturating_sub(start_pc)),
                         cslot,
-                        name,
-                        &local_variable_desc(exc_ty),
+                        name.to_string(),
+                        local_variable_desc(exc_ty),
                     );
+                    if let Some(frame) = self.active_inline_frame_identity() {
+                        code.add_inline_frame_catch(frame, entry);
+                    } else {
+                        code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4);
+                    }
                 }
             }
             if !cbody_diverges {
                 if let Some(f) = finally {
                     // Same as the normal path: this catch stored the result, and `after` loads it.
                     let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                    self.emit(f, code);
+                    self.emit_finalizer_copy(f, code);
+                    if inline_cleanup_result && !fin_diverges {
+                        load(
+                            rt,
+                            result_slot.expect("an inline cleanup result owns a temporary"),
+                            code,
+                        );
+                    }
                     if let Some(parked) = parked {
                         self.release_temporary(parked);
                     }
                 } // `finally` inlined after the catch
                 if !fin_diverges {
                     if let Some(f) = finally {
-                        debug_lines::mark_block_exit(self.ir, f, code);
+                        self.mark_block_exit(f, code);
                     }
                     // The LAST catch of a `try` with no `finally` is followed immediately by
                     // `after`: nothing stands between them, so the jump would be to the next
@@ -415,7 +503,7 @@ impl Emitter<'_> {
             let tslot = parked.slot();
             // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
             // keyword — mark it before the store so both copies open on the same line.
-            debug_lines::mark_block_entry(self.ir, f, code);
+            self.mark_finalizer_handler_entry(expression, f, code);
             store(thr_ty, tslot, code);
             // kotlinc protects the handler's own entry — everything ahead of the copy of the
             // finalizer it introduces — with a range of its own.
@@ -429,7 +517,7 @@ impl Emitter<'_> {
             // `top`. It is a backend temporary, not a value, and holds its own lease: nested
             // catch-all handlers each lease their own, and a lease cannot collide with a value id.
             let parked = self.lease_frame_temporary(parked, thr_ty);
-            self.emit(f, code);
+            self.emit_finalizer_copy(f, code);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
@@ -452,8 +540,11 @@ impl Emitter<'_> {
             // numeric key into the semantic slot map.
             let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
             self.bind(after, code);
-            if let Some(slot) = result_slot {
+            if let Some(slot) = result_slot.filter(|_| !inline_cleanup_result) {
                 load(rt, slot, code);
+            }
+            if inline_cleanup_result && discarded {
+                discard(rt, code);
             }
             if let Some(lease) = result_lease {
                 self.release_temporary(lease);
@@ -522,9 +613,52 @@ impl Emitter<'_> {
         };
         let target = if brk { end } else { cont };
         self.mark_expression_start(transfer, code);
+        let transfer_line = code.current_line();
         code.nop();
+        // Every break to an inline-return frame leaves that result on the stack. A path that
+        // skips `finally` and a path that never entered it (`setup() ?: return false` beside
+        // `return block()`) meet at the same label, and kotlinc's landing use is the store, not
+        // another load.
         let survives = self.emit_transfer_finalizers(depth, code);
         if survives {
+            if brk && !code.is_dead() {
+                if let Some(label) = label {
+                    if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
+                        // A generic return specialized to `Unit` stores `kotlin.Unit.INSTANCE`
+                        // and leaves it there. kotlinc does not carry that reference across
+                        // `finally`: a later read is its own `getstatic`, and a discarded call
+                        // never reloads the slot. A primitive result is carried so every path
+                        // into the landing label has it on the stack.
+                        let carries = slot_words(ty) > 0
+                            && ty != Ty::obj("kotlin/Unit")
+                            && !self.discarded_inline_results.contains(&value);
+                        if carries {
+                            let slot = self.activate_inline_return_frame_result(value, ty);
+                            load(ty, slot, code);
+                            if self
+                                .label_stack_resident_values
+                                .insert(target, value)
+                                .is_some_and(|existing| existing != value)
+                            {
+                                self.run.set_emit_error(
+                                    "an inline-return label receives different stack-carried values"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // A transfer's finalizer copies run under their own source lines. Restore the line
+            // `mark_expression_start` already checked — the mapped output line of an inline copy —
+            // at the physical jump, as return emission restores it at `xreturn`. A dead jump is
+            // the finalizer's own exit; marking it lets goto cleanup thread this transfer into
+            // that copy.
+            if !code.is_dead() {
+                if let Some(line) = transfer_line {
+                    code.mark_line(u32::from(line));
+                }
+            }
             code.goto(target);
         }
         self.reopen_finally_segments(code);

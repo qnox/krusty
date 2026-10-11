@@ -51,7 +51,7 @@ impl Parser<'_> {
                 "<error>".to_string()
             };
             self.expect(TokenKind::Colon, "':'");
-            let ty = self.parse_type();
+            let ty = self.parse_vararg_aware_type(is_vararg);
             let default_operator = self.eat_span(TokenKind::Eq);
             let default = if default_operator.is_some() {
                 self.skip_newlines();
@@ -82,5 +82,13 @@ impl Parser<'_> {
         }
         self.expect(TokenKind::RParen, "')'");
         params
+    }
+
+    /// A parameter's written type. On a `vararg` parameter it is the element type, flagged so the
+    /// checker can see that the parameter's own type is the array of it.
+    pub(super) fn parse_vararg_aware_type(&mut self, is_vararg: bool) -> TypeRef {
+        let mut ty = self.parse_type();
+        ty.flags = ty.flags.with_vararg_element(is_vararg);
+        ty
     }
 }

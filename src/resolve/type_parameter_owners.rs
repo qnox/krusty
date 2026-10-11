@@ -76,13 +76,25 @@ impl Checker<'_> {
                 }
             }
         }
-        ty.source_name_with_type_parameter_in(context, &|parameter| {
-            let source = crate::types::type_parameter_source_name(parameter);
-            match self.type_parameter_owners.get(parameter) {
-                Some(owner) => format!("{source} (of {owner})"),
-                None => source.to_string(),
-            }
-        })
+        ty.source_name_with_classifier_in(
+            context,
+            &|parameter| {
+                let source = crate::types::type_parameter_source_name(parameter);
+                match self.type_parameter_owners.get(parameter) {
+                    Some(owner) => format!("{source} (of {owner})"),
+                    None => source.to_string(),
+                }
+            },
+            &|classifier| {
+                let index = self.resolved_index?;
+                let declaration = index.classifier_declaration(classifier)?;
+                index
+                    .local_class_name_provenance(declaration)?
+                    .segments
+                    .last()
+                    .cloned()
+            },
+        )
     }
 
     fn publish_type_parameter_owner(

@@ -216,7 +216,14 @@ impl BodyLowering<'_> {
             FirProgressionSource::Value {
                 progression,
                 iterable,
-            } => self.progression_value(progression, *iterable)?,
+                stepped,
+            } => {
+                let stepped = stepped
+                    .as_deref()
+                    .map(|stepped| self.progression_source(stepped).map(Box::new))
+                    .transpose()?;
+                self.progression_value(progression, *iterable, stepped)?
+            }
             FirProgressionSource::Step {
                 nested,
                 step,
@@ -239,6 +246,7 @@ impl BodyLowering<'_> {
         &mut self,
         progression: &FirProgressionClass,
         iterable: FirExprId,
+        stepped: Option<Box<IrProgressionSource>>,
     ) -> Result<IrProgressionSource, FirLoweringFailure> {
         let value = self.expression(iterable)?;
         let iterable_ty = self
@@ -279,6 +287,7 @@ impl BodyLowering<'_> {
             first,
             last,
             step,
+            stepped,
         })
     }
 
@@ -296,6 +305,8 @@ impl BodyLowering<'_> {
             result,
             extension_receiver_parameter,
             dispatch,
+
+            metadata_constant_read: _,
         } = target
         else {
             return Err(FirLoweringFailure::UnsupportedLoopMember);
@@ -432,11 +443,9 @@ impl BodyLowering<'_> {
         });
         let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
         let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let next_index = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: index_read,
-            rhs: one,
-        });
+        let next_index = self
+            .ir
+            .add_arithmetic(IrBinOp::Add, index_read, one, Ty::Int);
         let update = self.ir.add_expr(IrExpr::SetValue {
             var: index_slot,
             value: next_index,
@@ -661,6 +670,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                overridden_declarations,
                 suspend,
                 can_inline,
                 inline_plan,
@@ -676,6 +686,7 @@ impl BodyLowering<'_> {
                     declared_result: *declared_result,
                     overridden_results,
                     semantic_role: *semantic_role,
+                    overridden_declarations,
                     suspend: *suspend,
                     can_inline: *can_inline,
                     inline_plan: inline_plan.as_deref(),
@@ -685,6 +696,7 @@ impl BodyLowering<'_> {
                     dispatch_class: Self::static_class(*receiver),
                     extension_receiver,
                     arguments,
+                    source_line: None,
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration)),
             crate::fir::FirCallTarget::Intrinsic {

@@ -21,21 +21,36 @@ pub(super) fn emit_lambda_class(
     let class = c.fq_name();
     let arity = u8::try_from(lambda.bridge.param_tys.len())
         .expect("a lambda class's arity fits a numbered FunctionN");
-    // The class's generic header: `Object`, then the function type it implements.
+    // The class's generic header: `Object`, then the function type it implements — except when
+    // kotlinc's `hasNothingInNonContravariantPosition` leaves that supertype raw (no `Signature`).
     let formatter = JvmSignatureFormatter::new(ir, env);
-    let signature = formatter
-        .ty_at(&lambda.function_type, Wildcards::Suppressed)
-        .map(|function| format!("L{OBJECT};{function}"));
+    let signature = if lambda.raw_supertype {
+        None
+    } else {
+        formatter
+            .ty_at(&lambda.function_type, Wildcards::Suppressed)
+            .map(|function| format!("L{OBJECT};{function}"))
+    };
     let mut cw = new_writer_generic(&class, signature.as_deref(), OBJECT, opts);
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
     cw.set_access(0x0010 | 0x0020 | u16::from(lambda.public_inline)); // FINAL | SUPER | publication
+    let inline_default = lambda.inline_default_owner;
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
+        let method = inline_default
+            .map(|function| super::method_defaults::default_stub_method(ir, function, &owner))
+            .or(method);
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
             None => cw.set_enclosing_class(&owner),
         }
+    }
+    if inline_default.is_some() {
+        let lines = u16::try_from(ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        cw.start_inline_origin_source_map(lines);
     }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(arity));
@@ -50,7 +65,7 @@ pub(super) fn emit_lambda_class(
         .map(|(index, field)| Capture {
             names: crate::jvm::capture_names::lambda_class_capture(ir, lambda, index)
                 .expect("every field of a lambda class stores one of its captures"),
-            ty: jvm_declared_ty(&field.ty),
+            ty: jvm_value_ty(&field.ty),
             descriptor: ir_type_desc(&field.ty),
             signature: parameterized_sig(&formatter, &field.ty),
             parameter_signature: parameterized_sig_at(&formatter, &field.ty, Wildcards::Declared),
@@ -190,13 +205,14 @@ pub(super) fn emit_lambda_class(
         add_singleton_instance_field(&mut cw, &class);
     }
     if lambda.public_inline {
-        cw.set_kotlin_metadata(
-            3,
-            &[2, 4, 0],
-            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC),
-            &[],
-            &[],
-        );
+        let mut xi =
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC);
+        // A private `inline` function's default lambda is public on the JVM but not part of the
+        // public ABI. Public and internal owners set the flag.
+        if lambda.public_inline_abi {
+            xi |= super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
+        }
+        cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &[], &[]);
         env.run.finish_class(cw)
     } else {
         finish_local_synthetic_class(cw, env)
@@ -229,11 +245,16 @@ fn emit_initialization(
     if singleton {
         // Retained typed operations still require class reification. A concrete call-site copy
         // contains ordinary specialized operations and therefore has no declaration marker.
-        if class.methods.iter().any(|&method| {
-            ir.functions[method as usize]
-                .body
-                .is_some_and(|body| body_has_reified_markers(ir, body))
-        }) {
+        if class
+            .lambda
+            .as_ref()
+            .is_some_and(|lambda| lambda.requires_reification)
+            || class.methods.iter().any(|&method| {
+                ir.functions[method as usize]
+                    .body
+                    .is_some_and(|body| body_has_reified_markers(ir, body))
+            })
+        {
             let marker = emitter.cw.methodref(
                 "kotlin/jvm/internal/Intrinsics",
                 "needClassReification",

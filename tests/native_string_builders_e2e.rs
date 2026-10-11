@@ -102,6 +102,23 @@ fn append_line_adds_a_newline_and_never_the_platforms_separator() {
 }
 
 #[test]
+fn a_builder_renders_an_element_through_its_own_to_string() {
+    // `append` asks the VALUE how it renders, which for a class of the program's own is the
+    // override it declared -- the same answer `"$value"` gives and not the identity one.
+    expect_native_box(
+        "class Point(val x: Int) {\n\
+         \x20   override fun toString(): String = \"P($x)\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val text = StringBuilder().append(Point(1)).append(listOf(2, 3)).toString()\n\
+         \x20   return if (text == \"P(1)[2, 3]\") \"OK\" else \"fail: $text\"\n\
+         }\n",
+        "BuilderRenders",
+        "OK",
+    );
+}
+
+#[test]
 fn a_builder_holds_its_text_against_the_collector() {
     // The builder's one reference field is the byte array, and the text is traced through it.
     // Enough garbage to force collections while the builder is the only thing keeping it alive.
@@ -160,6 +177,35 @@ fn both_text_types_answer_to_char_sequence() {
          \x20   }\n\
          }\n",
         "CharSequenceDescriptor",
+        "OK",
+    );
+}
+
+#[test]
+fn a_builder_used_inside_an_inline_function_body_is_the_same_builder() {
+    // Inlining copies the callee's checked body into the caller. A builder member call in that
+    // body must reach the backend as the Kotlin member it was resolved to, exactly as the same call
+    // written in the caller does.
+    expect_native_box(
+        "inline fun build(): String { val sb = StringBuilder(); sb.append(\"O\"); sb.append('K'); return sb.toString() }\n\
+         fun box(): String = build()\n",
+        "BuilderInInlineBody",
+        "OK",
+    );
+}
+
+#[test]
+fn a_builder_used_inside_a_lambda_inlined_into_a_call_is_the_same_builder() {
+    expect_native_box(
+        "inline fun run2(block: () -> Unit) = block()\n\
+         inline fun <T> run1(block: () -> T): T = block()\n\
+         fun box(): String {\n\
+         \x20   var r = \"\"\n\
+         \x20   run2 { val sb = StringBuilder(); sb.append(\"O\"); r = sb.toString() }\n\
+         \x20   val sb = StringBuilder(r)\n\
+         \x20   return run1 { sb.append(\"K\"); sb.toString() }\n\
+         }\n",
+        "BuilderInInlinedLambda",
         "OK",
     );
 }

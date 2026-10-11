@@ -40,6 +40,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            visibility_suppressed: false,
             type_variables: &[],
         }
     }
@@ -54,6 +55,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            visibility_suppressed: false,
             type_variables: &[],
         }
     }
@@ -72,6 +74,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            visibility_suppressed: false,
             type_variables: &[],
         }
     }
@@ -89,6 +92,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: Vec::new(),
             access_package: None,
             access_file: None,
+            visibility_suppressed: false,
             type_variables: &[],
         }
     }
@@ -136,6 +140,13 @@ impl SymbolSource for ResolverSource<'_> {
         match self {
             Self::Direct(source) => source.generated_serializer_singleton(classifier),
             Self::Memoized(source) => source.generated_serializer_singleton(classifier),
+        }
+    }
+
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        match self {
+            Self::Direct(source) => source.sam_with_receiver_annotations(),
+            Self::Memoized(source) => source.sam_with_receiver_annotations(),
         }
     }
 }

@@ -174,7 +174,7 @@ fn primitive_receiver_extension_property_getter_has_lvt() {
         source,
         "IarExtPropLvt",
         std::slice::from_ref(&common::stdlib_jar()),
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("iarExtPropLvt: krusty failed to compile");
     let (_, bytes) = classes
@@ -207,8 +207,9 @@ fn var_extension_property_setter_has_lvt() {
                \x20   set(value) {\n\
                \x20       if (value < 0) return\n\
                \x20   }\n";
-    let classes = common::compile_in_process(src, "IarExtPropSet", &[], None)
-        .expect("iarExtPropSet: krusty failed to compile");
+    let classes =
+        common::compile_in_process(src, "IarExtPropSet", &[], Some(&common::jdk_modules()))
+            .expect("iarExtPropSet: krusty failed to compile");
     let (_, bytes) = classes
         .iter()
         .find(|(name, _)| name == "IarExtPropSetKt")

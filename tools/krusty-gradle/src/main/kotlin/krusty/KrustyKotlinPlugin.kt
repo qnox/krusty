@@ -31,7 +31,6 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension
 import org.jetbrains.kotlin.gradle.plugin.CompilerPluginConfig
 import org.jetbrains.kotlin.gradle.plugin.KotlinBasePlugin
-import org.jetbrains.kotlin.gradle.plugin.KotlinCompilerPluginSupportPlugin
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 import java.io.File
 import javax.inject.Inject
@@ -55,14 +54,6 @@ abstract class KrustyKotlinPlugin @Inject constructor(
             )
         }
         val aggregate = aggregateTask(project.rootProject)
-        // Every applied compiler-plugin support plugin, whether it was applied before krusty or
-        // after it, wherever in the build script that happens. `all` replays the plugins already
-        // applied and realizes no tasks, so it stays at apply time.
-        val compilerPluginIds =
-            project.objects.listProperty(String::class.java).convention(emptyList())
-        project.plugins.withType(KotlinCompilerPluginSupportPlugin::class.java).all {
-            compilerPluginIds.add(getCompilerPluginId())
-        }
         // Wire replacements at the end of project configuration, not during plugin application.
         // Realizing a KotlinJvmCompile while a convention plugin is mid-apply reads — and so
         // finalizes — KotlinTopLevelExtension.compilerVersion before that convention sets it (the
@@ -70,7 +61,7 @@ abstract class KrustyKotlinPlugin @Inject constructor(
         // applying the Kotlin JVM plugin), and Gradle forbids registering a task from inside a
         // task configuration callback.
         project.afterEvaluate {
-            replaceKotlinJvmCompiles(project, javaToolchains, aggregate, compilerPluginIds)
+            replaceKotlinJvmCompiles(project, javaToolchains, aggregate)
         }
     }
 }
@@ -97,7 +88,6 @@ private fun replaceKotlinJvmCompiles(
     project: Project,
     javaToolchains: JavaToolchainService,
     aggregate: TaskProvider<Task>,
-    appliedCompilerPluginIds: ListProperty<String>,
 ) {
     // Gradle's kotlin-dsl (applied through `kotlin-dsl` or `kotlin-dsl.base`) owns every Kotlin
     // compilation of its project: precompiled script plugins are `.gradle.kts` scripts compiled
@@ -137,13 +127,14 @@ private fun replaceKotlinJvmCompiles(
             libraries.from(kotlinTask.libraries)
             friendPaths.from(kotlinTask.friendPaths)
             destinationDirectory.set(kotlinTask.destinationDirectory)
-            compilerArguments.set(project.provider {
-                compilerArguments(kotlinTask)
-            })
+            compilerArguments.set(
+                pluginVersion.map { version ->
+                    compilerArguments(kotlinTask, supportedKotlinPluginVersion(version))
+                },
+            )
             kotlinTarget.set(kotlinTask.compilerOptions.jvmTarget.map { it.target })
             targetValidationMode.set(kotlinTask.jvmTargetValidationMode.map { it.name })
             kotlinPluginVersion.set(pluginVersion)
-            compilerPluginIds.set(appliedCompilerPluginIds.map { it.distinct().sorted() })
             // The compiler-plugin request kotlinc receives from this task: KGP's resolved plugin
             // classpath (`-Xplugin`) and its per-plugin options (`-P plugin:<id>:<key>=<value>`).
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
@@ -231,9 +222,6 @@ abstract class KrustyCompileTask @Inject constructor(
     @get:Input
     abstract val compilerVersion: Property<String>
 
-    @get:Input
-    abstract val compilerPluginIds: ListProperty<String>
-
     @get:Classpath
     abstract val compilerPluginClasspath: ConfigurableFileCollection
 
@@ -288,7 +276,8 @@ abstract class KrustyCompileTask @Inject constructor(
             arguments.add(libraries.files.joinToString(File.pathSeparator, transform = File::getAbsolutePath))
         }
         if (!friendPaths.isEmpty) {
-            arguments.add("-Xfriend-paths=" + friendPaths.files.joinToString(File.pathSeparator, transform = File::getAbsolutePath))
+            // kotlinc splits friend paths on `,`, not on the path separator.
+            arguments.add("-Xfriend-paths=" + friendPaths.files.joinToString(",", transform = File::getAbsolutePath))
         }
         arguments.addAll(compilerArguments.get())
         if (javaVersion.get() != kotlinJavaVersion.get()) {
@@ -297,13 +286,6 @@ abstract class KrustyCompileTask @Inject constructor(
             )
         }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
-        val unsupportedCompilerPlugins = compilerPluginIds.get().filter { it !in COMPILER_PLUGIN_IDS }
-        if (unsupportedCompilerPlugins.isNotEmpty()) {
-            throw GradleException(
-                "Kotlin compiler plugins are not supported by krusty: " +
-                    unsupportedCompilerPlugins.joinToString(", "),
-            )
-        }
         if (compilerVersion.get() != pluginVersion) {
             throw GradleException(
                 "Kotlin compiler ${compilerVersion.get()} differs from Kotlin Gradle plugin $pluginVersion",
@@ -346,17 +328,6 @@ abstract class KrustyCompileTask @Inject constructor(
     }
 }
 
-/**
- * The compiler-plugin support plugins krusty accepts. Their jars and options are forwarded as the
- * Kotlin Gradle plugin hands them to kotlinc, and the compiler resolves each jar by the registrar it
- * declares: kotlinx.serialization runs as krusty's native pass; `kotlin.scripting` is kotlinc's
- * default scripting plugin, which the Kotlin Gradle plugin applies to every project and which acts
- * only on script sources (this task passes krusty `.kt` and `.java` sources only). Any other applied
- * support plugin (all-open, no-arg, Compose, ...) fails the task wherever it was applied: krusty
- * cannot preserve its compiler semantics, and skipping it would produce wrong output.
- */
-private val COMPILER_PLUGIN_IDS = setOf("org.jetbrains.kotlinx.serialization", "kotlin.scripting")
-
 private fun pluginOptionArguments(configs: List<CompilerPluginConfig>): List<String> =
     configs.flatMap { config ->
         config.allOptions().flatMap { (pluginId, options) ->
@@ -375,7 +346,7 @@ private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn:
     }
 }
 
-private fun compilerArguments(task: KotlinJvmCompile): List<String> {
+private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): List<String> {
     val options = task.compilerOptions
     fun reject(condition: Boolean, name: String) {
         if (condition) throw GradleException("krusty does not support compilerOptions.$name")
@@ -385,17 +356,16 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
-    // `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is the
-    // authoritative place to validate names and apply severities.
-    reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
+    // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is
+    // the authoritative place to validate names and apply severities. `-Werror` is the global
+    // form of that policy: the compiler fails the compilation when any warning is emitted.
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
     reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
 
     val structuredOptIns = validateStructuredOptIns(options.optIn.getOrElse(emptyList()))
     val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
-    val arguments = validateFreeArguments(freeArguments)
+    val arguments = validateFreeArguments(freeArguments, kotlinVersion)
     structuredOptIns.firstOrNull { marker -> "-opt-in=$marker" in freeArguments }?.let { marker ->
         throw GradleException(
             "compilerOptions.optIn and freeCompilerArg '-opt-in=$marker' both request marker '$marker'; configure exactly one",
@@ -420,30 +390,11 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
     if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
     if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
+    if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
+        arguments.add("-Werror")
+    }
     return arguments
 }
-
-private val ALLOWED_FREE_FLAGS = setOf(
-    "-Xno-param-assertions",
-    "-Xno-call-assertions",
-    "-Xcontext-parameters",
-    "-Xconsistent-data-class-copy-visibility",
-    "-Xexplicit-backing-fields",
-    "-Xmulti-dollar-interpolation",
-    "-Xnested-type-aliases",
-    "-Xskip-prerelease-check",
-    "-Xsuppress-version-warnings",
-    "-Xdont-warn-on-error-suppression",
-    "-Xrender-internal-diagnostic-names",
-    "-Xskip-metadata-version-check",
-)
-
-private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "complete", "disable")
-
-private val EXPLICIT_API_MODES = setOf("strict", "warning", "disable")
-
-private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
-private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
 
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
@@ -460,73 +411,6 @@ private fun validateStructuredOptIns(markers: List<String>): List<String> {
         }
     }
     return markers
-}
-
-private fun validateFreeArguments(input: List<String>): ArrayList<String> {
-    val result = ArrayList<String>()
-    val seen = HashSet<String>()
-    for (argument in input) {
-        reservedFreeArgument(argument)?.let { owner ->
-            throw GradleException(
-                "freeCompilerArg '$argument' conflicts with $owner; configure the structured Gradle input instead",
-            )
-        }
-        val key = when {
-            argument in ALLOWED_FREE_FLAGS -> argument
-            argument == "-jvm-default" || argument == "-Xjvm-default" -> throw GradleException(
-                "freeCompilerArg '$argument' needs the '=' form: $argument=<mode>",
-            )
-            argument.startsWith("-jvm-default=") &&
-                argument.substringAfter('=') in JVM_DEFAULT_MODES -> "-jvm-default"
-            argument.startsWith("-Xjvm-default=") &&
-                argument.substringAfter('=') in JVM_DEFAULT_LEGACY_MODES -> "-jvm-default"
-            // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
-            // exact repeat is a duplicate, so the key is the argument itself.
-            argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument == "-Werror" ->
-                throw GradleException(
-                    "krusty does not support warning policy freeCompilerArg '$argument'",
-                )
-            // The compiler owns the typed diagnostic registry and severity validation. Several
-            // entries are legal (one per diagnostic), so only an exact repeated argument shares a
-            // key at this transport boundary.
-            argument.startsWith("-Xwarning-level=") -> argument
-            argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
-            argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
-            // KGP's `explicitApi()` and `explicitApiWarning()` arrive as this free argument.
-            argument.startsWith("-Xexplicit-api=") &&
-                argument.substringAfter('=') in EXPLICIT_API_MODES -> "-Xexplicit-api"
-            argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
-            argument.startsWith("-Xname-based-destructuring=") &&
-                argument.substringAfter('=') in NAME_DESTRUCTURING_MODES -> "-Xname-based-destructuring"
-            else -> throw GradleException(
-                "unsupported freeCompilerArg '$argument'; use a supported compilerOptions property",
-            )
-        }
-        if (!seen.add(key)) throw GradleException("duplicate freeCompilerArg '$key'")
-        result.add(argument)
-    }
-    return result
-}
-
-private fun reservedFreeArgument(argument: String): String? {
-    fun isOption(vararg names: String): Boolean = names.any { argument == it || argument.startsWith("$it=") }
-    return when {
-        isOption("-d") -> "the plugin-owned destination"
-        isOption("-cp", "-classpath", "-class-path") -> "the task libraries classpath"
-        isOption("-Xfriend-paths") -> "the task friend paths"
-        isOption("-module-name") -> "compilerOptions.moduleName"
-        isOption("-jvm-target") -> "compilerOptions.jvmTarget"
-        isOption("-java-parameters") -> "compilerOptions.javaParameters"
-        isOption("-jdk-home", "-no-jdk") -> "compilerOptions.noJdk and the Java toolchain"
-        isOption("-no-stdlib", "-no-reflect") -> "the plugin-owned dependency policy"
-        isOption("-Xkotlin-reference-version") -> "the Kotlin Gradle plugin version"
-        isOption("-language-version") -> "compilerOptions.languageVersion"
-        isOption("-api-version") -> "compilerOptions.apiVersion"
-        isOption("-progressive") -> "compilerOptions.progressiveMode"
-        isOption("-Xplugin", "-P") -> "compiler plugin configuration"
-        else -> null
-    }
 }
 
 private fun supportedKotlinPluginVersion(version: String): String = when (version) {

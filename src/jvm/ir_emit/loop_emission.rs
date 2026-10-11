@@ -30,7 +30,7 @@ impl Emitter<'_> {
         self.bind(start, code);
         // A pre-test loop checks the condition before the body; a `do…while` skips this and
         // tests at the bottom (`cont`), so the body always runs once.
-        if !post_test && self.emit_cond_branch(cond, end, false, code) {
+        if !post_test && self.in_condition(|this| this.emit_cond_branch(cond, end, false, code)) {
             // `while (false)`: the jump-out is unconditional, so the body/update/back-edge
             // that would follow are unreachable — emitting them leaves frameless dead code
             // the verifier rejects. kotlinc emits no body for a never-entered loop either.
@@ -65,7 +65,12 @@ impl Emitter<'_> {
                 // authorizes this lifetime, so no source-shape lookup is involved.
                 IrExpr::Block { stmts, value } => {
                     let saved = self.open_slot_scope();
-                    self.emit_open_block(stmts, value, Some(bottom), code);
+                    let emitted =
+                        self.emit_open_block(stmts, value, Some(bottom), false, 0, false, code);
+                    debug_assert!(emitted.reserved_inline_stack.is_none());
+                    if let Some(discarded) = emitted.discard_after_close {
+                        super::discard(self.value_ty(discarded), code);
+                    }
                     Some(saved)
                 }
                 _ => {
@@ -108,7 +113,9 @@ impl Emitter<'_> {
             if !self.ir.expr_source_lines.contains_key(&cond) {
                 debug_lines::mark_loop_control(loop_line, code);
             }
-            let _ = self.emit_cond_branch(cond, start, true, code);
+            // A loop condition is kotlinc's `isInsideCondition`: an unsigned test keeps its line
+            // on the receiver load, and the following jump, rather than on the literal.
+            let _ = self.in_condition(|this| this.emit_cond_branch(cond, start, true, code));
             if let Some(saved) = retained_body_scope.take() {
                 self.close_scope_locals(code, false);
                 self.block_depth -= 1;

@@ -164,7 +164,11 @@ impl Checker<'_> {
                 .or_else(|| self.read_callable_reference_types.get(&receiver))
                 .copied();
         }
+        // This is the callable signature selected for invocation, not the receiver's nullability.
+        // `record_invoke` checks the separately narrowed receiver value immediately afterwards, so
+        // a nullable value still errors while a stable property proved non-null remains callable.
         self.expression_function_type(scope, receiver, receiver_ty)
+            .map(Ty::non_null)
     }
 
     /// Whether invoking a type-parameter value selects a function constituent other than the one its
@@ -692,15 +696,12 @@ impl Checker<'_> {
         ) {
             return InvokeResolution::Selected(Ty::Error);
         }
-        let context_args = shape
-            .context_sources
-            .iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        if !context_args.is_empty() {
-            self.context_args.insert(call, context_args.clone());
-            self.mark_context_extension_receiver_used(scope, call, &context_args);
+        let context_args = shape.context_sources.clone();
+        let implicit_context_args = context_args.iter().flatten().cloned().collect::<Vec<_>>();
+        if !implicit_context_args.is_empty() {
+            self.context_args
+                .insert(call, implicit_context_args.clone());
+            self.mark_context_extension_receiver_used(scope, call, &implicit_context_args);
         }
         let ret = selected.callable.ret;
         let target = if extension_receiver.is_none() {
@@ -952,11 +953,14 @@ impl Checker<'_> {
                 continue;
             }
             if !self.lambda_overload_partially_applicable(
+                scope,
                 overload,
                 None,
                 (args, arg_tys),
-                &argument_map,
-                &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
+                (
+                    &argument_map,
+                    &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
+                ),
                 type_args,
             ) {
                 continue;
@@ -1313,15 +1317,17 @@ impl Checker<'_> {
                     ) {
                         return InvokeResolution::Selected(Ty::Error);
                     }
-                    let context_args = shape
-                        .context_sources
-                        .iter()
-                        .flatten()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !context_args.is_empty() {
-                        self.context_args.insert(call, context_args.clone());
-                        self.mark_context_extension_receiver_used(scope, call, &context_args);
+                    let context_args = shape.context_sources.clone();
+                    let implicit_context_args =
+                        context_args.iter().flatten().cloned().collect::<Vec<_>>();
+                    if !implicit_context_args.is_empty() {
+                        self.context_args
+                            .insert(call, implicit_context_args.clone());
+                        self.mark_context_extension_receiver_used(
+                            scope,
+                            call,
+                            &implicit_context_args,
+                        );
                     }
                     let ret = selected.callable.ret;
                     let target =
@@ -1378,6 +1384,14 @@ impl Checker<'_> {
                 );
                 self.expect_call_arg(scope, *p, args[i], actual);
             }
+        }
+        // A bare local call selects the receiver value and its function signature together. Publish
+        // that committed semantic type on the callee expression; checked FIR consumes the same
+        // decision instead of recovering from an earlier placeholder or re-reading storage type.
+        if matches!(semantic_receiver_ty, Ty::Fun(_))
+            && matches!(self.file.expr(receiver), Expr::Name(_))
+        {
+            self.set(receiver, semantic_receiver_ty);
         }
         self.expr_lowers.insert(
             call,

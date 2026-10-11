@@ -24,10 +24,10 @@ fn assert_production_frontend_accepts(source: &str) {
     let mut diagnostics = crate::diag::DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &crate::features::LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -146,6 +146,7 @@ fn delegate_member_substitution_names_its_receiver_class_parameter() {
             parameter: parameter.into(),
             reified: false,
             value: ResolvedTy::new(Ty::String).unwrap(),
+            reified_runtime: ResolvedTy::new(Ty::String).unwrap(),
             additional_bounds: Box::new([]),
         }],
     );

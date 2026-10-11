@@ -1,7 +1,7 @@
 //! JVM realization of checked instance-field writes.
 
 use super::{
-    emit_num_conv, instance_field_jvm_name, jvm_declared_ty, slot_words, static_storage,
+    emit_num_conv, instance_field_jvm_name, jvm_value_ty, slot_words, static_storage,
     type_descriptor, Emitter,
 };
 use crate::ir::{ClassId, IrBinOp, IrExpr};
@@ -54,7 +54,7 @@ impl Emitter<'_> {
         let field = class.fields.get(field_index as usize)?;
         Some(StoredConstructorProperty {
             class_name: class.fq_name(),
-            field_name: instance_field_jvm_name(self.ir, class, field),
+            field_name: instance_field_jvm_name(self.ir, self.run, class, field_index as usize),
             ty: field.ty,
         })
     }
@@ -84,22 +84,30 @@ impl Emitter<'_> {
             .flatten();
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
-        let name = instance_field_jvm_name(self.ir, class_decl, field);
-        let field_ty = jvm_declared_ty(&field.ty);
+        let name = instance_field_jvm_name(self.ir, self.run, class_decl, index as usize);
+        let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         if static_storage(self.ir, class_decl) {
             self.emit_static_storage_field(receiver, value, &owner, &name, field_ty, code);
             return;
         }
-        let cross_class_method = super::static_accessors::cross_class_backing_field_method(
-            self.cw,
-            self.ir,
-            &self.facade,
-            self.static_owner,
-            class,
-            index,
-            true,
-        );
+        let reader = (!self.export_private_calls)
+            .then_some(self.static_owner)
+            .flatten();
+        let cross_class_method = {
+            let planned = self.run.static_accessor_plan.borrow();
+            super::static_accessors::cross_class_backing_field_method(
+                self.cw,
+                self.ir,
+                self.run,
+                &self.facade,
+                &planned,
+                reader,
+                class,
+                index,
+                true,
+            )
+        };
         if cross_class_method.is_none()
             && self.emit_int_self_sub(receiver, class, index, value, code)
         {
@@ -130,11 +138,10 @@ impl Emitter<'_> {
         // A value that carried its OWN source line leaves that line in effect; the store belongs to
         // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
         // the property's line stays in effect over everything that follows the store.
-        if let (Some(&statement_line), true) = (
-            self.ir.expr_lines.get(&statement),
-            self.ir.expr_source_lines.contains_key(&value),
-        ) {
-            code.mark_line(statement_line);
+        if self.ir.expr_source_lines.contains_key(&value) {
+            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+                self.mark_expression_line(statement, statement_line, code);
+            }
         }
         if let Some(method) = cross_class_method {
             code.invokestatic(method, (1 + slot_words(field_ty)) as i32, 0);
@@ -204,12 +211,12 @@ impl Emitter<'_> {
         };
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
-        let field_ty = jvm_declared_ty(&field.ty);
+        let field_ty = jvm_value_ty(&field.ty);
         if field_ty != Ty::Int || self.emits_control_flow(rhs) || self.must_spill_across(rhs) {
             return false;
         }
         let owner = class_decl.fq_name();
-        let name = instance_field_jvm_name(self.ir, class_decl, field);
+        let name = instance_field_jvm_name(self.ir, self.run, class_decl, index as usize);
 
         self.emit_value(receiver, code);
         code.dup();
@@ -292,6 +299,8 @@ mod tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
+        // The handoff records the class's declarations before the JVM lowers it.
+        crate::metadata::class_declarations::record_all(&mut ir);
 
         let run = EmitRun::default();
         let classes = emit_for_test(&ir, "demo/FacadeKt", &run)

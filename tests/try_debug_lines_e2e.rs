@@ -672,12 +672,10 @@ fn a_catch_parameter_is_named_where_it_is_declared() {
 /// `once` and `nested` differ only in how many expansions the catch is cloned into, so a name that
 /// were a constant suffix, or no suffix, would fail on one of the two.
 ///
-/// Byte equality is not attainable and the reason is stated rather than worked around: the
-/// expansion of `guarded`, whose returns are not its tail, keeps its result in a local of its own
-/// that kotlinc does not have, so every row declared after that local sits one slot higher. Every
-/// row kotlinc writes is there, inline-depth markers included, in kotlinc's order and under its
-/// names; pinning both projections is what makes closing the slot gap visible here. The offsets
-/// are left out for the same reason.
+/// An inline-return result does not occupy its JVM slot until its first real store, so locals in
+/// the returned operand can use the declaration cursor exactly as they do in kotlinc. The complete
+/// tables therefore agree at both expansion depths, including the marker and catch-parameter slots.
+/// Offsets are left out because this test owns names, nesting, order, and slot placement.
 #[test]
 fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     let src = "inline fun guarded(tag: String, block: () -> String): String {\n\
@@ -695,8 +693,9 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
                fun nested(tag: String): String = twice(tag) { tag }\n";
     let (reference, krusty) = disassemble_both("NestedCatchNames", src, "NestedCatchNamesKt");
     let table = |text: &str, method: &str| local_variable_table(text, method, 2..5);
+    let once = table(&reference, "java.lang.String once(");
     assert_eq!(
-        table(&reference, "java.lang.String once("),
+        once,
         [
             "3 $i$a$-guarded-NestedCatchNamesKt$once$1 I",
             "4 e$iv Ljava/lang/IllegalStateException;",
@@ -708,17 +707,12 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     );
     assert_eq!(
         table(&krusty, "java.lang.String once("),
-        [
-            "4 $i$a$-guarded-NestedCatchNamesKt$once$1 I",
-            "5 e$iv Ljava/lang/IllegalStateException;",
-            "2 $i$f$guarded I",
-            "1 tag$iv Ljava/lang/String;",
-            "0 tag Ljava/lang/String;",
-        ],
-        "krusty's complete table for one expansion: the catch parameter carries its frame"
+        once,
+        "the complete table agrees for one expansion"
     );
+    let nested = table(&reference, "java.lang.String nested(");
     assert_eq!(
-        table(&reference, "java.lang.String nested("),
+        nested,
         [
             "5 $i$a$-twice-NestedCatchNamesKt$nested$1 I",
             "6 e$iv$iv Ljava/lang/IllegalStateException;",
@@ -732,16 +726,8 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     );
     assert_eq!(
         table(&krusty, "java.lang.String nested("),
-        [
-            "6 $i$a$-twice-NestedCatchNamesKt$nested$1 I",
-            "7 e$iv$iv Ljava/lang/IllegalStateException;",
-            "4 $i$f$guarded I",
-            "3 tag$iv$iv Ljava/lang/String;",
-            "2 $i$f$twice I",
-            "1 tag$iv Ljava/lang/String;",
-            "0 tag Ljava/lang/String;",
-        ],
-        "krusty's complete table for two: one frame per expansion, not a constant suffix"
+        nested,
+        "the complete table agrees for two expansions"
     );
 }
 

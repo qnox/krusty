@@ -94,6 +94,7 @@ impl FunctionInfo {
         callable.member_realization = member.realization;
         callable.compiler_intrinsic = member.realization.compiler_intrinsic();
         callable.semantic_role = member.semantic_role;
+        callable.overridden_declarations = member.overridden_declarations.clone();
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();
@@ -122,7 +123,7 @@ impl FunctionInfo {
         candidate.flags.is_final = member.is_final();
         candidate.flags.inherited_by_delegation = member.inherited_by_delegation();
         candidate.flags.return_value_status = member.return_value_status;
-        candidate.annotations = member.annotations.clone();
+        candidate.callable.annotations = member.annotations.clone();
         candidate.default_values = member.default_values.clone();
         candidate.stable_declaration = member.stable_declaration;
         candidate.source_member = member.source_member;

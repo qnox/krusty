@@ -13,24 +13,38 @@
 use std::collections::HashMap;
 
 mod arithmetic;
+mod arrays;
 mod boxed;
+mod c_abi;
 mod calls;
+mod carrier;
 mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
 mod declared_capabilities;
 mod defaults;
+mod entry;
 mod enums;
 mod exceptions;
-use arithmetic::{arithmetic_result, scalar_bound};
+mod frame_objects;
+mod intrinsic_operations;
+use arithmetic::scalar_bound;
+use carrier::{box_suffix, machine_carrier, scalar_suffix, Carrier};
 use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
 mod functions;
+mod implementor_dispatch;
+mod lists;
 mod local_delegates;
+mod maps;
+mod module_abi;
+mod object_entries;
 mod objects;
+mod ranges;
 mod references;
+mod representation;
 mod scope;
 mod statics;
 mod strings;
@@ -40,8 +54,7 @@ mod unsigned;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::MemFlagsData;
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, BlockArg, InstBuilder, Signature, StackSlotData, StackSlotKind,
-    TrapCode,
+    types, Block, BlockArg, InstBuilder, Signature, StackSlotData, StackSlotKind, TrapCode,
 };
 use cranelift_codegen::ir::{FuncRef, Inst, Type, Value};
 use cranelift_codegen::isa::CallConv;
@@ -52,17 +65,74 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrStatic, IrTypeOp,
+    IrLocalPropertyLayout, IrStatic, IrTypeOp, MainEntryParameters,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
 use super::super::symbols::Symbols;
 use super::super::target::NativeTarget;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 
-/// The construct a lowering declined, phrased for a diagnostic.
-pub type Unsupported = String;
+/// A construct the lowering declined, and the checked node it was declined at.
+///
+/// The phrase is presentation; the node is identity. The innermost expression or statement a
+/// decline leaves through records its common-IR origin, and an outer one never replaces it, so the
+/// diagnostic lands on the node that could not be lowered rather than on whatever encloses it.
+#[derive(Debug)]
+pub struct Unsupported {
+    construct: String,
+    origin: Option<crate::fir::OriginId>,
+}
+
+impl Unsupported {
+    /// The construct, phrased for a diagnostic.
+    pub fn construct(&self) -> &str {
+        &self.construct
+    }
+
+    /// The checked origin of the node the construct was declined at, when one recorded it.
+    pub fn origin(&self) -> Option<crate::fir::OriginId> {
+        self.origin
+    }
+
+    /// Attribute this decline to `origin` unless a more deeply nested node already claimed it.
+    fn at(mut self, origin: Option<crate::fir::OriginId>) -> Self {
+        if self.origin.is_none() {
+            self.origin = origin;
+        }
+        self
+    }
+}
+
+impl From<String> for Unsupported {
+    fn from(construct: String) -> Self {
+        Self {
+            construct,
+            origin: None,
+        }
+    }
+}
+
+impl From<&str> for Unsupported {
+    fn from(construct: &str) -> Self {
+        construct.to_string().into()
+    }
+}
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.construct)
+    }
+}
+
+/// `format!` for a decline: the phrase of an [`Unsupported`] with no origin yet.
+macro_rules! declined {
+    ($($argument:tt)*) => {
+        $crate::native::codegen::lower::Unsupported::from(format!($($argument)*))
+    };
+}
+pub(crate) use declined;
 
 /// One lowered Kotlin file.
 pub struct Lowered {
@@ -70,68 +140,8 @@ pub struct Lowered {
     pub object: Vec<u8>,
     /// Whether this file declared `main` and therefore defines [`PROGRAM_ENTRY`].
     pub defines_entry: bool,
-}
-
-/// How a Kotlin type is carried in machine code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Carrier {
-    /// `Unit` in return position: no value.
-    Void,
-    /// A machine scalar of the given Cranelift type; the flag says whether an argument of this type
-    /// is sign- (true) or zero-extended when passed to the runtime's C ABI.
-    Scalar(Type, bool),
-    /// A `KRef`: an `i64` pointer into the collected heap, or null.
-    Ref,
-}
-
-impl Carrier {
-    fn clif(self) -> Option<Type> {
-        match self {
-            Self::Void => None,
-            Self::Scalar(ty, _) => Some(ty),
-            Self::Ref => Some(types::I64),
-        }
-    }
-
-    fn abi_param(self) -> Option<AbiParam> {
-        match self {
-            Self::Void => None,
-            Self::Scalar(ty, signed) if ty.bits() < 32 => Some(if signed {
-                AbiParam::new(ty).sext()
-            } else {
-                AbiParam::new(ty).uext()
-            }),
-            Self::Scalar(ty, _) => Some(AbiParam::new(ty)),
-            Self::Ref => Some(AbiParam::new(types::I64)),
-        }
-    }
-}
-
-/// A nullable primitive is a reference: `Int?` has to represent `null`, so it boxes, exactly as it
-/// does on the JVM and as the C runtime already expects.
-fn carrier(ty: Ty) -> Carrier {
-    match ty {
-        Ty::Unit => Carrier::Void,
-        Ty::Boolean => Carrier::Scalar(types::I8, false),
-        Ty::Byte => Carrier::Scalar(types::I8, true),
-        Ty::Short => Carrier::Scalar(types::I16, true),
-        Ty::Char => Carrier::Scalar(types::I16, false),
-        Ty::Int => Carrier::Scalar(types::I32, true),
-        Ty::Long => Carrier::Scalar(types::I64, true),
-        Ty::Float => Carrier::Scalar(types::F32, true),
-        Ty::Double => Carrier::Scalar(types::F64, true),
-        // Kotlin's unsigned integers are value classes, and common lowering erases each to the
-        // signed machine integer it wraps — the right machine shape, and the wrong one to reason
-        // about: `4294967295u` is that `Int`'s bits and not its value. The carrier keeps both
-        // facts, so every widening zero-extends and every comparison and division asks the unsigned
-        // question. What a carrier cannot keep is the TYPE, which is why a boxed one gets a
-        // descriptor of its own: `1u as? Int` must fail, and a boxed `UInt` must render unsigned.
-        Ty::UByte => Carrier::Scalar(types::I8, false),
-        Ty::UShort => Carrier::Scalar(types::I16, false),
-        Ty::UInt => Carrier::Scalar(types::I32, false),
-        Ty::ULong => Carrier::Scalar(types::I64, false),
-        _ => Carrier::Ref,
-    }
+    /// This file's contribution to the module's C header, in source order.
+    pub abi: Vec<super::super::c_abi::Record>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -142,7 +152,10 @@ fn trusted() -> MemFlagsData {
     MemFlagsData::trusted()
 }
 
-fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
+fn isa_for(
+    target: NativeTarget,
+    verify: bool,
+) -> Result<cranelift_codegen::isa::OwnedTargetIsa, Unsupported> {
     let triple: target_lexicon::Triple = target
         .triple()
         .parse()
@@ -151,7 +164,7 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
     for (name, value) in [
         ("is_pic", "false"),
         ("opt_level", "none"),
-        ("enable_verifier", "true"),
+        ("enable_verifier", if verify { "true" } else { "false" }),
         ("use_colocated_libcalls", "false"),
     ] {
         flags
@@ -161,7 +174,7 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
     cranelift_codegen::isa::lookup(triple)
         .map_err(|error| format!("target {target} ({error})"))?
         .finish(settings::Flags::new(flags))
-        .map_err(|error| format!("target {target} ({error})"))
+        .map_err(|error| declined!("target {target} ({error})"))
 }
 
 /// What the generator is given beyond the file: the pieces a native IR pass prepared for it.
@@ -177,10 +190,17 @@ pub struct FileInput<'a> {
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
     /// once per build by the backend rather than once per file.
     pub runtime_symbols: &'a std::collections::HashSet<String>,
+    /// C export symbols already claimed by earlier files in this module.
+    pub abi_symbols: &'a mut std::collections::HashSet<String>,
+    /// This file's identity in the module. Its initializer is exported under it.
+    pub source: crate::fir::SourceFileId,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
         &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+    /// Which classifiers are value classes, and how this target carries each occurrence of one;
+    /// see [`crate::native::value_classes`].
+    pub value_classes: &'a super::super::value_classes::NativeValueClasses,
 }
 
 pub fn lower_file(
@@ -188,6 +208,7 @@ pub fn lower_file(
     target: NativeTarget,
     stem: &str,
     entry: Entry,
+    verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
         ir,
@@ -195,10 +216,13 @@ pub fn lower_file(
         callables,
         dependency_properties,
         runtime_symbols,
+        abi_symbols,
+        source,
+        value_classes,
     } = input;
-    let class_model = model::build(ir)?;
+    let class_model = model::build(ir, value_classes)?;
 
-    let isa = isa_for(target)?;
+    let isa = isa_for(target, verify)?;
     let builder = ObjectBuilder::new(
         isa,
         format!("{stem}.o"),
@@ -209,8 +233,10 @@ pub fn lower_file(
 
     let mut lowering = FileLowering {
         ir,
+        source,
         classifiers,
         callables,
+        values: value_classes,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
         model: class_model,
@@ -225,6 +251,7 @@ pub fn lower_file(
         lambdas: HashMap::new(),
         local_delegate_helpers: HashMap::new(),
         default_wrappers: HashMap::new(),
+        module_default_entries: Vec::new(),
         default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
         reference_identities: HashMap::new(),
@@ -238,12 +265,11 @@ pub fn lower_file(
         // a thunk could be emitted for, and only the model knows that.
         unwalkable_collections: std::collections::HashSet::new(),
         walkable_classes: std::collections::HashMap::new(),
-        sequence_classes: std::collections::HashSet::new(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
     };
-    // Before anything reads a role: the walking members a class answers for decide both which
-    // receivers play an iteration role and which shapes still decline, and both are read while
+    // Before anything reads a shape: the walking members a class answers for decide both which
+    // receivers have a runtime-walkable representation and which shapes still decline; both are read while
     // bodies are lowered.
     lowering.resolve_walkable_classes();
     lowering.declare_functions()?;
@@ -252,6 +278,7 @@ pub fn lower_file(
     lowering.declare_lambdas()?;
     lowering.declare_local_delegate_helpers()?;
     lowering.declare_default_wrappers()?;
+    lowering.declare_module_default_entries()?;
     lowering.declare_default_constructors()?;
     lowering.declare_enum_entries()?;
     // Constructors are bodies too, so property-reference artifacts must exist before classes are
@@ -261,39 +288,30 @@ pub fn lower_file(
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
     lowering.define_default_wrappers()?;
+    lowering.define_module_default_entries()?;
     lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
-    let mut defines_entry = false;
+    let file_init = lowering.define_file_init(source, statics_init)?;
+    let selected = entry.selected(ir);
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
-        let function = &ir.functions[index];
-        let is_entry = function.params.is_empty()
-            && function.is_static
-            && function.dispatch_receiver.is_none()
-            && match entry {
-                Entry::Main => function.name == "main",
-                Entry::Box => function.name == "box" && carrier(function.ret) == Carrier::Ref,
-            };
-        if is_entry {
-            lowering.define_program_entry(index, entry, statics_init)?;
-            defines_entry = true;
+        if let Some((_, parameters)) = selected.filter(|(function, _)| *function == index as u32) {
+            lowering.define_program_entry(
+                index,
+                entry,
+                file_init,
+                statics_init.is_some(),
+                parameters == MainEntryParameters::Arguments,
+            )?;
         }
     }
-    // Kotlin's other entry point, `fun main(args: Array<String>)`, is a program whose arguments
-    // this target does not pass yet. Declining here names it; without this the file lowers with no
-    // entry and the link fails on an undefined symbol that says nothing about `main`.
-    if matches!(entry, Entry::Main)
-        && !defines_entry
-        && ir.functions.iter().any(|function| {
-            function.name == "main"
-                && function.is_static
-                && function.dispatch_receiver.is_none()
-                && function.params.len() == 1
-        })
-    {
-        return Err("a `main` that takes its arguments".to_string());
-    }
+    lowering.define_property_entry_points(file_init)?;
+    lowering.define_constructor_entry_points(file_init)?;
+    lowering.define_value_box_entry_points()?;
+    let defines_entry = selected.is_some();
+    let abi = super::super::c_abi::file_records(ir, abi_symbols);
+    lowering.define_c_exports(file_init, &abi)?;
 
     let object = module
         .finish()
@@ -302,13 +320,19 @@ pub fn lower_file(
     Ok(Lowered {
         object,
         defines_entry,
+        abi,
     })
 }
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
+    /// This file's stable module identity, used to distinguish a declaration copied into the
+    /// module-reference table from one that is genuinely owned by another file.
+    source: crate::fir::SourceFileId,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     callables: &'a crate::backend::CheckedBackendCallables,
+    /// Which classifiers are value classes, and which occurrences travel unboxed.
+    values: &'a super::super::value_classes::NativeValueClasses,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
@@ -338,6 +362,9 @@ struct FileLowering<'a> {
     local_delegate_helpers: HashMap<(u32, bool), FuncId>,
     /// One wrapper per omission shape a call in this file uses.
     default_wrappers: HashMap<defaults::Omission, FuncId>,
+    /// The entry each top-level function with defaults exports for callers in other files, by IR
+    /// function, in function order.
+    module_default_entries: Vec<(u32, FuncId)>,
     /// The same, for a construction that leaves arguments out.
     default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
@@ -369,21 +396,17 @@ struct FileLowering<'a> {
     /// Whether this file redeclares `Throwable.message` or `Throwable.cause`; see
     /// [`overrides_a_throwable_accessor`].
     overrides_a_throwable_accessor: bool,
-    /// The classes of THIS FILE the runtime can walk, by the role their own members answer for.
+    /// The classes of THIS FILE the runtime can walk, by their runtime collection shape.
     ///
     /// A class implementing `kotlin.collections.Iterable` or `Iterator` records where its own
     /// `iterator`/`hasNext`/`next` sit in its descriptor (`objects::WalkSlots`), which is what
     /// lets the runtime's walking entry points reach an object it did not make. This says which
     /// class that is, so a receiver typed by the class rather than by the interface plays the
-    /// role too — `xs.withIndex()` on a class of the program is the same walk as on a list.
-    walkable_classes:
-        std::collections::HashMap<crate::types::TypeName, super::super::intrinsics::IterationRole>,
-    /// Those among them that answer for `kotlin.sequences.Sequence`.
-    ///
-    /// They play the `Iterable` role — the walk is the same — and a receiver typed by one is
-    /// offered the same NARROW set of members a receiver typed `Sequence` is, for the same reason:
-    /// this runtime's walks are eager, and an eager `map` over a sequence is not Kotlin's.
-    sequence_classes: std::collections::HashSet<crate::types::TypeName>,
+    /// shape too, so its iteration-protocol members use the same descriptor dispatch as a list.
+    walkable_classes: std::collections::HashMap<
+        crate::types::TypeName,
+        super::super::intrinsics::CollectionShape,
+    >,
     /// The shapes among those that the runtime cannot walk an object of this file's behind; see
     /// [`unwalkable_collections`].
     unwalkable_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
@@ -393,118 +416,15 @@ struct FileLowering<'a> {
 }
 
 impl<'a> FileLowering<'a> {
-    fn collection_shape(
-        &self,
-        internal: crate::types::TypeName,
-    ) -> Option<super::super::intrinsics::CollectionShape> {
-        classifier_shapes::collection_shape(self.classifiers, internal)
-    }
-
-    fn is_list_check_type(&self, internal: crate::types::TypeName) -> bool {
-        classifier_shapes::is_list_check_type(self.classifiers, internal)
-    }
-
-    fn function_type_descriptor(&self, internal: crate::types::TypeName) -> Option<&'static str> {
-        classifier_shapes::function_type_descriptor(self.classifiers, internal)
-    }
-
-    /// Whether a class of this file answers for the dependency type `internal`.
-    fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
-        self.implemented_dependencies.contains(&internal)
-    }
-
-    /// Decide which classes of this file the runtime can WALK, and which collection shapes it
-    /// therefore still cannot.
-    ///
-    /// A class is walkable exactly when a thunk could be emitted for the members a walk goes
-    /// through: its own `iterator`, or its own `hasNext` AND `next`. That is one question, asked
-    /// here once, so that the role a receiver plays and the thunks an object carries can never
-    /// disagree — a class recorded as walkable whose descriptor holds no thunk would have its
-    /// objects read as something they are not.
-    ///
-    /// The shapes are the converse: a shape is UNWALKABLE where any class of this file behind it
-    /// is not walkable, because no static type tells one implementor from another within a shape.
-    /// `class Chars : CharSequence` is the case that makes it necessary — `CharSequence` shares
-    /// the iterable shape with a list, since text is walked by the same dispatch, but it declares
-    /// no `iterator`.
-    fn resolve_walkable_classes(&mut self) {
-        use super::super::intrinsics::IterationRole;
-        for id in 0..self.ir.classes.len() as ClassId {
-            let slots = self.walk_slots(id);
-            let role = if slots.iterator != 0 || slots.length != 0 {
-                // `Iterable` wins over `Iterator` for a class that answers for both. The two roles
-                // differ in which members a receiver is asked for, and a class handing out an
-                // iterator is asked for that one first. TEXT plays the same role: its own members
-                // are `length` and the indexed read, but a walk of it asks for an iterator and
-                // the runtime makes one over those two.
-                Some(IterationRole::Iterable)
-            } else if slots.has_next != 0 && slots.next != 0 {
-                Some(IterationRole::Iterator)
-            } else {
-                None
-            };
-            if let Some(role) = role {
-                let name = self.ir.classes[id as usize].fq_name;
-                self.walkable_classes.insert(name, role);
-                if slots.sequence {
-                    self.sequence_classes.insert(name);
-                }
-            }
-        }
-        let mut record = |owner: &crate::types::TypeName, overridden| {
-            if self.walkable_classes.contains_key(owner) {
-                return;
-            }
-            self.unwalkable_collections
-                .extend(classifier_shapes::collection_shape(
-                    self.classifiers,
-                    overridden,
-                ));
-        };
-        for (owner, edges) in &self.ir.function_overrides {
-            for edge in edges {
-                if matches!(
-                    edge.overridden,
-                    crate::fir::ResolvedFunctionOverrideTarget::External(_)
-                ) {
-                    record(owner, edge.overridden_owner);
-                }
-            }
-        }
-        for (owner, edges) in &self.ir.property_overrides {
-            for edge in edges {
-                if matches!(
-                    edge.overridden,
-                    crate::fir::ResolvedPropertyOverrideTarget::External(_)
-                ) {
-                    record(owner, edge.overridden_owner);
-                }
-            }
-        }
-    }
-
-    /// Whether this file declares a class of the given collection SHAPE.
-    ///
-    /// Asked by a type CHECK rather than by a call: a marker on the runtime's own types answers
-    /// `x is List<*>` for every list the runtime built, and says nothing about a list the program
-    /// declared. Where the file declares one, the check keeps declining rather than answering
-    /// `false` for an object that is one.
-    pub(super) fn implements_collection_shape(
-        &self,
-        shape: super::super::intrinsics::CollectionShape,
-    ) -> bool {
-        self.implemented_collections.contains(&shape)
-    }
-
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match carrier(*param).abi_param() {
+            match self.carrier(*param).abi_param() {
                 Some(abi) => signature.params.push(abi),
-                None => return Err("a `Unit` parameter".to_string()),
+                None => return Err("a `Unit` parameter".into()),
             }
         }
-        if let Some(abi) = carrier(ret).abi_param() {
+        if let Some(abi) = self.carrier(ret).abi_param() {
             signature.returns.push(abi);
         }
         Ok(signature)
@@ -516,12 +436,18 @@ impl<'a> FileLowering<'a> {
         let mut params = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
             if self.ir.class_id_by_name(owner).is_none() {
-                return Err(format!(
+                return Err(declined!(
                     "a method of `{}`, which is not declared in this file",
                     owner.render()
                 ));
             }
-            params.push(any());
+            // A value class's member takes the VALUE as `this`; its box reaches it through a
+            // bridge. Every other member takes the object, as a reference.
+            params.push(if self.values.is_value_class(owner) {
+                Ty::Obj(owner, &[])
+            } else {
+                any()
+            });
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -567,9 +493,16 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             let signature = self.function_signature(index as crate::ir::FunId)?;
+            // A file-level function is reached across the module by its `kt_mod_` symbol, which
+            // stays hidden. The public C name, when there is one, is a separate export.
+            let linkage = if super::super::c_abi::is_file_level(self.ir, index) {
+                Linkage::Hidden
+            } else {
+                Linkage::Export
+            };
             let id = self
                 .module
-                .declare_function(&self.symbols.functions[index], Linkage::Export, &signature)
+                .declare_function(&self.symbols.functions[index], linkage, &signature)
                 .map_err(|error| format!("declaring `{}` ({error})", function.name))?;
             self.functions.push(Some(id));
         }
@@ -647,7 +580,7 @@ impl<'a> FileLowering<'a> {
         // Both facts about the result travel into the body: the carrier decides the shape of the
         // `return`, and the TYPE decides how a value that arrives in another representation is
         // converted into it — a carrier cannot, because `Boolean` and `UByte` share one.
-        let carried = carrier(result);
+        let carried = self.carrier(result);
         let frontend_config = self.module.target_config();
         let mut context = self.module.make_context();
         context.func.signature = signature;
@@ -673,6 +606,8 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    frame_objects: std::collections::HashMap::new(),
+                    frame_fields: std::collections::HashMap::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -706,9 +641,12 @@ impl<'a> FileLowering<'a> {
         // The emitted function, for when a compiled program answers wrongly and the IR that made it
         // reads correctly — the difference is then in this, and nothing else shows it.
         crate::trace_compiler!("native", "{name}\n{}", context.func.display());
-        self.module
-            .define_function(id, &mut context)
-            .map_err(|error| format!("compiling `{name}` ({error})"))?;
+        if let Err(error) = self.module.define_function(id, &mut context) {
+            return Err(declined!(
+                "compiling `{name}` ({error:?})\n{}",
+                context.func.display()
+            ));
+        }
         self.module.clear_context(&mut context);
         Ok(())
     }
@@ -732,7 +670,7 @@ impl<'a> FileLowering<'a> {
         // one kotlinc leaves recursive too — it reports NON_TAIL_RECURSIVE_CALL and emits the
         // call — so declining those refused programs kotlinc compiles, and compiles the same way.
         if self.ir.unlooped_tailrec.contains(&(index as u32)) {
-            return Err(format!(
+            return Err(declined!(
                 "a `tailrec` function `{}` common lowering leaves recursive",
                 function.name
             ));
@@ -759,6 +697,7 @@ impl<'a> FileLowering<'a> {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
                     lowering.builder.def_var(variable, *value);
                 }
+                lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
             },
         );
@@ -787,114 +726,6 @@ impl<'a> FileLowering<'a> {
                 }),
             Err(reason) => Err(reason),
         }
-    }
-
-    /// `kt_program_entry`: what the runtime's `_start` calls. Records the stack bottom for the
-    /// collector, runs the entry function — printing its result when it has one, which is how a
-    /// `box()` case reports its verdict — and exits through the kernel; it never returns to
-    /// `_start`.
-    ///
-    /// A `box()` answer is printed after [`BOX_RESULT_FRAME`], with nothing after it: the answer is
-    /// every byte that follows the frame's last occurrence. Its last LINE would not do, because the
-    /// program's own output comes before it and an answer may span lines: `"FAIL\nOK"` is a wrong
-    /// answer whose last line is `OK`.
-    fn define_program_entry(
-        &mut self,
-        main_index: usize,
-        entry: Entry,
-        statics_init: Option<FuncId>,
-    ) -> Result<(), Unsupported> {
-        let void = Signature::new(CallConv::SystemV);
-        let entry_id = self
-            .module
-            .declare_function(PROGRAM_ENTRY, Linkage::Export, &void)
-            .map_err(|error| format!("declaring `{PROGRAM_ENTRY}` ({error})"))?;
-        let init = self.import("kt_runtime_init", &[Ty::obj("kotlin/Any")], Ty::Unit)?;
-        let exit = self.import("kt_exit", &[Ty::Int], Ty::Unit)?;
-        let uncaught = self.import("kt_check_uncaught", &[], Ty::Unit)?;
-        let prints_result = carrier(self.ir.functions[main_index].ret) == Carrier::Ref;
-        let println = if prints_result && entry == Entry::Main {
-            Some(self.import("kt_println_any", &[any()], Ty::Unit)?)
-        } else {
-            None
-        };
-        let framed = if prints_result && entry == Entry::Box {
-            Some((
-                self.string_data(BOX_RESULT_FRAME.as_bytes())?,
-                self.import("kt_string_utf8", &[Ty::obj("kotlin/Any"), Ty::Int], any())?,
-                self.import("kt_print_any", &[any()], Ty::Unit)?,
-            ))
-        } else {
-            None
-        };
-        let main = self.functions[main_index].expect("the entry function has a body");
-        let frontend_config = self.module.target_config();
-
-        let mut context = self.module.make_context();
-        context.func.signature = void;
-        let mut builder_context = FunctionBuilderContext::new();
-        {
-            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
-            let block = builder.create_block();
-            builder.switch_to_block(block);
-            builder.seal_block(block);
-            // The address of this frame's own slot is as good a stack bottom as any: everything
-            // the program does happens in frames below it.
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                8,
-                3,
-            ));
-            let bottom = builder.ins().stack_addr(types::I64, slot, 0);
-            let init_ref = self.module.declare_func_in_func(init, builder.func);
-            builder.ins().call(init_ref, &[bottom]);
-            // Top-level properties are initialized before the entry function runs, which is when
-            // the JVM would have touched the facade and run its `<clinit>`.
-            let uncaught_ref = self.module.declare_func_in_func(uncaught, builder.func);
-            if let Some(statics_init) = statics_init {
-                let statics_ref = self.module.declare_func_in_func(statics_init, builder.func);
-                builder.ins().call(statics_ref, &[]);
-                // An initializer that threw has left its exception pending. Kotlin never reaches
-                // the entry then — the JVM fails the facade's `<clinit>` first — so the program
-                // ends here, reporting it, before the entry's first statement can run.
-                builder.ins().call(uncaught_ref, &[]);
-            }
-            let main_ref = self.module.declare_func_in_func(main, builder.func);
-            let call = builder.ins().call(main_ref, &[]);
-            // A `throw` nothing caught has left the exception pending and returned a zero value
-            // all the way to here. Kotlin ends the program reporting it, which is what this does —
-            // and it must happen BEFORE the answer is printed, because that zero is not an answer.
-            builder.ins().call(uncaught_ref, &[]);
-            if let Some(println) = println {
-                let result = builder.inst_results(call)[0];
-                let println_ref = self.module.declare_func_in_func(println, builder.func);
-                builder.ins().call(println_ref, &[result]);
-            }
-            if let Some((frame, utf8, print)) = framed {
-                let result = builder.inst_results(call)[0];
-                let global = self.module.declare_data_in_func(frame, builder.func);
-                let bytes = builder.ins().symbol_value(types::I64, global);
-                let length = builder
-                    .ins()
-                    .iconst(types::I32, BOX_RESULT_FRAME.len() as i64);
-                let utf8_ref = self.module.declare_func_in_func(utf8, builder.func);
-                let made = builder.ins().call(utf8_ref, &[bytes, length]);
-                let marker = builder.inst_results(made)[0];
-                let print_ref = self.module.declare_func_in_func(print, builder.func);
-                builder.ins().call(print_ref, &[marker]);
-                builder.ins().call(print_ref, &[result]);
-            }
-            let zero = builder.ins().iconst(types::I32, 0);
-            let exit_ref = self.module.declare_func_in_func(exit, builder.func);
-            builder.ins().call(exit_ref, &[zero]);
-            builder.ins().return_(&[]);
-            builder.finalize(frontend_config);
-        }
-        self.module
-            .define_function(entry_id, &mut context)
-            .map_err(|error| format!("compiling `{PROGRAM_ENTRY}` ({error})"))?;
-        self.module.clear_context(&mut context);
-        Ok(())
     }
 }
 
@@ -951,6 +782,11 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The constructions of this body whose object lives in this frame, each with the local it
+    /// initializes; see `frame_objects`.
+    frame_objects: std::collections::HashMap<u32, u32>,
+    /// The field variables of each local that holds a frame object.
+    frame_fields: std::collections::HashMap<u32, Vec<Variable>>,
 }
 
 /// One `finally` the current position is inside.
@@ -969,9 +805,14 @@ pub(super) struct PendingFinally {
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// How a semantic type is carried in this file; see [`FileLowering::carrier`].
+    fn carrier(&self, ty: Ty) -> Carrier {
+        self.file.carrier(ty)
+    }
+
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
-        let Some(clif) = carrier(ty).clif() else {
-            return Err("a `Unit`-typed local".to_string());
+        let Some(clif) = self.carrier(ty).clif() else {
+            return Err("a `Unit`-typed local".into());
         };
         let variable = self.builder.declare_var(clif);
         self.values.insert(slot, (variable, ty));
@@ -1132,7 +973,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return false;
         };
         let slot = self.file.ir.classes[*class as usize].fields[*index as usize].ty;
-        match carrier(slot) {
+        match self.carrier(slot) {
             Carrier::Scalar(_, _) => is_scalar_zero(self.file.ir, *value),
             Carrier::Ref => is_null(self.file.ir, *value),
             Carrier::Void => false,
@@ -1140,6 +981,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn statement(&mut self, id: u32) -> Result<(), Unsupported> {
+        self.statement_effect(id)
+            .map_err(|declined| declined.at(self.file.ir.node_origin(id)))
+    }
+
+    fn statement_effect(&mut self, id: u32) -> Result<(), Unsupported> {
         // `var x = 0` in a class body stores NOTHING. The rule is Kotlin's, it is observable
         // rather than an optimization, and the IR is what knows which store is a declaration's —
         // see `property_initializer_stores`. A fresh object's storage is already zero here, as it
@@ -1176,8 +1022,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // A function whose result is a reference can still be handed `Unit` — a
                         // `Unit`-returning lambda's body returns the `Unit` OBJECT, because
                         // `FunctionN.invoke` answers with a reference whatever the lambda does.
-                        // `reference` materializes the runtime's singleton for exactly that.
-                        let value = self.reference(value)?;
+                        // `coerce` materializes the runtime's singleton for exactly that. It coerces
+                        // to the DECLARED result, not to `Any`: a value class carried as its value
+                        // is returned as that value, never boxed on the way out.
+                        let declared = self.result_type;
+                        let value = match self.coerce(value, declared)? {
+                            Some(value) => value,
+                            None => self.builder.ins().iconst(types::I64, 0),
+                        };
                         if self.terminated {
                             return Ok(());
                         }
@@ -1194,9 +1046,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             return Ok(());
                         }
                         let Some(lowered) = lowered else {
-                            return Err(
-                                "a `return` of no value from a non-`Unit` function".to_string()
-                            );
+                            return Err("a `return` of no value from a non-`Unit` function".into());
                         };
                         // The expression need not already be in the result's representation: a
                         // body whose value is typed by a type PARAMETER carries a reference, and
@@ -1206,8 +1056,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         let declared = self.result_type;
                         let Some(value) = self.convert(lowered, source, declared)? else {
                             return Err(
-                                "a `return` whose value does not reach the declared result"
-                                    .to_string(),
+                                "a `return` whose value does not reach the declared result".into(),
                             );
                         };
                         if self.terminated {
@@ -1236,7 +1085,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     Some(IrExpr::RefNew { .. }) => any(),
                     _ => ty,
                 };
-                if carrier(ty) == Carrier::Void {
+                if self.carrier(ty) == Carrier::Void {
                     if let Some(init) = init {
                         self.expression(init)?;
                     }
@@ -1264,7 +1113,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         return Ok(());
                     }
                     let Some(value) = value else {
-                        return Err("a local initialized from a `Unit` value".to_string());
+                        return Err("a local initialized from a `Unit` value".into());
                     };
                     self.builder.def_var(variable, value);
                 } else {
@@ -1282,14 +1131,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 let Some(&(variable, ty)) = self.values.get(&var) else {
-                    return Err("an assignment to an undeclared local".to_string());
+                    return Err("an assignment to an undeclared local".into());
                 };
                 let value = self.coerce(value, ty)?;
                 if self.terminated {
                     return Ok(());
                 }
                 let Some(value) = value else {
-                    return Err("an assignment of a `Unit` value".to_string());
+                    return Err("an assignment of a `Unit` value".into());
                 };
                 self.builder.def_var(variable, value);
             }
@@ -1363,11 +1212,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     )?;
                     return Ok(());
                 }
+                // A property declared in another file of the module has no layout here; its
+                // declaring file exports the entry points of one shared plan.
+                if self.file.is_imported_property(&target) {
+                    return self.module_property_write(&target, dispatch_receiver, value);
+                }
                 match self.checked_property(&target) {
-                    Ok((class, index)) => {
+                    Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, dispatch_receiver, value)?
                     }
-                    Err(reason) if reason == objects::TOP_LEVEL => {
+                    Ok(objects::CheckedProperty::TopLevel) => {
                         self.top_level_write(&target, value)?;
                     }
                     Err(reason) => return Err(reason),
@@ -1390,7 +1244,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 .rposition(|frame| frame.label.as_deref() == Some(label)),
             None => self.loops.len().checked_sub(1),
         };
-        found.ok_or_else(|| format!("a `{keyword}` outside the loop it names"))
+        found.ok_or_else(|| declined!("a `{keyword}` outside the loop it names"))
     }
 
     /// `while`, `do…while`, and the shape a lowered `for` takes: a loop whose `update` runs after
@@ -1415,7 +1269,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         let Some(condition) = condition else {
-            return Err("a loop condition of no value".to_string());
+            return Err("a loop condition of no value".into());
         };
         self.builder
             .ins()
@@ -1504,9 +1358,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         result: Option<Ty>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
-        let result = result.filter(|ty| carrier(*ty) != Carrier::Void);
+        let result = result.filter(|ty| self.carrier(*ty) != Carrier::Void);
         if let Some(ty) = result {
-            let clif = carrier(ty).clif().expect("non-void carrier");
+            let clif = self.carrier(ty).clif().expect("non-void carrier");
             self.builder.append_block_param(merge, clif);
         }
 
@@ -1520,7 +1374,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         break;
                     }
                     let Some(condition) = condition else {
-                        return Err("a condition of no value".to_string());
+                        return Err("a condition of no value".into());
                     };
                     let then_block = self.builder.create_block();
                     let else_block = self.builder.create_block();
@@ -1547,7 +1401,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 // costs a few unreachable instructions and never a wrong answer.
                 Some(ty) => {
                     self.runtime_call("kt_no_when_branch_matched", &[], Ty::Unit, &[])?;
-                    let clif = carrier(ty).clif().expect("non-void carrier");
+                    let clif = self.carrier(ty).clif().expect("non-void carrier");
                     let unreachable = match clif {
                         types::F32 => self.builder.ins().f32const(0.0),
                         types::F64 => self.builder.ins().f64const(0.0),
@@ -1595,9 +1449,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             (Some(_), Some(value)) => {
                 self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
             }
-            (Some(_), None) => {
-                return Err("a `when` arm of no value where one is needed".to_string())
-            }
+            (Some(_), None) => return Err("a `when` arm of no value where one is needed".into()),
             (None, _) => {
                 self.builder.ins().jump(merge, &[]);
             }
@@ -1607,7 +1459,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn zero_of(&mut self, ty: Ty) -> Value {
-        match carrier(ty) {
+        match self.carrier(ty) {
             Carrier::Scalar(t, _) if t == types::F32 => self.builder.ins().f32const(0.0),
             Carrier::Scalar(t, _) if t == types::F64 => self.builder.ins().f64const(0.0),
             Carrier::Scalar(t, _) => self.builder.ins().iconst(t, 0),
@@ -1622,6 +1474,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// rather than about a node are said here, and cover every route in rather than the routes
     /// thought of one at a time.
     fn expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
+        self.expression_value(id)
+            .map_err(|declined| declined.at(self.file.ir.node_origin(id)))
+    }
+
+    fn expression_value(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
         let logical = self.file.ir.logical_types.get(&id).copied();
         let value = self.lowered_expression(id)?;
         let (Some(value), Some(logical)) = (value, logical) else {
@@ -1638,7 +1495,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if !logical.is_unsigned() || !self.carried_as_scalar(id) {
             return Ok(Some(value));
         }
-        let Some(narrow) = carrier(logical).clif() else {
+        let Some(narrow) = self.carrier(logical).clif() else {
             return Ok(Some(value));
         };
         let actual = self.builder.func.dfg.value_type(value);
@@ -1651,7 +1508,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Does this expression's machine shape hold the value itself rather than a pointer to it?
     fn carried_as_scalar(&self, id: u32) -> bool {
         self.physical_type_of(id)
-            .is_some_and(|ty| matches!(carrier(ty), Carrier::Scalar(..)))
+            .is_some_and(|ty| matches!(self.carrier(ty), Carrier::Scalar(..)))
     }
 
     fn lowered_expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
@@ -1666,7 +1523,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(None);
                 }
                 let Some(&(variable, _)) = self.values.get(&slot) else {
-                    return Err("a read of an undeclared local".to_string());
+                    return Err("a read of an undeclared local".into());
                 };
                 Ok(Some(self.builder.use_var(variable)))
             }
@@ -1726,7 +1583,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     )
                 }
             }
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs),
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
             IrExpr::StringConcat(parts) => self.concat(&parts),
@@ -1750,11 +1607,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .iter()
                     .map(|ordinal| ordinal + default_prefix_count)
                     .collect();
+                let placement = match self.frame_objects.get(&id) {
+                    Some(&local) => frame_objects::Placement::Frame { local },
+                    None => frame_objects::Placement::Heap,
+                };
                 self.construction(
+                    id,
                     internal,
                     &args,
                     ctor_params.as_deref(),
                     (!omitted.is_empty()).then_some(omitted.as_slice()),
+                    placement,
                 )
             }
             IrExpr::MethodCall {
@@ -1762,7 +1625,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
                 receiver,
                 args,
-            } => self.method_call(class, index, receiver, &args),
+            } => self.method_call(id, class, index, receiver, &args),
             IrExpr::GetField {
                 receiver,
                 class,
@@ -1775,6 +1638,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.lateinit_initialized(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::NewArray { array_type, size } => self.new_array(array_type, size),
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } => self.vararg(array_type, &spreads, &elements),
             IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => self.lambda(id),
             IrExpr::InvokeFunction {
                 func,
@@ -1790,6 +1659,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
+            IrExpr::EnumValues { classifier } => self.enum_values(classifier),
+            IrExpr::EnumEntries { classifier } => self.enum_entries(classifier),
             // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
             // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
             // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
@@ -1839,7 +1710,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }) if self.throwable_field(target).is_some() => {
                 let symbol = self.throwable_field(target).expect("just matched");
                 if self.file.overrides_a_throwable_accessor {
-                    return Err(format!(
+                    return Err(declined!(
                         "a read of `Throwable.{}` in a file that overrides one",
                         if symbol == "kt_throwable_cause" {
                             "cause"
@@ -1856,6 +1727,84 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.is_text_length(target) => self.text_length(receiver),
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.external_getter_is_indices(target) => self.indices(receiver),
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                result,
+                ..
+            }) if self.range_getter(target, receiver).is_some() => {
+                let (owner, name) = self
+                    .range_getter(target, receiver)
+                    .expect("checked by the guard");
+                self.range_property_member(owner, &name, receiver, result)
+                    .expect("a range member, by the guard")
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.lazy_getter(target, receiver).is_some()
+                || self.pair_getter(target, receiver).is_some() =>
+            {
+                let name = self
+                    .lazy_getter(target, receiver)
+                    .or_else(|| self.pair_getter(target, receiver))
+                    .expect("checked by the guard");
+                match self.list_property_member(&name, receiver, any()) {
+                    Some(realized) => realized,
+                    None => Err(declined!("`{name}` of a receiver that answers none of it")),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.indexed_value_getter(target, receiver).is_some() => {
+                let name = self
+                    .indexed_value_getter(target, receiver)
+                    .expect("checked by the guard");
+                let answer = lists::indexed_value_getter_ty(&name);
+                match self.list_property_member(&name, receiver, answer) {
+                    Some(realized) => realized,
+                    None => Err(declined!(
+                        "`{name}` of a receiver that is not an indexed value"
+                    )),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.list_getter(target, receiver).is_some() => {
+                let name = self
+                    .list_getter(target, receiver)
+                    .expect("checked by the guard");
+                match self.list_property_member(&name, receiver, Ty::Int) {
+                    Some(realized) => realized,
+                    None => Err(declined!("`{name}` of a receiver that is not a collection")),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.map_getter(target, receiver).is_some() => {
+                let property = self
+                    .map_getter(target, receiver)
+                    .expect("checked by the guard");
+                match self.map_property_member(property, receiver, property.answer()) {
+                    Some(realized) => realized,
+                    None => Err(declined!(
+                        "`{}` of a receiver that is not a map",
+                        property.name()
+                    )),
+                }
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1872,9 +1821,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         None,
                     );
                 }
+                if self.file.is_imported_property(&target) {
+                    return self.module_property_read(&target, dispatch_receiver);
+                }
                 match self.checked_property(&target) {
-                    Ok((class, index)) => self.property_read(class, index, dispatch_receiver),
-                    Err(reason) if reason == objects::TOP_LEVEL => self.top_level_read(&target),
+                    Ok(objects::CheckedProperty::Member(class, index)) => {
+                        self.property_read(class, index, dispatch_receiver)
+                    }
+                    Ok(objects::CheckedProperty::TopLevel) => self.top_level_read(&target),
                     Err(reason) => Err(reason),
                 }
             }
@@ -1886,6 +1840,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(classifier, value),
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction {
+                operation,
+                start,
+                start_type,
+                end,
+                end_type,
+                result,
+            }) => self.range_construction(operation, start, start_type, end, end_type, result),
+            IrExpr::Checked(IrCheckedOperation::RangeContains {
+                operation,
+                value,
+                start,
+                end,
+                negated,
+                counter,
+            }) => self.range_contains(operation, value, start, end, negated, counter),
+            IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
+                self.illegal_progression_step(step)
+            }
             IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
             IrExpr::Try {
@@ -1906,7 +1879,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.statement(id)?;
                 Ok(None)
             }
-            other => Err(self.describe_declined(&other)),
+            other => Err(self.describe_declined(&other).into()),
         }
     }
 
@@ -1981,7 +1954,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 // Kotlin admits unpaired surrogates; UTF-8 does not encode them and the runtime is
                 // UTF-8, so such a literal is declined rather than mangled.
                 let Some(text) = value.as_str() else {
-                    return Err("a string constant containing an unpaired surrogate".to_string());
+                    return Err("a string constant containing an unpaired surrogate".into());
                 };
                 self.string_literal(text.as_bytes())?
             }
@@ -2015,7 +1988,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // so a call that leaves it out still names the declaration that has it.
         let has_message = args.len() > compared;
         if args.len() < compared {
-            return Err(format!(
+            return Err(declined!(
                 "a `kotlin.test` assertion missing an operand (`{symbol}`)"
             ));
         }
@@ -2102,11 +2075,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // pointer to one, and it is no WIDER than that scalar: `expression` has narrowed the value
         // to it, so the two agree. Wider would be a claim about bits that are not there, and a
         // pointer is not the value at all — `val any: Any = 7u` is still checked as `UInt`.
-        let bits = |ty: Ty| carrier(ty).clif().map(|clif| clif.bits());
+        let bits = |ty: Ty| self.carrier(ty).clif().map(|clif| clif.bits());
         match logical {
             Some(logical)
                 if logical.is_unsigned()
-                    && matches!(carrier(physical), Carrier::Scalar(..))
+                    && matches!(self.carrier(physical), Carrier::Scalar(..))
                     && bits(logical) <= bits(physical) =>
             {
                 Some(logical)
@@ -2195,7 +2168,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     };
                     result = Some(match result {
                         None => ty,
-                        Some(previous) if carrier(previous) == carrier(ty) => previous,
+                        Some(previous) if self.carrier(previous) == self.carrier(ty) => previous,
                         Some(_) => any(),
                     });
                 }
@@ -2205,7 +2178,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Try { result, .. } => *result,
             IrExpr::StringConcat(_) => Ty::String,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
-            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => match op {
+            IrExpr::PrimitiveBinOp { op, .. } => match op {
                 IrBinOp::Lt
                 | IrBinOp::Le
                 | IrBinOp::Gt
@@ -2216,15 +2189,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 | IrBinOp::RefNe
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
-                // An operand of a bounded type parameter is read through its bound: the operator
-                // unboxes it, so the RESULT is that primitive and not the reference the
-                // declaration spells — a caller told otherwise would skip the boxing the next
-                // parameter needs, and the mismatch reaches the verifier, or worse.
-                _ => arithmetic_result(
-                    *op,
-                    scalar_bound(self.type_of(*lhs)?)?,
-                    self.type_of(*rhs).and_then(scalar_bound),
-                ),
+                // The selected operator's declared result, which common lowering recorded: the
+                // primitive itself even when an operand is a bounded type parameter's reference.
+                _ => self.file.ir.checked_type(id)?,
             },
             IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::Call { callee, .. } => match callee {
@@ -2235,7 +2202,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 Callee::External { ret, .. }
                 | Callee::Intrinsic { ret, .. }
+                | Callee::Module { ret, .. }
                 | Callee::ModuleWithDefaults { ret, .. }
+                // Another file's function returns what its declaration fixes; both files carry
+                // that type by the same projection, a value class as its value.
+                | Callee::CrossFile { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
                 Callee::Special { source, .. } => {
                     let function = self.file.ir.checked_callable_functions.get(&(*source)?)?;
@@ -2265,6 +2236,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 classifier: internal,
                 ..
             } => Ty::Obj(*internal, &[]),
+            IrExpr::EnumValues { classifier } => {
+                Ty::obj_args("kotlin/Array", &[Ty::Obj(*classifier, &[])])
+            }
+            IrExpr::EnumEntries { classifier } => {
+                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::Obj(*classifier, &[])])
+            }
             IrExpr::MethodCall { class, index, .. } => {
                 let fid = self.file.ir.classes[*class as usize].methods[*index as usize];
                 self.file.ir.functions[fid as usize].ret
@@ -2285,15 +2262,37 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     self.file.ir.classes[*class as usize].fields[*index as usize].ty,
                 )
             }
+            IrExpr::EnclosingInstance { inner, .. } => {
+                let (class, field) = self.enclosing_field(*inner).ok()?;
+                self.file.ir.classes[class as usize].fields[field as usize].ty
+            }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,
+            // What the checked accessor the access calls answers.
+            IrExpr::LocalDelegateAccess(access) => {
+                let plan = self
+                    .file
+                    .ir
+                    .local_delegate_plans
+                    .get(access.plan as usize)?;
+                match access.value {
+                    Some(_) => plan.setter.as_ref()?.result,
+                    None => plan.getter.result,
+                }
+            }
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
             // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver,
+                result,
+                ..
+            }) => {
                 if self.is_text_length(*target) {
                     return Some(Ty::Int);
                 }
@@ -2310,9 +2309,58 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
                     Some(_) => Ty::Int,
-                    None => return None,
+                    // A pair's components are references; a list's `size` is an `Int`; a range's
+                    // own members answer at their element's width. Which of the three this read is
+                    // depends on the receiver as much as on the getter — a range declares `first`
+                    // too — so the receiverless read is none of them.
+                    None => match receiver {
+                        // `x.indices` is realized as an `IntRange` and as nothing else, whatever
+                        // the receiver is indexable as, so the read IS one. Saying so is what
+                        // lets `b in a.indices` recognize its receiver as a range when `b` is not
+                        // an `Int`: that comparison is the ranges FACADE's, which reads its
+                        // element from the receiver, and a receiver with no type sent the call
+                        // to the dependency-member path to be declined by name.
+                        Some(_) if self.external_getter_is_indices(*target) => {
+                            Ty::obj("kotlin/ranges/IntRange")
+                        }
+                        Some(receiver)
+                            if self.lazy_getter(*target, *receiver).is_some()
+                                || self.pair_getter(*target, *receiver).is_some() =>
+                        {
+                            any()
+                        }
+                        Some(receiver)
+                            if self.indexed_value_getter(*target, *receiver).is_some() =>
+                        {
+                            let name = self
+                                .indexed_value_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            lists::indexed_value_getter_ty(&name)
+                        }
+                        Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
+                        Some(receiver) if self.map_getter(*target, *receiver).is_some() => {
+                            let property = self
+                                .map_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            let answer = property.answer();
+                            // The runtime's answer is only the carrier; the checked result names
+                            // the collection the read IS (`m.keys` is a `Set`). A walk over the
+                            // read itself, `for (k in m.keys)`, finds its collection shape there.
+                            if self.carrier(*result) == self.carrier(answer) {
+                                *result
+                            } else {
+                                answer
+                            }
+                        }
+                        Some(receiver) => {
+                            self.range_getter(*target, *receiver)?;
+                            *result
+                        }
+                        None => return None,
+                    },
                 }
             }
+            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
             IrExpr::LocalPropertyReference(_) => Ty::obj("kotlin/reflect/KProperty"),
             // A class literal is an object of the reflection type Kotlin gives it, which is what
             // makes an equality between two of them an equality between references.
@@ -2339,101 +2387,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // A `lateinit` read yields its operand too; only the guard differs.
             IrExpr::LateinitCheck { operand, .. } => self.physical_type_of(*operand)?,
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
-                self.file.ir.checked_properties.get(target)?.ty
+                match self.file.is_imported_property(target) {
+                    // A property declared in another file: the type its getter entry point
+                    // returns.
+                    true => self.module_property_ty(target)?,
+                    false => self.file.ir.checked_properties.get(target)?.ty,
+                }
             }
             _ => return None,
         })
-    }
-
-    /// An expression coerced to the carrier of `target`.
-    fn coerce(&mut self, arg: u32, target: Ty) -> Result<Option<Value>, Unsupported> {
-        let Some(value) = self.expression(arg)? else {
-            // `Unit` is a value in Kotlin, and a position that wants a reference wants that value:
-            // `val u: Any = Unit`, an argument of type `Any?`, a `Unit`-returning lambda's result.
-            // The runtime owns the singleton, so there is one of it program-wide.
-            if !self.terminated && carrier(target) == Carrier::Ref {
-                return self.runtime_call("kt_unit", &[], any(), &[]);
-            }
-            return Ok(None);
-        };
-        if self.terminated {
-            return Ok(Some(value));
-        }
-        let source = self.type_of(arg);
-        self.convert(value, source, target)
-    }
-
-    /// An expression in a position that requires a reference, boxing a scalar if necessary.
-    fn reference(&mut self, id: u32) -> Result<Value, Unsupported> {
-        match self.coerce(id, any())? {
-            Some(value) => Ok(value),
-            // Only a lowering that already left has no value here; anything else, including
-            // `Unit`, `coerce` materialized.
-            None => Ok(self.builder.ins().iconst(types::I64, 0)),
-        }
-    }
-
-    /// A representation change between carriers: boxing a scalar into a reference, unboxing one
-    /// out, or widening/narrowing between scalars. An undetermined source leaves the value alone.
-    fn convert(
-        &mut self,
-        value: Value,
-        source: Option<Ty>,
-        target: Ty,
-    ) -> Result<Option<Value>, Unsupported> {
-        let target_ty = target;
-        let target = carrier(target);
-        match (source.map(carrier), target) {
-            (None, target) => {
-                // The lowering could not type the expression. Its machine type is still known,
-                // and when that already is the target's carrier nothing needs doing; otherwise a
-                // conversion would be a guess, and a guess is declined.
-                let actual = self.builder.func.dfg.value_type(value);
-                match target.clif() {
-                    Some(clif) if clif == actual => Ok(Some(value)),
-                    None => Ok(None),
-                    Some(clif) => Err(format!(
-                        "a value of undetermined type (carried as `{actual}`) where a `{clif}` is \
-                         required"
-                    )),
-                }
-            }
-            (Some(Carrier::Ref), Carrier::Ref) => Ok(Some(value)),
-            (Some(source), target) if source == target => Ok(Some(value)),
-            (Some(Carrier::Scalar(_, _)), Carrier::Ref) => {
-                let ty = source.expect("known scalar");
-                let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!(
-                        "a `{ty:?}` in a position that requires a reference"
-                    ));
-                };
-                self.runtime_call(
-                    &format!("kt_box_{suffix}"),
-                    &[ty],
-                    Ty::obj("kotlin/Any"),
-                    &[value],
-                )
-            }
-            (Some(Carrier::Ref), Carrier::Scalar(_, _)) => {
-                // The TARGET's own type, not one recovered from its carrier: a carrier cannot tell
-                // a `UByte` from a `Boolean`, and each unboxes through its own descriptor.
-                let ty = target_ty.non_null();
-                let Some(suffix) = box_suffix(ty) else {
-                    return Err(format!("an unboxing to `{ty:?}`"));
-                };
-                self.runtime_call(
-                    &format!("kt_unbox_{suffix}"),
-                    &[Ty::obj("kotlin/Any")],
-                    ty,
-                    &[value],
-                )
-            }
-            (Some(Carrier::Scalar(from, signed)), Carrier::Scalar(to, _)) => {
-                Ok(Some(self.resize(value, from, signed, to)))
-            }
-            (Some(_), Carrier::Void) => Ok(None),
-            (Some(Carrier::Void), _) => Err("a coercion from `Unit`".to_string()),
-        }
     }
 
     /// A string template: each part rendered by the runtime and joined left to right.
@@ -2463,212 +2425,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(joined))
     }
 
-    /// A compiler-selected operation on built-in types, realized by the runtime.
-    fn intrinsic(
-        &mut self,
-        operation: IrIntrinsic,
-        ret: Ty,
-        receiver: Option<u32>,
-        args: &[u32],
-    ) -> Result<Option<Value>, Unsupported> {
-        match operation {
-            // `relational_operator` records that the call came from a `ComparisonCall`, which
-            // lets a backend emit a branch instead of materializing the -1/0/1. This one answers
-            // the same VALUE either way and leaves that to Cranelift, so the hint is ignored
-            // rather than acted on.
-            IrIntrinsic::PrimitiveCompare { operand, .. } => {
-                let (Some(receiver), [argument]) = (receiver, args) else {
-                    return Err("a malformed `compareTo`".to_string());
-                };
-                // The operand type named here is the erased one, which for an unsigned value is
-                // the signed number sharing its bits — and ordering is exactly the question that
-                // reads those bits differently. The receiver's own checked type decides.
-                if let Some(element) = self
-                    .type_of(receiver)
-                    .map(Ty::non_null)
-                    .filter(|ty| ty.is_unsigned())
-                {
-                    return self.unsigned_compare(element, receiver, *argument, ret);
-                }
-                let Some(suffix) = scalar_suffix(operand) else {
-                    return Err("`compareTo` on a non-scalar operand".to_string());
-                };
-                let left = self.coerce(receiver, operand)?;
-                let right = self.coerce(*argument, operand)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                let (Some(left), Some(right)) = (left, right) else {
-                    return Err("`compareTo` on `Unit`".to_string());
-                };
-                self.runtime_call(
-                    &format!("kt_compare_{suffix}"),
-                    &[operand, operand],
-                    ret,
-                    &[left, right],
-                )
-            }
-            // `s[i]`, and the read a `for (c in s)` loop is lowered into: common lowering turns
-            // that loop into a counted one over `StringLength` and this, so the two arrive
-            // together and only one of them was answered.
-            //
-            // The runtime answers a `Char`; a site that asked for a boxed one — `for (c: Char? in
-            // s)` — gets the conversion, which is why the answer is not handed straight back.
-            IrIntrinsic::StringGet => {
-                let (Some(receiver), [index]) = (receiver, args) else {
-                    return Err("a malformed string read".to_string());
-                };
-                self.string_get(receiver, *index, ret)
-            }
-            IrIntrinsic::Ieee754Equals { operand } => {
-                let [left, right] = args else {
-                    return Err("a malformed IEEE floating-point equality".to_string());
-                };
-                let operand = operand.canonical_semantic();
-                if !matches!(operand, Ty::Float | Ty::Double) {
-                    return Err(format!(
-                        "an IEEE equality whose operand is not floating-point (`{operand:?}`)"
-                    ));
-                }
-                self.ieee_equality(
-                    IrBinOp::Eq,
-                    *left,
-                    self.type_of(*left),
-                    *right,
-                    self.type_of(*right),
-                )
-            }
-            // `"$u"`: the frontend names the conversion rather than letting the template reach for
-            // `Any.toString()`, because the value it would reach for is the signed number sharing
-            // the bits.
-            IrIntrinsic::UnsignedToString { source } => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed unsigned `toString`".to_string());
-                };
-                let Some(realized) = self.unsigned_intrinsic_to_string(source.non_null(), receiver)
-                else {
-                    return Err(format!("an unsigned `toString` of `{source:?}`"));
-                };
-                realized
-            }
-            IrIntrinsic::StringLength => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed `String.length`".to_string());
-                };
-                let value = self.reference(receiver)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                self.runtime_call("kt_string_length", &[any()], ret, &[value])
-            }
-            IrIntrinsic::NullableAnyToString => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed `toString`".to_string());
-                };
-                let value = self.reference(receiver)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                self.runtime_call("kt_to_string", &[any()], ret, &[value])
-            }
-            IrIntrinsic::GeneratedPropertyHash { ty } => {
-                let [value] = args else {
-                    return Err("a malformed data-class field hash".to_string());
-                };
-                self.field_hash(*value, ty)
-            }
-            IrIntrinsic::GeneratedPropertyEquals { ty } => {
-                let [left, right] = args else {
-                    return Err("a malformed data-class field comparison".to_string());
-                };
-                self.field_equals(*left, *right, ty)
-            }
-            // A data class rendering an ARRAY property shows its CONTENTS, not the identity an
-            // array's own `toString` answers — `data class D(val xs: IntArray)` prints
-            // `D(xs=[1, 2])`. That is the same rendering `xs.contentToString()` asks for, and the
-            // runtime already answers it for every array it lays out.
-            IrIntrinsic::DataClassArrayToString { .. } => {
-                let [value] = args else {
-                    return Err("a malformed data-class array rendering".to_string());
-                };
-                let array = self.reference(*value)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                self.runtime_call("kt_array_content_to_string", &[any()], any(), &[array])
-            }
-            IrIntrinsic::Assert { mode } => self.checked_assertion(mode, args),
-            other => Err(format!("the `{other:?}` intrinsic")),
-        }
-    }
-
-    /// Kotlin's `assert(value)` / `assert(value) { message }`.
-    ///
-    /// The MODE decides before anything is evaluated, which is the whole of what makes this an
-    /// intrinsic rather than a call: `always-disable` evaluates NEITHER child, so a condition with
-    /// a side effect does not have it — the corpus asks that directly.
-    ///
-    /// Enabled, the condition is evaluated and branched on, and the message is computed only on
-    /// the failing side: `lazyMessage` is lazy exactly there. It crosses as the FUNCTION it is,
-    /// invoked by the runtime beside the failure it reports rather than here.
-    ///
-    /// The `Runtime` mode is the one this target does not answer. Whether assertions are on is a
-    /// question about how the program was BUILT, and nothing in this generator can see that yet —
-    /// answering it either way would be a guess a program can observe.
-    fn checked_assertion(
-        &mut self,
-        mode: crate::types::AssertionMode,
-        args: &[u32],
-    ) -> Result<Option<Value>, Unsupported> {
-        match mode {
-            crate::types::AssertionMode::AlwaysDisabled => Ok(None),
-            crate::types::AssertionMode::Runtime => Err(
-                "an `assert` whose enabling is decided at run time, which this target does not \
-                 answer yet"
-                    .to_string(),
-            ),
-            crate::types::AssertionMode::AlwaysEnabled => {
-                let [condition, message @ ..] = args else {
-                    return Err("a malformed `assert`".to_string());
-                };
-                if message.len() > 1 {
-                    return Err("an `assert` with more than a condition and a message".to_string());
-                }
-                let Some(value) = self.coerce(*condition, Ty::Boolean)? else {
-                    return Ok(None);
-                };
-                if self.terminated {
-                    return Ok(None);
-                }
-                // The message ARGUMENT is an ordinary argument and is evaluated here, before the
-                // branch: `assert(c, xs.filter { … }::message)` filters whether or not the
-                // assertion holds, and the corpus asks exactly that. What `lazyMessage` makes lazy
-                // is the INVOCATION, which happens beside the failure and nowhere else.
-                let lazy = match message {
-                    [function] => self.reference(*function)?,
-                    _ => self.builder.ins().iconst(types::I64, 0),
-                };
-                if self.terminated {
-                    return Ok(None);
-                }
-                let failed = self.builder.create_block();
-                let passed = self.builder.create_block();
-                self.builder.ins().brif(value, passed, &[], failed, &[]);
-
-                self.continue_in(failed);
-                self.builder.seal_block(failed);
-                self.runtime_call("kt_assertion_failed", &[any()], Ty::Unit, &[lazy])?;
-                if !self.terminated {
-                    self.builder.ins().jump(passed, &[]);
-                }
-
-                self.continue_in(passed);
-                self.builder.seal_block(passed);
-                Ok(None)
-            }
-        }
-    }
-
     /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`.
     ///
     /// Kotlin's answer for each primitive is fixed, and these are those answers rather than
@@ -2678,7 +2434,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// not lost in the truncation to `Int`, and `Double` does the same to its bits. A `Float` is
     /// its bits. The smaller integers are themselves, widened.
     fn field_hash(&mut self, value: u32, ty: Ty) -> Result<Option<Value>, Unsupported> {
-        if carrier(ty) == Carrier::Ref {
+        if self.carrier(ty) == Carrier::Ref {
             // Including a nullable primitive, which is a box and hashes through its own type.
             let value = self.reference(value)?;
             if self.terminated {
@@ -2687,7 +2443,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.runtime_call("kt_hash_code", &[any()], Ty::Int, &[value]);
         }
         let Some(operand) = self.coerce(value, ty)? else {
-            return Err("a `Unit` data-class field".to_string());
+            return Err("a `Unit` data-class field".into());
         };
         if self.terminated {
             return Ok(None);
@@ -2697,7 +2453,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// The hash of a value already in hand, by the same rules.
     pub(super) fn value_hash(&mut self, operand: Value, ty: Ty) -> Result<Value, Unsupported> {
-        if carrier(ty) == Carrier::Ref {
+        // A value class hashes as the value it holds, by the rule for THAT value's type.
+        let ty = self.file.values.project(ty);
+        if self.carrier(ty) == Carrier::Ref {
             return Ok(self
                 .runtime_call("kt_hash_code", &[any()], Ty::Int, &[operand])?
                 .expect("`kt_hash_code` returns an Int"));
@@ -2731,7 +2489,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let bits = self.bits_of(operand, types::I64);
                 self.fold_to_int(bits)
             }
-            other => return Err(format!("a data-class field of type `{other:?}`")),
+            other => return Err(declined!("a data-class field of type `{other:?}`")),
         };
         Ok(hash)
     }
@@ -2770,14 +2528,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         right: u32,
         ty: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        if carrier(ty) != Carrier::Ref {
+        if self.carrier(ty) != Carrier::Ref {
             let left = self.coerce(left, ty)?;
             let right = self.coerce(right, ty)?;
             if self.terminated {
                 return Ok(None);
             }
             let (Some(left), Some(right)) = (left, right) else {
-                return Err("a `Unit` data-class field".to_string());
+                return Err("a `Unit` data-class field".into());
             };
             return self.values_equal(left, right, ty).map(Some);
         }
@@ -2803,7 +2561,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         right: Value,
         ty: Ty,
     ) -> Result<Value, Unsupported> {
-        if carrier(ty) != Carrier::Ref {
+        // A value class compares by the value it holds, by the rule for THAT value's type.
+        let ty = self.file.values.project(ty);
+        if self.carrier(ty) != Carrier::Ref {
             // `Double.equals` is not `==`: it reads the bits, so `NaN` equals itself and the two
             // zeroes are distinct. Comparing the reinterpreted integers is exactly that rule, and
             // it is the rule Kotlin's own `equals` states — `==` on the machine answers the other
@@ -2837,7 +2597,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 return Ok(values);
             }
             let Some(value) = value else {
-                return Err("a `Unit` argument".to_string());
+                return Err("a `Unit` argument".into());
             };
             values.push(value);
         }
@@ -2845,57 +2605,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 }
 
-/// The primitive a reference-carried type REPRESENTS, or `None` when it represents no primitive.
-///
-/// A type parameter is the case that matters: `T : Int` is carried as a reference — a boxed `Int`,
-/// exactly as the JVM carries it — and its bound is what says which primitive is in the box. The
-/// chain is peeled because a bound can name another parameter, and the step count is capped so a
-/// cyclic one cannot spin.
 /// `Any?`: the type every runtime reference parameter is declared as.
 fn any() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
-}
-
-/// The runtime's suffix for a scalar type's `kt_compare_*` and console functions.
-fn scalar_suffix(ty: Ty) -> Option<&'static str> {
-    Some(match ty {
-        Ty::Boolean => "boolean",
-        Ty::Byte => "byte",
-        Ty::Short => "short",
-        Ty::Char => "char",
-        Ty::Int => "int",
-        Ty::Long => "long",
-        Ty::Float => "float",
-        Ty::Double => "double",
-        _ => return None,
-    })
-}
-
-/// The Kotlin type an arithmetic operator produces, which is not always its operands'.
-///
-/// Arithmetic on the narrow integer types is `Int` arithmetic — Kotlin has no
-/// `Byte.plus(Byte): Byte`, and a result typed `Byte` would pick the wrong carrier. `Char` is the
-/// exception that makes the others a rule: `Char.plus(Int)` and `Char.minus(Int)` are declared to
-/// return `Char`, and only `Char.minus(Char)` returns `Int`. So `val c: Any = 'A' + 1` boxes a
-/// `Char` holding `'B'`, not an `Int` holding `66`.
-fn box_suffix(ty: Ty) -> Option<&'static str> {
-    Some(match ty {
-        Ty::Boolean => "boolean",
-        Ty::Byte => "byte",
-        Ty::Short => "short",
-        Ty::Char => "char",
-        Ty::Int => "int",
-        Ty::Long => "long",
-        Ty::Float => "float",
-        Ty::Double => "double",
-        // Each unsigned type has a descriptor of its own, which is what makes `1u as? Int` fail
-        // and a boxed one render its value rather than the signed number sharing its bits.
-        Ty::UByte => "ubyte",
-        Ty::UShort => "ushort",
-        Ty::UInt => "uint",
-        Ty::ULong => "ulong",
-        _ => return None,
-    })
 }
 
 fn callee_kind(callee: &Callee) -> &'static str {
@@ -2961,14 +2673,14 @@ mod tests {
 
     #[test]
     fn a_nullable_primitive_is_carried_as_a_reference() {
-        assert_eq!(carrier(Ty::Int), Carrier::Scalar(types::I32, true));
+        assert_eq!(machine_carrier(Ty::Int), Carrier::Scalar(types::I32, true));
         assert_eq!(
-            carrier(Ty::nullable(Ty::Int)),
+            machine_carrier(Ty::nullable(Ty::Int)),
             Carrier::Ref,
             "`Int?` must represent `null`, so it boxes exactly as it does on the JVM"
         );
-        assert_eq!(carrier(Ty::Unit), Carrier::Void);
-        assert_eq!(carrier(Ty::String), Carrier::Ref);
+        assert_eq!(machine_carrier(Ty::Unit), Carrier::Void);
+        assert_eq!(machine_carrier(Ty::String), Carrier::Ref);
     }
 
     #[test]
@@ -2976,9 +2688,22 @@ mod tests {
         // `Byte` is signed and `Char` is not; passing either to the runtime in a 32-bit register
         // must extend it the way the C prototype's type does, or `kt_println_char('é')` prints a
         // negative code point.
-        assert!(carrier(Ty::Byte).abi_param().unwrap().extension == ArgumentExtension::Sext);
-        assert!(carrier(Ty::Char).abi_param().unwrap().extension == ArgumentExtension::Uext);
-        assert!(carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext);
-        assert!(carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
+        assert!(
+            machine_carrier(Ty::Byte).abi_param().unwrap().extension == ArgumentExtension::Sext
+        );
+        assert!(
+            machine_carrier(Ty::Char).abi_param().unwrap().extension == ArgumentExtension::Uext
+        );
+        assert!(
+            machine_carrier(Ty::Boolean).abi_param().unwrap().extension == ArgumentExtension::Uext
+        );
+        assert!(machine_carrier(Ty::Int).abi_param().unwrap().extension == ArgumentExtension::None);
+    }
+
+    #[test]
+    fn only_a_verified_build_runs_the_cranelift_verifier() {
+        let target = NativeTarget::host().expect("a supported host");
+        assert!(!isa_for(target, false).unwrap().flags().enable_verifier());
+        assert!(isa_for(target, true).unwrap().flags().enable_verifier());
     }
 }

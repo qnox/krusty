@@ -48,7 +48,7 @@ fn assert_same_method(src: &str, class: &str, member: &str) {
         reference,
         "{class}.{member}"
     );
-    match common::method_code_diff_against_kotlinc("Main", &[], src, class, member) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], src, class, member) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{class}.{member}: reference toolchain unavailable"),
@@ -56,8 +56,13 @@ fn assert_same_method(src: &str, class: &str, member: &str) {
 }
 
 fn assert_runs(src: &str) {
-    let output = common::compile_and_run_box(src, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        src,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }
 

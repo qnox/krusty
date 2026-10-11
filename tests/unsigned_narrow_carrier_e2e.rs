@@ -77,7 +77,8 @@ fun box(): String {\n\
 /// later change to the narrowing cannot break them silently.
 #[test]
 fn a_narrow_unsigned_constant_survives_a_collection_and_an_array() {
-    const SRC: &str = "fun box(): String {\n\
+    const SRC: &str = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
+fun box(): String {\n\
     val l = listOf<UByte>(200u, 255u)\n\
     if (l[0].toString() != \"200\" || l[1].toString() != \"255\") return \"fail list\"\n\
     if (l[0] != 200.toUByte()) return \"fail list element\"\n\

@@ -48,6 +48,9 @@ pub enum FirPropertyTarget {
         /// Parameter slot occupied by the extension receiver when this accessor belongs to a
         /// member-extension property. Ordinary members and top-level extensions use `None`.
         extension_receiver_parameter: Option<u32>,
+        /// Reading the selected declaration is a constant-value expression for Kotlin metadata.
+        /// The provider computes this semantic fact; later phases do not inspect its origin.
+        metadata_constant_read: bool,
         dispatch: FirPropertyDispatch,
     },
 }
@@ -61,6 +64,10 @@ pub enum FirPropertyReferenceTarget {
     /// a symbolic declaration signature.
     SpecializedModule {
         property: PropertyId,
+        /// Exact classifier the reference was written on for an instance member. This is selected
+        /// with the property and controls reflection substitution; a backend must not reconstruct
+        /// it from the specialized receiver type or the declaring accessor owner.
+        reflection_owner: Option<TypeName>,
         /// Accessor declaration spellings carried by the provider-selected property candidate.
         /// These are declaration facts, not names reconstructed from the property spelling by a
         /// later backend pass.

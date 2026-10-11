@@ -269,8 +269,11 @@ pub(crate) fn unsigned_range_construction(
     .then_some(MemberRealization::RangeConstruction { open_end })
 }
 
-/// A `UInt`/`ULong` member whose JVM realization is the JDK's own unsigned operation on the carrier
-/// (kotlinc's unsigned `IntrinsicMethods` entries) rather than a call of the stdlib declaration.
+/// A `UInt`/`ULong` member kotlinc realizes without calling or inlining the stdlib declaration.
+///
+/// `CompareTo`, `Divide`, `Remainder` and `ToString` are the JDK's unsigned methods on the carrier.
+/// The bitwise members are the carrier primitive opcode. `LogicalShiftRight` is `UInt.shr` /
+/// `ULong.shr`: a logical shift, not the arithmetic `shr` of a signed integer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnsignedMemberOperation {
     CompareTo,
@@ -326,6 +329,49 @@ pub(crate) fn unsigned_member_operation(
     Some((class, operation))
 }
 
+/// The primitive operation implemented by one exact unsigned bitwise member signature.
+///
+/// This is deliberately the same declaration-to-intrinsic mapping used for signed builtin
+/// operations: no intermediate semantic role is needed once the provider has the owner, full
+/// parameter list, result and modifiers together. A same-named overload remains an ordinary
+/// stdlib declaration with its own implementation.
+pub(crate) fn unsigned_bitwise_intrinsic(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    use crate::types::wk;
+    let element = if facts.owner == wk::uint() {
+        Ty::UInt
+    } else if facts.owner == wk::ulong() {
+        Ty::ULong
+    } else {
+        return None;
+    };
+    if facts.is_property || facts.ret != element {
+        return None;
+    }
+    match facts.name {
+        "and" | "or" | "xor" if facts.is_infix && facts.params == [element] => {
+            Some(match facts.name {
+                "and" => CompilerIntrinsic::PrimitiveBitAnd,
+                "or" => CompilerIntrinsic::PrimitiveBitOr,
+                "xor" => CompilerIntrinsic::PrimitiveBitXor,
+                _ => unreachable!(),
+            })
+        }
+        "shl" | "shr" if facts.is_infix && facts.params == [Ty::Int] => {
+            Some(if facts.name == "shl" {
+                CompilerIntrinsic::PrimitiveShiftLeft
+            } else {
+                CompilerIntrinsic::PrimitiveUnsignedShiftRight
+            })
+        }
+        "inv" if !facts.is_infix && facts.params.is_empty() => {
+            Some(CompilerIntrinsic::PrimitiveBitNot)
+        }
+        _ => None,
+    }
+}
+
 fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberRealization> {
     let open_end = match facts.name {
         "rangeTo" => false,
@@ -366,14 +412,15 @@ pub(crate) fn primitive_binary_operands(
     }
 }
 
-/// Common comparison carrier of an exact builtin scalar `compareTo`: `Char`/`Boolean` compare as
-/// `Int`, numeric operands at their promoted type (`Int.compareTo(Long)` compares `Long`s).
+/// Common comparison carrier of an exact builtin scalar `compareTo`: `Char` compares as `Int`,
+/// `Boolean` as itself, numeric operands at their promoted type (`Int.compareTo(Long)` compares
+/// `Long`s).
 pub(crate) fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<Ty> {
     let receiver = receiver.canonical_semantic().non_null();
     let parameter = parameter.canonical_semantic().non_null();
-    if (receiver == Ty::Boolean && parameter == Ty::Boolean)
-        || (receiver == Ty::Char && parameter == Ty::Char)
-    {
+    if receiver == Ty::Boolean && parameter == Ty::Boolean {
+        Some(Ty::Boolean)
+    } else if receiver == Ty::Char && parameter == Ty::Char {
         Some(Ty::Int)
     } else {
         Ty::promote(receiver, parameter)
@@ -473,6 +520,14 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
         && receiver.is_some()
     {
         return MemberRealization::Intrinsic(CompilerIntrinsic::PrimitiveHashCode);
+    }
+
+    if facts.name == "equals"
+        && facts.params == [Ty::nullable(Ty::obj("kotlin/Any"))]
+        && facts.ret == Ty::Boolean
+        && receiver.is_some()
+    {
+        return MemberRealization::Intrinsic(CompilerIntrinsic::PrimitiveEquals);
     }
 
     if facts.owner.matches("kotlin/Boolean")
@@ -685,6 +740,55 @@ mod tests {
         );
         assert_eq!(
             unsigned_member_operation(&facts("kotlin/UInt", "div", &[Ty::UInt], Ty::ULong)),
+            None
+        );
+        assert_eq!(
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
+                is_operator: false,
+                is_infix: true,
+                ..facts("kotlin/UInt", "and", &[Ty::UInt], Ty::UInt)
+            }),
+            Some(CompilerIntrinsic::PrimitiveBitAnd)
+        );
+        assert_eq!(
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/ULong", "shr", &[Ty::Int], Ty::ULong)
+            }),
+            Some(CompilerIntrinsic::PrimitiveUnsignedShiftRight)
+        );
+        assert_eq!(
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
+                is_operator: false,
+                ..facts("kotlin/UInt", "inv", &[], Ty::UInt)
+            }),
+            Some(CompilerIntrinsic::PrimitiveBitNot)
+        );
+        // A non-infix bitwise spelling, a shift whose count is not `Int`, a foreign unsigned
+        // class and a wrong result stay ordinary declarations and therefore keep their inline body.
+        assert_eq!(
+            unsigned_bitwise_intrinsic(&facts("kotlin/UInt", "or", &[Ty::UInt], Ty::UInt)),
+            None
+        );
+        assert_eq!(
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/UInt", "shl", &[Ty::UInt], Ty::UInt)
+            }),
+            None
+        );
+        assert_eq!(
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/UByte", "and", &[Ty::UByte], Ty::UByte)
+            }),
+            None
+        );
+        assert_eq!(
+            unsigned_bitwise_intrinsic(&BuiltinMemberDeclaration {
+                is_infix: true,
+                ..facts("kotlin/UInt", "xor", &[Ty::UInt], Ty::Int)
+            }),
             None
         );
     }

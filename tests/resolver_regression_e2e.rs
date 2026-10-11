@@ -1011,7 +1011,8 @@ fun measure(text: String, values: IntArray, ch: Char): Int =
     text.length + values.size + ch.code
 "#,
         &[],
-        None,
+        // The JDK supplies `java.io.Serializable`, a supertype of each of these builtins.
+        Some(&common::jdk_modules()),
     );
     assert_eq!(diagnostics, Vec::<String>::new());
 }
@@ -1660,6 +1661,118 @@ fun box(): String {
 }
 
 #[test]
+fn nested_alias_constructors_inside_their_declaring_class_keep_target_identity() {
+    let src = r#"
+class Container {
+    inner class Item(val value: String)
+    inner class GenericItem<T>(val value: T)
+    class NestedItem<T>(val value: T)
+
+    typealias ItemAlias = Item
+    typealias GenericAlias<T> = GenericItem<T>
+    typealias NestedAlias = NestedItem<String>
+
+    fun result(): String {
+        if (ItemAlias("O").value != "O") return "item"
+        if (GenericAlias("K").value != "K") return "generic"
+        return NestedAlias("OK").value
+    }
+}
+
+fun box(): String = Container().result()
+"#;
+    assert_accepted_and_runs(src, "ResolverNestedAliasConstructorIdentity");
+}
+
+#[test]
+fn top_level_alias_to_an_inner_classifier_binds_the_implicit_outer_receiver() {
+    let src = r#"
+class Container {
+    inner class Item(val value: String)
+}
+typealias ItemAlias = Container.Item
+
+fun box(): String {
+    val container = Container()
+    val construct = Container::ItemAlias
+    return construct(container, "OK").value
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverTopLevelInnerAliasImplicitReceiver");
+}
+
+#[test]
+fn generic_top_level_alias_to_an_inner_classifier_maps_the_outer_argument() {
+    let src = r#"
+class Container<T>(val value: T) {
+    inner class Item {
+        fun result(): T = value
+    }
+}
+typealias ItemAlias<T> = Container<T>.Item
+
+fun box(): String {
+    val container = Container("OK")
+    if (container.ItemAlias<String>().result() != "OK") return "direct"
+    val construct = Container<String>::ItemAlias
+    return construct(container).result()
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverGenericTopLevelInnerAlias");
+}
+
+#[test]
+fn inner_alias_outer_inference_substitutes_the_same_formal_in_own_arguments() {
+    let src = r#"
+class Outer<T>(val outer: T) {
+    inner class Inner<U>(val inner: U) {
+        fun result(): String = outer.toString() + inner.toString()
+    }
+}
+typealias Same<T> = Outer<T>.Inner<T>
+
+fun box(): String {
+    val outer = Outer("O")
+    val construct = Outer<String>::Same
+    return construct(outer, "K").result()
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverInnerAliasSharedOuterFormal");
+}
+
+#[test]
+fn fixed_inner_alias_outer_rejects_a_different_applied_receiver() {
+    let src = r#"
+class Container<T> {
+    inner class Item
+}
+typealias StringItem = Container<String>.Item
+
+fun byType() = Container<Int>::StringItem
+"#;
+    assert_rejection_same_as_kotlinc("ResolverInnerAliasFixedOuterMismatch", src);
+}
+
+#[test]
+fn inapplicable_inner_alias_does_not_hide_an_applicable_extension() {
+    let src = r#"
+class Container<T> {
+    inner class Item
+}
+typealias StringItem = Container<String>.Item
+
+fun Container<Int>.StringItem(): String = "OK"
+
+fun box(): String {
+    if (Container<Int>().StringItem() != "OK") return "direct"
+    val reference = Container<Int>::StringItem
+    return reference(Container())
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverInnerAliasReceiverMismatchExtension");
+}
+
+#[test]
 fn enabled_when_guard_uses_the_type_test_scope_and_short_circuits() {
     let src = r#"
 // LANGUAGE: +WhenGuards
@@ -1909,20 +2022,30 @@ class Box<out T : Any?> private constructor(private val value: Any?) {
             .collect::<Vec<_>>()
     });
     assert_eq!(diagnostics, Vec::<String>::new());
+    let [(owner, name, Some(receiver), parameters, member, extension)] = selected.as_slice() else {
+        panic!("expected one selected member extension, got {selected:#?}")
+    };
+    assert!(owner.matches("Box$Companion"));
+    assert_eq!(name, "getOrDefault");
+    assert!(*member);
+    assert!(*extension);
+    let [parameter] = parameters.as_slice() else {
+        panic!("getOrDefault must retain one value parameter")
+    };
+    let krusty::types::Ty::TyParam(parameter_identity, parameter_bound) = parameter else {
+        panic!("generic value parameter was erased: {parameter:?}")
+    };
     assert_eq!(
-        selected,
-        [(
-            krusty::types::type_name("Box$Companion"),
-            "getOrDefault".to_string(),
-            Some(krusty::types::Ty::obj_args(
-                "Box",
-                &[krusty::types::Ty::obj("kotlin/Any")],
-            )),
-            vec![krusty::types::Ty::obj("kotlin/Any")],
-            true,
-            true,
-        )]
+        **parameter_bound,
+        krusty::types::Ty::nullable(krusty::types::Ty::obj("kotlin/Any"))
     );
+    assert!(matches!(
+        receiver,
+        krusty::types::Ty::Obj(owner, arguments)
+            if owner.matches("Box")
+                && matches!(arguments.as_ref(), [krusty::types::Ty::TyParam(receiver_identity, receiver_bound)]
+                    if receiver_identity == parameter_identity && *receiver_bound == *parameter_bound)
+    ));
 }
 
 #[test]

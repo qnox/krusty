@@ -25,6 +25,7 @@ impl BodyLowering<'_> {
         line: u32,
     ) -> Result<ExprId, FirLoweringFailure> {
         let mut prefix = Vec::new();
+        let subject_expression = subject;
         let subject = subject
             .map(|subject| {
                 let subject_expression = self
@@ -79,7 +80,21 @@ impl BodyLowering<'_> {
                         }
                         comparison
                     }
-                    FirWhenCondition::Predicate(candidate) => self.expression(candidate)?,
+                    FirWhenCondition::Predicate(candidate) => {
+                        // fir2ir reads the subject afresh in each condition (`is T`, `in r`), at
+                        // that condition's offsets, so the read carries the condition's line.
+                        if let (Some(expression), Some(temporary)) = (subject_expression, subject) {
+                            let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                            let line = self.body.expression_debug_lines(candidate).source;
+                            if line != 0 {
+                                self.ir.expr_source_lines.insert(read, line);
+                            }
+                            self.set_expression_state(expression, LoweringState::Lowered(read));
+                        }
+                        let candidate = self.expression(candidate)?;
+                        self.ir.mark_early_inline_result_adaptation(candidate);
+                        candidate
+                    }
                 };
                 condition = Some(match condition {
                     Some(previous) => self.short_circuit_or(previous, candidate),
@@ -88,6 +103,7 @@ impl BodyLowering<'_> {
             }
             if let Some(guard) = branch.guard {
                 let guard = self.expression(guard)?;
+                self.ir.mark_early_inline_result_adaptation(guard);
                 condition = Some(match condition {
                     Some(previous) => self.short_circuit_and(previous, guard),
                     None => guard,
@@ -119,6 +135,9 @@ impl BodyLowering<'_> {
         if prefix.is_empty() {
             Ok(when)
         } else {
+            // The block holding the subject is the checked expression; the `when` inside it yields
+            // the same value.
+            self.ir.logical_types.insert(when, result_ty);
             Ok(self.ir.add_expr(IrExpr::Block {
                 stmts: prefix,
                 value: Some(when),

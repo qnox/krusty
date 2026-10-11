@@ -3,7 +3,7 @@
 //! Common IR keeps expression values even where Kotlin source discards them. This boundary chooses
 //! the JVM statement shape, including control flow whose branches must discard independently.
 
-use super::{bottom_values, discard, CodeBuilder, Emitter, IrExpr};
+use super::{bottom_values, discard, CodeBuilder, Emitter, IrExpr, Ty};
 
 impl Emitter<'_> {
     pub(super) fn emit_discarding(&mut self, expression: u32, code: &mut CodeBuilder) {
@@ -40,7 +40,7 @@ impl Emitter<'_> {
         // A discarded `when` is a statement: its branches discard their own values, so no branch
         // leaves a value another branch does not. A block ending in one runs as a statement block,
         // which discards that `when` the same way. A discarded `Unit` is nothing at all.
-        if !self.machine_suspensions.contains(&expression) {
+        if !self.machine_suspensions.contains_key(&expression) {
             match node {
                 // A copied inline body's terminal `Unit` carries its mapped closing line on a
                 // `nop`, even though the value itself is not materialized.
@@ -51,8 +51,23 @@ impl Emitter<'_> {
                     }
                     return;
                 }
+                // A generic inline return specialized to Unit already stored
+                // `kotlin.Unit.INSTANCE` before `finally`. The caller that discards the call
+                // does not reload that slot.
+                IrExpr::GetValue(index)
+                    if self.inline_return_frame_result_type(*index)
+                        == Some(Ty::obj("kotlin/Unit")) =>
+                {
+                    return;
+                }
                 IrExpr::When { branches } => {
                     self.emit_when(expression, branches, true, code);
+                    return;
+                }
+                // A discarded block is a statement block: its trailing read is not a value the
+                // break out of an inline-return frame has to carry.
+                IrExpr::Block { stmts, value } if !self.is_transformed_block(expression) => {
+                    self.emit_statement_block(expression, stmts.clone(), *value, code);
                     return;
                 }
                 // A discarded `try` runs its branches as statements, as a discarded `when` does,
@@ -89,12 +104,23 @@ impl Emitter<'_> {
                     arg,
                     type_operand,
                 } if *type_operand == crate::types::Ty::Unit && !self.diverges(*arg) => {
+                    // A carried inline result is already on the stack at the landing. Reading it
+                    // consumes that resident value and does not change the tracked height, so the
+                    // pop is the landing itself: the load stayed before the jump.
+                    let carried = matches!(
+                        self.ir.expr(*arg),
+                        IrExpr::GetValue(index) if self.stack_resident_value == Some(*index)
+                    );
                     let before = code.stack_height();
                     self.emit_value(*arg, code);
-                    match code.stack_height() - before {
-                        1 => code.pop(),
-                        2 => code.pop2(),
-                        _ => {}
+                    if carried {
+                        code.pop();
+                    } else {
+                        match code.stack_height() - before {
+                            1 => code.pop(),
+                            2 => code.pop2(),
+                            _ => {}
+                        }
                     }
                     return;
                 }
@@ -133,9 +159,26 @@ impl Emitter<'_> {
         if self.emit_discarded_boxed_call(expression, node, code) {
             return;
         }
+        // `FunctionN.invoke` physically returns `Object`. Narrowing that result to the function's
+        // declared type exists only for a consumer; a statement-position invocation discards the
+        // erased slot directly, as a discarded generic call does above. Suspension points keep
+        // their existing materialization path because the coroutine machine owns their join type.
+        let discarded_erased_invocation = matches!(
+            node,
+            IrExpr::InvokeFunction { ret, .. }
+                if !matches!(ret, crate::types::Ty::Unit | crate::types::Ty::Nothing)
+                    && !self.machine_suspensions.contains_key(&expression)
+                    && self.transformed_result(expression).is_none()
+        );
+        if discarded_erased_invocation {
+            self.erased_invocations.insert(expression);
+        }
         let suspension = self.machine_before(expression, code);
         self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);
+        // `emit_value_node` normally consumes this marker at the invocation. Remove it defensively
+        // for aliases whose emission bypasses the ordinary `InvokeFunction` result path.
+        self.erased_invocations.remove(&expression);
         // A statement still suspends. The probe reads the result before it is popped, the same
         // way a used result is probed before its consumer.
         self.probe_intrinsic_suspension(expression, code);
@@ -156,6 +199,13 @@ impl Emitter<'_> {
         if self.diverges(expression) {
             return;
         }
-        discard(self.value_ty(expression), code);
+        discard(
+            if discarded_erased_invocation {
+                crate::types::Ty::obj("java/lang/Object")
+            } else {
+                self.value_ty(expression)
+            },
+            code,
+        );
     }
 }

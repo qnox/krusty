@@ -50,6 +50,14 @@ The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 p
 `0x00` byte before the delimited `StringTableTypes`. The reader strips it before
 `parseDelimitedFrom`. krusty emits it verbatim; confirmed by the round-trips below.
 
+## `d1` parts — kotlinc's partition
+A payload larger than one `CONSTANT_Utf8` entry is written as several `d1` strings. kotlinc's
+`UtfEncodingKt.bytesToStrings` appends each char (the marker included), adds its modified-UTF-8
+width (1 for `0x01..=0x7f`, 2 for `0x00` and `0x80..=0xff`), and closes the part as soon as the
+count reaches **65534**, so a part holds 65534 bytes, or 65535 when a two-byte char crosses the
+threshold. No trailing empty part is written. `metadata::encoding::bytes_to_strings` follows the
+same rule; `tests/large_metadata_parts_e2e.rs` compares a 4000-property class byte for byte.
+
 ## Version stamp — `mv` and the `.kotlin_module` header
 
 Every emitted `@Metadata` carries `mv` (metadata version) and the `.kotlin_module` header carries
@@ -148,6 +156,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `Property.flags` (8710 → 8711) — and because kotlinc derives an accessor's DEFAULT flags word from
   the property's (that bit included), an annotated property with plain accessors also writes
   `getter_flags`/`setter_flags` = 6 explicitly.
+- An annotation written on an accessor (`@A get`, `@A set`) sets `hasAnnotations` (bit 0) in that
+  accessor's flags word (`getter_flags` f7, `setter_flags` f8), which therefore differs from the
+  default word and is written. Its records go to `Property.getter_annotation` (f15) and
+  `setter_annotation` (f16); an annotation on the setter's parameter (`set(@A v)`) sets the bit on
+  `setter_value_parameter` and records it in that `ValueParameter.annotation` (f7). Arguments are
+  recorded as for any declaration annotation, and only where annotations are written into metadata
+  at all. Test: `tests/property_accessor_annotation_e2e.rs`.
 - A member property's modality (bits 4-5) follows its declaration, not its class (kotlinc 2.4.20):
   `open`, and an `override` not marked `final`, are OPEN even in a final class; `abstract`, and an
   interface property without a getter, are ABSTRACT; an interface property with a getter is OPEN.
@@ -174,7 +189,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   on members such as `MutableCollection.add`; a Java declaration records none and is skipped, so an
   override of `java.util.ArrayList.add` records 2. The same status resolution gives an override the
   `operator` (bit 8) and `infix` (bit 9) modifiers when any declaration it overrides has them. Test:
-  `tests/metadata_return_value_status_e2e.rs`.
+  `tests/metadata_return_value_status_e2e.rs`. KLIB package functions and properties carry these
+  same status bits through target-neutral normalization rather than dropping them at the provider
+  boundary.
 - Field order and type-parameter references (kotlinc 2.4.0, 2.4.10, 2.4.20): the protoc-generated
   `writeTo` emits every message's fields in ascending field-number order, repeated fields together
   and extensions last, so `Type.flags` (f1, e.g. `SUSPEND_TYPE`) comes first and a function's
@@ -209,6 +226,15 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   So `vararg x: Int` records nothing, while a nullable primitive, a `Unit` parameter, a suspend
   function type, `KSuspendFunctionN` or any context parameter does. Test:
   `tests/metadata_version_requirement_e2e.rs`.
+- `JvmFieldSignature.desc` presence (kotlinc 2.4.20, `requiresSignature`) follows the same
+  mapping: a backing field, a hoisted companion field or a delegate's `x$delegate` records its
+  descriptor exactly when it differs from the property type's `ClassMapperLite` descriptor. So a
+  type-parameter field (`private var x: T` -> `Ljava/lang/Object;`, with or without accessors), a
+  boxed `Int?`, a value class's carrier (`UInt` -> `I`), a reference array (`Array<String>` ->
+  `[Ljava/lang/String;`) and a delegate of another type record it, while `IntArray`, `List<T>?` and a
+  delegate of the property's own class do not. A property without a field (abstract, or in an
+  interface) interns no field string. The descriptor interns after the accessors' strings, so a
+  constructor property's comes after its getter's. Test: `tests/metadata_field_signature_e2e.rs`.
 - Local classifiers (kotlinc 2.4.20): a local class, an anonymous object, and any class nested in
   one get a full `Class` record with LOCAL visibility (5): members, supertypes (`Any` when none is
   declared) and nested class names. An anonymous object records no constructor. The class id is
@@ -231,7 +257,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   order, the primary-constructor properties first and enum entries at their declaration position
   (so after those properties and before the body's other members), then the members the compiler
   generates: `componentN`, `copy`, `equals`, `hashCode`, `toString` for a data class and `equals`,
-  `hashCode`, `toString` for a value class. The visit order is the order strings enter `d2` and the
+  `hashCode`, `toString` for a value class. A value class's override that source declares is one of
+  its declarations instead: `override fun toString()` is a declared `Function` (realized as
+  `toString-impl`) and the generated list keeps only the members source left out. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
@@ -308,8 +336,9 @@ f8 is still 66 with a `<set-?>` parameter, and another class in the file writes 
 `access$set<X>$p`.
 
 A delegated top-level property records `isDelegated` as a member property does, and its
-`JvmPropertySignature.field` names the `x$delegate` storage with both name and descriptor, interned
-after the accessors. A top-level `lateinit` property likewise records `isLateinit`. A private
+`JvmPropertySignature.field` names the `x$delegate` storage, interned after the accessors, with its
+descriptor when the field's type maps differently from the property's (see `JvmFieldSignature.desc`
+presence above). A top-level `lateinit` property likewise records `isLateinit`. A private
 delegated property's accessors are private methods. Tests:
 `a_delegated_top_level_property_records_its_delegate_field` and
 `a_top_level_lateinit_property_records_lateinit`.
@@ -392,6 +421,8 @@ Observed rules, each pinned by a fixture in `tests/typealias_abbreviated_type_e2
 | `import dep.Payload as P` | an import RENAME is not a typealias — NO abbreviation |
 | `(Cargo) -> Cargo` | an INLINE function type abbreviates its components; the arrow node itself spells nothing |
 | `vararg xs: Cargo` | spelled as the ELEMENT, recorded as `Array<Cargo>` — the abbreviation goes on the element and on `vararg_element_type`, never on the array |
+| `Handler` (`= (Cargo) -> Cargo`) | a USE of a function-type alias carries the right-hand side's component spellings on its expanded `Function1` arguments |
+| `(count: Int) -> Unit` | the parameter's `Type` records `Type.annotation` `@kotlin/ParameterName` with one argument (`name` = string-table id, value `{type=8 STRING, string_value(f5)="count"}`), after the type's own annotations; d2 interns the class, then `name`, then the value |
 | supertype, type-parameter bound, property type, extension receiver, ctor param, member fn | all carry it |
 
 **Interning order** (what keeps `d2` byte-identical): at every `Type` node — the main one and the
@@ -436,7 +467,9 @@ keeps abbreviation off type equality for the same reason). The spelling therefor
   `member_spellings`.
 - Class metadata is built from the IR alone, so the spelling reaches it on IR side tables
   (`fn_declared_spellings`, `class_declared_spellings`, `prop_declared_spellings`), filled at
-  lowering — the same mechanism `fn_param_declared_nullable` already used.
+  lowering — the same mechanism `fn_param_declared_nullable` already used. Property spellings use
+  `(classifier identity, stable declaration order)`, not `(classifier, source name)`: ordinary and
+  member-extension properties may legally share a name.
 
 ### Reading it back
 
@@ -485,7 +518,61 @@ The recorded `ValueParameter.type` of a `vararg` is `Array<out E>`, not the inva
 checker carries — the array's `Argument.projection` is `1` (OUT). The element travels separately and
 UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_recorded_type` applies
 the projection at the encode seam only, so nothing upstream of metadata sees a type source never
-wrote. A primitive specialized array has no type argument and is recorded unchanged.
+wrote. Package functions, member functions, constructors (annotation classes included) and a
+`vararg val` constructor property all record the projected array. A primitive specialized array has no type argument and is recorded unchanged.
+
+## `Property.flags` HAS_CONSTANT
+
+Read from kotlinc 2.4.20's `FirElementSerializer.propertyProto`:
+`isConst || (!isVar && canBeUsedForConstVal(fullyExpandedType(returnType)) && hasConstantValue(initializer))`.
+`hasConstantValue` (`FirToConstantValueChecker`) accepts a supported literal, a string
+concatenation whose arguments are constants, a `const val` (or Java `final` field) read, an enum
+entry, an annotation constructor, `arrayOf` over constants, and a call in package `kotlin` named
+in `NUMBER_CONVERSIONS` or `unaryMinus` whose dispatch receiver is constant. kotlinc's parser folds
+`-3`, `+3` and `"a" + "b"` into literals before that. Measured the same in classes and at top level:
+
+| initializer | HAS_CONSTANT |
+| --- | --- |
+| `val s: String = "s"`, `val u: UInt = 1u`, `val n: Int = -X` | yes |
+| `X.toLong()`, `(-3).toLong()`, `0.toDouble()`, `1.0.toInt()`, `65.toChar()` | yes |
+| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"`, `+3`, a bare `S` | yes |
+| `val a: Any = "t"`, `val c: CharSequence = "abcd"`, `val m: String? = "m"` | no |
+| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `S + "a"`, `+X`, `3u.toUInt()` | no |
+
+## Accessors, setter parameters and member list order
+
+Measured against kotlinc 2.4.20:
+
+- `JvmPropertySignature.getter`/`setter` name the property's own accessor methods. A private
+  property with default accessors has no accessor method, so it records the field alone, even when
+  the class declares `getValue(reference, property)` or an exact `fun getCount(): Int` /
+  `fun setCount(next: Int)`. Those stay `Function` records.
+- `Property.setter_value_parameter`'s type addresses the property's own type parameters by id
+  (`Type.type_parameter`), while the return type and receiver name them
+  (`Type.type_parameter_name`). The setter is a declaration of its own. This holds for package and
+  class properties alike.
+- `Class.property`, `Class.function` and `Class.type_alias` serialize in the order the records were
+  built, which is the d2 interning order. With `var <M> Slot<M>.member` declared before
+  `val later`, both lists put `member` first.
+
+## `Property.flags` HAS_CONSTANT
+
+Read from kotlinc 2.4.20's `FirElementSerializer.propertyProto`:
+`isConst || (!isVar && canBeUsedForConstVal(fullyExpandedType(returnType)) && hasConstantValue(initializer))`.
+`hasConstantValue` (`FirToConstantValueChecker`) accepts a supported literal, a string
+concatenation whose arguments are constants, a `const val` read, a provider-published Java `final`
+field read (including one without a `ConstantValue` attribute), an enum entry, an annotation
+constructor, `arrayOf` over constants, and a call in package `kotlin` named
+in `NUMBER_CONVERSIONS` or `unaryMinus` whose dispatch receiver is constant. kotlinc's parser folds
+`-3`, `+3` and `"a" + "b"` into literals before that. Measured the same in classes and at top level:
+
+| initializer | HAS_CONSTANT |
+| --- | --- |
+| `val s: String = "s"`, `val u: UInt = 1u`, `val n: Int = -X` | yes |
+| `X.toLong()`, `(-3).toLong()`, `0.toDouble()`, `1.0.toInt()`, `65.toChar()` | yes |
+| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"`, `+3`, a bare `S` | yes |
+| `val a: Any = "t"`, `val c: CharSequence = "abcd"`, `val m: String? = "m"` | no |
+| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `S + "a"`, `+X`, `3u.toUInt()` | no |
 
 ## Class supertypes: only what source declared
 
@@ -508,3 +595,26 @@ wrong shifts every abbreviation onto the neighbouring supertype.
 Both lists lead with the superclass. The emitter then moves it to the slot that resolution recorded
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
+
+## Compiler-plugin declarations in a KLIB
+
+kotlinx.serialization is split like kotlinc's plugin: its frontend part declares what Kotlin code
+can name, and its IR part fills bodies and adds IR-only helpers. krusty declares the frontend part
+at the backend handoff, before the declaration records are built, so every target describes the
+same declarations; each backend completes them afterwards.
+
+For `@Serializable class Foo(val a: Int, val b: String = "x")` kotlinc-native 2.4.20 writes, beside
+`Foo`'s own members:
+
+- `Foo`: an `internal` secondary constructor `(seen0: Int, a: Int, b: String?,
+  serializationConstructorMarker: SerializationConstructorMarker?)`;
+- `Foo.$serializer`: a `@Deprecated(HIDDEN)` object implementing `GeneratedSerializer<Foo>` with a
+  private constructor, `childSerializers`, `deserialize`, `serialize` and `val descriptor`;
+- `Foo.Companion`: a private constructor and `serializer(): KSerializer<Foo>`.
+
+`nestedClassName` lists `$serializer` before `Companion`, and the fragment's classes follow that
+order. A plugin-generated class and its members carry no file extension (`classFile` 175,
+`functionFile` 172, `propertyFile` 176): no source file declares them. `write$Self` is not a
+declaration: the JVM adds it to its own `@Metadata` record after the handoff.
+`klib_class_surface_e2e::serialization_plugin_declarations_match_kotlinc_native` compares the whole
+fragment with kotlinc-native's bytes.

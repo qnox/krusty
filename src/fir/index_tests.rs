@@ -30,15 +30,16 @@ fn duplicate_classifier_identity_is_ambiguous_without_losing_forward_identities(
     assert_eq!(index.classifier_declaration(identity), None);
 }
 
-#[test]
-fn superclass_interface_paths_are_published_by_exact_identity() {
+/// The inherited defaults override planning publishes for each named classifier of `source`.
+fn published_inherited_defaults(
+    source: &str,
+    stem: &str,
+    classifiers: &[&str],
+) -> Vec<Vec<ResolvedInheritedDefault>> {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(
-            "package sample\ninterface AncestorContract\ninterface DirectContract\nopen class Parent : AncestorContract\nclass Child : Parent(), DirectContract\n",
-        )
-        .with_file_stem("SuperclassInterfacePaths")],
-        Box::new(EmptySymbolSource),
+        &[SourceInput::kotlin(source).with_file_stem(stem)],
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -49,16 +50,125 @@ fn superclass_interface_paths_are_published_by_exact_identity() {
         .expect("Pass 1 must finalize")
         .module
         .index();
-    let child = (0..index.declaration_count())
-        .map(|raw| DeclarationId::from_raw(raw as u32))
-        .find(|declaration| index.declaration_name(*declaration) == Some("Child"))
-        .expect("Child declaration");
+    classifiers
+        .iter()
+        .map(|name| {
+            let classifier = (0..index.declaration_count())
+                .map(|raw| DeclarationId::from_raw(raw as u32))
+                .find(|declaration| index.declaration_name(*declaration) == Some(*name))
+                .expect("named classifier");
+            index
+                .inherited_defaults(classifier)
+                .expect("override planning must publish inherited defaults")
+                .to_vec()
+        })
+        .collect()
+}
 
+#[test]
+fn an_interface_reached_through_the_superclass_publishes_no_inherited_default() {
+    let [child] = published_inherited_defaults(
+        "package sample\ninterface AncestorContract { fun ancestor() = 1 }\ninterface DirectContract { fun direct() = 2 }\nopen class Parent : AncestorContract\nclass Child : Parent(), DirectContract\n",
+        "SuperclassInterfacePaths",
+        &["Child"],
+    )
+    .try_into()
+    .expect("one classifier");
+    let direct = crate::types::type_name("sample/DirectContract");
+    let function = child.first().and_then(|default| default.function);
+    assert!(matches!(
+        function,
+        Some(crate::fir::ResolvedFunctionOverrideTarget::Module(_))
+    ));
     assert_eq!(
-        index
-            .superclass_interfaces(child)
-            .expect("override planning must publish superclass path provenance"),
-        [crate::types::type_name("sample/AncestorContract")]
+        child,
+        [ResolvedInheritedDefault {
+            name: InheritedMemberName::Function("direct".into()),
+            function,
+            declaring_interface: direct,
+            dispatch_interface: direct,
+            parameters: Box::new([]),
+            parameter_identities: Box::new([]),
+            result: crate::types::Ty::Int,
+            applied_parameters: Box::new([]),
+            applied_result: crate::types::Ty::Int,
+            suspend: false,
+            vararg: false,
+            body: InheritedDefaultBody::Module,
+        }]
+    );
+}
+
+#[test]
+fn the_nearest_declaration_of_a_slot_wins_and_names_its_direct_superinterface() {
+    let [implementation, left_defaults] = published_inherited_defaults(
+        "package sample\ninterface Base { fun f() = 1\n fun g() = 2\n fun h(): Int = 3 }\ninterface Left : Base { override fun g() = 4\n override fun h(): Int }\ninterface Other\nabstract class Impl : Other, Left { override fun f() = 5 }\n",
+        "NearestDeclaration",
+        &["Impl", "Left"],
+    )
+    .try_into()
+    .expect("two classifiers");
+    let left = crate::types::type_name("sample/Left");
+    let function = implementation.first().and_then(|default| default.function);
+    assert!(matches!(
+        function,
+        Some(crate::fir::ResolvedFunctionOverrideTarget::Module(_))
+    ));
+    assert_eq!(
+        implementation,
+        [ResolvedInheritedDefault {
+            name: InheritedMemberName::Function("g".into()),
+            function,
+            declaring_interface: left,
+            dispatch_interface: left,
+            parameters: Box::new([]),
+            parameter_identities: Box::new([]),
+            result: crate::types::Ty::Int,
+            applied_parameters: Box::new([]),
+            applied_result: crate::types::Ty::Int,
+            suspend: false,
+            vararg: false,
+            body: InheritedDefaultBody::Module,
+        }]
+    );
+    assert_eq!(
+        left_defaults
+            .iter()
+            .map(|default| (&default.name, default.declaring_interface))
+            .collect::<Vec<_>>(),
+        [(
+            &InheritedMemberName::Function("f".into()),
+            crate::types::type_name("sample/Base")
+        )]
+    );
+}
+
+/// The record keeps the declaration's own shape for the call it realizes and carries the shape the
+/// classifier's applied supertype gives the member, which a specializing realization declares.
+#[test]
+fn a_specializing_supertype_publishes_the_applied_member_shape() {
+    let [specialized] = published_inherited_defaults(
+        "package sample\ninterface I<T> { fun f(value: T): T = value }\nclass C : I<String>\n",
+        "SpecializedDefault",
+        &["C"],
+    )
+    .try_into()
+    .expect("one classifier");
+    let [default] = specialized.try_into().expect("one inherited default");
+    let declared = default.parameters.to_vec();
+    let [crate::types::Ty::TyParam(..)] = declared[..] else {
+        panic!("the declared parameter stays the interface's `T`: {declared:?}");
+    };
+    assert_eq!(default.result, declared[0]);
+    let string = crate::types::Ty::obj("kotlin/String");
+    assert_eq!(*default.applied_parameters, [string]);
+    assert_eq!(default.applied_result, string);
+    assert_eq!(
+        (default.declaring_interface, default.dispatch_interface),
+        (
+            crate::types::type_name("sample/I"),
+            crate::types::type_name("sample/I")
+        )
     );
 }
 
@@ -70,7 +180,7 @@ fn member_source_order_interleaves_functions_and_properties() {
             "class C {\n    fun before() = 1\n    var value = \"x\"\n    fun after() = value.length\n}\n",
         )
         .with_file_stem("Members")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -119,7 +229,7 @@ fn generated_data_members_follow_every_declared_member() {
             SourceInput::kotlin("data class D(val x: Int) {\n    fun declared(): Int = x\n}\n")
                 .with_file_stem("DataOrder"),
         ],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -164,7 +274,7 @@ fn resolved_index_owns_semantic_classifier_graph_without_header_syntax() {
             "package sample\nopen class Parent<T>\nclass Child : Parent<String>()\nval answer: Int = 42\nfun make(): Child = Child()\nfun String.ext(value: Int): Int = value\n",
         )
         .with_file_stem("Hierarchy")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -269,7 +379,7 @@ fn property_override_edges_are_exact_pending_free_pass_one_facts() {
              }\n",
         )
         .with_file_stem("Overrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -342,10 +452,10 @@ fn anonymous_object_inferred_override_stays_deferred_until_its_checked_body() {
              }\n",
         )
         .with_file_stem("AnonymousContext")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -396,7 +506,7 @@ fn superclass_function_override_edge_precedes_backend_erasure() {
              }\n",
         )
         .with_file_stem("FunctionOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -460,7 +570,7 @@ fn interface_function_override_edge_precedes_backend_erasure() {
              }\n",
         )
         .with_file_stem("InterfaceOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -508,7 +618,7 @@ fn enum_entry_override_edge_is_owned_by_the_stable_entry() {
              }\n",
         )
         .with_file_stem("EnumEntryOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -573,7 +683,7 @@ fn inherited_interface_implementation_is_published_before_backend_lowering() {
              class StringMatcher : StringBase(), Matcher<String>\n",
         )
         .with_file_stem("InheritedInterfaceOverrides")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -618,7 +728,7 @@ fn inherited_interface_property_is_published_before_backend_lowering() {
              class StringValue : StringBase(), Valued<String>\n",
         )
         .with_file_stem("InheritedInterfaceProperties")],
-        Box::new(EmptySymbolSource),
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -670,10 +780,10 @@ fn mapped_interface_override_publishes_external_declaration_identity() {
              }\n",
         )
         .with_file_stem("MappedInterfaceOverride")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -739,10 +849,10 @@ fn a_dependency_property_publishes_its_kotlin_name() {
              fun h(s: String): IntRange = s.indices\n",
         )
         .with_file_stem("DependencyPropertyName")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -826,10 +936,10 @@ fn a_dependency_extension_publishes_its_kotlin_name() {
              fun s(x: List<Int>): Int = x.sum()\n",
         )
         .with_file_stem("DependencyExtensionName")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -896,10 +1006,10 @@ fn value_class_override_publishes_the_generic_interface_edge() {
              }\n",
         )
         .with_file_stem("ValueClassComparableOverride")],
-        Box::new(
+        crate::frontend::PlatformProvider::jvm(Box::new(
             crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
-        ),
+        )),
         &LangFeatures::new(),
         &mut diagnostics,
     );

@@ -6,26 +6,47 @@ use crate::types::{Ty, TypeName, Visibility};
 use super::header::{
     next_id, CallableId, DeclarationFlags, DeclarationId, DeclarationIds, DeclarationKind,
     DeclarationNameId, DeclarationStub, DeferredCallableSelectionId, DeferredMemberSelectionId,
-    DeferredValueSelectionId, DiagnosticId, HeaderDeclaration, HeaderDeclarationKind,
-    HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames, OriginId, PropertyId,
-    SigExprId, SigNameId, SignatureScopeId, SourceFileId, SourceMap, StableDeclarationAnchor,
-    TypeParameterId,
+    DeferredValueSelectionId, DiagnosticId, ExternalCallableId, HeaderDeclaration,
+    HeaderDeclarationKind, HeaderScopeArena, HeaderSyntaxArena, HeaderTypeId, LookupNames,
+    OriginId, PropertyId, QualifiedCallCoordinateId, SigExprId, SigNameId, SignatureScopeId,
+    SourceFileId, SourceMap, StableDeclarationAnchor, TypeParameterId,
 };
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 
 mod call_arguments;
+mod expressions;
 mod resolved_types;
 mod selections;
 pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgumentProbe};
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
+pub use expressions::*;
 pub use resolved_types::*;
 pub use selections::*;
 mod classifier_headers;
 mod declaration_metadata;
+pub use declaration_metadata::NoArgSuperConstructor;
 mod result_expectation;
 mod source_packages;
+
+/// Exact constructor declaration selected for a serializer class named by a checked type-use
+/// annotation. Module and dependency declarations share the same semantic payload; only their
+/// stable identity carrier differs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedCustomSerializerConstructorTarget {
+    Module(DeclarationId),
+    External(ExternalCallableId),
+}
+
+/// Frontend-selected construction of a serializer class for an annotated type occurrence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTypeUseSerializerConstruction {
+    pub serializer: TypeName,
+    pub parameters: Box<[ResolvedTy]>,
+    pub operands: Box<[u32]>,
+    pub target: ResolvedCustomSerializerConstructorTarget,
+}
 
 /// A half-open slice in the signature graph's shared operand arena.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -60,165 +81,6 @@ pub struct SigSubstitution {
 pub struct SignatureScope {
     pub owner: DeclarationId,
     pub source: SourceFileId,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SigBinaryOperator {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Remainder,
-    Equal,
-    NotEqual,
-    Less,
-    LessOrEqual,
-    Greater,
-    GreaterOrEqual,
-    BooleanAnd,
-    BooleanOr,
-    ReferentialEqual,
-    ReferentialNotEqual,
-}
-
-/// Temporary signature expression. Every variant is `Copy` and owns no allocation; variable-length
-/// operands, substitutions, names, scopes, and deferred lookups live in packed side arenas owned by
-/// [`SignatureGraph`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SigExpr {
-    Known(ResolvedTy),
-    /// An `Int` literal keeps its value until compact semantic evaluation. This is not a published
-    /// type or a retained body: it is temporary literal provenance used by Kotlin's integer-
-    /// constant adaptation during overload selection, and is destroyed with the signature graph.
-    IntegerLiteral(i32),
-    /// An unsigned integer literal (`0u`, `2147483648u`). The payload is the full `UInt` magnitude,
-    /// including values above `i32::MAX`, until a sibling primitive adapts it.
-    UnsignedIntegerLiteral(u64),
-    DeclarationType(DeclarationId),
-    ClassifierType {
-        declaration: DeclarationId,
-        scope: SignatureScopeId,
-    },
-    Parameter {
-        declaration: DeclarationId,
-        index: u32,
-    },
-    Type {
-        syntax: HeaderTypeId,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    ContextualType {
-        expected: SigExprId,
-        syntax: HeaderTypeId,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Value(DeferredValueSelectionId),
-    Call {
-        target: DeferredCallableSelectionId,
-        arguments: CallArgumentRange,
-    },
-    CallableReference(DeferredCallableSelectionId),
-    BoundCallableReference {
-        receiver: SigExprId,
-        classifier: Option<SigExprId>,
-        scope: SignatureScopeId,
-        root: Option<SigNameId>,
-        target: DeferredCallableSelectionId,
-    },
-    ClassLiteral {
-        receiver: SigExprId,
-        classifier: Option<SigExprId>,
-        scope: SignatureScopeId,
-        root: Option<SigNameId>,
-    },
-    Member {
-        receiver: SigExprId,
-        lookup: DeferredMemberSelectionId,
-        origin: OriginId,
-    },
-    MemberCall {
-        receiver: SigExprId,
-        target: DeferredMemberSelectionId,
-        arguments: CallArgumentRange,
-        origin: OriginId,
-    },
-    Binary {
-        operator: SigBinaryOperator,
-        lhs: SigExprId,
-        rhs: SigExprId,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Invoke {
-        callee: SigExprId,
-        arguments: CallArgumentRange,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Function {
-        parameters: OperandRange,
-        result: SigExprId,
-        context_count: u32,
-        has_receiver: bool,
-        suspend: bool,
-    },
-    ContextualParameter(DeclarationId),
-    ContextualFunction {
-        parameters: OperandRange,
-        result: SigExprId,
-        scope: SignatureScopeId,
-        implicit_it: bool,
-        suspend: bool,
-    },
-    ScopedReceiver {
-        receiver: SigExprId,
-        result: SigExprId,
-        scope: SignatureScopeId,
-    },
-    /// Evaluate nested executable effects in source order before yielding the signature result.
-    Sequence {
-        effects: OperandRange,
-        result: SigExprId,
-    },
-    Delegate {
-        delegate: SigExprId,
-        expected: Option<SigExprId>,
-        scope: SignatureScopeId,
-        site: SignatureDelegateSiteId,
-    },
-    Join {
-        operands: OperandRange,
-        scope: SignatureScopeId,
-        origin: OriginId,
-    },
-    Nullable(SigExprId),
-    NonNullable(SigExprId),
-    /// A value read after an expression-statement call whose contract proves it non-null for the
-    /// rest of the block (`assertNotNull(x)`, `requireNotNull(x)`, a same-module
-    /// `returns() implies (x != null)`). The callee is only known once `call` is selected, so the
-    /// proof is deferred to evaluation; without it the read keeps `value`'s type.
-    ContractNarrowed {
-        value: SigExprId,
-        call: SigExprId,
-        argument: u32,
-        /// The argument is the CONDITION `value != null` rather than the value itself: the proof
-        /// is a `returns() implies <argument>` effect (`assertTrue(x != null)`).
-        condition: bool,
-    },
-    /// A lexical value after a successful non-null `as` cast that has already run. Evaluation
-    /// keeps `value`'s type when it is already `target` or a subtype, and uses `target` only
-    /// when the cast actually narrows.
-    CastNarrowed {
-        value: SigExprId,
-        target: SigExprId,
-        scope: SignatureScopeId,
-    },
-    Substitute {
-        base: SigExprId,
-        substitutions: SubstitutionRange,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,6 +150,7 @@ pub struct SignatureGraph {
     callable_selections: Vec<DeferredCallableSelection>,
     member_selections: Vec<DeferredMemberSelection>,
     value_selections: Vec<DeferredValueSelection>,
+    qualified_call_coordinates: Vec<QualifiedCallCoordinate>,
     delegate_sites: Vec<SignatureDelegateSite>,
     type_syntax: HeaderSyntaxArena,
     type_names: LookupNames,
@@ -466,6 +329,27 @@ impl SignatureGraph {
         self.value_selections.get(id.raw() as usize).copied()
     }
 
+    pub fn add_qualified_call_coordinate(
+        &mut self,
+        coordinate: QualifiedCallCoordinate,
+    ) -> QualifiedCallCoordinateId {
+        let id = QualifiedCallCoordinateId::from_raw(next_id(
+            self.qualified_call_coordinates.len(),
+            "qualified call coordinates",
+        ));
+        self.qualified_call_coordinates.push(coordinate);
+        id
+    }
+
+    pub fn qualified_call_coordinate(
+        &self,
+        id: QualifiedCallCoordinateId,
+    ) -> Option<QualifiedCallCoordinate> {
+        self.qualified_call_coordinates
+            .get(id.raw() as usize)
+            .copied()
+    }
+
     /// Add the graph root extracted for an inferred declaration stub. Explicit signatures and
     /// ordinary/default bodies cannot enter through this API because their stubs carry no inference
     /// kind.
@@ -604,6 +488,7 @@ impl SignatureGraph {
             + self.callable_selections.len() * std::mem::size_of::<DeferredCallableSelection>()
             + self.member_selections.len() * std::mem::size_of::<DeferredMemberSelection>()
             + self.value_selections.len() * std::mem::size_of::<DeferredValueSelection>()
+            + self.qualified_call_coordinates.len() * std::mem::size_of::<QualifiedCallCoordinate>()
             + self.delegate_sites.len() * std::mem::size_of::<SignatureDelegateSite>()
             + self.type_syntax.storage_payload_bytes()
             + self.type_names.storage_payload_bytes()
@@ -807,6 +692,9 @@ pub trait SignatureSemantics {
         arguments: &[ResolvedSigCallArgument<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
+        // The compact graph already bound a syntactically qualified call's root as a namespace.
+        // Final selection must not retry that root as a value.
+        qualified_namespace: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
@@ -820,6 +708,9 @@ pub trait SignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
+        // The parser supplied a qualified callee and its root was bound as a namespace, not a
+        // value. This is graph structure, not a fact reconstructed from `spelling`.
+        qualified: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
@@ -866,6 +757,19 @@ pub trait SignatureSemantics {
         scope: SignatureScope,
         root: &str,
     ) -> Result<bool, DiagnosticId>;
+
+    /// Decide whether a syntactically qualified call's first segment binds a value before the same
+    /// spelling can be considered as a package or classifier. `first_selector` is the next parser
+    /// segment, allowing a singleton classifier's nested classifier to stay a namespace while an
+    /// ordinary singleton member call uses the value interpretation.
+    fn qualified_call_receiver_is_value(
+        &self,
+        scope: SignatureScope,
+        root: &str,
+        first_selector: &str,
+    ) -> Result<bool, DiagnosticId> {
+        self.callable_reference_receiver_is_value(scope, root, first_selector)
+    }
 
     /// Decide whether the root of a qualified callable reference denotes a value. Unlike a class
     /// literal, the referenced declaration participates: a singleton classifier is a value in
@@ -1472,6 +1376,8 @@ pub struct ResolvedModuleIndex {
     source_packages: HashMap<SourceFileId, TypeName>,
     /// Each source unit's Kotlin `main`, selected once by the frontend (`fir::entry_point`).
     pub(super) source_entry_points: HashMap<SourceFileId, super::ResolvedEntryPoint>,
+    /// Each source unit's `fun box(): String` test entry, selected with its `main`.
+    pub(super) source_box_entries: HashMap<SourceFileId, CallableId>,
     /// Every package some source unit publishes, with all of its enclosing packages: the
     /// namespaces the source module contributes. Derived from `source_packages` as each identity
     /// is published, so a package-child probe is one lookup instead of a walk of every source
@@ -1521,21 +1427,33 @@ pub struct ResolvedModuleIndex {
     /// classifier. The callable was selected while the generated symbol table was authoritative;
     /// later consumers receive its owner and arity without recognizing a generated spelling.
     serialization_companion_accessors: HashMap<DeclarationId, (Box<str>, TypeName, usize)>,
+    /// The superclass constructor each class the no-arg plugin matched delegates to.
+    no_arg_constructors: HashMap<DeclarationId, NoArgSuperConstructor>,
+    /// The annotations kotlinc's sam-with-receiver plugin is configured with.
+    sam_with_receiver_annotations: Box<[TypeName]>,
     /// Primary constructor of the custom serializer CLASS a source classifier's
     /// `@Serializable(with = …)` names, selected and validated by the serialization frontend, with
     /// the generated accessor's operand ordinal passed to each constructor parameter.
     serialization_custom_serializer_constructors:
         HashMap<DeclarationId, (DeclarationId, Box<[u32]>)>,
+    /// Constructor plans selected for serializer classes named on declared type occurrences, keyed
+    /// by serializer identity and the annotated type's semantic argument count. This is independent
+    /// of source property spelling and can be reused by every equal checked occurrence.
+    serialization_type_use_serializer_constructors:
+        HashMap<(TypeName, u32), ResolvedTypeUseSerializerConstruction>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
     invisible_reference_suppressions: std::collections::HashSet<DeclarationId>,
     invisible_member_suppressions: std::collections::HashSet<DeclarationId>,
     optional_declaration_usage_suppressions: std::collections::HashSet<DeclarationId>,
+    /// The lexical policies each source's file annotations open, resolved once in Pass 1 from the
+    /// checked applications. Bounded Pass-2 units do not retain the file annotations' syntax.
+    file_lexical_policies: HashMap<SourceFileId, Box<[crate::lexical_policy::LexicalPolicy]>>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
-    annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
+    annotation_targets: crate::types::DeclaredTargetPolicies,
     /// Stable resolved identity of every source classifier. Identity belongs to the declaration
     /// inventory and may be known before an ordinary body-local classifier's lexical parent header
     /// is checked in Pass 2.
@@ -1553,10 +1471,9 @@ pub struct ResolvedModuleIndex {
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
     pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
-    /// Exact interface identities inherited through the direct superclass of each source
-    /// classifier. Pass 1 computes this while the semantic hierarchy provider is live; target
-    /// backends consume it instead of walking superclass declarations again.
-    pub(super) superclass_interfaces: HashMap<DeclarationId, Box<[TypeName]>>,
+    /// The interface defaults each source classifier inherits without overriding, selected while
+    /// the semantic hierarchy provider is live; target backends realize them without a walk.
+    pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
@@ -1600,6 +1517,10 @@ pub struct ResolvedModuleIndex {
     pub(super) declaration_names: Vec<Box<str>>,
     declaration_name_ids: FxHashMap<Box<str>, DeclarationNameId>,
     declarations_by_name: HashMap<DeclarationNameId, Vec<DeclarationId>>,
+    /// Ownerless declarations keyed by name. Package lookup must not walk every member that
+    /// shares a spelling: `value` or `toString` is declared once per file, and scanning that
+    /// list on every top-level probe is quadratic in the module.
+    top_level_declarations_by_name: HashMap<DeclarationNameId, Vec<DeclarationId>>,
     properties: HashMap<PropertyId, ResolvedPropertyHeader>,
     property_by_declaration: HashMap<DeclarationId, PropertyId>,
     /// Source identities and typed roles parallel to a property's resolved context-parameter
@@ -1900,6 +1821,13 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    /// Every declaration anchored in `source`, in declaration-id order, including headerless
+    /// ancestry nodes the parser stream does not inventory. Per-file lowering reads this instead
+    /// of scanning the module.
+    pub(crate) fn declarations_in_source(&self, source: SourceFileId) -> &[DeclarationId] {
+        self.declarations.in_source(source)
+    }
+
     pub fn source_order(&self, declaration: DeclarationId) -> Option<u32> {
         let order = self.source_orders.get(&declaration).copied();
         if order.is_none() {
@@ -1911,21 +1839,6 @@ impl ResolvedModuleIndex {
             );
         }
         order
-    }
-
-    /// The position `declaration`'s continuation class takes in its scope's generated-class
-    /// sequence, or `None` when the declaration is not a source `suspend` function.
-    pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {
-        self.continuation_ordinals.get(&declaration).copied()
-    }
-
-    pub fn publish_continuation_ordinal(&mut self, declaration: DeclarationId, ordinal: u32) {
-        assert!(
-            self.continuation_ordinals
-                .insert(declaration, ordinal)
-                .is_none_or(|existing| existing == ordinal),
-            "a suspend declaration holds exactly one continuation ordinal"
-        );
     }
 
     pub fn declaration_header(
@@ -1942,6 +1855,29 @@ impl ResolvedModuleIndex {
         self.invisible_reference_suppressions.contains(&declaration)
     }
 
+    pub(crate) fn publish_file_lexical_policies(
+        &mut self,
+        source: SourceFileId,
+        policies: Vec<crate::lexical_policy::LexicalPolicy>,
+    ) {
+        let previous = self
+            .file_lexical_policies
+            .insert(source, policies.into_boxed_slice());
+        assert!(
+            previous.is_none(),
+            "a source's file lexical policies are published once"
+        );
+    }
+
+    pub(crate) fn file_lexical_policies(
+        &self,
+        source: SourceFileId,
+    ) -> &[crate::lexical_policy::LexicalPolicy] {
+        self.file_lexical_policies
+            .get(&source)
+            .map_or(&[], |policies| &policies[..])
+    }
+
     pub(crate) fn declaration_suppresses_invisible_member(
         &self,
         declaration: DeclarationId,
@@ -1955,6 +1891,22 @@ impl ResolvedModuleIndex {
     ) -> bool {
         self.optional_declaration_usage_suppressions
             .contains(&declaration)
+    }
+
+    /// Restrict a modifier-less override to the visibility it inherits from the declarations it
+    /// overrides. Override edges — and with them the overridden declarations' visibilities — exist
+    /// only after signature finalization, so the header starts at the parser's `public` default and
+    /// is corrected here, before any body is checked against or lowered from it.
+    pub(crate) fn publish_inherited_visibility(
+        &mut self,
+        declaration: DeclarationId,
+        visibility: Visibility,
+    ) {
+        let header = self
+            .declaration_headers
+            .get_mut(&declaration)
+            .expect("inherited visibility requires a finalized declaration header");
+        header.visibility = visibility;
     }
 
     pub(crate) fn publish_visibility_suppression(
@@ -1984,7 +1936,6 @@ impl ResolvedModuleIndex {
         &mut self,
         classifier: TypeName,
         retention: crate::types::AnnotationRetention,
-        targets: Option<crate::types::AnnotationTargets>,
     ) {
         assert!(
             self.classifier_declarations.contains_key(&classifier),
@@ -1996,14 +1947,51 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "an annotation classifier may publish one retention policy"
         );
-        if let Some(targets) = targets {
-            assert!(
-                self.annotation_targets
-                    .insert(classifier, targets)
-                    .is_none(),
-                "an annotation classifier may publish one target policy"
-            );
-        }
+    }
+
+    /// A source annotation class's declared `@Retention`, published once the classifier-annotation
+    /// pass has checked the application and found it selects a `kotlin.annotation.AnnotationRetention`
+    /// entry. It replaces the default the header registered the class with.
+    pub(crate) fn publish_annotation_retention(
+        &mut self,
+        classifier: TypeName,
+        retention: crate::types::AnnotationRetention,
+    ) {
+        let registered = self
+            .annotation_retentions
+            .get_mut(&classifier)
+            .expect("a declared retention requires the classifier's registered annotation policy");
+        assert!(
+            *registered == crate::types::AnnotationRetention::Default
+                && retention != crate::types::AnnotationRetention::Default,
+            "an annotation classifier may publish one declared retention"
+        );
+        *registered = retention;
+    }
+
+    /// A source annotation class's `@Target` policy, published once the classifier-annotation pass
+    /// has checked the application: `valid` decides applicability, an invalid application only
+    /// supplies kotlinc's recovery for diagnostics (see [`crate::types::DeclaredTargetPolicies`]).
+    pub(crate) fn publish_annotation_targets(
+        &mut self,
+        classifier: TypeName,
+        targets: crate::types::AnnotationTargets,
+        valid: bool,
+    ) {
+        assert!(
+            self.annotation_retentions.contains_key(&classifier),
+            "annotation targets require the classifier's published annotation policy"
+        );
+        let published = if valid {
+            self.annotation_targets.publish_valid(classifier, targets)
+        } else {
+            self.annotation_targets
+                .publish_invalid_recovery(classifier, targets)
+        };
+        assert!(
+            published,
+            "an annotation classifier may publish one target policy"
+        );
     }
 
     pub(crate) fn annotation_retention(
@@ -2013,14 +2001,8 @@ impl ResolvedModuleIndex {
         self.annotation_retentions.get(&classifier).copied()
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.annotation_targets
-            .get(&classifier)
-            .copied()
-            .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
+    pub(crate) fn annotation_targets(&self) -> &crate::types::DeclaredTargetPolicies {
+        &self.annotation_targets
     }
 
     pub fn classifier_header(
@@ -2044,6 +2026,28 @@ impl ResolvedModuleIndex {
             .flatten()
     }
 
+    /// `declaration` and the classifiers that lexically contain it, nearest first.
+    ///
+    /// Non-classifier owners (a function containing a local class, for example) are traversed but
+    /// not returned. The result is declaration identity, not a classifier-name prefix: generated
+    /// local names do not encode lexical ownership.
+    pub fn classifier_and_outer_class_declarations(
+        &self,
+        declaration: DeclarationId,
+    ) -> Vec<DeclarationId> {
+        let mut classifiers = Vec::new();
+        let mut current = Some(declaration);
+        while let Some(owner) = current {
+            if self.classifier_identity(owner).is_some() {
+                classifiers.push(owner);
+            }
+            current = self
+                .declaration_header(owner)
+                .and_then(|header| header.owner);
+        }
+        classifiers
+    }
+
     pub fn classifier_hierarchy(
         &self,
         declaration: DeclarationId,
@@ -2051,6 +2055,21 @@ impl ResolvedModuleIndex {
         self.classifier_hierarchies
             .get(&declaration)
             .map(Box::as_ref)
+    }
+
+    /// Direct supertypes already recorded for `classifier`. `None` means this index has no
+    /// hierarchy for that classifier; an empty list means the recorded hierarchy has no parent
+    /// other than the implicit `Any`.
+    pub fn recorded_direct_supertypes(&self, classifier: TypeName) -> Option<Vec<TypeName>> {
+        let declaration = self.classifier_declaration(classifier)?;
+        let hierarchy = self.classifier_hierarchy(declaration)?;
+        Some(
+            hierarchy
+                .iter()
+                .filter(|entry| entry.depth == 1)
+                .map(|entry| entry.classifier)
+                .collect(),
+        )
     }
 
     pub(crate) fn publish_classifier_hierarchy(
@@ -2340,6 +2359,12 @@ impl ResolvedModuleIndex {
                 .entry(name)
                 .or_default()
                 .push(declaration);
+            if header.owner.is_none() {
+                self.top_level_declarations_by_name
+                    .entry(name)
+                    .or_default()
+                    .push(declaration);
+            }
         }
     }
 
@@ -2590,7 +2615,12 @@ impl ResolvedModuleIndex {
             && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
             && self.serialization_companion_accessors.is_empty()
+            && self.no_arg_constructors.is_empty()
+            && self.sam_with_receiver_annotations.is_empty()
             && self.serialization_custom_serializer_constructors.is_empty()
+            && self
+                .serialization_type_use_serializer_constructors
+                .is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -2654,6 +2684,16 @@ impl ResolvedModuleIndex {
         self.declaration_name_ids
             .get(name)
             .and_then(|name| self.declarations_by_name.get(name))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Ownerless declarations with this spelling, in publication order. Member declarations that
+    /// reuse the spelling are absent: a package probe must not visit them.
+    pub(crate) fn top_level_declarations_named(&self, name: &str) -> &[DeclarationId] {
+        self.declaration_name_ids
+            .get(name)
+            .and_then(|name| self.top_level_declarations_by_name.get(name))
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
@@ -2999,6 +3039,7 @@ impl ResolvedModuleIndex {
             + self.source_package_namespaces.len() * std::mem::size_of::<TypeName>()
             + self.source_entry_points.len()
                 * std::mem::size_of::<(SourceFileId, super::ResolvedEntryPoint)>()
+            + self.source_box_entries.len() * std::mem::size_of::<(SourceFileId, CallableId)>()
             + self.source_inventory.len()
                 * (std::mem::size_of::<SourceFileId>()
                     + std::mem::size_of::<Box<[DeclarationId]>>())
@@ -3071,6 +3112,9 @@ impl ResolvedModuleIndex {
             + self.serialization_companion_accessors.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<(Box<str>, TypeName, usize)>())
+            + self.no_arg_constructors.len()
+                * std::mem::size_of::<(DeclarationId, NoArgSuperConstructor)>()
+            + std::mem::size_of_val(&*self.sam_with_receiver_annotations)
             + self
                 .serialization_companion_accessors
                 .values()
@@ -3084,10 +3128,30 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|(_, operands)| std::mem::size_of_val(operands.as_ref()))
                 .sum::<usize>()
+            + self.serialization_type_use_serializer_constructors.len()
+                * (std::mem::size_of::<(TypeName, u32)>()
+                    + std::mem::size_of::<ResolvedTypeUseSerializerConstruction>())
+            + self
+                .serialization_type_use_serializer_constructors
+                .values()
+                .map(|construction| {
+                    std::mem::size_of_val(construction.parameters.as_ref())
+                        + std::mem::size_of_val(construction.operands.as_ref())
+                })
+                .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()
                 + self.optional_declaration_usage_suppressions.len())
                 * std::mem::size_of::<DeclarationId>()
+            + self
+                .file_lexical_policies
+                .values()
+                .map(|policies| {
+                    std::mem::size_of::<SourceFileId>()
+                        + policies.len()
+                            * std::mem::size_of::<crate::lexical_policy::LexicalPolicy>()
+                })
+                .sum::<usize>()
             + self.classifiers.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedClassifierHeader>())
@@ -3128,12 +3192,13 @@ impl ResolvedModuleIndex {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + self.superclass_interfaces.len()
-                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self
-                .superclass_interfaces
+                .inherited_defaults
                 .values()
-                .map(|interfaces| interfaces.len() * std::mem::size_of::<TypeName>())
+                .map(|defaults| {
+                    std::mem::size_of::<DeclarationId>()
+                        + defaults.len() * std::mem::size_of::<super::ResolvedInheritedDefault>()
+                })
                 .sum::<usize>()
             + self
                 .classifiers
@@ -3223,6 +3288,14 @@ impl ResolvedModuleIndex {
                     + std::mem::size_of::<Vec<DeclarationId>>())
             + self
                 .declarations_by_name
+                .values()
+                .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
+                .sum::<usize>()
+            + self.top_level_declarations_by_name.len()
+                * (std::mem::size_of::<DeclarationNameId>()
+                    + std::mem::size_of::<Vec<DeclarationId>>())
+            + self
+                .top_level_declarations_by_name
                 .values()
                 .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
                 .sum::<usize>()

@@ -422,10 +422,10 @@ impl CallInferenceConstraints {
                 // applicable, while the VALUE read out of it is approximated where it is recorded.
                 // A second, concrete constraint merges as before, which strips the projection and
                 // widens — an invariant occurrence then rejects the write, exactly as kotlinc does.
-                let merged = match self.lower.get(name).copied() {
-                    None => actual,
-                    Some(current) => merge_inferred_ty_from_symbols(Some(source), current, actual),
-                };
+                let merged = merge_inferred_lower_bounds_from_symbols(
+                    source,
+                    &inputs.iter().map(|(actual, _)| *actual).collect::<Vec<_>>(),
+                );
                 self.lower.insert(name.to_string(), merged);
             }
             ConstraintPosition::Upper => {
@@ -661,11 +661,26 @@ fn collect_call_inference_constraints(
 ) {
     match shape {
         Ty::TyParam(name, _) => constraints.insert(source, name, actual, position, origin),
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+        Ty::Nullable(inner) => {
             collect_call_inference_constraints(
                 source,
                 *inner,
                 nullable_generic_actual(actual),
+                position,
+                origin,
+                constraints,
+            );
+        }
+        Ty::PlatformNullable(inner) => {
+            let actual = nullable_generic_actual(actual);
+            // A Java `List<T>!` is published as `MutableList<T>!`. `listOf("x")` reaches `List`,
+            // not `MutableList`, so the element variable has to be read from the provider's
+            // read-only face. A value that already reaches the mutable face keeps that face.
+            let inner = super::choose_platform_lower_face(source, *inner, actual);
+            collect_call_inference_constraints(
+                source,
+                inner,
+                actual,
                 position,
                 origin,
                 constraints,
@@ -723,17 +738,7 @@ fn collect_call_inference_constraints(
             while let Ty::TyParam(_, bound) = actual {
                 actual = bound.projection_inner().unwrap_or(*bound).non_null();
             }
-            let projected = match actual {
-                Ty::Obj(actual_owner, _) if owner == actual_owner => Some(actual),
-                Ty::Obj(_, _) => receiver_hierarchy(source, actual)
-                    .into_iter()
-                    .map(|(ty, _)| ty)
-                    .find(|ty| {
-                        ty.obj_internal()
-                            .is_some_and(|actual_owner| owner == actual_owner)
-                    }),
-                _ => None,
-            };
+            let projected = supertype_with_classifier(source, actual, owner);
             let Some(Ty::Obj(_, actual_arguments)) = projected else {
                 return;
             };

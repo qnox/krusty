@@ -434,7 +434,7 @@ fn streamed_headers_preserve_compact_package_and_import_scopes() {
 }
 
 #[test]
-fn compact_header_types_own_same_file_alias_source_spellings_by_type_identity() {
+fn compact_header_types_retain_same_file_alias_uses_until_resolution() {
     let inputs = [SourceInput::kotlin(
         "package app\nclass Payload\ntypealias Cargo = Payload\nfun make(value: Cargo): Cargo = value",
     )];
@@ -467,20 +467,70 @@ fn compact_header_types_own_same_file_alias_source_spellings_by_type_identity() 
     };
     let parameter = module.syntax.parameters(parameters)[0].ty;
     for ty in [parameter, result] {
-        let expanded = module
+        let written = module
             .syntax
             .transient_type_ref(ty, &module.lookup_names)
-            .expect("expanded compact type");
-        assert_eq!(expanded.name, "Payload");
-        let spellings = module
+            .expect("written compact type");
+        assert_eq!(written.name, "Cargo");
+        assert!(module
             .syntax
             .transient_source_spellings(ty, &module.lookup_names)
-            .expect("source spelling projection");
-        assert_eq!(
-            spellings.get(&expanded.span).map(|ty| ty.name.as_str()),
-            Some("Cargo")
-        );
+            .expect("source spelling projection")
+            .is_empty());
     }
+}
+
+#[test]
+fn compact_header_keeps_the_exact_receiver_function_supertype_shape() {
+    let inputs = [SourceInput::kotlin(
+        "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype\n\
+         class ReceiverFunction : Int.() -> Unit { override fun invoke(value: Int) {} }",
+    )];
+    let mut diagnostics = DiagSink::new();
+    let module = stream_file_stub_inventory(
+        &inputs,
+        &LangFeatures::from_source(inputs[0].text),
+        &mut diagnostics,
+        |_, _, _| {},
+    );
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let classifier = module
+        .stubs
+        .iter()
+        .find(|stub| {
+            stub.kind == DeclarationKind::Classifier
+                && stub
+                    .lookup_name
+                    .and_then(|name| module.lookup_names.get(name))
+                    == Some("ReceiverFunction")
+        })
+        .expect("receiver-function classifier header");
+    let HeaderDeclarationKind::Classifier { supertypes, .. } =
+        module.syntax.declaration(classifier.id).unwrap().kind
+    else {
+        panic!("classifier header")
+    };
+    let [supertype] = module.syntax.type_operands(supertypes) else {
+        panic!("one declared supertype")
+    };
+    let packed = module.syntax.ty(*supertype).expect("packed supertype");
+    assert!(packed.flags.function_receiver());
+    let HeaderTypeKind::Function {
+        parameters,
+        result: Some(_),
+        context_count: 0,
+    } = packed.kind
+    else {
+        panic!("receiver function supertype must remain a function node")
+    };
+    assert_eq!(module.syntax.type_operands(parameters).len(), 1);
+    let transient = module
+        .syntax
+        .transient_type_ref(*supertype, &module.lookup_names)
+        .expect("transient function type");
+    assert!(transient.is_function_type_syntax());
+    assert!(transient.fun_has_receiver());
+    assert_eq!(transient.fun_params.len(), 1);
 }
 
 #[test]
@@ -741,41 +791,6 @@ fn default_expression_growth_does_not_enter_header_syntax_or_signature_constrain
         panic!("callable header")
     };
     assert!(small.syntax.parameters(parameters)[0].flags.has_default());
-}
-
-#[test]
-fn annotation_policy_inventory_flattens_named_target_arrays_without_body_ids() {
-    let text =
-        "@Target(allowedTargets = [AnnotationTarget.FIELD, AnnotationTarget.VALUE_PARAMETER])\n\
-                annotation class Mark\n";
-    let inputs = [SourceInput::kotlin(text)];
-    let mut diagnostics = DiagSink::new();
-    let module = stream_file_stub_inventory(
-        &inputs,
-        &LangFeatures::new(),
-        &mut diagnostics,
-        |_, _, _| {},
-    );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    let declaration = module
-        .stubs
-        .iter()
-        .find(|stub| {
-            stub.lookup_name
-                .and_then(|name| module.lookup_names.get(name))
-                == Some("Mark")
-        })
-        .expect("annotation class declaration")
-        .id;
-    let [application] = module.annotation_policy_applications(declaration) else {
-        panic!("one compact annotation policy application")
-    };
-    let arguments = module
-        .annotation_policy_arguments(application.arguments)
-        .iter()
-        .map(|argument| module.lookup_names.get(*argument).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(arguments, ["FIELD", "VALUE_PARAMETER"]);
 }
 
 #[test]
@@ -1816,13 +1831,20 @@ fn source_map_assigns_per_input_identities_without_retaining_source_text_or_line
 fn every_synthetic_origin_has_a_stable_source_cause() {
     let mut origins = OriginStore::default();
     let source = origins.source(SourceFileId::from_raw(2), Span::new(10, 14));
-    let synthetic = origins.synthetic(source, SyntheticOriginKind::ImplicitConversion);
+    let mut synthetic = origins.synthetic(source, SyntheticOriginKind::ImplicitConversion);
     assert_eq!(
         origins.get(synthetic),
         Some(Origin::Synthetic {
             cause: source,
             kind: SyntheticOriginKind::ImplicitConversion,
         })
+    );
+    for _ in 0..64 {
+        synthetic = origins.synthetic(synthetic, SyntheticOriginKind::ImplicitConversion);
+    }
+    assert_eq!(
+        origins.source_span(synthetic),
+        Some((SourceFileId::from_raw(2), Span::new(10, 14)))
     );
 }
 
@@ -2219,12 +2241,18 @@ impl SignatureSemantics for TestSignatureSemantics {
         arguments: &[ResolvedSigCallArgument<'_>],
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
+        qualified_namespace: bool,
         expected: Option<ResolvedTy>,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId> {
-        self.operations
-            .borrow_mut()
-            .push(format!("call:{spelling}"));
+        self.operations.borrow_mut().push(format!(
+            "{}call:{spelling}",
+            if qualified_namespace {
+                "namespace-"
+            } else {
+                ""
+            }
+        ));
         if let Some(declaration) = self.call_dependency {
             return demand(declaration).map(|signature| signature.result);
         }
@@ -2241,6 +2269,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         arguments: &[SigCallArgumentProbe<'_>],
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
+        _qualified: bool,
         _expected: Option<ResolvedTy>,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId> {
@@ -2319,6 +2348,18 @@ impl SignatureSemantics for TestSignatureSemantics {
         _scope: SignatureScope,
         _root: &str,
     ) -> Result<bool, DiagnosticId> {
+        Ok(false)
+    }
+
+    fn qualified_call_receiver_is_value(
+        &self,
+        _scope: SignatureScope,
+        root: &str,
+        first_selector: &str,
+    ) -> Result<bool, DiagnosticId> {
+        self.operations
+            .borrow_mut()
+            .push(format!("qualified-root:{root}.{first_selector}"));
         Ok(false)
     }
 
@@ -2532,7 +2573,11 @@ fn resolver_selection_demands_the_selected_declaration_through_the_solver() {
         trailing_lambda: false,
     });
     let arguments = graph.add_call_arguments([]);
-    let call = graph.add_expr(SigExpr::Call { target, arguments });
+    let call = graph.add_expr(SigExpr::Call {
+        target,
+        arguments,
+        qualified: None,
+    });
     let selected_result = graph.add_expr(SigExpr::Known(
         ResolvedTy::new(Ty::String).expect("String is publishable"),
     ));
@@ -2561,6 +2606,76 @@ fn resolver_selection_demands_the_selected_declaration_through_the_solver() {
             "call:selected",
             "parameters",
             "parameters"
+        ]
+    );
+}
+
+#[test]
+fn a_namespace_bound_qualified_call_stays_a_namespace_at_final_selection() {
+    let declaration = DeclarationId::from_raw(32);
+    let origin = OriginId::from_raw(4);
+    let mut graph = SignatureGraph::default();
+    let scope = graph.add_scope(SignatureScope {
+        owner: declaration,
+        source: SourceFileId::from_raw(0),
+    });
+    let result = graph.add_expr(SigExpr::Known(ResolvedTy::new(Ty::String).unwrap()));
+    let spelling = graph.intern_name("pkg.selected");
+    let member_name = graph.intern_name("selected");
+    let member = graph.add_member_selection(DeferredMemberSelection {
+        scope,
+        spelling: member_name,
+        origin,
+        expected: None,
+        type_arguments: OperandRange::default(),
+        trailing_lambda: false,
+    });
+    let target = graph.add_callable_selection(DeferredCallableSelection {
+        scope,
+        spelling,
+        lexical_classifier: None,
+        origin,
+        expected: Some(result),
+        type_arguments: OperandRange::default(),
+        trailing_lambda: false,
+    });
+    let arguments = graph.add_call_arguments([]);
+    let root = graph.intern_name("pkg");
+    let first_selector = graph.intern_name("selected");
+    let qualified = graph.add_qualified_call_coordinate(QualifiedCallCoordinate {
+        receiver: result,
+        root,
+        first_selector,
+        member,
+        origin,
+    });
+    let call = graph.add_expr(SigExpr::Call {
+        target,
+        arguments,
+        qualified: Some(qualified),
+    });
+    graph.add_inferred_constraint(
+        &inferred_stub(declaration, InferredSignatureKind::ExpressionFunction),
+        call,
+        OriginId::from_raw(0),
+    );
+
+    let semantics = TestSignatureSemantics::new();
+    let index = SignatureSolver::new(graph, [declaration])
+        .finalize(&ResolverBackedSignatureEvaluator::new(&semantics))
+        .unwrap();
+
+    assert_eq!(
+        index.signature(declaration).unwrap().result.get(),
+        Ty::String
+    );
+    assert_eq!(
+        semantics.operations.into_inner(),
+        [
+            "qualified-root:pkg.selected",
+            "call-expectations",
+            "namespace-call:pkg.selected",
+            "parameters",
         ]
     );
 }
@@ -2597,6 +2712,7 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     let call = graph.add_expr(SigExpr::Call {
         target: call_selection,
         arguments: call_arguments,
+        qualified: None,
     });
     let member_selection = graph.add_member_selection(DeferredMemberSelection {
         scope,
@@ -2915,6 +3031,37 @@ fn owned_declarations_are_indexed_by_owner() {
     assert_eq!(index.owned_declarations(unrelated), &[]);
     assert_eq!(index.companion_declaration(outer), Some(companion));
     assert_eq!(index.companion_declaration(unrelated), None);
+}
+
+/// A repeated member spelling must not sit on the top-level name index. Package lookup probes
+/// that index on every unresolved name, and walking every same-named member is quadratic.
+#[test]
+fn top_level_name_index_excludes_owned_members() {
+    let header = |kind, owner| ResolvedDeclarationHeader {
+        kind,
+        owner,
+        name: None,
+        visibility: Visibility::Public,
+        flags: DeclarationFlags::default(),
+        initialization_order: None,
+    };
+    let owner = DeclarationId::from_raw(0);
+    let member = DeclarationId::from_raw(1);
+    let top_level = DeclarationId::from_raw(2);
+    let mut index = ResolvedModuleIndex::default();
+    index.publish_declaration_header(
+        member,
+        header(DeclarationKind::Function, Some(owner)),
+        Some("value"),
+    );
+    index.publish_declaration_header(
+        top_level,
+        header(DeclarationKind::Function, None),
+        Some("value"),
+    );
+    assert_eq!(index.declarations_named("value"), &[member, top_level]);
+    assert_eq!(index.top_level_declarations_named("value"), &[top_level]);
+    assert!(index.top_level_declarations_named("missing").is_empty());
 }
 
 /// The sibling lookup (`owned_declaration`) reads the same owner table, so a constructor is found

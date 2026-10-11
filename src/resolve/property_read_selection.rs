@@ -3,7 +3,38 @@
 //! Candidate collection and selection remain in the resolver facade. This boundary exposes only
 //! the semantic type, visibility check, and external-property identity consumed after selection.
 
-use super::{Checker, Origin, PropertyReadSelection, Ty, TypeName, Visibility};
+use super::{
+    Checker, Origin, PropertyReadSelection, ResolvedPropertyAccess, Ty, TypeName, Visibility,
+};
+
+pub(super) struct PropertyReadMemberSelection {
+    pub(super) name: String,
+    pub(super) ty: Ty,
+    pub(super) owner: TypeName,
+    pub(super) interface: bool,
+    pub(super) getter: Option<crate::symbol_resolver::ResolvedMember>,
+    pub(super) accessor: Option<Box<crate::libraries::LibraryCallable>>,
+    /// Provider-chosen field, Kotlin accessor, or Java accessor. The platform null-check names it.
+    pub(super) producer: crate::libraries::PropertyProducer,
+    /// Provider-published constant-value expression fact for this selected read.
+    pub(super) metadata_constant_read: bool,
+    pub(super) context_access: Option<Box<ResolvedPropertyAccess>>,
+    pub(super) compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
+    pub(super) compile_time_constant: Option<crate::libraries::LibraryConst>,
+    pub(super) source_member: Option<crate::libraries::SourceMember>,
+    pub(super) stable_declaration: Option<crate::fir::DeclarationId>,
+    pub(super) access: Option<(Visibility, TypeName)>,
+    /// Whether a second read through the same receiver returns the same value.
+    pub(super) stable_read: bool,
+}
+
+pub(super) enum PropertyReadAmbiguity {
+    MemberExtension,
+    Extension,
+    MissingContext,
+    /// Synthetic properties of one classifier declared by different accessor methods.
+    Accessors(Vec<String>),
+}
 
 impl PropertyReadSelection {
     pub(super) fn ty(&self) -> Ty {
@@ -75,5 +106,59 @@ impl Checker<'_> {
         selection.hidden_from(receiver, |visibility, owner, probed| {
             self.receiver_property_accessible(visibility, owner, probed)
         })
+    }
+}
+
+impl Checker<'_> {
+    /// The ambiguity a read reports when accessor methods of one classifier declare the same
+    /// synthetic property. Candidates are listed the way kotlinc looks them up: the `isX` getter,
+    /// then the `get` spellings.
+    pub(super) fn competing_accessor_candidates(
+        &self,
+        name: &str,
+        selected: &crate::symbol_resolver::SelectedMemberProperty,
+    ) -> Option<Vec<String>> {
+        if selected.competing_accessors.is_empty() {
+            return None;
+        }
+        let candidates = selected
+            .property
+            .iter()
+            .chain(&selected.competing_accessors)
+            .collect::<Vec<_>>();
+        Some(
+            candidates
+                .into_iter()
+                .map(|candidate| {
+                    let keyword = if candidate.setter.is_some() {
+                        "var"
+                    } else {
+                        "val"
+                    };
+                    let ty = self.diagnostic_type_name(candidate.ty, &[candidate.ty]);
+                    format!("{keyword} {name}: {ty}")
+                })
+                .collect(),
+        )
+    }
+
+    pub(super) fn competing_accessor_ambiguity(
+        &self,
+        name: &str,
+        selected: &crate::symbol_resolver::SelectedMemberProperty,
+    ) -> super::PropertyReadAmbiguity {
+        super::PropertyReadAmbiguity::Accessors(
+            self.competing_accessor_candidates(name, selected)
+                .expect("an accessor ambiguity has competing candidates"),
+        )
+    }
+
+    pub(super) fn report_accessor_ambiguity(&mut self, span: super::Span, candidates: Vec<String>) {
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for candidate in candidates {
+            message.push('\n');
+            message.push_str(&candidate);
+        }
+        self.diags.error(span, message);
     }
 }

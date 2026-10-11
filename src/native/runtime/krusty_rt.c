@@ -272,7 +272,7 @@ KByteArray *kt_bytes_new(kt_int length) {
 
 static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
-KT_TYPE_WITH(kt_type_string, "kotlin.", "String", sizeof(KObject), 1, kt_string_references, kt_text_interfaces)
+KT_TYPE_WITH(kt_type_string, "kotlin.", "String", sizeof(KString), 1, kt_string_references, kt_text_interfaces)
 KT_TYPE_WITH(kt_type_byte, "kotlin.", "Byte", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE_WITH(kt_type_short, "kotlin.", "Short", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE_WITH(kt_type_int, "kotlin.", "Int", sizeof(KObject), 0, NULL, kt_number_interfaces)
@@ -300,10 +300,12 @@ KRef kt_new(const KType *type) { return (KRef)kt_gc_allocate(type, sizeof(KObjec
 /* ---- strings ------------------------------------------------------------------------------- */
 
 KRef kt_string_of(KRef storage, const char *bytes, kt_int byte_length) {
-    KRef object = kt_new(&kt_type_string);
+    KRef object = (KRef)kt_gc_allocate(&kt_type_string, sizeof(KString));
     object->as.string.storage = storage;
     object->as.string.bytes = bytes;
     object->as.string.byte_length = byte_length;
+    object->as.string.units_plus_one = 0;
+    ((KString *)object)->cursor = 0;
     return object;
 }
 
@@ -323,14 +325,18 @@ static const char *kt_text_of(KRef self, kt_int *byte_length);
    points; of those, only the ones a four-byte sequence starts (`11110xxx`, i.e. above U+FFFF) are
    written as a SURROGATE PAIR in UTF-16 and contribute two units. Everything else contributes one.
 
-   This walks the bytes on every call, which is what a string that stores UTF-8 costs; it is also
-   what makes the answer right for text a JVM-shaped length would have to be stored alongside. */
+   This walks the bytes, which is what a string that stores UTF-8 costs; a `String` keeps the count
+   once made, because its text never changes. A builder's text does, so it is walked each time. */
 kt_int kt_string_length(KRef self) {
     /* Text the PROGRAM wrote: a class implementing `kotlin.CharSequence`, whose own `length` its
        descriptor records. Asked first, because `kt_text_of` reads a string's own storage and an
        object of the program's holds none. */
     if (self != NULL && self->header.type->walk_length != NULL) {
         return self->header.type->walk_length(self);
+    }
+    bool string = self != NULL && self->header.type == &kt_type_string;
+    if (string && self->as.string.units_plus_one != 0) {
+        return self->as.string.units_plus_one - 1;
     }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
@@ -342,6 +348,11 @@ kt_int kt_string_length(KRef self) {
         }
         units += (byte >= 0xF0u) ? 2 : 1;
     }
+    /* `units_plus_one` is signed. An all-ASCII string may legitimately have INT32_MAX units, so
+       leave that one uncached rather than overflowing while encoding the zero sentinel. */
+    if (string && units < INT32_MAX) {
+        self->as.string.units_plus_one = units + 1;
+    }
     return units;
 }
 
@@ -349,9 +360,9 @@ kt_int kt_string_length(KRef self) {
 
    The text is stored as UTF-8, and Kotlin indexes by UTF-16 unit, so this walks the bytes the same
    way `kt_string_length` counts them: a byte that is not a continuation byte starts one code point,
-   and one above U+FFFF occupies TWO units. Walking per access is what a string that stores UTF-8
-   costs, and it is the same cost `length` already pays; a program that wants to iterate cheaply
-   iterates the string rather than its indices. */
+   and one above U+FFFF occupies TWO units. A string's walk resumes from its cursor (see
+   `KString`) when the index lies at or past it, so an ascending scan by index walks the text once;
+   an index before the cursor walks from the start. */
 kt_char kt_string_get(KRef self, kt_int index) {
     if (self != NULL && self->header.type->walk_char_at != NULL) {
         return self->header.type->walk_char_at(self, index);
@@ -363,14 +374,40 @@ kt_char kt_string_get(KRef self, kt_int index) {
         kt_text_index_out_of_bounds(self, index, kt_string_length(self));
         return 0;
     }
+    /* All-ASCII text is indexed directly: counting it once (see `kt_string_length`) is what
+       tells the two apart, and costs no more than the first walk would have. */
+    if (self != NULL && self->header.type == &kt_type_string) {
+        kt_int units = kt_string_length(self);
+        if (units == self->as.string.byte_length) {
+            if (index >= units) {
+                kt_text_index_out_of_bounds(self, index, units);
+                return 0;
+            }
+            return (kt_char)(unsigned char)self->as.string.bytes[index];
+        }
+    }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int unit = 0;
-    for (kt_int at = 0; at < byte_length;) {
+    kt_int at = 0;
+    uint64_t *cursor = NULL;
+    if (self != NULL && self->header.type == &kt_type_string) {
+        cursor = &((KString *)self)->cursor;
+        uint64_t resumed = __atomic_load_n(cursor, __ATOMIC_RELAXED);
+        if ((kt_int)(uint32_t)resumed <= index) {
+            unit = (kt_int)(uint32_t)resumed;
+            at = (kt_int)(resumed >> 32);
+        }
+    }
+    while (at < byte_length) {
         unsigned char lead = (unsigned char)bytes[at];
         kt_int width = lead < 0x80u ? 1 : lead < 0xE0u ? 2 : lead < 0xF0u ? 3 : 4;
         kt_int units = width == 4 ? 2 : 1;
         if (index < unit + units) {
+            if (cursor != NULL) {
+                __atomic_store_n(cursor, ((uint64_t)(uint32_t)at << 32) | (uint32_t)unit,
+                                 __ATOMIC_RELAXED);
+            }
             uint32_t code = lead;
             if (width == 2) {
                 code = ((uint32_t)(lead & 0x1Fu) << 6) | ((unsigned char)bytes[at + 1] & 0x3Fu);
@@ -1748,80 +1785,6 @@ const KType kt_type_lazy = {KT_NAMED("kotlin.", "Lazy"),
                             .vtable = kt_lazy_vtable,
                             .vtable_length = 3};
 
-/* `kotlin.Result` is a value class over `Any?`, and its representation is Kotlin's own: a SUCCESS
-   is the value itself, so `Result.success(x)` is `x` and costs nothing, and a FAILURE is this
-   marker holding the exception. That is what lets a `Result<T>` cross a function boundary as an
-   ordinary reference with no wrapper of this runtime's invention.
-
-   A `null` success is representable and distinct from a failure, because a failure is never NULL. */
-typedef struct KResultFailure {
-    KObjectHeader header;
-    KRef exception;
-} KResultFailure;
-
-static const uint32_t kt_result_failure_offsets[] = {offsetof(KResultFailure, exception)};
-
-static const KType kt_type_result_failure = {KT_NAMED("kotlin.Result.", "Failure"),
-                                             .instance_size = sizeof(KResultFailure),
-                                             .reference_count = 1,
-                                             .reference_offsets = kt_result_failure_offsets,
-                                             .super = &kt_type_any,
-                                             .vtable = kt_any_vtable,
-                                             .vtable_length = 3};
-
-/* `Result.success(x)` IS `x`. This exists so the call site has a target of the ordinary shape
-   rather than a special case; it costs one call and no allocation. */
-KRef kt_result_success(KRef value) { return value; }
-
-KRef kt_result_failure(KRef exception) {
-    KResultFailure *failure =
-        (KResultFailure *)kt_gc_allocate(&kt_type_result_failure, sizeof(KResultFailure));
-    failure->exception = exception;
-    return (KRef)failure;
-}
-
-kt_boolean kt_result_is_failure(KRef value) {
-    return value != NULL && value->header.type == &kt_type_result_failure;
-}
-
-kt_boolean kt_result_is_success(KRef value) { return !kt_result_is_failure(value); }
-
-KRef kt_result_get_or_null(KRef value) { return kt_result_is_failure(value) ? NULL : value; }
-
-KRef kt_result_exception_or_null(KRef value) {
-    return kt_result_is_failure(value) ? ((const KResultFailure *)value)->exception : NULL;
-}
-
-/* A failure throws the exception it holds and returns at once. `kt_throw` comes back, and falling
-   through would hand the failure marker to a caller expecting a `T`: a value of no type the program
-   declared, which the caller would read if it ever read before looking for the exception. */
-KRef kt_result_get_or_throw(KRef value) {
-    if (kt_result_is_failure(value)) {
-        kt_throw(((const KResultFailure *)value)->exception);
-        return NULL;
-    }
-    return value;
-}
-
-/* Kotlin's own rendering: `Success(value)` or `Failure(exception)`.
-
-   Either one renders an object through ITS `toString`, which the program may override and which
-   may throw. That comes back with the exception pending and a placeholder where the text would be,
-   so the rendering stops there and answers no text: going on would build `Success(null)` out of
-   the placeholder -- allocating, and handing back text -- after the call it was built from had
-   already failed. The NULL is never read; the caller finds the exception first. */
-KRef kt_result_to_string(KRef value) {
-    kt_boolean failure = kt_result_is_failure(value);
-    KRef rendered = kt_to_string(failure ? ((const KResultFailure *)value)->exception : value);
-    if (kt_pending_exception() != NULL) {
-        return NULL;
-    }
-    /* `rendered` stays a root in this local across the allocations below. */
-    KRef opening = failure ? kt_string_utf8("Failure(", 8) : kt_string_utf8("Success(", 8);
-    KRef text = kt_string_plus(opening, rendered);
-    return kt_string_plus(text, kt_string_utf8(")", 1));
-}
-
 KRef kt_lazy_of(KRef initializer) {
     KLazy *lazy = (KLazy *)kt_gc_allocate(&kt_type_lazy, sizeof(KLazy));
     lazy->initializer = initializer;
@@ -2250,6 +2213,22 @@ static kt_long kt_range_last_element(kt_boolean unsigned_bounds, kt_long first, 
     return last + kt_difference_modulo(first, last, -step);
 }
 
+kt_int kt_progression_last_int(kt_int first, kt_int last, kt_int step) {
+    return (kt_int)kt_range_last_element(false, first, last, step);
+}
+
+kt_long kt_progression_last_long(kt_long first, kt_long last, kt_long step) {
+    return kt_range_last_element(false, first, last, step);
+}
+
+kt_int kt_progression_last_uint(kt_int first, kt_int last, kt_int step) {
+    return (kt_int)kt_range_last_element(true, (uint32_t)first, (uint32_t)last, step);
+}
+
+kt_long kt_progression_last_ulong(kt_long first, kt_long last, kt_long step) {
+    return kt_range_last_element(true, first, last, step);
+}
+
 static KRef kt_range_allocate(const KType *type, kt_long first, kt_long last, kt_long step) {
     KRange *range = (KRange *)kt_gc_allocate(type, sizeof(KRange));
     range->first = first;
@@ -2347,6 +2326,8 @@ kt_boolean kt_range_is_empty(KRef range) { return kt_range_empty((const KRange *
 kt_long kt_range_first(KRef range) { return ((const KRange *)range)->first; }
 
 kt_long kt_range_last(KRef range) { return ((const KRange *)range)->last; }
+
+kt_long kt_range_step_value(KRef range) { return ((const KRange *)range)->step; }
 
 /* `value in range`, in constant time. A value is a member when it lies between the ends in the
    walk's own direction (a descending progression has `first` above `last`) and sits ON the step:

@@ -1,6 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
-mod argument_boundaries;
+pub(super) mod argument_boundaries;
+mod reordered_operands;
 
 use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
@@ -15,7 +16,7 @@ use crate::types::{Ty, TypeName};
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
-use super::inline_body::ExternalInlineCallRequest;
+use super::inline_body::{ExternalCollectionTransformPlan, ExternalInlineCallRequest};
 use super::{BodyLowering, FirLoweringFailure};
 
 #[derive(Clone, Copy)]
@@ -102,6 +103,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) declared_result: Option<ResolvedTy>,
     pub(super) overridden_results: &'a [ResolvedTy],
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
@@ -112,10 +114,15 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) dispatch_class: Option<TypeName>,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    /// Source line of the call, when the lowering site carries one. An inline-body expansion
+    /// attributes its frame to it; an ordinary dependency call does not consume it.
+    pub(super) source_line: Option<u32>,
 }
 
 pub(super) struct ModuleConstructorRequest<'a> {
     pub(super) classifier: crate::types::TypeName,
+    /// The checked constructor declaration the call selected.
+    pub(super) constructor: crate::fir::DeclarationId,
     pub(super) argument_parameter_types: &'a [Ty],
     pub(super) declaration_parameter_types: &'a [Ty],
     pub(super) primary_in_current_file: bool,
@@ -174,25 +181,6 @@ impl BodyLowering<'_> {
             }
         });
         suspends
-    }
-
-    fn checked_operands_suspend(
-        &self,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> bool {
-        dispatch_receiver
-            .into_iter()
-            .chain(extension_receiver)
-            .any(|operand| self.operand_suspends(operand))
-            || arguments.iter().any(|argument| match argument {
-                IrCheckedArgument::Expression { value, .. } => self.operand_suspends(*value),
-                IrCheckedArgument::Vararg { elements, .. } => elements
-                    .iter()
-                    .any(|(value, _)| self.operand_suspends(*value)),
-                IrCheckedArgument::Default { .. } => false,
-            })
     }
 
     /// Inline the already-checked block passed to one of Kotlin's coroutine primitives.
@@ -365,6 +353,7 @@ impl BodyLowering<'_> {
             declared_result,
             overridden_results,
             semantic_role,
+            overridden_declarations,
             suspend,
             can_inline,
             inline_plan,
@@ -374,6 +363,7 @@ impl BodyLowering<'_> {
             dispatch_class,
             extension_receiver,
             arguments,
+            source_line,
         } = request;
         // Preserve the checked SOURCE receiver across dependency realization. An extension records
         // its declaration receiver (a generic `T` deliberately records nothing); a member records
@@ -398,6 +388,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
+                source_line,
             })?;
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
@@ -447,6 +438,8 @@ impl BodyLowering<'_> {
         if let Some(role) = semantic_role {
             self.ir.semantic_call_roles.insert(call, role);
         }
+        self.ir
+            .record_external_overridden_declarations(target, overridden_declarations);
         if let Some(receiver) = source_receiver {
             self.ir
                 .ext_call_source_receiver
@@ -489,24 +482,26 @@ impl BodyLowering<'_> {
     /// The checker attaches this plan only when the selected argument is a source lambda whose
     /// body suspends. Common lowering consumes that decision without inspecting callable or body
     /// semantics again.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn external_inline_collection_transform(
         &mut self,
-        lambda_parameter: u32,
-        local_names: &crate::fir::FirInlineCollectionLocalNames,
-        traversal: &crate::fir::FirInlineIterationTraversal,
-        factory: ExternalCallableId,
-        factory_classifier: crate::types::TypeName,
-        factory_parameters: &[ResolvedTy],
-        capacity: Option<&crate::fir::FirInlineCollectionCapacity>,
-        append: &crate::fir::FirInlineCollectionAppend,
-        accumulator_ty: ResolvedTy,
+        plan: ExternalCollectionTransformPlan<'_>,
         receiver_ty: Option<ResolvedTy>,
         parameter_types: &[Ty],
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
+        let ExternalCollectionTransformPlan {
+            lambda_parameter,
+            local_names,
+            traversal,
+            factory,
+            factory_classifier,
+            factory_parameters,
+            capacity,
+            append,
+            accumulator_ty,
+        } = plan;
         let (mut statements, receiver, args, defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty,
@@ -537,16 +532,8 @@ impl BodyLowering<'_> {
             } => lambda,
             _ => return None,
         };
-        let (implementation, captures, inline_body, arity) = match self.ir.expr(lambda).clone() {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                inline_body: Some(inline_body),
-                arity,
-                ..
-            } => (impl_fn, captures, inline_body, arity as usize),
-            _ => return None,
-        };
+        let (implementation, captures, inline_body, arity) =
+            inline_argument_template(self.ir, lambda)?;
         if arity != 1 {
             return None;
         }
@@ -947,9 +934,9 @@ impl BodyLowering<'_> {
         // remain substitution nodes through `preserve_inline_lambdas` below. Ordinary
         // calls have no such retained-body boundary and may keep an already ordered operand stream
         // direct.
-        let direct = matches!(mode, SelectedOperandMode::DirectWhenOrdered)
-            && !preserve_inline_lambdas
-            && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
+        let passable =
+            matches!(mode, SelectedOperandMode::DirectWhenOrdered) && !preserve_inline_lambdas;
+        let direct = passable
             && argument_boundaries::follow_parameter_order(arguments, extension_receiver_parameter);
         let mut statements = Vec::new();
         let receiver = if member_extension {
@@ -990,6 +977,7 @@ impl BodyLowering<'_> {
                 preserve_inline_lambdas,
             },
             direct,
+            passable,
         )?;
         statements.extend(normalized.statements);
         let mut slots = normalized.slots;
@@ -1022,10 +1010,19 @@ impl BodyLowering<'_> {
         Some((statements, receiver, args, normalized.defaults))
     }
 
-    /// Call `visit` for every local this expression reads, including nested operands and a
-    /// preserved inline lambda's captures and body — all run in the caller's frame once the call
-    /// is spliced.
+    /// Call `visit` for every caller local this expression reads, including nested operands and a
+    /// preserved inline lambda's captures.
+    ///
+    /// The lambda's `inline_body` keeps the lambda's own value numbering until the splice rehomes
+    /// it. Those indices are not caller slots: walking them counted a lambda local as a use of the
+    /// operand temporary and kept a copy kotlinc never emits (`repeat(n) { … }` spilling `n`).
     fn for_each_value_read(&self, expression: ExprId, visit: &mut impl FnMut(u32)) {
+        if let IrExpr::Lambda { captures, .. } = self.ir.expr(expression) {
+            for capture in captures.clone() {
+                self.for_each_value_read(capture, visit);
+            }
+            return;
+        }
         if let IrExpr::GetValue(slot) = self.ir.expr(expression) {
             visit(*slot);
         }
@@ -1038,8 +1035,17 @@ impl BodyLowering<'_> {
         }
     }
 
-    /// Whether this expression declares or assigns `slot`.
+    /// Whether this expression declares or assigns caller slot `slot`.
+    ///
+    /// A lambda `inline_body` is skipped for the same reason [`Self::for_each_value_read`] skips
+    /// it: its stores name the lambda's own locals, not the caller's.
     fn writes_value(&self, expression: ExprId, slot: u32) -> bool {
+        if let IrExpr::Lambda { captures, .. } = self.ir.expr(expression) {
+            return captures
+                .clone()
+                .into_iter()
+                .any(|capture| self.writes_value(capture, slot));
+        }
         let writes_here = match self.ir.expr(expression) {
             IrExpr::Variable { index, .. } => *index == slot,
             IrExpr::SetValue { var, .. } => *var == slot,
@@ -1066,9 +1072,11 @@ impl BodyLowering<'_> {
     /// does the last operand local whatever its value, unless it suspends (a suspension point
     /// stays a statement of its own): evaluating it where the call consumes it
     /// still runs it after every operand before it, and the target then reads an `@InlineOnly`
-    /// callee's argument in place as kotlinc does. Nested uses, including vararg elements, retain their locals because this fold only replaces
-    /// root operands. Keeping a foldable root local costs a slot and a copy the reference compiler
-    /// does not emit, and shifts every local the spliced body goes on to use.
+    /// callee's argument in place as kotlinc does. A direct element of a vararg operand folds the
+    /// same way: the array is built when that argument is evaluated, so the element runs after the
+    /// arguments before it and is stored into the array instead of into a local of its own.
+    /// Keeping a foldable local costs a slot and a copy the reference compiler does not emit, and
+    /// shifts every local the spliced body goes on to use.
     ///
     /// Only a value whose source is not written by any surviving statement qualifies, so folding it
     /// back cannot move a read across a write.
@@ -1109,9 +1117,10 @@ impl BodyLowering<'_> {
                 _ if index + 1 == statements.len() && !self.operand_suspends(init) => None,
                 _ => continue,
             };
-            // Replacement is deliberately limited to a root call operand. Require exactly one
-            // such read, and fail closed if the slot is also read by a nested operand or surviving
-            // statement; otherwise removing the declaration would leave that nested read dangling.
+            // Replacement is a root call operand, or one direct element of its vararg array.
+            // Require exactly one such read, and fail closed if the slot is also read by a nested
+            // operand or surviving statement; otherwise removing the declaration would leave that
+            // nested read dangling.
             let root_uses = args
                 .iter()
                 .chain(receiver.iter())
@@ -1119,6 +1128,24 @@ impl BodyLowering<'_> {
                     matches!(self.ir.expr(operand), IrExpr::GetValue(read) if *read == slot)
                 })
                 .count();
+            // One direct `GetValue` element of a vararg array is the same single use as a root
+            // operand: folding it back evaluates the element while the array is filled.
+            let element_uses = args
+                .iter()
+                .chain(receiver.iter())
+                .map(|&operand| {
+                    let IrExpr::Vararg { elements, .. } = self.ir.expr(operand) else {
+                        return 0;
+                    };
+                    let elements = elements.clone();
+                    elements
+                        .iter()
+                        .filter(|&&element| {
+                            matches!(self.ir.expr(element), IrExpr::GetValue(read) if *read == slot)
+                        })
+                        .count()
+                })
+                .sum::<usize>();
             let all_uses: usize = args
                 .iter()
                 .chain(receiver.iter())
@@ -1135,13 +1162,39 @@ impl BodyLowering<'_> {
                     other != index && self.writes_value(statement, source)
                 })
             });
-            if root_uses != 1 || all_uses != root_uses || rewritten {
+            let uses = root_uses + element_uses;
+            if uses != 1 || all_uses != uses || rewritten {
                 continue;
             }
             statements.remove(index);
+            let mut vararg_elements = Vec::new();
             for operand in args.iter_mut().chain(receiver.iter_mut()) {
                 if matches!(self.ir.expr(*operand), IrExpr::GetValue(read) if *read == slot) {
                     *operand = init;
+                    continue;
+                }
+                let IrExpr::Vararg { elements, .. } = self.ir.expr(*operand) else {
+                    continue;
+                };
+                let indexes = elements
+                    .clone()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, element)| {
+                        matches!(self.ir.expr(*element), IrExpr::GetValue(read) if *read == slot)
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                if !indexes.is_empty() {
+                    vararg_elements.push((*operand, indexes));
+                }
+            }
+            for (operand, indexes) in vararg_elements {
+                let IrExpr::Vararg { elements, .. } = &mut self.ir.exprs[operand as usize] else {
+                    continue;
+                };
+                for index in indexes {
+                    elements[index] = init;
                 }
             }
         }
@@ -1359,6 +1412,7 @@ impl BodyLowering<'_> {
     ) -> Option<ExprId> {
         let ModuleConstructorRequest {
             classifier,
+            constructor,
             argument_parameter_types,
             declaration_parameter_types,
             primary_in_current_file,
@@ -1428,6 +1482,10 @@ impl BodyLowering<'_> {
             .construction_declared_params
             .insert(construction, declared_parameters);
         self.ir.construction_targets.insert(construction, target);
+        self.ir
+            .module_constructions
+            .selected
+            .insert(construction, constructor);
         self.record_annotation_construction(construction, classifier, annotation)?;
         Some(self.wrap_call_statements(statements, construction))
     }
@@ -1474,9 +1532,7 @@ impl BodyLowering<'_> {
         // extension receiver, then the value arguments. A context argument is an implicit value
         // (a context parameter or an implicit receiver), so passing the receiver after it still
         // evaluates every operand once, in source order.
-        let direct =
-            !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
-                && argument_boundaries::follow_parameter_order(arguments, None);
+        let direct = argument_boundaries::follow_parameter_order(arguments, None);
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {
@@ -1563,6 +1619,7 @@ impl BodyLowering<'_> {
                 inline: callable.is_inline(),
             },
             direct,
+            true,
         )?;
         statements.extend(normalized.statements);
         let mut slots = normalized.slots;
@@ -1624,6 +1681,16 @@ impl BodyLowering<'_> {
         }
         let selected_declaration_parameter_types = declaration_parameter_types.clone();
         let declaration_result = signature.result.get();
+        // A call whose whole operand list consists of implicit context values begins at the first
+        // generated load: there is no written receiver or value argument to own a later start.
+        // Calls that also have an extension/value operand keep the ordinary operand-then-dispatch
+        // line sequence. Record the semantic shape here while the declaration still distinguishes
+        // context parameters; JVM emission only consumes the resulting debug provenance.
+        let starts_at_implicit_context = callable.shape.context_parameter_count != 0
+            && declared_extension_receiver.is_none()
+            && usize::try_from(callable.shape.context_parameter_count)
+                .ok()
+                .is_some_and(|count| count == selected_parameter_types.len());
         // kotlinc inlines every call of a same-module inline function, whichever class declares
         // it: the checked template is cloned here with its receiver as an explicit operand, and a
         // target backend adds the synthetic accessors its private member uses need.
@@ -1815,6 +1882,85 @@ impl BodyLowering<'_> {
             &selected_declaration_parameter_types,
             &default_argument_positions,
         );
+        if starts_at_implicit_context {
+            let first = match self.ir.expr(call) {
+                IrExpr::Call { args, .. } => args.first().copied(),
+                _ => None,
+            };
+            // Local-declaration lifting has already turned an enclosing context receiver into an
+            // explicit captured-receiver parameter. Its load is synthetic setup: kotlinc starts
+            // the source call's line at dispatch, after the load. A non-captured implicit context
+            // argument remains owned by the call from its first generated operand.
+            let captured_context = first.is_some_and(|operand| {
+                let mut value = operand;
+                let value = loop {
+                    match self.ir.expr(value) {
+                        IrExpr::GetValue(value) => break *value,
+                        IrExpr::GetField { class, index, .. } => {
+                            return self.ir.classes[*class as usize]
+                                .ctor_args
+                                .iter()
+                                .find(|argument| argument.field_index == Some(*index))
+                                .and_then(|argument| argument.capture.as_ref())
+                                .and_then(|capture| capture.receiver.as_ref())
+                                .is_some_and(|receiver| {
+                                    matches!(
+                                        receiver,
+                                        crate::ir::IrCapturedReceiver::Context { .. }
+                                    )
+                                });
+                        }
+                        IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg,
+                            ..
+                        } => value = *arg,
+                        _ => return false,
+                    }
+                };
+                // Anonymous-object and local-class members own their capture directly. Their
+                // checked body retains the exact receiver provenance and the lifted parameter
+                // slot even though they are not themselves lambda declarations.
+                if self
+                    .implicit_receiver_capture_slots
+                    .iter()
+                    .any(|(capture, slot)| {
+                        *slot == value
+                            && matches!(
+                                &capture.receiver,
+                                crate::fir::FirCapturedReceiver::Context { .. }
+                            )
+                    })
+                {
+                    return true;
+                }
+                let Some(parameters) = self
+                    .declaration_lambda
+                    .and_then(|function| self.ir.fn_params.get(&function))
+                else {
+                    return false;
+                };
+                let Some(identity) = parameters.identities.get(value as usize) else {
+                    return false;
+                };
+                let crate::ir::IrParameterRole::CapturedReceiver { ordinal } = identity.role else {
+                    return false;
+                };
+                parameters
+                    .captured_receivers
+                    .get(ordinal as usize)
+                    .is_some_and(|receiver| {
+                        matches!(receiver, crate::ir::IrCapturedReceiver::Context { .. })
+                    })
+            });
+            if captured_context {
+                if let Some(line) = source_line {
+                    self.ir.mark_dispatch_line(call, line);
+                }
+            } else if first.is_some_and(|operand| self.ir.is_positionless(operand)) {
+                self.ir.mark_generated_operand_start(call);
+            }
+        }
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.
@@ -1863,6 +2009,9 @@ impl BodyLowering<'_> {
         arguments: &[IrCheckedArgument],
         policy: CheckedArgumentPolicy<'_>,
         direct: bool,
+        // Whether operands are stored only because named arguments reorder them, so the ones
+        // kotlinc passes in place may stay there.
+        passable: bool,
     ) -> Option<NormalizedCheckedArguments> {
         let mut statements = Vec::new();
         let mut inline_lambdas = vec![None; parameter_types.len()];
@@ -1879,25 +2028,9 @@ impl BodyLowering<'_> {
                             CheckedArgumentPolicy::Selected {
                                 preserve_inline_lambdas,
                                 ..
-                            } => {
-                                preserve_inline_lambdas
-                                    && matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    )
-                            }
+                            } => preserve_inline_lambdas && inline_argument_stays(self.ir, value),
                             CheckedArgumentPolicy::SameFileInline { inline, .. } => {
-                                inline
-                                    && matches!(
-                                        self.ir.expr(value),
-                                        IrExpr::Lambda {
-                                            inline_body: Some(_),
-                                            ..
-                                        }
-                                    )
+                                inline && inline_argument_stays(self.ir, value)
                             }
                         };
                         if matches!(policy, CheckedArgumentPolicy::SameFileInline { .. })
@@ -1907,10 +2040,12 @@ impl BodyLowering<'_> {
                         }
                         let value = if preserve || self.ir.is_delegated_property_operand(value) {
                             value
-                        } else if direct {
+                        } else if direct
+                            || (passable && self.passes_reordered_operand_in_place(value))
+                        {
                             self.direct_call_operand(value, parameter_ty)
                         } else {
-                            self.spill_call_operand(value, parameter_ty, &mut statements)
+                            self.spill_reordered_operand(value, parameter_ty, &mut statements)
                         };
                         Some(match policy {
                             CheckedArgumentPolicy::SameFileInline {
@@ -2031,6 +2166,59 @@ impl BodyLowering<'_> {
     /// consumed by `compareTo(Int)` must remain `Char`).
     fn direct_call_operand(&mut self, value: ExprId, _target: Ty) -> ExprId {
         value
+    }
+}
+
+/// A lambda literal, or a callable reference whose adapter is that literal, stays in the argument
+/// position. Spilling either would be the function object the splice is there to avoid.
+fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
+    match ir.expr(value) {
+        IrExpr::Lambda {
+            inline_body: Some(_),
+            ..
+        } => true,
+        IrExpr::CallableReference(_) => inline_argument_template(ir, value).is_some(),
+        _ => false,
+    }
+}
+
+/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
+/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// one returned value are the invocation. A stored reference never reaches this helper.
+pub(crate) fn inline_argument_template(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+) -> Option<(u32, Vec<ExprId>, ExprId, usize)> {
+    let expression_node = ir.expr(expression).clone();
+    match expression_node {
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: Some(inline_body),
+            arity,
+            ..
+        } => Some((impl_fn, captures, inline_body, usize::from(arity))),
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: None,
+            arity,
+            ..
+        } if ir.lambda_class_provenance(impl_fn)
+            == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter) =>
+        {
+            let arity = usize::from(arity);
+            let function = ir.functions.get(impl_fn as usize)?;
+            let body = function.body?;
+            let inline_body = *ir.callable_reference_adapter_results.get(&body)?;
+            let body_arity = function.params.len();
+            if body_arity != arity + captures.len() {
+                return None;
+            }
+            Some((impl_fn, captures, inline_body, arity))
+        }
+        IrExpr::CallableReference(_) => ir.callable_reference_inline_template(expression),
+        _ => None,
     }
 }
 

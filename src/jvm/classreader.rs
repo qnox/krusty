@@ -825,6 +825,60 @@ fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
     })
 }
 
+/// The class's `SourceDebugExtension` attribute body, or `None` when the class declares none.
+///
+/// The body is the source map itself (JVMS 4.7.11). A method attribute of the same name is not
+/// this value.
+pub fn source_debug_extension(bytes: &[u8]) -> Result<Option<String>, ReadError> {
+    let mut reader = Reader { b: bytes, i: 0 };
+    if reader.u4()? != 0xCAFEBABE {
+        return Err(ReadError::NotAClass);
+    }
+    reader.u2()?;
+    reader.u2()?;
+    let pool = parse_constant_pool(&mut reader)?;
+    reader.u2()?;
+    reader.u2()?;
+    reader.u2()?;
+    let interfaces = reader.u2()?;
+    for _ in 0..interfaces {
+        reader.u2()?;
+    }
+    skip_member_table(&mut reader)?;
+    skip_member_table(&mut reader)?;
+    let attributes = reader.u2()?;
+    for _ in 0..attributes {
+        let name_index = reader.u2()?;
+        let length = reader.u4()? as usize;
+        let body = reader.take(length)?;
+        let name = match pool.get(name_index as usize) {
+            Some(C::Utf8(name)) => name.as_str(),
+            _ => "",
+        };
+        if name == "SourceDebugExtension" {
+            let text = std::str::from_utf8(body).map_err(|_| ReadError::NotAClass)?;
+            return Ok(Some(text.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn skip_member_table(reader: &mut Reader<'_>) -> Result<(), ReadError> {
+    let members = reader.u2()?;
+    for _ in 0..members {
+        reader.u2()?;
+        reader.u2()?;
+        reader.u2()?;
+        let attributes = reader.u2()?;
+        for _ in 0..attributes {
+            reader.u2()?;
+            let length = reader.u4()? as usize;
+            reader.take(length)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     let mut r = Reader { b: bytes, i: 0 };
     if r.u4()? != 0xCAFEBABE {
@@ -1059,9 +1113,14 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 if is_retention && ename == "value" {
                     let Ok(tag) = attr.u1() else { break };
                     if tag == b'e' {
-                        let _ = attr.u2(); // enum type descriptor index
+                        // Only a `java.lang.annotation.RetentionPolicy` constant is a policy.
+                        let owner = attr.u2().map(utf8);
                         if let Ok(ci) = attr.u2() {
-                            out.retention = Some(utf8(ci).to_string());
+                            if owner.is_ok_and(|owner| {
+                                owner == "Ljava/lang/annotation/RetentionPolicy;"
+                            }) {
+                                out.retention = Some(utf8(ci).to_string());
+                            }
                         }
                     } else {
                         // Unexpected shape — stop parsing this class's attributes rather than desync.
@@ -1104,7 +1163,12 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 if (is_kotlin_target && ename == "allowedTargets")
                     || (is_java_target && ename == "value")
                 {
-                    match read_element_value(&mut attr, cp, ElementValueExtract::EnumConstants) {
+                    let entries = ElementValueExtract::EnumConstants(if is_kotlin_target {
+                        "Lkotlin/annotation/AnnotationTarget;"
+                    } else {
+                        "Ljava/lang/annotation/ElementType;"
+                    });
+                    match read_element_value(&mut attr, cp, entries) {
                         Ok(Some(constants)) if is_kotlin_target => out.kotlin_targets = constants,
                         Ok(Some(constants)) => out.java_targets = constants,
                         Ok(None) => {}
@@ -1307,9 +1371,10 @@ enum ElementValueExtract {
     Skip,
     /// String elements (`s`) — `@Metadata`'s `d1`/`d2`.
     Strings,
-    /// Enum-constant elements (`e`) — an annotation's `@Target` entries, of which only the CONSTANT
-    /// name is kept (the enum type is implied by the element).
-    EnumConstants,
+    /// Enum-constant elements (`e`) of exactly the enum whose type descriptor is given — an
+    /// annotation's `@Target` entries (`AnnotationTarget` for Kotlin, `ElementType` for Java). Only
+    /// the constant name of a matching element is kept; an element of another enum is no entry.
+    EnumConstants(&'static str),
 }
 
 /// Skip an element_value, extracting an array's elements when `extract` asks for their shape.
@@ -1368,7 +1433,7 @@ fn read_element_value_body(
                 }
                 // An enum element is `e` + type descriptor + constant name, two indices where a
                 // string element has one — reading it as a string array would desync the walk.
-                ElementValueExtract::EnumConstants => {
+                ElementValueExtract::EnumConstants(descriptor) => {
                     let mut result = Vec::with_capacity(n);
                     for _ in 0..n {
                         let t = r.u1()? as char;
@@ -1376,9 +1441,11 @@ fn read_element_value_body(
                             read_element_value_body(r, cp, t, ElementValueExtract::Skip)?;
                             continue;
                         }
-                        r.u2()?; // enum type descriptor
+                        let owner = r.u2()?;
                         let constant = r.u2()?;
-                        result.push(utf8(constant));
+                        if utf8(owner) == descriptor {
+                            result.push(utf8(constant));
+                        }
                     }
                     return Ok(Some(result));
                 }
@@ -1892,5 +1959,85 @@ mod tests {
                 facts: Default::default(),
             }]
         );
+    }
+
+    fn push_u2(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend(value.to_be_bytes());
+    }
+
+    fn push_u4(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend(value.to_be_bytes());
+    }
+
+    fn push_utf8(bytes: &mut Vec<u8>, text: &str) {
+        bytes.push(1);
+        push_u2(bytes, text.len() as u16);
+        bytes.extend(text.as_bytes());
+    }
+
+    /// Constant-pool count, then `Foo`, its class, `java/lang/Object`, its class, `m`, `()V`,
+    /// and `SourceDebugExtension`.
+    fn class_with_source_map(method_map: Option<&str>, class_map: Option<&str>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_u4(&mut bytes, 0xCAFEBABE);
+        push_u2(&mut bytes, 0);
+        push_u2(&mut bytes, 55);
+        push_u2(&mut bytes, 8);
+        push_utf8(&mut bytes, "Foo");
+        bytes.push(7);
+        push_u2(&mut bytes, 1);
+        push_utf8(&mut bytes, "java/lang/Object");
+        bytes.push(7);
+        push_u2(&mut bytes, 3);
+        push_utf8(&mut bytes, "m");
+        push_utf8(&mut bytes, "()V");
+        push_utf8(&mut bytes, "SourceDebugExtension");
+        push_u2(&mut bytes, 0x0001);
+        push_u2(&mut bytes, 2);
+        push_u2(&mut bytes, 4);
+        push_u2(&mut bytes, 0);
+        push_u2(&mut bytes, 0);
+        push_u2(&mut bytes, 1);
+        push_u2(&mut bytes, 0x0009);
+        push_u2(&mut bytes, 5);
+        push_u2(&mut bytes, 6);
+        match method_map {
+            Some(text) => {
+                push_u2(&mut bytes, 1);
+                push_u2(&mut bytes, 7);
+                push_u4(&mut bytes, text.len() as u32);
+                bytes.extend(text.as_bytes());
+            }
+            None => push_u2(&mut bytes, 0),
+        }
+        match class_map {
+            Some(text) => {
+                push_u2(&mut bytes, 1);
+                push_u2(&mut bytes, 7);
+                push_u4(&mut bytes, text.len() as u32);
+                bytes.extend(text.as_bytes());
+            }
+            None => push_u2(&mut bytes, 0),
+        }
+        bytes
+    }
+
+    #[test]
+    fn source_debug_extension_is_the_class_attribute() {
+        let class_map = "SMAP\nFoo.kt\n*E\n";
+        let bytes = class_with_source_map(Some("METHOD\n"), Some(class_map));
+        assert_eq!(
+            super::source_debug_extension(&bytes).expect("readable class"),
+            Some(class_map.to_string())
+        );
+        let without = class_with_source_map(Some("METHOD\n"), None);
+        assert_eq!(
+            super::source_debug_extension(&without).expect("readable class"),
+            None
+        );
+        assert!(matches!(
+            super::source_debug_extension(b"not a class"),
+            Err(super::ReadError::NotAClass)
+        ));
     }
 }

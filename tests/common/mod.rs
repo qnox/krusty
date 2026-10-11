@@ -1,13 +1,18 @@
 //! Shared test helpers.
 
+use krusty::compilation_target::CompilationTarget;
 pub(crate) mod byte_dump;
+pub(crate) mod conformance_report;
 pub(crate) mod kotlin_metadata;
-mod kotlinc_lib;
+pub(crate) mod kotlinc_lib;
+pub(crate) mod kotlinc_server;
 pub mod language_directives;
 mod metadata_diff;
-mod native_backend;
+pub mod native_backend;
+pub(crate) mod producing_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
+pub use kotlinc_server::{kotlin_compiler_jar, kotlinc_compile};
 #[allow(unused_imports)] // conformance never calls these; the e2e crate does.
 pub use metadata_diff::{
     metadata_diff_against_kotlinc_cp, metadata_diff_against_kotlinc_lib,
@@ -21,8 +26,8 @@ pub mod source_set_compile;
 // the JVM-only helpers below.
 #[allow(unused_imports)]
 pub use native_backend::{
-    expect_native_box, expect_native_decline, expect_native_exit, native_sys_header,
-    write_native_runtime_headers,
+    expect_native_box, expect_native_decline, expect_native_exit, expect_native_sources,
+    native_analysis, native_analysis_with_plugins, native_sys_header, write_native_runtime_headers,
 };
 pub use source_set_compile::compile_in_process_files;
 
@@ -197,7 +202,6 @@ struct ProfGuard {
     start: Instant,
     on: bool,
 }
-#[allow(dead_code)]
 impl ProfGuard {
     fn new(phase: &'static str) -> Self {
         Self {
@@ -371,11 +375,10 @@ pub fn compile_in_process(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let report = compile_in_process_report(src, stem, cp_jars, jdk_modules);
-    (report.diagnostics.is_empty() && !report.classes.is_empty()).then_some(report.classes)
+    (!report.has_errors && !report.classes.is_empty()).then_some(report.classes)
 }
 
-/// The complete diagnostics of an in-process compile of `src`, in emission order; empty when it
-/// compiled.
+/// The complete diagnostics of an in-process compile of `src`, in emission order.
 pub fn compile_in_process_diagnostics(
     src: &str,
     stem: &str,
@@ -388,15 +391,18 @@ pub fn compile_in_process_diagnostics(
 struct InProcessEmissionReport {
     artifacts: Vec<krusty::compiler::Artifact>,
     diagnostics: Vec<String>,
+    has_errors: bool,
 }
 
-/// What in-process compiles analyze against: `platform` plus every native compiler plugin krusty
-/// ships — the configuration a build applying the kotlinx.serialization plugin selects with
-/// `-Xplugin`. Without a selection no plugin runs, as with kotlinc (`cli_compiler_plugin_e2e`).
+/// What in-process compiles analyze against: `target`'s rules over `platform`'s declarations, plus
+/// every native compiler plugin krusty ships — the configuration a build applying the
+/// kotlinx.serialization plugin selects with `-Xplugin`. Without a selection no plugin runs, as with
+/// kotlinc (`cli_compiler_plugin_e2e`).
 pub fn with_native_plugins(
-    platform: impl Into<krusty::frontend::PlatformProvider>,
+    target: krusty::compilation_target::CompilationTarget,
+    platform: impl Into<krusty::frontend::PlatformLibraries>,
 ) -> krusty::frontend::PlatformProvider {
-    platform.into().with_native_plugins(
+    krusty::frontend::PlatformProvider::new(target, platform).with_native_plugins(
         krusty::plugins::registry::PluginRegistry::with_builtins().every_native_extension(),
     )
 }
@@ -418,13 +424,15 @@ fn emit_in_process<B: krusty::compiler::Backend>(
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let features = krusty::features::LangFeatures::from_source(src);
+    // The backend names the target; the analysis it consumes is checked under the same rules.
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(backend.compilation_target(), platform),
         &features,
         &mut diags,
     );
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, backend, "main", &mut diags);
+    let has_errors = diags.has_errors();
     InProcessEmissionReport {
         artifacts,
         diagnostics: diags
@@ -432,6 +440,7 @@ fn emit_in_process<B: krusty::compiler::Backend>(
             .into_iter()
             .map(|diagnostic| diagnostic.msg)
             .collect(),
+        has_errors,
     }
 }
 
@@ -447,6 +456,10 @@ pub fn capture_common_ir(
 
     impl krusty::compiler::Backend for CaptureBackend {
         type State = ();
+
+        fn compilation_target(&self) -> krusty::compilation_target::CompilationTarget {
+            CompilationTarget::Jvm
+        }
 
         fn lower_ir_file(
             &self,
@@ -474,9 +487,10 @@ pub fn capture_common_ir(
     (files, report.diagnostics)
 }
 
-struct InProcessCompileReport {
-    classes: Vec<(String, Vec<u8>)>,
-    diagnostics: Vec<String>,
+pub(crate) struct InProcessCompileReport {
+    pub(crate) classes: Vec<(String, Vec<u8>)>,
+    pub(crate) diagnostics: Vec<String>,
+    pub(crate) has_errors: bool,
 }
 
 /// Run the production streaming compiler once while retaining its diagnostics. Test helpers that
@@ -489,7 +503,15 @@ fn compile_in_process_report(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> InProcessCompileReport {
-    let cp = cached_classpath(cp_jars, jdk_modules);
+    compile_in_process_report_with_classpath(src, stem, cached_classpath(cp_jars, jdk_modules))
+}
+
+/// [`compile_in_process_report`] against an explicitly configured classpath (friend modules).
+pub(crate) fn compile_in_process_report_with_classpath(
+    src: &str,
+    stem: &str,
+    cp: std::rc::Rc<Classpath>,
+) -> InProcessCompileReport {
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),
@@ -507,6 +529,7 @@ fn compile_in_process_report(
     InProcessCompileReport {
         classes,
         diagnostics: report.diagnostics,
+        has_errors: report.has_errors,
     }
 }
 
@@ -559,7 +582,14 @@ pub fn compile_in_process_metadata_cp_module_target(
 
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
-    let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
+    // kotlinc's reference compile has its stdlib and the JDK on its classpath by default.
+    let mut jars = cp_jars.to_vec();
+    for default in [stdlib_jar(), jdk_modules()] {
+        if !jars.contains(&default) {
+            jars.push(default);
+        }
+    }
+    let cp = std::rc::Rc::new(Classpath::new(jars));
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),
@@ -569,7 +599,7 @@ pub fn compile_in_process_metadata_cp_module_target(
     let features = krusty::features::LangFeatures::from_source(src);
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(CompilationTarget::Jvm, platform),
         &features,
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
@@ -783,7 +813,7 @@ where
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::new(),
         prepare,
         &mut diags,
@@ -1134,19 +1164,64 @@ class TestClassLoader extends ClassLoader {
 }
 "#;
 
-/// Locate `JAVA_HOME` for the runner JVM (`KRUSTY_REF_JAVA_HOME` overrides). `None` ⇒ skip.
-#[allow(dead_code)]
-pub fn java_home() -> String {
+/// The JDK home the runner JVMs, javac, and the reference kotlinc server run on:
+/// `KRUSTY_REF_JAVA_HOME`, else `JAVA_HOME`. `None` when neither names a home.
+pub fn selected_java_home() -> Option<String> {
     std::env::var("KRUSTY_REF_JAVA_HOME")
         .or_else(|_| std::env::var("JAVA_HOME"))
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| {
-            panic!(
-                "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
-                 There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
-            )
-        })
+}
+
+/// [`selected_java_home`], which every JVM-backed test requires.
+pub fn java_home() -> String {
+    selected_java_home().unwrap_or_else(|| {
+        panic!(
+            "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
+             There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
+        )
+    })
+}
+
+/// Start `main_class` in its own `java` process with `arguments` as raw bytes and `input` on its
+/// standard input, and wait for it. The persistent runners cannot do this: a program's arguments and
+/// standard input belong to its process, and theirs carry the runner protocol. The locale is UTF-8
+/// so the launcher decodes the arguments as UTF-8, and the environment is otherwise empty, so
+/// nothing the host exports (a `JAVA_TOOL_OPTIONS` banner) reaches the program's output. `None` when
+/// no JDK is there.
+pub fn run_jvm_main(
+    classpath: &[PathBuf],
+    main_class: &str,
+    arguments: &[&std::ffi::OsStr],
+    input: &[u8],
+) -> Option<std::process::Output> {
+    let java = Path::new(&java_home()).join("bin/java");
+    if !java.is_file() {
+        return None;
+    }
+    let classpath = std::env::join_paths(classpath).expect("build the class path");
+    let mut child = Command::new(java)
+        .env_clear()
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .arg("-cp")
+        .arg(classpath)
+        .arg(main_class)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // Written on its own thread: a program may print before it has read all of its input.
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let output = child.wait_with_output().ok()?;
+    writer.join().expect("the input writer");
+    Some(output)
 }
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
@@ -2080,7 +2155,7 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        with_native_plugins(platform),
+        with_native_plugins(CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::default(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
@@ -2527,20 +2602,30 @@ pub fn inspect_checker_with_classpath<T>(
     ) -> T,
 ) -> (Vec<String>, T) {
     use krusty::diag::DiagSink;
-    use krusty::frontend::{check_file, collect_signatures_with_cp};
+    use krusty::frontend::{analyze_source_set_with_features, SourceInput};
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(main);
-    let toks = krusty::lexer::lex(main, &mut diags);
-    let files = vec![krusty::parser::parse_with_features(
-        main, &toks, &mut diags, &features,
-    )];
     let cp = std::rc::Rc::new(Classpath::new(classpath));
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
     );
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-    let info = check_file(&files[0], &mut syms, &mut diags);
-    let inspected = inspect(&files[0], &info, &syms);
+    let inputs = [SourceInput::kotlin(main)];
+    let analysis = analyze_source_set_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::jvm(platform),
+        &features,
+        &mut diags,
+    );
+    let file = analysis
+        .files
+        .first()
+        .expect("retained inspection analysis must keep its source file");
+    let info = analysis
+        .types
+        .first()
+        .and_then(Option::as_ref)
+        .expect("retained inspection analysis must check its source file");
+    let inspected = inspect(file, info, &analysis.symbols);
     (
         diags.diags.iter().map(|m| m.msg.clone()).collect(),
         inspected,
@@ -2577,6 +2662,7 @@ pub fn corpus_ready() -> bool {
 pub fn run_box_corpus_case(rel: &str) -> Option<String> {
     let src = krusty::conformance::prepare_test_source(
         &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+        krusty::conformance::TestTarget::Jvm,
     );
     // Multi-file / multi-module cases need the gate's `// FILE:`/`// MODULE:` splitting — skip here
     // rather than miscompile all blocks as one source (enforce the contract, don't rely on luck).
@@ -2594,6 +2680,7 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
 pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
     let src = krusty::conformance::prepare_test_source(
         &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+        krusty::conformance::TestTarget::Jvm,
     );
     if src.contains("// FILE:") || src.contains("// MODULE:") {
         return None;
@@ -2601,333 +2688,6 @@ pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
     let jdk = jdk_modules();
     let cp = classpath_jars_for(&src);
     backend_outcome_in_process(&src, "P", &cp, Some(jdk.as_path()))
-}
-
-// --- Persistent kotlinc compiler server -----------------------------------
-//
-// The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
-// start each time (the dominant cost of the differential e2e). Reusing `K2JVMCompiler.exec()` in one
-// persistent JVM is warm (~0.4s) BUT leaks: the compiler accumulates global caches (its IntelliJ-core
-// application environment + jar-filesystem handlers) across calls, so the 2nd+ compile in one process
-// death-spirals the collector (1st ~4s, 2nd >120s, independent of heap). The official compile daemon
-// avoids this not by magic but by CLEARING those caches between compiles.
-//
-// So this driver does the same, in ONE JVM: it holds a single `URLClassLoader` over the compiler jars
-// (classes loaded ONCE — that is where the warmth is), runs each request through `K2JVMCompiler.exec()`,
-// then resets the leaky global via `KotlinCoreEnvironment.disposeApplicationEnvironment()`. The next
-// compile recreates a fresh application environment, so state never accumulates. Result: ~0.4s warm
-// compiles, STABLE across compiles (measured 3990/417/523/422/400ms), in a single ~1 GB JVM — no second
-// daemon process (fits small/shared RAM), no RMI, no per-compile class reload. The driver uses only JDK
-// APIs (reflection + URLClassLoader), so it needs no compiler jar on its OWN classpath; it builds the
-// loader from the dist lib dir passed as argv[0].
-const KOTLINC_SERVER_SRC: &str = r#"
-import java.io.*;
-import java.net.*;
-import java.util.*;
-import java.lang.reflect.Method;
-
-public class KotlincServer {
-    public static void main(String[] a) throws Exception {
-        // Compiler jars for the loader — drop `-sources`/JS/WASM jars (not needed to compile plain JVM
-        // Kotlin) so the one loader holds less.
-        File[] files = new File(a[0]).listFiles();
-        ArrayList<URL> urls = new ArrayList<>();
-        if (files != null) for (File f : files) {
-            String n = f.getName();
-            if (n.endsWith(".jar") && !n.endsWith("-sources.jar") && !n.contains("-js") && !n.contains("-wasm"))
-                urls.add(f.toURI().toURL());
-        }
-        // ONE loader for the whole session: the compiler classes load once (this is the warmth). Parent is
-        // the platform loader only, so the compiler's classes stay private to it.
-        URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), ClassLoader.getPlatformClassLoader());
-        Class<?> k = cl.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
-        Method exec = k.getMethod("exec", PrintStream.class, String[].class);
-        // The reset the compile daemon uses: dispose the accumulated global application environment after
-        // each compile so the next one starts clean — without this the reused compiler leaks and stalls.
-        Method disposeAppEnv = cl.loadClass("org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment")
-            .getMethod("disposeApplicationEnvironment");
-
-        // Bind the framed protocol to the RAW stdin/stdout fds, THEN redirect System.out to stderr, so the
-        // compiler's own prints to System.out cannot corrupt a response frame.
-        DataInputStream din = new DataInputStream(new BufferedInputStream(new FileInputStream(FileDescriptor.in), 65536));
-        DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 4096));
-        System.setOut(System.err);
-
-        while (true) {
-            int n;
-            try { n = din.readInt(); } catch (EOFException e) { break; }
-            String[] args = new String[n];
-            for (int i = 0; i < n; i++) {
-                int l = din.readUnsignedShort();
-                args[i] = new String(din.readNBytes(l), "UTF-8");
-            }
-            ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
-            PrintStream err = new PrintStream(errBuf, true, "UTF-8");
-            int codeNum;
-            try {
-                Object comp = k.getDeclaredConstructor().newInstance();
-                Object code = exec.invoke(comp, err, (Object) args);
-                codeNum = (int) code.getClass().getMethod("getCode").invoke(code);
-            } catch (Throwable t) {
-                t.printStackTrace(err);
-                codeNum = 2;
-            } finally {
-                // Clear the leaky global compiler state — the key to reusing one JVM without degrading.
-                try { disposeAppEnv.invoke(null); } catch (Throwable ignore) {}
-            }
-            byte[] eb = errBuf.toByteArray();
-            dout.writeInt(codeNum);
-            dout.writeInt(eb.length);
-            dout.write(eb);
-            dout.flush();
-        }
-    }
-}
-"#;
-
-/// The reference compiler's all-in-one jar (`<dist>/lib/kotlin-compiler.jar`), which carries
-/// `K2JVMCompiler`. `None` when the provisioned dist is unavailable.
-#[allow(dead_code)]
-pub fn kotlin_compiler_jar() -> Option<PathBuf> {
-    let p = kotlinc_lib_dir()?.join("kotlin-compiler.jar");
-    p.is_file().then_some(p)
-}
-
-/// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
-/// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
-fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
-    // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
-    // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
-    // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in KOTLINC_SERVER_SRC.bytes().chain(java_home.bytes()) {
-        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
-    }
-    let dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/kotlinc_server_{hash:016x}"));
-    let class = dir.join("KotlincServer.class");
-    if class.is_file() {
-        return Some(dir);
-    }
-    // Coverage runs several test binaries at once. They share this cache, so the first
-    // compile is exclusive; the others wait and reuse the class.
-    std::fs::create_dir_all(&dir).ok()?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join("KotlincServer.lock"))
-        .ok()?;
-    // SAFETY: `flock` on a descriptor this function owns until it returns.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return None;
-    }
-    if class.is_file() {
-        return Some(dir);
-    }
-    let src_path = dir.join("KotlincServer.java");
-    std::fs::write(&src_path, KOTLINC_SERVER_SRC).ok()?;
-    let javac = format!("{java_home}/bin/javac");
-    if !Path::new(&javac).exists() {
-        return None;
-    }
-    let out = Command::new(&javac)
-        .arg("-d")
-        .arg(&dir)
-        .arg(&src_path)
-        .output()
-        .ok()?;
-    if !class.is_file() {
-        eprintln!(
-            "KotlincServer javac failed: status {} {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return None;
-    }
-    Some(dir)
-}
-
-/// The reference compiler dist's lib dir (holds `kotlin-compiler.jar`) — the jars the isolating-loader
-/// driver builds its per-compile `URLClassLoader` from. Passed to the driver as its argv[0].
-#[allow(dead_code)]
-fn kotlinc_lib_of(compiler_jar: &Path) -> Option<PathBuf> {
-    compiler_jar.parent().map(Path::to_path_buf)
-}
-
-/// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
-struct KotlincServer {
-    _child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-}
-
-impl KotlincServer {
-    /// `cp` is the driver's run classpath (just its `server_dir` — the driver is pure JDK and loads the
-    /// compiler itself); `lib_dir` is passed as argv[0] so the driver builds its compiler `URLClassLoader`.
-    /// `jvm_properties` are `-D` arguments applied before the compiler class loads.
-    fn new(java: &str, cp: &str, lib_dir: &str, jvm_properties: &[String]) -> Option<Self> {
-        let mut cmd = Command::new(java);
-        // One persistent JVM that compiles in-process. 1 GB holds a single compile's working set (the leaky
-        // global state is reset after each — see the driver), so it stays flat across compiles. Fast-startup
-        // JIT/GC since each compile is short.
-        cmd.args(jvm_gclog_args("kotlinc"));
-        cmd.args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-Xmx1g"]);
-        cmd.args(jvm_properties);
-        cmd.args(["-cp", cp, "KotlincServer", lib_dir])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        die_with_parent(&mut cmd);
-        let mut child = spawn_owned(cmd).ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = child.stdout.take()?;
-        Some(KotlincServer {
-            _child: child,
-            stdin,
-            stdout,
-        })
-    }
-
-    fn try_compile(&mut self, args: &[String]) -> std::io::Result<(i32, String)> {
-        self.stdin.write_all(&(args.len() as u32).to_be_bytes())?;
-        for arg in args {
-            self.stdin.write_all(&(arg.len() as u16).to_be_bytes())?;
-            self.stdin.write_all(arg.as_bytes())?;
-        }
-        self.stdin.flush()?;
-        // A compile can take a few seconds (cold) — generous deadline.
-        let deadline = Instant::now() + Duration::from_secs(120);
-        let fd = self.stdout.as_raw_fd();
-        let mut i32_buf = [0u8; 4];
-        read_exact_deadline(fd, &mut i32_buf, deadline)?;
-        let code = i32::from_be_bytes(i32_buf);
-        read_exact_deadline(fd, &mut i32_buf, deadline)?;
-        let elen = u32::from_be_bytes(i32_buf) as usize;
-        let mut err = vec![0u8; elen];
-        read_exact_deadline(fd, &mut err, deadline)?;
-        Ok((code, String::from_utf8_lossy(&err).into_owned()))
-    }
-}
-
-/// Pools of persistent compiler servers, one per classpath and JVM-property set. Callers claim a
-/// server, then compile outside the pool lock, so overlapping compiles use distinct JVMs up to
-/// [`server_pool_cap`].
-type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>;
-
-/// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
-/// arguments (`["-d", out, "-cp", cp, "Lib.kt"]`). Returns `(exit_code, stderr)` — `exit_code == 0`
-/// is success — or `None` if the toolchain/JVM is unavailable (caller skips, exactly like a missing
-/// `kotlinc`).
-///
-/// A release or RC replays class files, the exit code, and kotlinc's diagnostics from the
-/// recorded-byte cache, for a successful build and for a rejected one. A test missing from that
-/// archive fails locally. CI compiles it with kotlinc instead. Master stores that recording;
-/// a pull request leaves the restored archive unchanged. A `-D` argument stays in the fingerprint.
-/// On a cache miss the live compiler applies it as a JVM system property, on a server that no
-/// other compile shares, and does not pass it through to the compiler.
-pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    if let Some(replayed) = byte_dump::replay_class_dump(args) {
-        if replayed.code == 0 {
-            byte_dump::write_replayed_classes(args, &replayed.files);
-        }
-        return Some((replayed.code, replayed.stderr));
-    }
-    let result = kotlinc_compile_live(args)?;
-    byte_dump::remember_class_dump(args, result.0, &result.1);
-    Some(result)
-}
-
-fn kotlinc_compile_live(args: &[String]) -> Option<(i32, String)> {
-    static POOLS: OnceLock<KotlincPools> = OnceLock::new();
-    let _pg = ProfGuard::new("kotlinc");
-    let java_home = java_home();
-    let java = format!("{java_home}/bin/java");
-    if !Path::new(&java).exists() {
-        return None;
-    }
-    let compiler_jar = kotlin_compiler_jar()?;
-    let server_dir = setup_kotlinc_server(&java_home, &compiler_jar)?;
-    let lib_dir = kotlinc_lib_of(&compiler_jar)?
-        .to_string_lossy()
-        .into_owned();
-    // The driver is pure JDK and loads the compiler itself (from `lib_dir`), so its OWN classpath is just
-    // its `server_dir`.
-    let cp = server_dir.to_string_lossy().into_owned();
-    // `-D` stays in `args` for the invocation fingerprint. The compiler itself rejects it, and a
-    // test-only language feature latches from the JVM property the first time `-XXLanguage` is
-    // parsed, so the property is applied at process start on a server that no other compile shares.
-    let (jvm_properties, compiler_args) = kotlinc_jvm_properties(args);
-    let pool_key = kotlinc_server_key(&cp, &jvm_properties);
-    let pool = {
-        let pools = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
-        pools
-            .entry(pool_key)
-            .or_insert_with(|| Arc::new(server_pool::Pool::new()))
-            .clone()
-    };
-    pool.with_server(
-        server_pool_cap(),
-        || KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties),
-        |server| match server.try_compile(&compiler_args) {
-            Ok(result) => Some(result),
-            Err(_) => {
-                // Server JVM died — restart once and retry.
-                *server = KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties)?;
-                server.try_compile(&compiler_args).ok()
-            }
-        },
-    )
-    .flatten()
-}
-
-/// Split `bin/kotlinc`'s `-D*` JVM system properties out of the compiler argument list.
-///
-/// `-destination` is the compiler's output-directory alias and stays a compiler argument.
-fn kotlinc_jvm_properties(args: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut properties = Vec::new();
-    let mut compiler_args = Vec::new();
-    for arg in args {
-        if arg.starts_with("-D") && arg != "-destination" {
-            properties.push(arg.clone());
-        } else {
-            compiler_args.push(arg.clone());
-        }
-    }
-    (properties, compiler_args)
-}
-
-/// The default server is keyed by its classpath alone. A JVM property gets its own server, created
-/// only when a cache miss reaches the live compiler.
-fn kotlinc_server_key(classpath: &str, properties: &[String]) -> String {
-    if properties.is_empty() {
-        return classpath.to_string();
-    }
-    let mut key = String::from(classpath);
-    for property in properties {
-        key.push('\0');
-        key.push_str(property);
-    }
-    key
-}
-
-/// How many persistent compiler-server JVMs to pool per classpath. Scales with the host — a single
-/// server serializes every kotlinc-dependency compile AND every java-driver test behind one mutex,
-/// which measured as the e2e suite's dominant wall-clock cost (hundreds of ~0.4s warm compiles all
-/// queueing on one JVM while the other N-1 cores idle). Each kotlinc server is capped at `-Xmx1g`
-/// and each JavaRunner at `-Xmx512m`, so the `ncpu/2` default clamped to [1, 6] bounds worst-case
-/// footprint at ~6 GB on big hosts and 2 servers on a 4-core CI runner. `KRUSTY_SERVER_POOL`
-/// overrides in either direction (e.g. 1 on a swapping shared box).
-fn server_pool_cap() -> usize {
-    std::env::var("KRUSTY_SERVER_POOL")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| {
-            let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get());
-            (ncpu / 2).clamp(1, 6)
-        })
 }
 
 // --- Persistent javac+run server ------------------------------------------
@@ -3046,7 +2806,10 @@ fn setup_java_runner(java_home: &str) -> Option<PathBuf> {
     // JDK in the cache key for the same reason as `setup_kotlinc_server`: a newer-javac class
     // under an older runtime dies at load and the failure masquerades as "toolchain unavailable".
     let mut hash: u64 = 0xcbf29ce484222325;
-    for b in JAVA_RUNNER_SRC.bytes().chain(java_home.bytes()) {
+    for b in JAVA_RUNNER_SRC
+        .bytes()
+        .chain(producing_jdk::driver_cache_key(java_home))
+    {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/java_runner_{hash:016x}"));
@@ -3161,7 +2924,7 @@ pub fn javac_run_proc(
     let runner_dir = setup_java_runner(&java_home)?;
     let pool = POOL.get_or_init(server_pool::Pool::new);
     pool.with_server(
-        server_pool_cap(),
+        server_pool::server_pool_cap(),
         || JavaRunner::new(&java, &runner_dir),
         |runner| match runner.try_run(driver_path, cp, outdir, main_class, proc_path) {
             Ok(output) => Some(output),
@@ -3177,37 +2940,30 @@ pub fn javac_run_proc(
 }
 
 /// The `SourceDebugExtension` (SMAP) payload of a compiled class, one entry per line, or an empty
-/// vector when the class carries none. javap renders the attribute as an indented block after a
-/// `SourceDebugExtension:` header; the same text also sits in the constant pool for the
-/// `@SourceDebugExtension` annotation kotlinc attaches, and reading the block compares the attribute
-/// itself rather than that pool entry.
+/// vector when the class carries none. The attribute body is the map; the same text also sits in
+/// the constant pool for the `@SourceDebugExtension` annotation kotlinc attaches, and reading the
+/// attribute compares the map itself rather than that pool entry.
 #[allow(dead_code)]
 pub fn source_debug_extension(class_file: &Path) -> Vec<String> {
-    let dump =
-        javap(&["-v", "-p", &class_file.to_string_lossy()]).expect("pooled JavaRunner unavailable");
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in dump.lines() {
-        if line.trim() == "SourceDebugExtension:" {
-            inside = true;
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if !line.starts_with("  ") || line.trim().is_empty() {
-            break;
-        }
-        out.push(line.trim().to_string());
+    let bytes = std::fs::read(class_file)
+        .unwrap_or_else(|error| panic!("read {}: {error}", class_file.display()));
+    match krusty::jvm::classreader::source_debug_extension(&bytes) {
+        Ok(Some(text)) => text.lines().map(str::to_string).collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => panic!(
+            "read SourceDebugExtension of {}: {error:?}",
+            class_file.display()
+        ),
     }
-    out
 }
 
 /// Disassemble via the pooled JavaRunner's in-process `javap` ToolProvider — the same persistent
-/// JVM the driver tests use, so a parity test costs no `javap` process (a full JVM start) per
-/// assertion. `args` is the ordinary javap argv (e.g. `["-c", "-p", "/path/To.class"]`). Returns
-/// the disassembly text; panics on a javap error (a malformed class under test is a failure, not a
-/// skip); `None` = JVM unavailable.
+/// JVM the driver tests use, so this never starts a `javap` process. `args` is the ordinary javap
+/// argv (e.g. `["-c", "-p", "/path/To.class"]`).
+///
+/// A check that can be decided from the class file should do that and call this only to explain a
+/// failure. Returns the disassembly text; panics on a javap error (a malformed class under test is
+/// a failure, not a skip); `None` = JVM unavailable.
 #[allow(dead_code)]
 pub fn javap(args: &[&str]) -> Option<String> {
     let joined = args.join("\n");
@@ -3393,6 +3149,7 @@ pub fn byte_diff_against_kotlinc_cp_target(
         target,
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         &[class],
         || {
             let dir = scratch_dir()?;
@@ -3453,22 +3210,32 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )))
 }
 
-/// Compare ONE method's instruction sequence against the reference compiler's, with the
-/// dependencies in `lib` (none when empty) built by the reference compiler.
+/// Compile `src` with kotlinc and krusty and require `class` to be the same bytes.
 ///
-/// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
-/// which diverge for reasons of their own; this instrument answers the narrower question a splice
-/// or coroutine change is actually about — whether the emitted code is the same instructions in the
-/// same order, naming the same members, over the same local slots. Pool indices are normalized away
-/// because two pools interned in different orders describe the same references.
+/// `method` is named in the failure text. The pass condition is the class file, so a match does
+/// not disassemble anything. Dependencies in `lib` (none when empty) are built by the reference
+/// compiler.
 #[allow(dead_code)]
-pub fn method_code_diff_against_kotlinc(
+pub fn class_bytes_diff_against_kotlinc(
     name: &str,
     lib: &[(&str, &str)],
     src: &str,
     class: &str,
     method: &str,
 ) -> Option<Result<(), String>> {
+    class_bytes_diffs_against_kotlinc(name, lib, src, class, &[method])?.pop()
+}
+
+/// [`class_bytes_diff_against_kotlinc`] for several members of one class. The dependency and both
+/// class files are built once. A byte match passes every member without disassembly. A mismatch
+/// fails every member with that class-file difference.
+pub fn class_bytes_diffs_against_kotlinc(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    class: &str,
+    methods: &[&str],
+) -> Option<Vec<Result<(), String>>> {
     let libout = if lib.is_empty() {
         None
     } else {
@@ -3491,8 +3258,14 @@ pub fn method_code_diff_against_kotlinc(
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
 
     let classpath: Vec<PathBuf> = libout.into_iter().chain([stdlib_jar()]).collect();
-    let classes = compile_in_process_metadata_cp(src, name, &classpath)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let jdk_modules = jdk_modules();
+    let report = compile_in_process_report(src, name, &classpath, Some(jdk_modules.as_path()));
+    assert!(
+        !report.has_errors && !report.classes.is_empty(),
+        "{name}: krusty failed to compile: {}",
+        report.diagnostics.join("; ")
+    );
+    let classes = report.classes;
     let (_, krusty_bytes) = classes
         .iter()
         .find(|(emitted, _)| emitted == class)
@@ -3502,16 +3275,45 @@ pub fn method_code_diff_against_kotlinc(
         std::fs::create_dir_all(parent).ok()?;
     }
     std::fs::write(&krusty_path, krusty_bytes).ok()?;
+    let reference_bytes = std::fs::read(kref.join(format!("{class}.class"))).ok()?;
 
-    let reference = disassembled_method(&kref, class, method)?;
-    let actual = disassembled_method(&kout, class, method)?;
+    let results = if reference_bytes == *krusty_bytes {
+        methods.iter().map(|_| Ok(())).collect()
+    } else {
+        let offset = reference_bytes
+            .iter()
+            .zip(krusty_bytes.iter())
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| reference_bytes.len().min(krusty_bytes.len()));
+        let window = |bytes: &[u8]| {
+            let start = offset.saturating_sub(8);
+            let end = offset.saturating_add(8).min(bytes.len());
+            format!("{:02x?}", &bytes[start..end])
+        };
+        let listing = |dir: &Path| {
+            let classpath = dir.to_string_lossy();
+            let binary_name = class.replace('/', ".");
+            javap(&["-p", "-c", "-l", "-cp", classpath.as_ref(), &binary_name])
+                .unwrap_or_else(|| "(javap unavailable)".to_string())
+        };
+        let reference = listing(&kref);
+        let actual = listing(&kout);
+        methods
+            .iter()
+            .map(|method| {
+                Err(format!(
+                    "{name}/{class}: bytes differ at offset {offset} (kotlinc {} B, krusty {} B)\n\
+                     kotlinc {}\nkrusty  {}\n{method}\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}",
+                    reference_bytes.len(),
+                    krusty_bytes.len(),
+                    window(&reference_bytes),
+                    window(krusty_bytes)
+                ))
+            })
+            .collect()
+    };
     let _ = std::fs::remove_dir_all(&dir);
-    if reference == actual {
-        return Some(Ok(()));
-    }
-    Some(Err(format!(
-        "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
-    )))
+    Some(results)
 }
 
 /// Whether `bytes` contains a CALL to `callee` — a method reference an instruction names, rather
@@ -3520,91 +3322,33 @@ pub fn method_code_diff_against_kotlinc(
 /// A spliced inline function's name still occurs in the class: its inline-depth marker
 /// (`$i$f$<callee>`) is a debug-table entry, and the source map names the file it came from. Those
 /// are not calls, and the reference compiler emits them too, so a byte search for the name answers
-/// a different question from the one a splice test is asking.
+/// a different question from the one a splice test is asking. `invokedynamic` is not a call of
+/// `callee`: its bootstrap name is not the function the splice removed.
 #[allow(dead_code)]
-pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<bool> {
-    let dir = scratch_dir()?;
-    let path = dir.join(format!("{class}.class"));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    std::fs::write(&path, bytes).ok()?;
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-cp"])
-        .arg(&dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Some(
-        text.lines()
-            .any(|line| line.contains("// Method ") && line.contains(&format!(".{callee}:"))),
-    )
-}
-
-/// One method's instructions and its `LocalVariableTable`, with constant-pool indices normalized
-/// away and the entry each one names kept (`invokestatic # // Method Boxing.boxInt:(I)…`), so a
-/// call to a different member is a difference.
-///
-/// The `LineNumberTable` is deliberately excluded: a spliced body's line numbers are output lines
-/// that only a `SourceDebugExtension` gives meaning to, and krusty does not emit one yet
-/// (`docs/JVM_INLINE_BEFORE_CPS.md` a5/a6). Including it would fail for a reason this instrument is
-/// not measuring.
-#[allow(dead_code)]
-fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-l", "-cp"])
-        .arg(dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let mut body = String::new();
-    let mut inside = false;
-    let mut skipping_lines = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(method) && trimmed.contains('(') {
-            inside = true;
-            continue;
-        }
-        if inside {
-            if trimmed.is_empty() {
-                break;
+pub fn class_calls_method(bytes: &[u8], callee: &str) -> bool {
+    let bodies = krusty::jvm::classreader::ClassBodies::parse(std::sync::Arc::new(bytes.to_vec()))
+        .expect("class under call inspection parses");
+    let methods = bodies
+        .coded_methods()
+        .map(|(name, descriptor)| (name.to_string(), descriptor.to_string()))
+        .collect::<Vec<_>>();
+    for (name, descriptor) in methods {
+        let code = bodies
+            .method_code(&name, &descriptor)
+            .unwrap_or_else(|| panic!("coded method {name}{descriptor} has no readable body"));
+        let instructions = krusty::jvm::inline::disassemble(&code.code)
+            .unwrap_or_else(|| panic!("coded method {name}{descriptor} does not disassemble"));
+        for instruction in &instructions {
+            if let Some((_, method, _, _)) =
+                krusty::jvm::inline::invoked_method(instruction, &code.source_cp)
+            {
+                if method == callee {
+                    return true;
+                }
             }
-            if trimmed == "Code:" {
-                continue;
-            }
-            if trimmed == "LineNumberTable:" {
-                skipping_lines = true;
-                continue;
-            }
-            if trimmed == "LocalVariableTable:" {
-                skipping_lines = false;
-                body.push_str("LocalVariableTable\n");
-                continue;
-            }
-            if skipping_lines {
-                continue;
-            }
-            // `12: invokestatic  #23    // Method one:(I)I` → `12: invokestatic #`
-            let mut parts = trimmed.splitn(2, "//");
-            let code = parts.next().unwrap_or(trimmed).trim();
-            let normalized = code
-                .split_whitespace()
-                .map(|token| if token.starts_with('#') { "#" } else { token })
-                .collect::<Vec<_>>()
-                .join(" ");
-            body.push_str(normalized.trim_end_matches(','));
-            if let Some(reference) = parts.next() {
-                body.push_str(" // ");
-                body.push_str(reference.trim());
-            }
-            body.push('\n');
         }
     }
-    (!body.is_empty()).then_some(body)
+    false
 }
 
 #[cfg(test)]

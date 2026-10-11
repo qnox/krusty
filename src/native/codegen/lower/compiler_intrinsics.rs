@@ -42,76 +42,29 @@ impl BodyLowering<'_, '_, '_> {
         match intrinsic {
             Some(crate::backend::BackendCompilerIntrinsic::StringPlus) => {
                 let (Some(receiver), [argument]) = (receiver, args) else {
-                    return Some(Err("a malformed `String.plus`".to_string()));
+                    return Some(Err("a malformed `String.plus`".into()));
                 };
                 Some(self.string_plus(receiver, *argument, ret))
             }
             Some(crate::backend::BackendCompilerIntrinsic::BooleanNot) => {
                 let (Some(receiver), []) = (receiver, args) else {
-                    return Some(Err("a malformed `Boolean.not`".to_string()));
+                    return Some(Err("a malformed `Boolean.not`".into()));
                 };
                 if self.type_of(receiver).map(Ty::non_null) != Some(Ty::Boolean) {
                     return Some(Err(
-                        "a `Boolean.not` receiver with a non-Boolean type".to_string()
+                        "a `Boolean.not` receiver with a non-Boolean type".into()
                     ));
                 }
                 Some(self.boolean_not(receiver, ret))
             }
+            Some(crate::backend::BackendCompilerIntrinsic::UnsignedCompare { carrier }) => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Some(Err("a malformed unsigned comparison".into()));
+                };
+                Some(self.unsigned_compare_intrinsic(carrier, *left, *right, ret))
+            }
             _ => None,
         }
-    }
-}
-
-pub(super) fn runtime_member_role(
-    compiler_intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
-    semantic_role: Option<crate::backend::BackendSemanticCallRole>,
-) -> Option<super::super::super::intrinsics::RuntimeMemberRole> {
-    use super::super::super::intrinsics::RuntimeMemberRole;
-    use crate::backend::{BackendCompilerIntrinsic, BackendSemanticCallRole};
-
-    match (compiler_intrinsic, semantic_role) {
-        (Some(BackendCompilerIntrinsic::NullableAnyToString), _)
-        | (_, Some(BackendSemanticCallRole::KotlinAnyToString)) => {
-            Some(RuntimeMemberRole::ToString)
-        }
-        (_, Some(BackendSemanticCallRole::KotlinAnyHashCode)) => Some(RuntimeMemberRole::HashCode),
-        (_, Some(BackendSemanticCallRole::KotlinAnyEquals)) => Some(RuntimeMemberRole::Equals),
-        (
-            _,
-            Some(
-                BackendSemanticCallRole::KotlinComparableCompareTo
-                | BackendSemanticCallRole::KotlinFunctionInvoke
-                | BackendSemanticCallRole::KotlinCallableReferenceName
-                | BackendSemanticCallRole::KotlinPropertyReferenceGet(_)
-                | BackendSemanticCallRole::KotlinPropertyReferenceSet(_)
-                | BackendSemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
-                | BackendSemanticCallRole::KotlinPropertyReferenceDelegateSet(_),
-            ),
-        ) => None,
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checked_any_member_role_survives_a_roleless_physical_override() {
-        assert_eq!(
-            runtime_member_role(
-                None,
-                Some(crate::backend::BackendSemanticCallRole::KotlinAnyToString),
-            ),
-            Some(crate::native::intrinsics::RuntimeMemberRole::ToString)
-        );
-        assert_eq!(
-            runtime_member_role(
-                None,
-                Some(crate::backend::BackendSemanticCallRole::KotlinAnyEquals),
-            ),
-            Some(crate::native::intrinsics::RuntimeMemberRole::Equals)
-        );
     }
 }
 

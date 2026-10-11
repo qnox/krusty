@@ -17,6 +17,17 @@ const SELECTED_INDEXED_ARGUMENT_MISMATCH: &str =
 pub struct SelectedArgumentCommitment {
     pub slots: Vec<Option<ExprId>>,
     pub declares_default: Vec<bool>,
+    /// Every written source argument mapped to its selected declaration slot. Repeated entries for
+    /// one slot are distinct vararg elements; `vararg_element` distinguishes those elements from a
+    /// named/spread whole-array argument.
+    pub argument_bindings: Vec<SelectedArgumentBinding>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedArgumentBinding {
+    pub argument: ExprId,
+    pub parameter: usize,
+    pub vararg_element: bool,
 }
 
 impl std::ops::Deref for SelectedArgumentCommitment {
@@ -86,6 +97,7 @@ impl Checker<'_> {
             debug_assert!(false, "successful argument mapping must be invertible");
             return false;
         };
+        let mut argument_bindings = Vec::with_capacity(args.len());
         for (source, (&argument, &parameter)) in args.iter().zip(&argument_parameters).enumerate() {
             let Some((&array_or_parameter, &probed_actual)) =
                 params.get(parameter).zip(arg_tys.get(source))
@@ -98,6 +110,11 @@ impl Checker<'_> {
                 .is_some_and(Option::is_some);
             let whole_array = call_sig.vararg_index == Some(parameter)
                 && (named || self.file.is_spread_arg(argument));
+            argument_bindings.push(SelectedArgumentBinding {
+                argument,
+                parameter,
+                vararg_element: call_sig.vararg_index == Some(parameter) && !whole_array,
+            });
             let inferred = argument_expectations
                 .and_then(|expectations| expectations.get(&argument))
                 .copied();
@@ -154,10 +171,22 @@ impl Checker<'_> {
                 declared,
                 argument,
                 actual,
+                call_sig
+                    .lambda_receiver_params
+                    .get(parameter)
+                    .copied()
+                    .unwrap_or(false),
                 implicit_lambda_label.as_deref(),
             );
         }
-        self.commit_selected_argument_slots(call, slots, &call_sig.param_defaults)
+        if !self.commit_selected_argument_slots(call, slots, &call_sig.param_defaults) {
+            return false;
+        }
+        self.resolved_call_arg_slots
+            .get_mut(&call)
+            .expect("the selected argument commitment was just inserted")
+            .argument_bindings = argument_bindings;
+        true
     }
 
     pub(super) fn require_value_parameter_defaults<'a>(
@@ -201,19 +230,21 @@ impl Checker<'_> {
             SelectedArgumentCommitment {
                 slots,
                 declares_default,
+                argument_bindings: Vec::new(),
             },
         );
         true
     }
 
-    /// Commit a subscript operator's value-parameter slots. `param_defaults` is the selected
-    /// signature's full table. The flags are its value-parameter suffix; a missing suffix does
-    /// not fall back to that full table.
+    /// Commit a selected subscript operator: its value-parameter slots and, for a generic
+    /// operator, the type arguments its selection solved (as every other generic call publishes
+    /// them). The selected signature's default flags are its full table; the flags used are its
+    /// value-parameter suffix, and a missing suffix does not fall back to that full table.
     pub(super) fn commit_indexed_operator_arguments(
         &mut self,
         expression: ExprId,
-        param_defaults: &[bool],
-        context_count: usize,
+        selected: &crate::libraries::FunctionInfo,
+        bindings: &crate::symbol_resolver::GSigBinds,
         params: &[Ty],
         vararg: Option<usize>,
         indices: &[ExprId],
@@ -225,11 +256,24 @@ impl Checker<'_> {
                 return false;
             }
         };
-        let Some(defaults) = value_parameter_defaults(param_defaults, context_count, slots.len())
-        else {
+        let Some(defaults) = value_parameter_defaults(
+            &selected.call_sig.param_defaults,
+            selected.context_count,
+            slots.len(),
+        ) else {
             self.report_inconsistent_parameter_defaults(expression);
             return false;
         };
+        if let Some(signature) = selected.generic_sig.as_ref() {
+            let resolved = signature
+                .formals
+                .iter()
+                .map(|formal| bindings.get(formal).copied())
+                .collect::<Vec<_>>();
+            if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
+                self.resolved_call_type_args.insert(expression, resolved);
+            }
+        }
         self.commit_selected_argument_slots(expression, slots, defaults)
     }
 

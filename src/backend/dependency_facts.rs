@@ -19,12 +19,12 @@ use std::collections::HashMap;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 use crate::libraries::{
-    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, MemberRealization,
-    NonvirtualCallRealization,
+    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, KlibDeclarationSignature,
+    MemberRealization, NonvirtualCallRealization,
 };
 use crate::symbol_source::SymbolSource;
 pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
-use crate::types::{InlineParameterModifier, Ty, TypeName};
+use crate::types::{InlineParameterModifier, SemanticCallableOwner, Ty, TypeName};
 
 /// What the provider normalized for one selected dependency callable, copied without
 /// reinterpretation. None of it is recovered from a spelling.
@@ -41,12 +41,15 @@ pub struct BackendCallableFact {
     /// Declaration visibility. A protected member stays callable from a subclass, and a nested
     /// class of that subclass reaches it through an accessor rather than a public invoke.
     pub visibility: crate::types::Visibility,
-    /// Exact semantic declaration package, independent of the physical realization kind.
-    pub declaration_package: Option<TypeName>,
+    /// Exact semantic declaration namespace, independent of the physical realization kind.
+    pub declaration_owner: Option<SemanticCallableOwner>,
     pub kind: ExternalCallableKind,
     pub owner_is_interface: bool,
     pub compiler_intrinsic: Option<BackendCompilerIntrinsic>,
     pub semantic_role: Option<BackendSemanticCallRole>,
+    /// Exact declarations this declaration overrides, as checked FIR froze them from the member
+    /// hierarchy. A target keys a specially implemented language declaration on them.
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
@@ -58,17 +61,24 @@ pub struct BackendCallableFact {
     /// classfile declaration. Backends consume this frozen plan; they do not reconstruct roles
     /// from arity or descriptor spelling.
     pub physical_parameter_plan: Option<Box<[crate::libraries::PhysicalParameterSlot]>>,
+    /// Exact semantic declaration result before target representation. A call site may expose a
+    /// substituted or erased carrier, while intrinsic realization still needs the declaration's
+    /// value-class identity.
+    pub ret: Ty,
     pub physical_ret: Ty,
     pub descriptor: String,
     pub inline: InlineKind,
     pub source_receiver: Option<Ty>,
     pub context_count: usize,
     pub declared_params: Option<Box<[Ty]>>,
+    pub declared_ret: Option<Ty>,
     pub inline_modifiers: Box<[InlineParameterModifier]>,
     pub default_realization: Option<Box<DefaultCallRealization>>,
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
     pub overridden_call_realizations: Box<[crate::libraries::OverriddenCallRealization]>,
     pub generic_sig: Option<Box<GenericSig>>,
+    /// Exact serialized-IR identity the provider published for this declaration, if any.
+    pub declaration_signature: Option<KlibDeclarationSignature>,
 }
 
 impl BackendCallableFact {
@@ -84,6 +94,19 @@ impl BackendCallableFact {
         matches!(
             self.kind,
             ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+        )
+    }
+
+    /// The target-free declaration view used when a selected KLIB body is lowered to common IR.
+    pub fn klib_body_callable(&self) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        crate::libraries::KlibBodyCallable::new(
+            &self.name,
+            self.kind,
+            &self.params,
+            self.ret,
+            &self.parameter_identities,
+            self.context_count,
+            self.declaration_signature.as_ref(),
         )
     }
 }
@@ -148,11 +171,16 @@ impl CheckedBackendCallables {
             let owner = facts
                 .freeze_callable(realization.getter, &mut callable)?
                 .physical_owner;
-            let result = provider
+            let getter = provider
                 .external_callable(realization.getter)
                 .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
-                .callable
-                .ret;
+                .callable;
+            let result = getter
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.ret)
+                .or(getter.declared_ret)
+                .unwrap_or(getter.ret);
             if let Some(setter) = realization.setter {
                 facts.freeze_callable(setter, &mut callable)?;
             }
@@ -170,6 +198,11 @@ impl CheckedBackendCallables {
             );
         }
         facts.freeze_callables(referenced.callables, callable)?;
+        for (identity, overridden) in &ir.external_overridden_declarations {
+            if let Some(fact) = facts.callables.get_mut(identity) {
+                fact.overridden_declarations = overridden.clone();
+            }
+        }
         Ok(facts)
     }
 
@@ -215,6 +248,7 @@ impl CheckedBackendCallables {
                 let realization =
                     provider(identity).ok_or(DependencyFactError::UnknownCallable(identity))?;
                 let parameter_identities = realization.parameter_identities;
+                let declaration_signature = realization.declaration_signature;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -222,27 +256,31 @@ impl CheckedBackendCallables {
                     reflection_name: callable.reflection_name,
                     physical_owner: callable.owner,
                     visibility: callable.visibility,
-                    declaration_package: realization.declaration_package,
+                    declaration_owner: realization.declaration_owner,
                     kind: realization.kind,
                     owner_is_interface: callable.owner_is_interface,
                     compiler_intrinsic: callable.compiler_intrinsic,
                     semantic_role: callable.semantic_role,
+                    overridden_declarations: Box::new([]),
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,
                     parameter_identities,
                     physical_parameter_plan: callable.physical_parameter_plan,
+                    ret: callable.ret,
                     physical_ret: callable.physical_ret,
                     descriptor: callable.descriptor,
                     inline: callable.inline,
                     source_receiver: callable.source_receiver,
                     context_count: callable.context_count,
                     declared_params: callable.declared_params,
+                    declared_ret: callable.declared_ret,
                     inline_modifiers: callable.inline_modifiers,
                     default_realization: callable.default_realization,
                     nonvirtual_realization: callable.nonvirtual_realization,
                     overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
+                    declaration_signature,
                 })
             }
         };

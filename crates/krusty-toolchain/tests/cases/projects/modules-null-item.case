@@ -1,0 +1,7 @@
+A null list item.
+--- project.yaml
+modules:
+  - null
+  - libs/a
+--- libs/a/module.yaml
+product: jvm/lib

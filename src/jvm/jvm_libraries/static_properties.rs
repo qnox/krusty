@@ -7,8 +7,38 @@
 //! [`PropertyInfo`] with receiver-less accessors. The provider facade only asks for the property.
 
 use super::*;
+use crate::libraries::LibConst;
 
 impl JvmLibraries {
+    pub(super) fn library_const(value: &crate::jvm::classreader::ConstVal) -> LibConst {
+        use crate::jvm::classreader::ConstVal;
+
+        match value {
+            ConstVal::Int(value) => LibConst::Int(*value),
+            ConstVal::Long(value) => LibConst::Long(*value),
+            ConstVal::Float(value) => LibConst::Float(*value),
+            ConstVal::Double(value) => LibConst::Double(*value),
+            ConstVal::Str(value) => LibConst::Str(value.clone()),
+        }
+    }
+
+    pub(super) fn const_fields<F>(
+        fields: &[crate::jvm::classreader::FieldSig],
+        mut ty: F,
+    ) -> std::collections::HashMap<String, LibraryConst>
+    where
+        F: FnMut(&crate::jvm::classreader::FieldSig) -> Option<Ty>,
+    {
+        fields
+            .iter()
+            .filter_map(|field| {
+                let ty = ty(field)?;
+                let value = Self::library_const(field.const_value.as_ref()?);
+                Some((field.name.clone(), LibraryConst { ty, value }))
+            })
+            .collect()
+    }
+
     /// The receiver-less property `internal.name` names, published in `internal`'s namespace: a
     /// `companion { … }` block property, or a static field (a Java static, or the outer-class
     /// storage of a companion `@JvmField`).
@@ -63,7 +93,10 @@ impl JvmLibraries {
         let mut property = properties.pop()?;
         property.associated_classifier = Some(internal);
         property.associated_access_owner = Some(internal);
-        self.register_external_property(&mut property, None);
+        self.register_external_property(
+            &mut property,
+            Some(SemanticCallableOwner::Classifier(internal)),
+        );
         Some(property)
     }
 
@@ -149,7 +182,7 @@ impl JvmLibraries {
                 let ty = if ci.meta.is_present() {
                     ty
                 } else {
-                    java_type_nullability(ty, f.nullability)
+                    super::java_nullability::java_field_type(ty, f.access, f.nullability)
                 };
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {
                     ty,
@@ -220,11 +253,12 @@ impl JvmLibraries {
             field.ty.platform_lower_bound(),
             descriptor,
         );
+        declaration.declaration_owner = Some(SemanticCallableOwner::Classifier(field.owner));
         declaration.physical_name = (field.name != source_name).then(|| field.name.clone());
         declaration.external_identity = Some(self.cp.intern_external_callable(
             &declaration,
             crate::libraries::ExternalCallableKind::StaticFieldRead,
-            None,
+            Some(SemanticCallableOwner::Classifier(field.owner)),
         ));
         field.external_identity = declaration.external_identity;
     }
@@ -253,6 +287,7 @@ impl JvmLibraries {
             is_const: field.constant.is_some() && field.is_final,
             implicit_integer_coercion: false,
             compile_time_constant: field.constant,
+            metadata_constant_read: false,
             visibility: field.visibility,
             owner: field.owner,
             receiver_rank: 0,
@@ -264,7 +299,10 @@ impl JvmLibraries {
             producer: crate::libraries::PropertyProducer::Field,
             read_stability: crate::libraries::PropertyReadStability::Unstable,
         };
-        self.register_external_property(&mut property, None);
+        self.register_external_property(
+            &mut property,
+            Some(SemanticCallableOwner::Classifier(field.owner)),
+        );
         Some(property)
     }
 
@@ -284,6 +322,7 @@ impl JvmLibraries {
             field.ty.platform_lower_bound(),
             descriptor.clone(),
         );
+        getter.declaration_owner = Some(SemanticCallableOwner::Classifier(field.owner));
         getter.physical_name = (field.name != getter_source_name).then(|| field.name.clone());
         getter.external_identity = field.external_identity;
         let setter = (!field.is_final).then(|| {
@@ -298,12 +337,13 @@ impl JvmLibraries {
                 Ty::Unit,
                 descriptor,
             );
+            setter.declaration_owner = Some(SemanticCallableOwner::Classifier(field.owner));
             setter.physical_name = setter_physical_name;
             setter.params = vec![field.ty];
             setter.external_identity = Some(self.cp.intern_external_callable(
                 &setter,
                 crate::libraries::ExternalCallableKind::StaticFieldWrite,
-                None,
+                Some(SemanticCallableOwner::Classifier(field.owner)),
             ));
             setter
         });
@@ -523,6 +563,7 @@ impl JvmLibraries {
             is_const: mp.is_const,
             implicit_integer_coercion: false,
             compile_time_constant: None,
+            metadata_constant_read: false,
             visibility: mp.visibility,
             owner,
             receiver_rank: 0,
@@ -532,7 +573,22 @@ impl JvmLibraries {
             setter_declaration: None,
             source_member: None,
             producer: crate::libraries::PropertyProducer::KotlinAccessor,
-            read_stability: crate::libraries::PropertyReadStability::Unstable,
+            read_stability: self.module_read_stability(mp, owner),
         })
+    }
+
+    /// A compiled property's read stability as this compilation may rely on it. kotlinc treats a
+    /// property of another module as unstable for smart casts; a friend module (a test compilation's
+    /// main) shares the declaring module's stability.
+    pub(super) fn module_read_stability(
+        &self,
+        mp: &super::metadata::MetaProp,
+        owner: TypeName,
+    ) -> crate::libraries::PropertyReadStability {
+        if self.cp.grants_internal_access(owner) {
+            mp.read_stability
+        } else {
+            crate::libraries::PropertyReadStability::Unstable
+        }
     }
 }

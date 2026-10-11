@@ -26,6 +26,7 @@ use crate::ir::{
 };
 use crate::jvm::lambda_classes::{nests_lifted_functions, site, Site};
 use crate::types::{Ty, TypeName};
+use std::collections::HashSet;
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 
@@ -65,10 +66,17 @@ impl SpillName {
 /// its own, when it is one of the shapes the transformer takes.
 pub(super) fn route(
     ir: &mut IrFile,
+    lambda_values: &HashSet<u32>,
     fid: u32,
     body: ExprId,
     mut route: Route<'_, '_, '_>,
 ) -> Routed {
+    // A function no lambda value names has no class site. Answer that from the file's lambda values
+    // rather than walking every emitted root once per suspend function.
+    if !lambda_values.contains(&fid) {
+        crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no lambda value");
+        return Routed::NotEligible;
+    }
     let Some(mut site) = site(ir, fid) else {
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no class site");
         return Routed::NotEligible;
@@ -148,13 +156,17 @@ pub(super) fn route(
         return Routed::Failed;
     }
     // kotlinc maps a `Unit` lambda's implicit return to the body's closing `}`.
-    if let (Some(unit), Some(&close)) = (
-        ensure_tail_return(ir, body, unit_return),
-        ir.fn_close_lines.get(&fid),
-    ) {
-        ir.expr_source_lines.insert(unit, close);
+    let units = ensure_tail_return(ir, body, unit_return);
+    if let Some(&close) = ir.fn_close_lines.get(&fid) {
+        for unit in units {
+            ir.expr_source_lines.insert(unit, close);
+        }
     }
-    let Some(form) = ir.lambda_origins.get(&fid).map(|origin| origin.form) else {
+    let Some((form, explicit_suspend)) = ir
+        .lambda_origins
+        .get(&fid)
+        .map(|origin| (origin.form, origin.explicit_suspend))
+    else {
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no source form");
         return Routed::Failed;
     };
@@ -165,18 +177,24 @@ pub(super) fn route(
 
     // The lambda value is a fresh instance with no completion. Its type is the class's: a
     // consumer that needs its `FunctionN` casts it, one that takes `Any` does not.
-    let mut arguments = site.captures.clone();
-    arguments.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
-    ir.exprs[site.node as usize] = IrExpr::New {
-        internal,
-        args: arguments,
-        ctor_params: None,
-        ctor_desc: None,
-        external_target: None,
-        defaults: Box::new([]),
-        default_prefix_count: 0,
-    };
-    ir.logical_types.insert(site.node, Ty::obj_name(internal));
+    // A copy in an enclosing inline-lambda template builds it from that template's captures.
+    for node in std::iter::once(site.node).chain(site.template_copies.iter().copied()) {
+        let IrExpr::Lambda { captures, .. } = &ir.exprs[node as usize] else {
+            unreachable!("a suspend lambda site builds a lambda value");
+        };
+        let mut arguments = captures.clone();
+        arguments.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
+        ir.exprs[node as usize] = IrExpr::New {
+            internal,
+            args: arguments,
+            ctor_params: None,
+            ctor_desc: None,
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        };
+        ir.logical_types.insert(node, Ty::obj_name(internal));
+    }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();
     for field in parameters
@@ -222,6 +240,7 @@ pub(super) fn route(
                 .collect(),
             type_parameters: ir.lambda_type_parameters(fid).to_vec(),
             form,
+            explicit_suspend,
         },
     );
     route.machines.record_transformed(
@@ -243,7 +262,19 @@ pub(super) fn route(
 /// order. An enclosing body is reshaped when its own machine is built, which can copy the lambda
 /// node that builds a nested lambda's value; realizing the nested lambda's class first leaves one
 /// node to replace, and the enclosing body then builds an ordinary object.
-pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> Vec<u32> {
+///
+/// Also returns every function some lambda value in the file names, the only ones [`route`] can
+/// take. Lowering copies or replaces lambda values but never makes one name another function, so
+/// the set taken before the first route admits every function a later root walk can find.
+pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> (Vec<u32>, HashSet<u32>) {
+    let lambda_values = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+            _ => None,
+        })
+        .collect();
     let mut enclosing = std::collections::HashMap::new();
     for (function, declaration) in ir.functions.iter().enumerate() {
         let Some(body) = declaration.body else {
@@ -257,7 +288,7 @@ pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> Vec<u32> {
     }
     let depth = |mut fid: u32| {
         let mut depth = 0usize;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         while let Some(&outer) = enclosing.get(&fid) {
             if !seen.insert(outer) {
                 break;
@@ -269,7 +300,7 @@ pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> Vec<u32> {
     };
     let mut ordered = fids;
     ordered.sort_by_key(|&fid| std::cmp::Reverse(depth(fid)));
-    ordered
+    (ordered, lambda_values)
 }
 
 /// The class's captured values and the lambda's own parameters, when every one of them has the

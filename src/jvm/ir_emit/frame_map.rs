@@ -69,6 +69,8 @@ pub(super) enum TempRole {
     CoroutineMachine,
     /// The `$i$f$<name>` inline-depth marker of an emitted inline function.
     InlineDepthMarker,
+    /// Words FixStack will fill with the operand stack saved across an inline lambda body.
+    InlineStackSpill,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,6 +85,15 @@ struct Entry {
     /// entry out of order cannot shift what they refer to.
     id: u32,
     occupant: Occupant,
+    slot: u16,
+    words: u16,
+}
+
+#[derive(Debug)]
+struct DeferredEntry {
+    /// Declaration order controls lexical lifetime even though physical entry happens later.
+    id: u32,
+    key: FrameKey,
     slot: u16,
     words: u16,
 }
@@ -113,8 +124,10 @@ pub(super) struct FrameMap {
     size: u16,
     /// The highest `size` has reached.
     max: u16,
-    /// The live entries, oldest first.
+    /// The physically live entries, in entry order.
     entries: Vec<Entry>,
+    /// Keyed locals declared outside the physical frame until their first store.
+    deferred: Vec<DeferredEntry>,
     next_id: u32,
 }
 
@@ -134,6 +147,65 @@ impl FrameMap {
         self.push(Occupant::Key(key), ty).1
     }
 
+    /// Record a keyed local at the current cursor without occupying its slot yet.
+    ///
+    /// This is the JVM shape of an inline-return result: its declaration precedes the expression
+    /// that computes it, but kotlinc lets locals inside that expression reuse the result slot. The
+    /// first store occupies that slot once those locals have left, or the next free slot when one
+    /// of them is still live.
+    pub(super) fn enter_deferred(&mut self, key: FrameKey, ty: Ty) -> u16 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let slot = self.size;
+        self.deferred.push(DeferredEntry {
+            id,
+            key,
+            slot,
+            words: slot_words(ty),
+        });
+        slot
+    }
+
+    /// Make a deferred keyed local occupy a real slot.
+    ///
+    /// The reserved slot is used only when the physical cursor has returned to it. If any newer
+    /// local remains live, the deferred entry is pushed above it like every ordinary frame entry.
+    pub(super) fn activate_deferred(&mut self, key: FrameKey) -> u16 {
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.occupant == Occupant::Key(key))
+        {
+            return entry.slot;
+        }
+        let index = self
+            .deferred
+            .iter()
+            .rposition(|entry| entry.key == key)
+            .unwrap_or_else(|| panic!("deferred frame entry {key:?} was never declared"));
+        let entry = self.deferred.remove(index);
+        // Reuse the declaration cursor only when the physical frame has returned to it. Otherwise
+        // enter above every still-live value: FrameMap is a stack allocator and must not fabricate
+        // a hole below a newer entry.
+        let slot = if self.size <= entry.slot {
+            entry.slot
+        } else {
+            self.size
+        };
+        self.entries.push(Entry {
+            id: entry.id,
+            occupant: Occupant::Key(entry.key),
+            slot,
+            words: entry.words,
+        });
+        self.size = slot
+            .checked_add(entry.words)
+            .expect("a local slot index does not fit in u16");
+        self.max = self.max.max(self.size);
+        slot
+    }
+
     /// Enter an unkeyed temporary of type `ty`.
     pub(super) fn enter_temp(&mut self, role: TempRole, ty: Ty) -> TempSlot {
         let (id, slot) = self.push(Occupant::Temp(role), ty);
@@ -149,7 +221,12 @@ impl FrameMap {
             .rposition(|entry| entry.occupant == occupant)
         {
             Some(index) => self.leave_at(index),
-            None => crate::trace_compiler!("slots", "leave {key:?}: never entered"),
+            None => match self.deferred.iter().rposition(|entry| entry.key == key) {
+                Some(index) => {
+                    self.deferred.remove(index);
+                }
+                None => crate::trace_compiler!("slots", "leave {key:?}: never entered"),
+            },
         }
     }
 
@@ -172,13 +249,11 @@ impl FrameMap {
         while index > 0 {
             index -= 1;
             let entry = &self.entries[index];
-            if entry.id < mark.id {
-                break;
-            }
-            if matches!(entry.occupant, Occupant::Key(_)) {
+            if entry.id >= mark.id && matches!(entry.occupant, Occupant::Key(_)) {
                 self.leave_at(index);
             }
         }
+        self.deferred.retain(|entry| entry.id < mark.id);
     }
 
     /// The frame size below call-operand holders that already occupy their target parameter slots.
@@ -246,13 +321,18 @@ impl FrameMap {
     /// Release every entry made since `mark`, in any order, as kotlinc's `Mark.dropTo` does.
     pub(super) fn drop_to(&mut self, mark: Mark) {
         self.entries.retain(|entry| entry.id < mark.id);
+        self.deferred.retain(|entry| entry.id < mark.id);
     }
 
     /// Release everything entered since `mark` AND move the cursor back to it: the next spliced copy
     /// of a lambda body is laid out from the same base as the one before it.
     pub(super) fn rewind_to(&mut self, mark: Mark) {
         self.drop_to(mark);
-        self.size = mark.size;
+        self.size = self
+            .entries
+            .iter()
+            .map(|entry| entry.slot + entry.words)
+            .fold(mark.size, u16::max);
     }
 
     /// Claim every slot below `top` without entering it: a spliced inline body lays its own locals
@@ -319,6 +399,65 @@ mod tests {
         let temp = frame.enter_temp(TempRole::OperandSpill, Ty::Double);
         assert_eq!(temp.slot(), 4);
         assert_eq!((frame.size(), frame.max()), (6, 6));
+    }
+
+    #[test]
+    fn a_deferred_entry_lends_its_slot_until_the_first_store() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        assert_eq!(frame.size(), 0);
+
+        let operand = frame.mark();
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        frame.leave_block(operand);
+        assert_eq!(frame.activate_deferred(result), 0);
+        assert_eq!((frame.size(), frame.max()), (1, 1));
+
+        // The entry predates the operand scope, so restoring that scope cannot release it.
+        frame.leave_block(operand);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Int), 1);
+    }
+
+    #[test]
+    fn a_deferred_entry_moves_when_its_slot_is_still_borrowed() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        assert_eq!(frame.activate_deferred(result), 1);
+        assert_eq!((frame.size(), frame.max()), (2, 2));
+
+        frame.leave(FrameKey::Value(1));
+        assert_eq!(frame.size(), 2);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Int), 2);
+    }
+
+    #[test]
+    fn a_deferred_entry_stays_above_a_later_live_local() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Long), 1);
+        frame.leave(FrameKey::Value(1));
+        assert_eq!(frame.activate_deferred(result), 3);
+        assert_eq!(frame.size(), 4);
+    }
+
+    #[test]
+    fn an_activated_outer_deferred_entry_survives_the_inner_scope() {
+        let mut frame = FrameMap::default();
+        let result = FrameKey::Value(0);
+        assert_eq!(frame.enter_deferred(result, Ty::Int), 0);
+        let inner = frame.mark();
+        assert_eq!(frame.enter(FrameKey::Value(1), Ty::Int), 0);
+        assert_eq!(frame.activate_deferred(result), 1);
+
+        frame.leave_block(inner);
+
+        assert_eq!(frame.size(), 2);
+        assert_eq!(frame.enter(FrameKey::Value(2), Ty::Int), 2);
     }
 
     #[test]

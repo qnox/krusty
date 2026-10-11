@@ -64,8 +64,10 @@ pub(super) fn specialize(
     let markers = plan(node, arguments)?;
 
     // Replacements that change the node count are applied last to first, so every recorded index
-    // still names its node when its turn comes.
+    // still names its node when its turn comes. Recursive `typeOf` temporaries start above the
+    // locals the body already owns and stay distinct across every marker in this method.
     let mut replacements: Vec<(usize, Vec<Node>)> = Vec::new();
+    let mut next_local = node.max_locals;
     for marker in &markers {
         match &marker.repoint {
             Repoint::Class {
@@ -109,13 +111,13 @@ pub(super) fn specialize(
                     .type_of
                     .get(argument)
                     .ok_or_else(|| InlineError::MissingReifiedArgument(argument.clone()))?;
-                replacements.push((
-                    *placeholder,
-                    realization.iter().flat_map(type_of_nodes).collect(),
-                ));
+                let (nodes, after) = type_of_realization(realization, next_local);
+                next_local = after;
+                replacements.push((*placeholder, nodes));
             }
         }
     }
+    node.max_locals = node.max_locals.max(next_local);
     replacements.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     for (at, nodes) in replacements {
         node.nodes.splice(at..=at, nodes);
@@ -372,6 +374,32 @@ fn set_type_operand(node: &mut Node, class: &str) -> Result<(), InlineError> {
     }
 }
 
+/// The nodes of one `typeOf` realization. Temporaries occupy `local_base` upward; the returned
+/// slot is the first one this realization did not use.
+fn type_of_realization(realization: &[TypeOfInsn], local_base: u16) -> (Vec<Node>, u16) {
+    let mut slots = std::collections::HashMap::<u32, u16>::new();
+    let mut next = local_base;
+    let mut nodes = Vec::new();
+    for instruction in realization {
+        match instruction {
+            TypeOfInsn::StoreTemp(id) => {
+                let slot = *slots.entry(*id).or_insert_with(|| {
+                    let slot = next;
+                    next += 1;
+                    slot
+                });
+                nodes.push(Node::Insn(Insn::Var { op: 0x3a, slot }));
+            }
+            TypeOfInsn::LoadTemp(id) => {
+                let slot = slots[id];
+                nodes.push(Node::Insn(Insn::Var { op: 0x19, slot }));
+            }
+            other => nodes.extend(type_of_nodes(other)),
+        }
+    }
+    (nodes, next)
+}
+
 fn type_of_nodes(instruction: &TypeOfInsn) -> Vec<Node> {
     let instruction = match instruction {
         TypeOfInsn::LdcClass(class) => Insn::Ldc(Constant::Class(class.clone())),
@@ -414,6 +442,9 @@ fn type_of_nodes(instruction: &TypeOfInsn) -> Vec<Node> {
             name,
             descriptor,
         } => method(0xb7, owner, name, descriptor),
+        TypeOfInsn::StoreTemp(_) | TypeOfInsn::LoadTemp(_) => {
+            unreachable!("a recursive typeOf temporary is encoded with its local slot")
+        }
         TypeOfInsn::ReifiedMarker(argument) => {
             return vec![
                 Node::Insn(push_int(TYPE_OF_MARKER)),

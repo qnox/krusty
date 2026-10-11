@@ -5,6 +5,7 @@ use crate::ast::{Decl, File};
 use crate::backend::{
     Artifact, Backend, BackendClassifierSource, BackendModuleFacts, CheckedBackendClassifiers,
 };
+use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::frontend::FrontendSymbols;
 use crate::jvm::names::{file_class_name, type_descriptor};
@@ -30,6 +31,9 @@ pub enum SkipReason {
     CallArguments(String),
     /// A selected overridden call could not be joined to its checked dispatch classifier facts.
     MemberDispatch(crate::types::TypeName),
+    /// A lambda argument of an inline call carried no published parameter modifier and declared
+    /// type, so whether the call inlines it is unknown.
+    InlineParameters,
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -60,6 +64,9 @@ pub(crate) struct BackendPassFacts {
     override_results: crate::jvm::override_results::OverrideResults,
     /// Neutral-result guards on collection overrides whose descriptor needs no bridge.
     collection_method_entry_barriers: crate::jvm::collection_barriers::MethodEntryBarriers,
+    /// JVM-only bridges for mapped collection declarations inherited from a Java superclass.
+    inherited_collection_bridges:
+        crate::jvm::inherited_collection_bridges::InheritedCollectionBridges,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -70,6 +77,9 @@ pub(crate) struct BackendPassFacts {
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
     property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+    /// The `-jvm-default` mode, which decides the forwarders (and their bridges) a class writes for
+    /// the interface defaults it inherits.
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -79,10 +89,12 @@ pub(crate) struct BackendPassFacts {
 /// miscompiles the gate never saw); a unit test below bans direct calls to the individual passes.
 ///
 /// Runs, in order:
-/// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
-///    declarations from the file's annotations; no-op without a trigger annotation.
-///    Once their output is final, freeze any exact dependency identity selected by a generated
-///    `super` call, then realize all checked super calls from those frozen facts.
+/// 1. `plugins::complete_enabled` — compiler-extension plugins (kotlinx.serialization) realize
+///    the declarations they generated at the handoff: bodies, storage and JVM helpers; no-op
+///    without a trigger annotation. The members the JVM publishes beyond the handoff's join each
+///    class's declaration record. Once their output is final, freeze any exact dependency identity
+///    selected by a generated `super` call, then realize all checked super calls from those
+///    frozen facts.
 ///
 /// 2. `realize_top_level_jvm_fields` — select public field storage for eligible top-level
 ///    `@JvmField` declarations through stable property/layout identities.
@@ -143,13 +155,16 @@ pub(crate) fn run_backend_passes(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(
+    crate::plugins::complete_enabled(
         ir,
         plugins.native_plugins,
         plugins.module_name,
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    // The JVM publishes members kotlinc's plugins generate only in IR (serialization's
+    // `write$Self`); they join each class's record before any lowering rewrites one.
+    crate::metadata::class_declarations::add_target_generated_functions(ir);
     // Plugins run after the frontend/backend handoff and may append checked calls selected by an
     // exact dependency identity. Freeze those provider-normalized records now, once plugin output
     // is final and before any realization consumes them. Existing facts remain the original copy.
@@ -159,6 +174,7 @@ pub(crate) fn run_backend_passes(
     run_backend_passes_after_plugins(
         ir,
         facade,
+        plugins.module_name,
         classifiers,
         callables,
         classpath,
@@ -171,6 +187,7 @@ pub(crate) fn run_backend_passes(
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
+    module_name: &str,
     classifiers: &CheckedBackendClassifiers<'_>,
     callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
@@ -182,8 +199,13 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
-    crate::jvm::module_calls::realize_super_calls(ir, callables, &mut facts.property_realizations)
-        .map_err(|_| SkipReason::SuperCalls)?;
+    crate::jvm::module_calls::realize_super_calls(
+        ir,
+        callables,
+        &mut facts.property_realizations,
+        facts.jvm_default,
+    )
+    .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
@@ -214,6 +236,10 @@ fn run_backend_passes_after_plugins(
     // method, retaining nullable-construction sites only in JVM pass facts.
     let class_java_sam = lambda_modes.sam_conversions == crate::jvm::ir_emit::LambdaMode::Class;
     facts.sam_wrapper_realizations = crate::jvm::sam_wrappers::realize(ir, facade, class_java_sam);
+    // A projected SAM conversion stays logically typed as the function it captures. Only the JVM
+    // implementation method receives the declaration's erased slots, after class-mode wrappers
+    // have consumed conversions that realize their own forwarding methods.
+    crate::jvm::sam_projected_adapters::realize(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     crate::jvm::deferred_local_storage::realize(ir);
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
@@ -236,12 +262,15 @@ fn run_backend_passes_after_plugins(
         callables,
         &facts.override_results,
         &mut facts.function_argument_arrays,
+        facts.jvm_default,
     )?;
     crate::jvm::collection_barriers::select(
         ir,
         &facts.override_results,
         &mut facts.collection_method_entry_barriers,
     );
+    facts.inherited_collection_bridges =
+        crate::jvm::inherited_collection_bridges::select(ir, classpath, &facts.override_results);
     // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
     // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
     // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
@@ -265,6 +294,10 @@ fn run_backend_passes_after_plugins(
         &mut facts.property_reference_realizations,
     );
     crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
+    crate::jvm::default_parameter_representation::record_defaulted_primitive_bounds(ir);
+    // A concatenation appends a `toString()` call's receiver itself, as kotlinc does once its
+    // value-class lowering has turned a value class's `toString()` into a static call.
+    crate::jvm::concatenated_to_string::flatten_to_string_operands(ir);
     // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
     // pass has named the functions kotlinc names their lifted callables after: name those callables
     // before any pass renders a debug name from them.
@@ -293,6 +326,10 @@ fn run_backend_passes_after_plugins(
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
+    // An inline expansion rewrites a type-parameter cell to the call-site element. A lambda that
+    // still uses the shared erased implementation takes the erased holder, and suspension spilling
+    // reads that holder from the cell, so the two have to agree before either pass.
+    crate::jvm::shared_captures::restore_erased_escaping_capture_holders(ir);
     let null_out_dead_spills =
         crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
     if !crate::jvm::suspend::lower_suspend(
@@ -314,10 +351,21 @@ fn run_backend_passes_after_plugins(
     // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
     // pass can retain the final caller-qualified path and ordinal.
     crate::jvm::debug_local_names::realize_source_lambda_implementation_names(ir);
-    crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
+    crate::jvm::ir_emit::mark_must_inline_lambdas(ir).map_err(|missing| {
+        crate::trace_compiler!(
+            "splice",
+            "inline call {} published no parameter facts for lambda operand {}",
+            missing.call,
+            missing.parameter
+        );
+        SkipReason::InlineParameters
+    })?;
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir, &facts.override_results);
+    // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
+    // names those from the value-class spelling and only then appends `$<module>` to the member.
+    crate::jvm::internal_names::mangle_internal_members(ir, module_name, facade);
     // A specialized suspend lambda is already a real class when suspend lowering completes, but
     // its JVM name depends on the caller's final placement and lifted spelling. Realize that name
     // only now and keep the coroutine-emission facts keyed by the same physical identity.
@@ -363,6 +411,8 @@ pub struct JvmBackend {
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
     java_parameters: bool,
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
+    /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
+    inline_string_concat: bool,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
     param_assertions: bool,
@@ -376,6 +426,9 @@ pub struct JvmBackend {
     /// `LanguageFeature.AnnotationsInMetadata`. This is deliberately independent of the physical
     /// metadata stamp: an internal stamp override must not change source-language semantics.
     annotations_in_metadata: bool,
+    /// Whether the language settings are pre-release, so every `@kotlin.Metadata` carries
+    /// kotlinc's pre-release flag.
+    pre_release_metadata: bool,
 }
 
 impl JvmBackend {
@@ -386,10 +439,12 @@ impl JvmBackend {
             jvm_default: crate::jvm::ir_emit::JvmDefaultMode::default(),
             java_parameters: false,
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
+            inline_string_concat: false,
             param_assertions: true,
             call_assertions: true,
             metadata_version: None,
             annotations_in_metadata: true,
+            pre_release_metadata: false,
         }
     }
 
@@ -398,6 +453,23 @@ impl JvmBackend {
     pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> JvmBackend {
         self.metadata_version = version;
         self
+    }
+
+    /// Mark every `@kotlin.Metadata` as pre-release, as kotlinc does when
+    /// `LanguageVersionSettings.isPreRelease` holds for the compilation.
+    pub fn with_pre_release_metadata(mut self, pre_release: bool) -> JvmBackend {
+        self.pre_release_metadata = pre_release;
+        self
+    }
+
+    /// The version and pre-release flag of every `@kotlin.Metadata` this backend writes.
+    fn metadata_stamp(&self) -> crate::jvm::classfile::MetadataStamp {
+        crate::jvm::classfile::MetadataStamp {
+            version: self
+                .metadata_version
+                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+            pre_release: self.pre_release_metadata,
+        }
     }
 
     /// Select declaration-annotation record emission from the finalized source-language feature
@@ -435,6 +507,12 @@ impl JvmBackend {
     /// Independently select `-Xlambdas` and `-Xsam-conversions` realization strategies.
     pub fn with_lambda_modes(mut self, modes: crate::jvm::ir_emit::LambdaModes) -> JvmBackend {
         self.lambda_modes = modes;
+        self
+    }
+
+    /// `-Xstring-concat=inline`: never build a string concatenation with `invokedynamic`.
+    pub fn with_inline_string_concat(mut self, inline: bool) -> JvmBackend {
+        self.inline_string_concat = inline;
         self
     }
 
@@ -476,6 +554,7 @@ pub fn shipping_emit_options(
         // Per-invocation strategies; the CLI overrides them on the backend.
         lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
         java_parameters: false,
+        inline_string_concat: false,
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
         // second compilation sees no constructor/member parameter names (named arguments) and no
@@ -495,6 +574,7 @@ pub fn shipping_emit_options(
         // The shipping default language level is 2.4, where this feature is enabled. A configured
         // compiler invocation overrides it through `EmitOptions::with_annotations_in_metadata`.
         annotations_in_metadata: true,
+        pre_release_metadata: false,
     }
 }
 
@@ -702,7 +782,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     // The semantic handoff says whether a callable body exists; this JVM boundary
                     // owns only its representation as a facade static. Common IR lowering consumes
                     // the same answer, so registration cannot promise a body that lowering omits.
-                    let emitted = syms.source_fn_has_callable_body(file, i as u32, f);
+                    let emitted = syms.source_fn_has_callable_body(file, f);
                     if emitted {
                         fns.push((
                             i as u32,
@@ -754,6 +834,9 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
 #[derive(Default)]
 pub struct JvmState {
     module_packages: std::collections::BTreeMap<String, Vec<String>>,
+    /// One compilation emits many files against one frozen module. The inner-class attribute map
+    /// depends only on that module, so building it again on every file is quadratic.
+    inner_class_resolver: Option<crate::jvm::classfile::InnerClassResolver>,
 }
 
 /// A checked file after every JVM representation pass has selected its physical facts. Keeping the
@@ -767,6 +850,7 @@ struct BackendReadyIr<'a> {
     facade_class: crate::types::TypeName,
     package: String,
     signature_symbols: &'a dyn BackendClassifierSource,
+    dependency_callables: crate::backend::CheckedBackendCallables,
     inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
     pass_facts: BackendPassFacts,
     metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
@@ -790,6 +874,7 @@ impl JvmBackend {
             native_plugins,
             module_name,
             stems,
+            origins: _,
         } = file;
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
@@ -834,13 +919,19 @@ impl JvmBackend {
             (module_name, facade_locals),
             self.param_assertions,
             &classifiers,
-            self.metadata_version
-                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+            self.metadata_stamp(),
             self.annotations_in_metadata,
         );
         let has_facade_members = metadata.is_some();
-        let inner_class_resolver =
-            checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
+        let inner_class_resolver = match state.inner_class_resolver.clone() {
+            Some(resolver) => resolver,
+            None => {
+                let resolver =
+                    checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
+                state.inner_class_resolver = Some(resolver.clone());
+                resolver
+            }
+        };
         self.emit_backend_ready_ir(
             BackendReadyIr {
                 ir,
@@ -850,6 +941,7 @@ impl JvmBackend {
                 facade_class,
                 package,
                 signature_symbols: &classifiers,
+                dependency_callables: callables,
                 inner_class_resolver,
                 pass_facts,
                 metadata,
@@ -874,6 +966,7 @@ impl JvmBackend {
             facade_class,
             package,
             signature_symbols,
+            dependency_callables,
             inner_class_resolver,
             pass_facts,
             metadata,
@@ -893,9 +986,11 @@ impl JvmBackend {
             shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
                 .with_jvm_default(self.jvm_default)
                 .with_lambda_modes(self.lambda_modes)
+                .with_inline_string_concat(self.inline_string_concat)
                 .with_param_assertions(self.param_assertions)
                 .with_metadata_version(self.metadata_version)
                 .with_annotations_in_metadata(self.annotations_in_metadata)
+                .with_pre_release_metadata(self.pre_release_metadata)
                 .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
@@ -909,6 +1004,7 @@ impl JvmBackend {
             function_argument_arrays: &pass_facts.function_argument_arrays,
             override_results: &pass_facts.override_results,
             collection_method_entry_barriers: &pass_facts.collection_method_entry_barriers,
+            inherited_collection_bridges: &pass_facts.inherited_collection_bridges,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,
@@ -917,6 +1013,7 @@ impl JvmBackend {
             crate::jvm::ir_emit::CheckedEmitFacts {
                 metadata: emit_metadata,
                 signature_symbols,
+                dependency_callables: &dependency_callables,
                 property_realizations: &pass_facts.property_realizations,
                 property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
@@ -984,6 +1081,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             diags.error(crate::diag::Span::new(0, 0), detail);
             return;
         }
+        SkipReason::InlineParameters => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: an inline call's lambda argument has no published parameter modifier and declared type".to_string(),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1003,6 +1107,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         SkipReason::DefaultCalls
         | SkipReason::SuperCalls
         | SkipReason::CallArguments(_)
+        | SkipReason::InlineParameters
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
@@ -1015,6 +1120,10 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
 
 impl Backend for JvmBackend {
     type State = JvmState;
+
+    fn compilation_target(&self) -> CompilationTarget {
+        CompilationTarget::Jvm
+    }
 
     fn lower_ir_file(
         &self,
@@ -1132,9 +1241,10 @@ impl Backend for JvmBackend {
         if let Err(target) = crate::jvm::module_calls::realize(
             &mut file.ir,
             file.stems,
-            &self.cp,
+            &file.classifiers,
             &file.callables,
             &mut property_realizations,
+            self.jvm_default,
         ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1168,6 +1278,7 @@ impl Backend for JvmBackend {
                 default_call_operands,
                 local_delegate_access,
                 lambda_methods,
+                jvm_default: self.jvm_default,
                 ..BackendPassFacts::default()
             },
             state,
@@ -1202,7 +1313,7 @@ pub fn facade_package_metadata_from_ir(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     symbols: &dyn crate::backend::BackendClassifierSource,
-    metadata_version: [i32; 3],
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
@@ -1242,86 +1353,18 @@ pub fn facade_package_metadata_from_ir(
                 &Default::default(),
             )
             .then_some(physical_descriptor);
-            let mut param_annotations = ir
-                .fn_param_annotations
-                .get(&declaration.function)
-                .cloned()
-                .unwrap_or_default();
-            if declaration.receiver.is_some() && declaration.context_count < param_annotations.len()
-            {
-                param_annotations.remove(declaration.context_count);
-            }
-            let mut no_infer_params = ir
-                .fn_param_no_infer
-                .get(&declaration.function)
-                .cloned()
-                .unwrap_or_default();
-            if declaration.receiver.is_some() && declaration.context_count < no_infer_params.len() {
-                no_infer_params.remove(declaration.context_count);
-            }
-            let context_parameter_kinds = ir
-                .function_parameter_identities(declaration.function)
-                .expect("a package function metadata declaration retains parameter identities")
-                .iter()
-                .take(declaration.context_count)
-                .map(crate::jvm::parameter_names::metadata_context_kind)
-                .collect();
             crate::metadata::builder::FnMeta {
-                name: declaration.name.clone(),
-                params: declaration.params.clone(),
-                ret: declaration.ret,
-                decl_order: declaration.source_order as usize,
-                annotations: crate::metadata::MetadataAnnotations::of_optional(
-                    ir.function_annotations.get(&declaration.function),
-                ),
-                receiver: declaration.receiver,
-                param_modifiers: super::metadata_flags::declared_value_parameters(
-                    ir,
-                    declaration.function,
-                    declaration.param_defaults.iter().copied(),
-                ),
-                suspend: declaration.suspend,
                 jvm_desc,
                 jvm_name,
-                inline: declaration.inline,
-                has_function_typed_parameter: declaration.has_function_typed_parameter,
-                operator: declaration.operator,
-                infix: declaration.infix,
-                tailrec: declaration.tailrec,
-                companion: declaration.companion,
-                contract: declaration
-                    .contract
-                    .as_ref()
-                    .map(|contract| contract.to_arc()),
-                type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| (parameter.name.clone(), parameter.reified))
-                    .collect(),
-                semantic_type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.semantic_name.clone())
-                    .collect(),
-                type_param_bounds: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.bounds.clone())
-                    .collect(),
-                context_count: declaration.context_count,
-                context_parameter_kinds,
-                vararg_index: declaration.vararg_index,
-                visibility: declaration.visibility,
-                spellings: declaration.spellings.clone(),
-                param_annotations: param_annotations
-                    .iter()
-                    .map(crate::metadata::MetadataAnnotations::of)
-                    .collect(),
-                no_infer_params,
+                ..crate::metadata::declaration_records::package_function(ir, declaration)
             }
         })
         .collect::<Vec<_>>();
 
+    // A declared accessor's realized name, which `@JvmName` may have changed.
+    let accessor_jvm_name = |function: Option<u32>| {
+        function.map(|function| ir.functions[function as usize].name.clone())
+    };
     let properties = ir
         .package_properties
         .iter()
@@ -1329,28 +1372,32 @@ pub fn facade_package_metadata_from_ir(
             // Which accessors the facade really declares, declared or compiler-default: a private
             // property with default accessors has none, and kotlinc's `JvmPropertySignature` then
             // names neither.
-            let (has_getter, has_setter, setter_function) =
-                match ir.local_property_layouts.get(&declaration.property) {
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                        storage,
-                        getter,
-                        setter,
-                        ..
-                    }) => (
-                        getter.is_some() || ir.has_jvm_default_static_getter(*storage),
-                        setter.is_some() || ir.has_jvm_default_static_setter(*storage),
-                        *setter,
-                    ),
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. }) => {
-                        (true, setter.is_some(), *setter)
-                    }
-                    Some(
-                        crate::ir::IrLocalPropertyLayout::Member { .. }
-                        | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
-                    )
-                    | None => (true, declaration.mutable, None),
-                };
+            let (has_getter, has_setter, getter_function, setter_function) = match ir
+                .local_property_layouts
+                .get(&declaration.property)
+            {
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                    storage,
+                    getter,
+                    setter,
+                    ..
+                }) => (
+                    getter.is_some() || ir.has_jvm_default_static_getter(*storage),
+                    setter.is_some() || ir.has_jvm_default_static_setter(*storage),
+                    *getter,
+                    *setter,
+                ),
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                    getter, setter, ..
+                }) => (true, setter.is_some(), Some(*getter), *setter),
+                Some(
+                    crate::ir::IrLocalPropertyLayout::Member { .. }
+                    | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
+                )
+                | None => (true, declaration.mutable, None, None),
+            };
             let companion = declaration.is_companion_extension();
+            let field = property_field(ir, declaration);
             let accessor_parameters = declaration
                 .context_parameters
                 .iter()
@@ -1368,7 +1415,9 @@ pub fn facade_package_metadata_from_ir(
                 erased_value_class_descriptor(ir, declaration).unwrap_or(ty_descriptor);
             let getter = has_getter.then(|| {
                 (
-                    crate::jvm::names::property_getter_name(&declaration.name),
+                    accessor_jvm_name(getter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_getter_name(&declaration.name)
+                    }),
                     format!("({descriptor_parameters}){value_descriptor}"),
                 )
             });
@@ -1376,55 +1425,28 @@ pub fn facade_package_metadata_from_ir(
                 let mut parameters = descriptor_parameters;
                 parameters.push_str(&value_descriptor);
                 (
-                    crate::jvm::names::property_setter_name(&declaration.name),
+                    accessor_jvm_name(setter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_setter_name(&declaration.name)
+                    }),
                     format!("({parameters})V"),
                 )
             });
             crate::metadata::builder::PropMeta {
-                name: declaration.name.clone(),
-                ty: declaration.ty,
-                is_var: declaration.mutable,
-                type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.name.clone())
-                    .collect(),
-                semantic_type_params: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.semantic_name.clone())
-                    .collect(),
-                type_param_bounds: declaration
-                    .type_params
-                    .iter()
-                    .map(|parameter| parameter.bounds.clone())
-                    .collect(),
-                receiver: declaration.receiver,
-                context_params: declaration
-                    .context_parameter_names
-                    .iter()
-                    .cloned()
-                    .zip(declaration.context_parameter_kinds.iter().copied())
-                    .zip(declaration.context_parameters.iter().copied())
-                    .map(|((name, kind), ty)| (name, kind, ty))
-                    .collect(),
                 getter,
                 setter,
-                setter_parameter_name: crate::jvm::parameter_names::explicit_setter(
+                field_name: field.as_ref().and_then(|(name, _)| name.clone()),
+                field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
+                    super::metadata_method_signatures::requires_field_signature(
+                        declaration.ty,
+                        physical,
+                        &Default::default(),
+                    )
+                }),
+                ..crate::metadata::declaration_records::package_property(
                     ir,
+                    declaration,
                     setter_function,
-                ),
-                is_const: declaration.is_const,
-                has_constant: declaration.has_constant,
-                decl_order: declaration.source_order as usize,
-                visibility: declaration.visibility,
-                spellings: declaration.spellings.clone(),
-                has_backing_field: declaration.has_backing_field,
-                modifiers: declaration.modifiers,
-                setter_visibility: declaration.setter_visibility,
-                companion,
-                delegate_field: delegate_field(ir, declaration),
-                field_desc: erased_value_class_descriptor(ir, declaration),
+                )
             }
         })
         .collect::<Vec<_>>();
@@ -1432,14 +1454,7 @@ pub fn facade_package_metadata_from_ir(
     let aliases = ir
         .package_type_aliases
         .iter()
-        .map(|alias| crate::metadata::builder::TypeAliasMeta {
-            name: alias.name.clone(),
-            formals: alias.formals.clone(),
-            expansion: alias.expansion,
-            visibility: alias.visibility,
-            expansion_spelling: alias.expansion_spelling.clone(),
-            decl_order: alias.source_order as usize,
-        })
+        .map(crate::metadata::declaration_records::package_alias)
         .collect::<Vec<_>>();
     let approximate = |ty| {
         crate::types::declaration_approximation(ty, &mut |classifier, index| {
@@ -1455,7 +1470,7 @@ pub fn facade_package_metadata_from_ir(
         (module_name, locals),
         param_assertions,
         Some(&approximate),
-        metadata_version,
+        metadata_stamp,
         annotations_in_metadata,
     )
 }
@@ -1479,22 +1494,25 @@ fn erased_value_class_descriptor(
         .then(|| crate::jvm::names::type_descriptor(field.ty))
 }
 
-fn delegate_field(
+/// The facade field realizing a property, if any: a delegate's storage by its JVM name, or a
+/// backing field (named by the property), with its physical descriptor.
+fn property_field(
     ir: &crate::ir::IrFile,
     declaration: &crate::ir::IrPackageProperty,
-) -> Option<(String, String)> {
-    let Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
-        delegate: Some(storage),
-        ..
-    }) = ir.local_property_layouts.get(&declaration.property)
-    else {
-        return None;
+) -> Option<(Option<String>, String)> {
+    let (name, storage) = match ir.local_property_layouts.get(&declaration.property)? {
+        crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } => (None, *storage),
+        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+            delegate: Some(storage),
+            ..
+        } => (
+            Some(ir.static_field_jvm_name(*storage).to_string()),
+            *storage,
+        ),
+        _ => return None,
     };
-    let field = &ir.statics[*storage as usize];
-    Some((
-        ir.static_field_jvm_name(*storage).to_string(),
-        crate::jvm::names::type_descriptor(field.ty),
-    ))
+    let field = ir.statics.get(storage as usize)?;
+    Some((name, crate::jvm::names::type_descriptor(field.ty)))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,
@@ -1533,7 +1551,7 @@ fn build_facade_metadata(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
-    metadata_version: [i32; 3],
+    metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
@@ -1549,9 +1567,9 @@ fn build_facade_metadata(
             );
         crate::jvm::ir_emit::KotlinMetadata {
             k: 2,
-            mv: metadata_version.to_vec(),
+            stamp: metadata_stamp,
             xi: 48,
-            d1: vec![d1_bytes.iter().map(|&byte| byte as char).collect()],
+            d1: crate::metadata::encoding::bytes_to_strings(&d1_bytes),
             d2,
         }
     })
@@ -1785,7 +1803,10 @@ mod tests {
             ("main", &[]),
             true,
             &NoClassifierFacts,
-            [2, 4, 0],
+            crate::jvm::classfile::MetadataStamp {
+                version: [2, 4, 0],
+                pre_release: false,
+            },
             true,
         )
         .expect("a package property requires facade metadata");
@@ -1856,15 +1877,23 @@ mod tests {
             ),
             (
                 "reparent_lambda_impls(",
-                &["src/jvm/ir_emit.rs", "src/jvm/backend.rs"],
+                &[
+                    "src/jvm/ir_emit.rs",
+                    "src/jvm/ir_emit/lambda_implementation_placement.rs",
+                    "src/jvm/backend.rs",
+                ],
             ),
             (
-                "run_enabled(",
+                "complete_enabled(",
                 &["src/plugins/mod.rs", "src/jvm/backend.rs"],
             ),
             (
                 "derive_bridges(",
                 &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "mangle_internal_members(",
+                &["src/jvm/internal_names.rs", "src/jvm/backend.rs"],
             ),
             ("collection_barriers::select(", &["src/jvm/backend.rs"]),
             (

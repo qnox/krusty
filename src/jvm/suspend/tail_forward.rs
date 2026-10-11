@@ -1,11 +1,11 @@
 //! Detection and body rewriting for a suspend function that directly forwards its continuation.
 
-use super::bottom_completion::unwrap_suspend_cast;
 use super::value_class_results::{boxed_on_resume, unboxed_carrier};
 use super::{
     expr_calls_suspend, is_suspension_point, recorded_suspension_result, suspend_call_fid,
     value_class_suspension_result,
 };
+use crate::backend::coroutines::unwrap_suspend_cast;
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult};
 use crate::types::Ty;
 use std::collections::HashSet;

@@ -15,11 +15,14 @@
 //! AST vs IR (see the doc): declaration/supertype generation belongs before type checking so
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
+pub mod allopen;
 pub mod cli;
 pub mod codegen_loop;
 pub mod deps;
 pub mod ksp;
+pub mod noarg;
 pub mod registry;
+pub mod sam_with_receiver;
 pub mod serialization;
 
 use crate::ir::{ClassId, IrFile};
@@ -44,6 +47,69 @@ pub struct PluginExpressionPlan {
     /// Checker-selected source operands in target-parameter order with their selected parameter
     /// types. Lowering evaluates/coerces exactly this list and performs no argument remapping.
     pub operands: Vec<(crate::ast::ExprId, Ty)>,
+    /// Operands the plugin composes from frontend-selected declarations rather than from source
+    /// syntax. They follow `operands`, in order.
+    pub synthesized: Vec<PluginSynthesizedOperand>,
+}
+
+/// A value a plugin plan composes without source syntax. Every callable it names was selected in
+/// the frontend from a declaration's full semantic signature, so lowering realizes the exact
+/// declaration and no later phase looks a member up by name.
+#[derive(Clone, Debug)]
+pub enum PluginSynthesizedOperand {
+    /// A checker-selected call on a singleton receiver. The complete ordinary member-call result
+    /// crosses this boundary; FIR publication must not reconstruct any target fact from the name.
+    SingletonCall {
+        call: FrontendResolvedSingletonCall,
+        arguments: Vec<PluginSynthesizedOperand>,
+    },
+    /// A nested plugin operation over synthesized operands, specialized by the named plugin.
+    Operation {
+        plugin: &'static str,
+        operation: &'static str,
+        data: Vec<TypeName>,
+        types: Vec<Ty>,
+        result: Ty,
+        operands: Vec<PluginSynthesizedOperand>,
+    },
+}
+
+/// One ordinary member call selected by the frontend for a plugin-composed expression.
+///
+/// The receiver, declaration, specialized signature, capabilities, generic substitutions, and
+/// positional argument mapping are all the result of the normal resolver/checker path. A plugin may
+/// recognize the selected declaration's semantic shape, but cannot enumerate or choose candidates.
+#[derive(Clone, Debug)]
+pub struct FrontendResolvedSingletonCall {
+    pub receiver: TypeName,
+    pub selected: FrontendSelectedMemberCall,
+    pub type_arguments: Vec<Option<Ty>>,
+    pub type_argument_bounds: Vec<Vec<Ty>>,
+    pub argument_parameters: Vec<u32>,
+}
+
+/// The closed semantic result of ordinary member-call selection that a plugin-composed operand
+/// needs. This contract owns no candidate or resolver state: core projects the selected receiver,
+/// declaration, specialized result, and suspension fact before the plugin sees it.
+#[derive(Clone, Debug)]
+pub struct FrontendSelectedMemberCall {
+    pub receiver: Ty,
+    pub member: crate::libraries::LibraryMember,
+    pub ret: Ty,
+    pub suspend: bool,
+}
+
+/// The sole semantic query available while a plugin composes a source-less call. Implementations
+/// route it through ordinary member candidate collection, overload selection, generic inference,
+/// argument mapping, and access checking.
+pub trait FrontendCallResolver {
+    fn resolve_singleton_member_call(
+        &self,
+        classifier: TypeName,
+        name: &str,
+        arguments: &[Ty],
+        expected_result: Ty,
+    ) -> Option<FrontendResolvedSingletonCall>;
 }
 
 /// One already-selected call projected into the plugin contract. Declaration identity, overload,
@@ -68,18 +134,53 @@ pub struct FrontendSelectedCall {
     pub argument_slots: Vec<Option<crate::ast::ExprId>>,
 }
 
-/// Read-only, resolver-independent inputs for post-resolution plugin planning.
-pub struct FrontendExpressionContext {
+/// Read-only inputs for post-resolution plugin planning. Source calls and annotations are already
+/// bound; the narrow resolver capability can only select an ordinary singleton member call whose
+/// receiver, name, argument types, and expected result the plugin supplies.
+pub struct FrontendExpressionContext<'a> {
     pub calls: Vec<FrontendSelectedCall>,
-    /// Qualified annotation identities for source and dependency classifiers named by these calls.
-    pub classifier_annotations: HashMap<TypeName, Vec<TypeName>>,
+    /// Qualified annotation identities for source classifiers and dependency classifiers named by
+    /// these calls.
+    pub classifier_annotations: &'a dyn FrontendClassifierAnnotations,
+    /// Absent only in isolated plugin-unit tests that do not compose calls.
+    pub call_resolver: Option<&'a dyn FrontendCallResolver>,
 }
 
-impl FrontendExpressionContext {
+/// The annotation identities of one classifier, answered per query. The frontend serves this from
+/// its module index without materializing every source classifier for each planned body.
+pub trait FrontendClassifierAnnotations {
+    fn classifier_annotations(&self, classifier: TypeName) -> Option<&[TypeName]>;
+}
+
+/// An eagerly collected annotation table, keyed by classifier.
+pub type ClassifierAnnotationMap = HashMap<TypeName, Vec<TypeName>>;
+
+impl FrontendClassifierAnnotations for ClassifierAnnotationMap {
+    fn classifier_annotations(&self, classifier: TypeName) -> Option<&[TypeName]> {
+        self.get(&classifier).map(Vec::as_slice)
+    }
+}
+
+impl FrontendExpressionContext<'_> {
     pub fn has_classifier_annotation(&self, classifier: TypeName, annotation: TypeName) -> bool {
         self.classifier_annotations
-            .get(&classifier)
+            .classifier_annotations(classifier)
             .is_some_and(|annotations| annotations.contains(&annotation))
+    }
+
+    pub fn resolve_singleton_member_call(
+        &self,
+        classifier: TypeName,
+        name: &str,
+        arguments: &[Ty],
+        expected_result: Ty,
+    ) -> Option<FrontendResolvedSingletonCall> {
+        self.call_resolver?.resolve_singleton_member_call(
+            classifier,
+            name,
+            arguments,
+            expected_result,
+        )
     }
 }
 
@@ -168,6 +269,7 @@ pub struct FrontendNamedClassContext<'a> {
 }
 
 /// A source class named by a class-valued annotation argument.
+#[derive(Clone)]
 pub struct FrontendNamedClass {
     pub classifier: TypeName,
     /// The class as a diagnostic names it without type arguments: `X<*, *>`.
@@ -206,6 +308,11 @@ pub struct PluginContext {
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
     /// class that is not there fails at class-load rather than at compile time.
     runtime_serializers: std::collections::HashSet<TypeName>,
+    /// Serializer classes this compilation does NOT declare that a property's `@Serializable(with =
+    /// …)` names, on the property or inside its declared type (`List<@Serializable(with = S::class)
+    /// T>`), mapped to whether the provider confirms an `object` (read through `INSTANCE`) rather
+    /// than a class (constructed). Absent ⇒ the provider could not classify it.
+    external_serializer_objects: std::collections::HashMap<TypeName, bool>,
 }
 
 impl Default for PluginContext {
@@ -216,6 +323,7 @@ impl Default for PluginContext {
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
+            external_serializer_objects: std::collections::HashMap::new(),
         }
     }
 }
@@ -228,6 +336,7 @@ impl Clone for PluginContext {
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
+            external_serializer_objects: self.external_serializer_objects.clone(),
         }
     }
 }
@@ -270,6 +379,21 @@ impl PluginContext {
     ) -> Self {
         self.runtime_serializers = serializers;
         self
+    }
+
+    /// Record the provider-confirmed kind of each external serializer class a property names.
+    pub(crate) fn with_external_serializer_objects(
+        mut self,
+        objects: std::collections::HashMap<TypeName, bool>,
+    ) -> Self {
+        self.external_serializer_objects = objects;
+        self
+    }
+
+    /// Whether external serializer class `serializer` is an `object`; `None` when the provider did
+    /// not classify it.
+    pub(crate) fn external_serializer_is_object(&self, serializer: TypeName) -> Option<bool> {
+        self.external_serializer_objects.get(&serializer).copied()
     }
 
     /// Whether the active runtime provides `serializer`. A builtin mapping must consult this before
@@ -393,6 +517,31 @@ impl PluginContext {
             .is_some_and(|annotations| Self::annotation_named(annotations, annotation).is_some())
     }
 
+    /// The checked declared spelling of `class`'s ordinary property `property`: the same tree, with
+    /// the same checked type-use annotation applications, that the property's `@Metadata` records.
+    /// The source name locates the already selected serializable field inside this class; its stable
+    /// declaration order selects the spelling, so a same-named member extension cannot replace it.
+    /// The empty spelling when the declared type spelled no alias and carried no recorded
+    /// type-use annotation.
+    pub fn property_declared_type<'ir>(
+        &self,
+        ir: &'ir IrFile,
+        class: ClassId,
+        property: &str,
+    ) -> &'ir crate::ir::Spelled {
+        ir.classes
+            .get(class as usize)
+            .and_then(|class| {
+                let property = class
+                    .properties
+                    .iter()
+                    .find(|candidate| candidate.name == property)?;
+                ir.prop_declared_spellings
+                    .get(&(class.fq_name_id(), property.source_order))
+            })
+            .map_or(crate::ir::Spelled::NONE, |spellings| &spellings.ret)
+    }
+
     pub fn property_canonical_type(
         &self,
         ir: &IrFile,
@@ -490,7 +639,7 @@ pub trait IrPlugin {
     /// resolver and must never change the type checker's result.
     fn plan_frontend_expressions(
         &self,
-        _ctx: &FrontendExpressionContext,
+        _ctx: &FrontendExpressionContext<'_>,
         _plans: &mut Vec<(crate::ast::ExprId, PluginExpressionPlan)>,
     ) {
     }
@@ -515,30 +664,88 @@ pub trait IrPlugin {
         None
     }
 
+    /// Annotations that make `open` the default modality of the classes they match and of the
+    /// members those classes declare, as kotlinc's FIR status transformer for all-open does. A class
+    /// matches when it, a meta-annotation of one of its annotations at any depth, or one of its
+    /// supertypes carries one of them. The frontend applies the status before any declaration's
+    /// modality is published, so every later phase sees the transformed declaration.
+    fn open_by_default_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
+    /// Annotations that give the classes they match a generated zero-argument constructor, as
+    /// kotlinc's no-arg plugin does. Classes match as for [`Self::open_by_default_annotations`].
+    /// The frontend decides which classes get one and reports the plugin's errors; lowering builds
+    /// the constructor from that decision.
+    fn no_arg_constructor_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
+    /// Annotations whose interfaces take a SAM conversion's first parameter as the converted
+    /// function's receiver, as kotlinc's sam-with-receiver plugin does. Only an annotation applied
+    /// directly to the interface that declares the abstract method counts.
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
-    /// Synthesize new classes or members.
+    /// Declare the Kotlin-visible classes and members the plugin generates. This runs at the
+    /// frontend/backend handoff, before any target sees the file, so every target's declaration
+    /// record includes them. A generated function's body is a placeholder until
+    /// [`Self::complete_declarations`]; nothing here may name a target representation.
     fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
+
+    /// Realize the declared members for the target: their bodies, and the storage and helpers
+    /// that have no Kotlin declaration of their own.
+    fn complete_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
     /// Fill in or rewrite method bodies after IR lowering.
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 }
 
-/// Run this compilation's native backend plugins over frontend-checked common IR. Annotation names
-/// and values have already been resolved and folded, so neither reparsed source nor spelling
-/// participates. `plugins` is the same selection the frontend ran; with none selected this is a no-op.
-pub fn run_enabled(
+/// Declare what this compilation's native plugins generate, at the frontend/backend handoff.
+/// Annotation names and values have already been resolved and folded, so neither reparsed source
+/// nor spelling participates. `plugins` is the same selection the frontend ran; with none selected
+/// this is a no-op.
+pub fn declare_enabled(ir: &mut IrFile, plugins: &registry::NativePlugins, module_name: &str) {
+    let ctx = PluginContext::from_ir(ir);
+    if !triggered(ir, plugins, &ctx) {
+        return;
+    }
+    plugins.host(module_name).declare(ir, &ctx);
+}
+
+/// Realize what [`declare_enabled`] declared for a target backend, and rewrite the plugins'
+/// expressions in source bodies.
+pub fn complete_enabled(
     ir: &mut IrFile,
     plugins: &registry::NativePlugins,
     module_name: &str,
     target_type_descriptor: fn(Ty) -> Option<String>,
     classifiers: &dyn crate::types::ClassifierFactSource,
 ) {
-    if plugins.is_empty() {
+    let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
+    if !triggered(ir, plugins, &ctx) {
         return;
     }
-    let ctx = PluginContext::from_ir(ir).with_target_type_descriptor(target_type_descriptor);
+    record_external_value_classes(ir, classifiers);
+    let external = external_serializers(ir, classifiers);
+    let ctx = ctx
+        .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
+        .with_external_serializers(external)
+        .with_runtime_serializers(runtime_serializers(classifiers))
+        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers));
+    plugins.host(module_name).complete(ir, &ctx);
+}
+
+/// Whether a selected plugin has anything to do in `ir`: a planned plugin expression or a class
+/// carrying its trigger annotation.
+fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext) -> bool {
+    if plugins.is_empty() {
+        return false;
+    }
     let uses_serialization = ir.exprs.iter().any(|expression| {
         matches!(
             expression,
@@ -548,20 +755,45 @@ pub fn run_enabled(
             }
         )
     });
-    if !uses_serialization
-        && ctx
+    uses_serialization
+        || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
             .is_empty()
-    {
-        return;
+}
+
+/// The provider-confirmed kind of every serializer class a property's `@Serializable(with = …)`
+/// names, on the property itself or on its declared type and type arguments, that this compilation
+/// does not declare (a declared one is classified from its own IR class).
+fn declared_serializer_objects(
+    ir: &IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+) -> std::collections::HashMap<TypeName, bool> {
+    let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
+    let declared = ir
+        .classes
+        .iter()
+        .map(|class| class.fq_name_id())
+        .collect::<std::collections::HashSet<_>>();
+    let property_annotations = ir
+        .classes
+        .iter()
+        .flat_map(|class| &class.property_annotations)
+        .flat_map(|property| property.annotations.applications())
+        .filter(|annotation| annotation.internal == serializable)
+        .flat_map(|annotation| &annotation.values)
+        .filter_map(|(_, value)| match value {
+            crate::ir::AnnoValue::Class(serializer) => serializer.kotlin_class_internal(),
+            _ => None,
+        });
+    let mut type_annotations = Vec::new();
+    for spelling in ir.prop_declared_spellings.values() {
+        serialization::named_serializers(&spelling.ret, &mut type_annotations);
     }
-    record_external_value_classes(ir, classifiers);
-    let external = external_serializers(ir, classifiers);
-    let ctx = ctx
-        .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
-        .with_external_serializers(external)
-        .with_runtime_serializers(runtime_serializers(classifiers));
-    plugins.host(module_name).run(ir, &ctx);
+    property_annotations
+        .chain(type_annotations)
+        .filter(|serializer| !declared.contains(serializer))
+        .filter_map(|serializer| Some((serializer, classifiers.classifier_is_object(serializer)?)))
+        .collect()
 }
 
 fn serial_info_annotations(
@@ -664,10 +896,17 @@ fn record_external_value_classes(
             continue;
         };
         collect(underlying, &mut referenced);
-        resolved.push((name, underlying));
+        resolved.push((
+            name,
+            underlying,
+            classifiers.classifier_value_declaration(name),
+        ));
     }
-    for (name, underlying) in resolved {
+    for (name, underlying, declaration) in resolved {
         ir.insert_external_value_class_name(name, underlying);
+        if let Some(declaration) = declaration {
+            ir.insert_external_value_class_declaration(name, declaration);
+        }
     }
 }
 
@@ -804,6 +1043,7 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
         let crate::ir::IrExpr::PluginPlaceholder {
             plugin: "serialization",
             data,
+            types,
             ..
         } = expression
         else {
@@ -814,6 +1054,9 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
                 external.push(classifier);
             }
         }
+        // A planned operation's type operands are what it needs a serializer FOR: the frontend
+        // plans `element<JsonElement>("v")` with `JsonElement` here, and nowhere else names it.
+        candidates.extend(types.iter().copied());
     }
     while let Some(ty) = candidates.pop() {
         // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
@@ -829,8 +1072,8 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
     external.into_iter()
 }
 
-/// Runs registered plugins over an `IrFile` phase by phase: all supertypes, then all declarations,
-/// then all body transforms.
+/// Runs registered plugins over an `IrFile` phase by phase: all supertypes and declarations at the
+/// handoff, then every target realization and body transform in the backend.
 #[derive(Default)]
 pub struct PluginHost {
     plugins: Vec<Box<dyn IrPlugin>>,
@@ -856,6 +1099,30 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].
+    pub fn sam_with_receiver_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.sam_with_receiver_annotations().iter().copied())
+            .collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::no_arg_constructor_annotations`].
+    pub fn no_arg_constructor_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.no_arg_constructor_annotations().iter().copied())
+            .collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::open_by_default_annotations`].
+    pub fn open_by_default_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.open_by_default_annotations().iter().copied())
+            .collect()
     }
 
     pub fn generate_frontend_declarations(
@@ -908,7 +1175,7 @@ impl PluginHost {
 
     pub fn plan_frontend_expressions(
         &self,
-        ctx: &FrontendExpressionContext,
+        ctx: &FrontendExpressionContext<'_>,
     ) -> Vec<(crate::ast::ExprId, PluginExpressionPlan)> {
         let mut plans = Vec::new();
         for plugin in &self.plugins {
@@ -917,12 +1184,20 @@ impl PluginHost {
         plans
     }
 
-    pub fn run(&self, ir: &mut IrFile, ctx: &PluginContext) {
+    /// The handoff phase: all supertypes, then all declarations.
+    pub fn declare(&self, ir: &mut IrFile, ctx: &PluginContext) {
         for p in &self.plugins {
             p.generate_supertypes(ir, ctx);
         }
         for p in &self.plugins {
             p.generate_declarations(ir, ctx);
+        }
+    }
+
+    /// The target phase: every declaration's realization, then all body transforms.
+    pub fn complete(&self, ir: &mut IrFile, ctx: &PluginContext) {
+        for p in &self.plugins {
+            p.complete_declarations(ir, ctx);
         }
         for p in &self.plugins {
             p.transform_bodies(ir, ctx);
@@ -930,9 +1205,15 @@ impl PluginHost {
     }
 }
 
-/// Fill all `IrClass` fields with empty defaults for a synthesized class.
+/// Fill all `IrClass` fields with empty defaults for a synthesized class named by its spelling.
+#[cfg(test)]
 pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass {
-    crate::ir::IrClass::synthetic(crate::types::type_name(&fq_name.into()))
+    synthetic_class_name(crate::types::type_name(&fq_name.into()))
+}
+
+/// Fill all [`crate::ir::IrClass`] fields with empty defaults for an already-resolved classifier.
+pub(crate) fn synthetic_class_name(fq_name: crate::types::TypeName) -> crate::ir::IrClass {
+    crate::ir::IrClass::synthetic(fq_name)
 }
 
 #[cfg(test)]
@@ -1071,7 +1352,8 @@ mod tests {
         let mut host = PluginHost::new();
         host.register(Box::new(TouchPlugin));
         let mut ir = IrFile::default();
-        host.run(&mut ir, &PluginContext::default());
+        host.declare(&mut ir, &PluginContext::default());
+        host.complete(&mut ir, &PluginContext::default());
         assert_eq!(ir.classes.len(), 1);
         assert!(ir.classes[0].fq_name_matches("demo/Generated"));
     }
@@ -1177,6 +1459,31 @@ mod tests {
                 "kotlinx/serialization/json/JsonElement"
             )),
             "a reified type argument must be a candidate: {candidates:?}"
+        );
+    }
+
+    /// The frontend plans `element<JsonElement>("v")` as a plugin operation whose TYPE operand is
+    /// the element type; no reified substitution and no name payload carries it. It, and the type
+    /// arguments inside it, must still reach the classifier-fact lookup.
+    #[test]
+    fn a_planned_operation_type_is_an_external_classifier_candidate() {
+        let mut ir = IrFile::default();
+        ir.add_expr(crate::ir::IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            kind: "descriptorElementDefaultBoth",
+            exprs: Vec::new(),
+            data: Vec::new(),
+            types: vec![Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::obj("kotlinx/serialization/json/JsonElement")],
+            )],
+        });
+        let candidates: Vec<crate::types::TypeName> = external_classifier_candidates(&ir).collect();
+        assert!(
+            candidates.contains(&crate::types::type_name(
+                "kotlinx/serialization/json/JsonElement"
+            )),
+            "a planned operation's type operand must be a candidate: {candidates:?}"
         );
     }
 

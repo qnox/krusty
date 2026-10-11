@@ -3,10 +3,30 @@
 //! The conformance binary shares the lower-level harness in `common`, but must not compile these
 //! unrelated resolver/reference-toolchain helpers and then suppress their dead-code warnings.
 
+use krusty::compilation_target::CompilationTarget;
 use std::path::PathBuf;
 use std::process::Command;
 
 use super::common_core as common;
+
+/// [`common::compile_in_process`] with selected classpath entries treated as Kotlin friend modules
+/// (kotlinc `-Xfriend-paths`), as a test source set compiles against its main output.
+pub fn compile_in_process_with_friend_paths(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    friend_paths: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut paths = cp_jars.to_vec();
+    paths.extend(jdk_modules.map(std::path::Path::to_path_buf));
+    let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new_with_friend_paths(
+        paths,
+        friend_paths.to_vec(),
+    ));
+    let report = common::compile_in_process_report_with_classpath(src, stem, cp);
+    (!report.has_errors && !report.classes.is_empty()).then_some(report.classes)
+}
 
 /// Compile with an internal metadata stamp (`[X, Y, 0]`; `None` keeps the default). This is not
 /// `-language-version`. It lives in the e2e-only helper so the conformance binary does not compile
@@ -152,10 +172,29 @@ pub struct CompilerError {
 /// Extract every rendered compiler error in emission order. The scratch-directory prefixes differ
 /// between invocations, so the stable source filename is the location boundary compared by tests.
 pub fn compiler_errors(output: &str) -> Vec<CompilerError> {
+    rendered_diagnostics(output, "error:")
+}
+
+/// Every rendered compiler warning in emission order, located like [`compiler_errors`].
+pub fn compiler_warnings(output: &str) -> Vec<CompilerError> {
+    rendered_diagnostics(output, "warning:")
+}
+
+/// Every warning about the compilation itself rather than a source position (`warning: …` with no
+/// location), in emission order.
+pub fn compiler_module_warnings(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|rendered| rendered.strip_prefix("warning: "))
+        .map(str::to_string)
+        .collect()
+}
+
+fn rendered_diagnostics(output: &str, severity: &str) -> Vec<CompilerError> {
     output
         .lines()
         .filter_map(|rendered| {
-            let (location, message) = rendered.split_once("error:")?;
+            let (location, message) = rendered.split_once(severity)?;
             let location = location.trim().trim_end_matches(':');
             let mut fields = location.rsplitn(3, ':');
             let column = fields.next()?.trim().parse().ok()?;
@@ -175,7 +214,8 @@ pub fn compiler_errors(output: &str) -> Vec<CompilerError> {
         .collect()
 }
 
-fn write_fixture_sources(work: &std::path::Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
+/// Write named sources under `work`, creating their directories, and return their paths.
+pub fn write_fixture_sources(work: &std::path::Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
     sources
         .iter()
         .map(|(name, source)| {
@@ -205,7 +245,10 @@ fn kotlinc_paths_result(
     })
 }
 
-/// Compile named sources with both compiler CLIs and retain their diagnostic streams.
+/// Compile named sources with krusty and kotlinc and retain their diagnostic streams.
+///
+/// Krusty runs in-process, sharing the classpath index, unless the caller passes extra compiler
+/// flags. Those flags still go to the `krusty` CLI.
 pub fn compiler_diagnostics(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
@@ -213,48 +256,90 @@ pub fn compiler_diagnostics(
     compiler_diagnostics_with_reference_args(sources, classpath, &[])
 }
 
-/// Compile named sources with both compiler CLIs, forwarding explicit language arguments only to
-/// kotlinc. Krusty reads the equivalent `// LANGUAGE:` directives from each source fixture.
+/// Compile named sources with krusty and kotlinc, forwarding explicit language arguments only to
+/// kotlinc. Krusty reads the equivalent `// LANGUAGE:` directives from each source fixture and
+/// runs in-process.
 pub fn compiler_diagnostics_with_reference_args(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
     reference_extra_args: &[String],
 ) -> CompilerDiagnosticResult {
-    compiler_diagnostics_with_args(sources, classpath, &[], reference_extra_args)
+    compiler_diagnostics_with_args(sources, classpath, &[], &[], reference_extra_args)
 }
 
-/// Compile named sources with both compiler CLIs, handing both the same `shared_args` — switches a
-/// build passes every compiler alike, such as `-Xplugin`.
+/// Compile named sources with krusty and kotlinc, handing both the same `shared_args` — switches a
+/// build passes every compiler alike, such as `-Xplugin`. Shared flags select the `krusty` CLI.
 pub fn compiler_diagnostics_with_shared_args(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
     shared_args: &[String],
 ) -> CompilerDiagnosticResult {
-    compiler_diagnostics_with_args(sources, classpath, shared_args, shared_args)
+    compiler_diagnostics_with_args(sources, classpath, &[], shared_args, shared_args)
+}
+
+/// Compile named sources with selected classpath entries treated as friend modules by both
+/// compilers. This is the diagnostic counterpart of [`compile_in_process_with_friend_paths`].
+pub fn compiler_diagnostics_with_friend_paths(
+    sources: &[(&str, &str)],
+    classpath: &[PathBuf],
+    friend_paths: &[PathBuf],
+) -> CompilerDiagnosticResult {
+    let friends = std::env::join_paths(friend_paths)
+        .expect("build compiler-diagnostic friend paths")
+        .to_string_lossy()
+        .into_owned();
+    let reference_args = [format!("-Xfriend-paths={friends}")];
+    compiler_diagnostics_with_args(sources, classpath, friend_paths, &[], &reference_args)
 }
 
 fn compiler_diagnostics_with_args(
     sources: &[(&str, &str)],
     classpath: &[PathBuf],
+    friend_paths: &[PathBuf],
     krusty_extra_args: &[String],
     reference_extra_args: &[String],
 ) -> CompilerDiagnosticResult {
     let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
     let source_paths = write_fixture_sources(&work, sources);
+    let source_texts = sources
+        .iter()
+        .map(|(_, source)| (*source).to_string())
+        .collect::<Vec<_>>();
     let joined_classpath = (!classpath.is_empty())
         .then(|| std::env::join_paths(classpath).expect("build compiler-diagnostic classpath"));
+    let krusty_out = work.join("krusty-out");
 
-    let mut krusty = Command::new(common::krusty_binary());
-    krusty.args([
-        "-d",
-        work.join("krusty-out").to_str().expect("UTF-8 output path"),
-    ]);
-    if let Some(classpath) = &joined_classpath {
-        krusty.arg("-cp").arg(classpath);
-    }
-    krusty.args(krusty_extra_args);
-    krusty.args(&source_paths);
-    let krusty = krusty.output().expect("run krusty diagnostic fixture");
+    // Extra flags select a CLI shape (plugins, `-jvm-default`, language overrides). The default
+    // invocation is the production pipeline in-process: a process per snippet rebuilt the stdlib
+    // and JDK indexes, and that startup dominated the diagnostic suites.
+    let (krusty_code, krusty_stdout, krusty_stderr) = if krusty_extra_args.is_empty() {
+        krusty_cli_diagnostics_in_process(
+            &source_paths,
+            &source_texts,
+            classpath,
+            friend_paths,
+            &krusty_out,
+        )
+    } else {
+        let mut krusty = Command::new(common::krusty_binary());
+        krusty.args(["-d", krusty_out.to_str().expect("UTF-8 output path")]);
+        if let Some(classpath) = &joined_classpath {
+            krusty.arg("-cp").arg(classpath);
+        }
+        krusty.args(krusty_extra_args);
+        krusty.args(&source_paths);
+        let krusty = krusty.output().expect("run krusty diagnostic fixture");
+        (
+            krusty.status.code().unwrap_or_else(|| {
+                panic!(
+                    "krusty diagnostic fixture terminated by signal: status={:?}, sources={source_paths:?}",
+                    krusty.status
+                )
+            }),
+            String::from_utf8_lossy(&krusty.stdout).into_owned(),
+            String::from_utf8_lossy(&krusty.stderr).into_owned(),
+        )
+    };
 
     let mut reference_args = joined_classpath
         .map(|classpath| vec!["-cp".to_string(), classpath.to_string_lossy().into_owned()])
@@ -263,19 +348,142 @@ fn compiler_diagnostics_with_args(
     let (reference_code, reference_stderr) =
         kotlinc_paths_result(&source_paths, &work.join("reference-out"), &reference_args);
     let result = CompilerDiagnosticResult {
-        krusty_code: krusty.status.code().unwrap_or_else(|| {
-            panic!(
-                "krusty diagnostic fixture terminated by signal: status={:?}, sources={source_paths:?}",
-                krusty.status
-            )
-        }),
-        krusty_stdout: String::from_utf8_lossy(&krusty.stdout).into_owned(),
-        krusty_stderr: String::from_utf8_lossy(&krusty.stderr).into_owned(),
+        krusty_code,
+        krusty_stdout,
+        krusty_stderr,
         reference_code,
         reference_stderr,
     };
     let _ = std::fs::remove_dir_all(work);
     result
+}
+
+/// The default `krusty` CLI compile, inside this process. Classpath indexes stay in
+/// [`common::cached_classpath`], and the rendered streams match the CLI: located diagnostics on
+/// stderr, `ok: emitted …` on stdout, and a non-zero status when the compile has errors.
+fn krusty_cli_diagnostics_in_process(
+    source_paths: &[PathBuf],
+    source_texts: &[String],
+    explicit_classpath: &[PathBuf],
+    friend_paths: &[PathBuf],
+    dest: &std::path::Path,
+) -> (i32, String, String) {
+    use krusty::diag::{DiagSink, Severity};
+    use krusty::frontend::PlatformProvider;
+    use krusty::jvm::classpath::Classpath;
+    use krusty::jvm::jvm_libraries::JvmLibraries;
+    use krusty::language_settings::LanguageSettings;
+    use krusty::source::SourceInput;
+
+    let mut jars = explicit_classpath.to_vec();
+    let Some(stdlib) = krusty::jvm::kotlin_stdlib_jar() else {
+        return (
+            1,
+            String::new(),
+            "krusty: cannot locate kotlin-stdlib.jar; configure a Kotlin distribution or pass -no-stdlib\n"
+                .to_string(),
+        );
+    };
+    if !jars.iter().any(|path| path == &stdlib) {
+        jars.push(stdlib);
+    }
+    let Some(reflect) = krusty::jvm::kotlin_dist_jar("kotlin-reflect.jar") else {
+        return (
+            1,
+            String::new(),
+            "krusty: cannot locate kotlin-reflect.jar in the selected Kotlin distribution; pass -no-reflect to disable it\n"
+                .to_string(),
+        );
+    };
+    if !jars.iter().any(|path| path == &reflect) {
+        jars.push(reflect);
+    }
+    let jdk = common::jdk_modules();
+    let jdk_arg = (!jars.iter().any(|path| path == &jdk)).then_some(jdk.as_path());
+    let cp = if friend_paths.is_empty() {
+        common::cached_classpath(&jars, jdk_arg)
+    } else {
+        let mut paths = jars.clone();
+        paths.extend(jdk_arg.map(std::path::Path::to_path_buf));
+        std::rc::Rc::new(Classpath::new_with_friend_paths(
+            paths,
+            friend_paths.to_vec(),
+        ))
+    };
+    let settings = LanguageSettings::default();
+    let libraries = JvmLibraries::new(cp.clone())
+        .map(|libraries| libraries.with_api_version(settings.api_version));
+    let mut diags = DiagSink::new();
+    let stems = source_paths
+        .iter()
+        .map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("File")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let inputs = source_paths
+        .iter()
+        .zip(source_texts)
+        .zip(&stems)
+        .map(|((path, source), stem)| {
+            SourceInput::new(
+                krusty::source::kind(path).expect("fixture source must have a known extension"),
+                source.as_str(),
+            )
+            .with_file_stem(stem)
+        })
+        .collect::<Vec<_>>();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
+        &inputs,
+        PlatformProvider::from(krusty::frontend::PlatformProvider::jvm(libraries)),
+        &settings.features,
+        "main",
+        &mut diags,
+    );
+    let backend = krusty::jvm::JvmBackend::new(cp)
+        .with_annotations_in_metadata(settings.features.has("AnnotationsInMetadata"))
+        .with_pre_release_metadata(settings.features.is_pre_release())
+        .with_metadata_version(Some(settings.language_version.metadata_version()));
+    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    let rendered_files = source_paths
+        .iter()
+        .zip(source_texts)
+        .map(|(path, source)| {
+            (
+                path.to_str().expect("fixture path is UTF-8"),
+                source.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if diags.has_errors() {
+        diags
+            .diags
+            .retain(|diagnostic| diagnostic.severity == Severity::Error);
+        diags.module_warnings.clear();
+        let count = diags.diags.len();
+        return (
+            1,
+            String::new(),
+            format!(
+                "{}krusty: {count} error(s)\n",
+                diags.render_all(&rendered_files)
+            ),
+        );
+    }
+    let emitted = outputs
+        .iter()
+        .filter(|(path, _)| path.ends_with(".class"))
+        .count();
+    (
+        0,
+        format!(
+            "ok: emitted {emitted} class file(s) to {}\n",
+            dest.display()
+        ),
+        diags.render_all(&rendered_files),
+    )
 }
 
 /// Every error kotlinc reports for named sources, as `file:line:column: message` in emission
@@ -291,11 +499,15 @@ pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -
 /// Require krusty to report exactly kotlinc's errors for a single `Main.kt` and require kotlinc to
 /// accept `source`: the ledger is empty.
 pub fn assert_accepted_like_kotlinc(source: &str) {
-    let sources = [("Main.kt", source)];
     let reference_args = common::language_directives::kotlinc_args(source);
-    let expected = reference_error_ledger(&sources, &reference_args);
+    assert_sources_accepted_like_kotlinc(&[("Main.kt", source)], &reference_args);
+}
+
+/// Require kotlinc to accept `sources` and krusty to report exactly kotlinc's (empty) ledger.
+pub fn assert_sources_accepted_like_kotlinc(sources: &[(&str, &str)], reference_args: &[String]) {
+    let expected = reference_error_ledger(sources, reference_args);
     assert_eq!(
-        krusty_error_ledger_with_args(&sources, &reference_args),
+        krusty_error_ledger_with_args(sources, reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
         krusty::kotlin_version::target()
@@ -352,6 +564,23 @@ pub fn reference_error_blocks(sources: &[(&str, &str)], extra_args: &[String]) -
     error_blocks(&stderr, true)
 }
 
+/// Complete error messages already rendered by one compiler invocation. Each diagnostic starts
+/// with `file:line:column: first line`; subsequent message lines are prefixed with `| `. Kotlinc's
+/// source excerpt and caret are omitted.
+pub fn rendered_error_blocks(output: &str, excerpted: bool) -> Vec<String> {
+    error_blocks(output, excerpted)
+}
+
+/// kotlinc's exit status and stderr for named sources, recorded like every reference diagnostic
+/// run.
+pub fn reference_compiler_run(sources: &[(&str, &str)], extra_args: &[String]) -> (i32, String) {
+    let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let result = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
+    let _ = std::fs::remove_dir_all(work);
+    result
+}
+
 /// Krusty's error blocks with the standard language/API settings from the reference invocation.
 pub fn krusty_error_blocks_with_args(
     sources: &[(&str, &str)],
@@ -403,6 +632,12 @@ fn standard_version_args(arguments: &[String]) -> Vec<String> {
         }
     }
     selected
+}
+
+/// The error blocks of a reference compiler's stderr, in the shape [`reference_error_blocks`]
+/// returns: its trailing source-line and caret excerpt is not part of a message.
+pub fn reference_error_blocks_from(stderr: &str) -> Vec<String> {
+    error_blocks(stderr, true)
 }
 
 fn error_blocks(stderr: &str, excerpted: bool) -> Vec<String> {
@@ -502,7 +737,7 @@ pub fn front_end_diagnostics_inputs(
     let mut diagnostics = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         inputs,
-        common::with_native_plugins(platform),
+        common::with_native_plugins(CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -847,14 +1082,36 @@ fn method_instructions(disassembly: &str, method: &str) -> Option<String> {
 
 /// Compile named in-memory fixtures with kotlinc and run `box()` from `main_class` on the shared JVM.
 pub fn kotlinc_box_files_result(sources: &[(&str, &str)], main_class: &str) -> String {
+    kotlinc_box_files_result_with_classpath(sources, main_class, &[])
+}
+
+/// [`kotlinc_box_files_result`] with caller-supplied runtime dependencies, such as `kotlin-reflect`.
+pub fn kotlinc_box_files_result_with_classpath(
+    sources: &[(&str, &str)],
+    main_class: &str,
+    classpath: &[PathBuf],
+) -> String {
     let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
     let source_paths = write_fixture_sources(&work, sources);
     let output = work.join("out");
-    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &[]);
+    let mut extra_args = Vec::new();
+    if !classpath.is_empty() {
+        extra_args.push("-cp".to_string());
+        extra_args.push(
+            std::env::join_paths(classpath)
+                .expect("build reference-runtime classpath")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &extra_args);
     assert_eq!(code, 0, "kotlinc rejected runtime fixture: {diagnostics}");
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let result = common::run_box(&[], main_class, &[output, stdlib, jdk])
+    let mut runtime_classpath = vec![output];
+    runtime_classpath.extend_from_slice(classpath);
+    runtime_classpath.extend([stdlib, jdk]);
+    let result = common::run_box(&[], main_class, &runtime_classpath)
         .expect("run kotlinc-built multi-file box fixture");
     let _ = std::fs::remove_dir_all(work);
     result
@@ -894,6 +1151,16 @@ pub fn front_end_diagnostics_located(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
+    front_end_diagnostics_located_for(CompilationTarget::Jvm, src, cp_jars, jdk_modules)
+}
+
+/// [`front_end_diagnostics_located`] under `target`'s source rules.
+pub fn front_end_diagnostics_located_for(
+    target: krusty::compilation_target::CompilationTarget,
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
     let cp = common::cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
@@ -902,7 +1169,7 @@ pub fn front_end_diagnostics_located(
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        common::with_native_plugins(platform),
+        common::with_native_plugins(target, platform),
         &krusty::features::LangFeatures::new(),
         |_, _| {},
         &mut diags,
@@ -920,4 +1187,31 @@ pub fn front_end_diagnostics_located(
             format!("{line}:{column}: {severity}: {}", diagnostic.msg)
         })
         .collect()
+}
+
+/// Every file below `dir`, by its path relative to `dir`, with its bytes, sorted. A missing
+/// directory is an empty output.
+pub fn output_tree(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("compiler output entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let name = path
+                    .strip_prefix(dir)
+                    .expect("a file below the output root")
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, std::fs::read(&path).expect("read an output file")));
+            }
+        }
+    }
+    found.sort();
+    found
 }

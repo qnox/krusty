@@ -20,6 +20,12 @@ impl Emitter<'_> {
             self.bail_descriptor_arity(&mismatch, result, code);
             return;
         }
+        // Lambda placement can move a receiverless implementation from the facade onto the class
+        // whose bytecode retains its method handle. Calls built before that JVM-only placement —
+        // notably a suspend helper's generated continuation — still carry `Callee::Local`. The
+        // explicit physical-owner table is authoritative; never recover the owner from a generated
+        // method or continuation name.
+        let class = class.or_else(|| self.ir.class_static_local_functions.get(&function).copied());
         let (owner, is_interface, emitted_by_owner) =
             match self.local_delegate_access.foreign_owner(function) {
                 Some(owner) => (owner.classifier.render(), owner.is_interface, false),

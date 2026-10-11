@@ -189,6 +189,28 @@ impl ProductionSignatureSemantics<'_> {
                 bound
             });
         }
+        // Arrow syntax is already a complete semantic function type. Its parser-internal `<fun>`
+        // spelling is not a classifier lookup key: rebinding it through the normalized FunctionN
+        // inventory erases receiver, context, and suspend shape. Resolve the components in the
+        // same lexical scope before considering aliases or classifiers.
+        if super::super::function_type_ref_shape(reference).is_some() {
+            let mut unresolved = false;
+            let function = super::super::typeref_leaf(reference, &mut |component| match self
+                .signature_type_ref_at(scope, lexical, component, include_scope_owner_body)
+            {
+                Some(ty) => ty,
+                None => {
+                    unresolved = true;
+                    Ty::Error
+                }
+            });
+            let function = function.filter(|_| !unresolved)?;
+            return Some(if reference.nullable() {
+                Ty::nullable(function)
+            } else {
+                function
+            });
+        }
         let associated_receiver = self
             .headers
             .stub(scope.owner)
@@ -241,29 +263,27 @@ impl ProductionSignatureSemantics<'_> {
                     })
             })
         {
-            if !self.table.declaration_suppresses_visibility(scope.owner) {
-                let access = self
-                    .with_resolver(scope, |resolver| {
-                        resolver.inaccessible_classifier_access(internal)
-                    })
-                    .ok();
-                crate::trace_compiler!(
-                    "resolve",
-                    "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+            let access = self
+                .with_resolver(scope, |resolver| {
+                    resolver.inaccessible_classifier_access(internal)
+                })
+                .ok();
+            crate::trace_compiler!(
+                "resolve",
+                "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+                scope.owner,
+                scope.source,
+                reference.name,
+                internal,
+            );
+            if let Some(access) = access {
+                self.record_classifier_access_diagnostic_at(
                     scope.owner,
                     scope.source,
-                    reference.name,
+                    reference.span,
                     internal,
+                    super::super::inaccessible_classifier_message(&reference.name, access),
                 );
-                if let Some(access) = access {
-                    self.record_classifier_access_diagnostic_at(
-                        scope.owner,
-                        scope.source,
-                        reference.span,
-                        internal,
-                        super::super::inaccessible_classifier_message(&reference.name, access),
-                    );
-                }
             }
             // The provider-normalized declaration, whichever module or classpath entry supplies it:
             // its variances check the written projections and its formal bounds give each `*` its
@@ -444,32 +464,8 @@ impl ProductionSignatureSemantics<'_> {
         reference: &TypeRef,
         include_scope_owner_body: bool,
     ) -> Option<Ty> {
-        let (identity, formals, expansion) =
+        let (_, formals, expansion) =
             self.signature_source_alias_expansion(scope, &reference.name)?;
-        let selected_classifier = self.qualified_type_classifier(scope, &reference.name);
-        // Compare with the declaration-owned alias target, not with the storage variant of its
-        // expansion. A structural function expansion is `Ty::Fun`, while dependency metadata
-        // correctly records its classifier target; deriving the head from `Ty::Obj` would reject
-        // that legitimate alias and deriving it from backend representation would leak platform
-        // policy into signature resolution.
-        let expansion_head = self
-            .table
-            .source_alias_fqns
-            .get(&identity)
-            .copied()
-            .or_else(|| {
-                self.table
-                    .libraries
-                    .type_alias_expansion(identity)
-                    .map(|alias| alias.target)
-            })
-            .or_else(|| expansion.non_null().obj_internal());
-        if selected_classifier.is_some() && selected_classifier != expansion_head {
-            // A nearer class declaration owns this spelling. The imported alias is not a fallback
-            // template for that unrelated class, including when the alias expands to a function
-            // type and therefore has no classifier head at all.
-            return None;
-        }
         crate::trace_compiler!(
             "signature",
             "compact typealias use spelling={} formals={formals:?} template={expansion:?}",
@@ -513,7 +509,7 @@ impl ProductionSignatureSemantics<'_> {
             .into_iter()
             .zip(arguments)
             .collect::<crate::symbol_resolver::GSigBinds>();
-        Some(crate::symbol_resolver::ty_subst(expansion, &bindings))
+        Some(crate::types::ty_subst_alias_expansion(expansion, &bindings))
     }
 
     /// Resolve a source type-alias lookup spelling to its declaration-owned expansion. This is a
@@ -524,60 +520,15 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> Option<(crate::types::TypeName, Vec<String>, Ty)> {
-        if spelling.contains('.') || spelling.contains('/') {
-            return None;
-        }
-        let imports = self.function_import_scope(scope.source).ok()?;
-        let expansion = |identity: crate::types::TypeName| {
-            self.table
-                .source_alias_expansions
-                .get(&identity)
-                .cloned()
-                .or_else(|| {
-                    self.table
-                        .libraries
-                        .type_alias_expansion(identity)
-                        .map(|alias| (alias.formals, alias.expansion))
-                })
-        };
-        let identity = if let Some((owner, declared_name)) = imports.explicit_target(spelling) {
-            owner
-                .existing_classifier(&declared_name)
-                .filter(|&id| expansion(id).is_some())?
-        } else {
-            let mut found = None;
-            for level in imports.classifier_levels() {
-                for &package in &level.packages {
-                    let Some(candidate) = crate::types::existing_type_name_child(package, spelling)
-                        .filter(|&id| expansion(id).is_some())
-                        .filter(|_| {
-                            !level.builtins_only
-                                || self
-                                    .table
-                                    .libraries
-                                    .symbols(
-                                        crate::symbol_source::SymbolNamespace::Package(package),
-                                        spelling,
-                                    )
-                                    .builtin_classifier
-                        })
-                    else {
-                        continue;
-                    };
-                    match found {
-                        None => found = Some(candidate),
-                        // Two distinct alias declarations in one level: ambiguous, kotlinc rejects.
-                        Some(previous) if previous == candidate => {}
-                        Some(_) => return None,
-                    }
-                }
-                if found.is_some() {
-                    break;
-                }
-            }
-            found?
-        };
-        expansion(identity).map(|(formals, expansion)| (identity, formals, expansion))
+        // The classifier and optional alias come from one scope-tower operation. Looking up alias
+        // declarations separately would let a lower star-imported alias attach itself to a winning
+        // same-package class whenever both normalize to the same target classifier.
+        self.with_resolver(scope, |resolver| {
+            resolver
+                .qualified_type_alias_expansion(spelling)
+                .map(|alias| (alias.identity, alias.formals, alias.expansion))
+        })
+        .ok()
     }
 
     pub(super) fn qualified_classifier(
@@ -864,20 +815,8 @@ impl ProductionSignatureSemantics<'_> {
             let (selection, failed_segment) =
                 resolver.qualified_type_classifier_binding_in_scope(spelling);
             match selection {
-                crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
-                    return Some((Some(classifier), None));
-                }
-                // Conflicting explicit imports name no complete candidates; the import list
-                // owns that conflict, so the reference reports its unbound root.
-                crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates)
-                    if candidates.is_empty() =>
-                {
-                    return Some((
-                        None,
-                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
-                            failed_segment.unwrap_or_else(|| first.to_string()),
-                        )),
-                    ));
+                crate::symbol_resolver::CandidateSelectionWithTies::Selected(path) => {
+                    return Some((Some(path.classifier), None));
                 }
                 crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates) => {
                     return Some((
@@ -1127,18 +1066,21 @@ impl ProductionSignatureSemantics<'_> {
         let argument_ordinals = (0..arguments.len())
             .map(|ordinal| crate::ast::ExprId(ordinal as u32))
             .collect::<Vec<_>>();
+        let deferred_type_variables = self.active_postponed_type_variables(scope);
         let selected = super::super::member_extension_function_with(
             &source,
             &oracle,
             &receivers,
-            explicit_context_arguments,
-            &|parameters| {
-                super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle)
-                    .map(|types| {
-                        types
-                            .into_iter()
-                            .map(|ty| {
-                                (
+            super::super::MemberExtensionProbes {
+                explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
+                select_context_arguments: &|parameters| {
+                    super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle)
+                        .map(|types| {
+                            types
+                                .into_iter()
+                                .map(|ty| {
+                                    (
                                     super::super::ResolvedContextArgument::ImplicitReceiver(
                                         super::super::ImplicitReceiverSelection::signature_receiver(
                                             ty,
@@ -1146,55 +1088,56 @@ impl ProductionSignatureSemantics<'_> {
                                     ),
                                     ty,
                                 )
-                            })
-                            .collect()
-                    })
-                    .ok_or(super::super::MissingContextParameter {
-                        index: 0,
-                        ty: Ty::Error,
-                    })
-            },
-            &|argument| argument_kinds[argument].is_spread(),
-            &|_, _, _| None,
-            &|params, call_sig, slots| {
-                // Applicability is the shared per-argument rule: each argument must fit the
-                // parameter it maps to (a vararg's element unless the argument is spread).
-                let parameter_by_argument = super::super::call_argument_parameter_indices(
-                    slots.args.len(),
-                    params.len(),
-                    slots.arg_names,
-                    slots.trailing_lambda,
-                    call_sig,
-                )?;
-                for (argument, parameter) in parameter_by_argument.into_iter().enumerate() {
-                    let kind = &argument_kinds[argument];
-                    let declared = *params.get(parameter)?;
-                    let expected = if call_sig.vararg_index == Some(parameter) && !kind.is_spread()
-                    {
-                        declared.array_read_elem().unwrap_or(declared)
-                    } else {
-                        declared
-                    };
-                    if !kind.fits_parameter(&*self.table.libraries, &source, expected) {
-                        return None;
+                                })
+                                .collect()
+                        })
+                        .ok_or(super::super::MissingContextParameter {
+                            index: 0,
+                            ty: Ty::Error,
+                        })
+                },
+                is_spread_arg: &|argument| argument_kinds[argument].is_spread(),
+                unit_coerced_lambda: &|_, _, _| None,
+                score_candidate: &|params, call_sig, slots| {
+                    // Applicability is the shared per-argument rule: each argument must fit the
+                    // parameter it maps to (a vararg's element unless the argument is spread).
+                    let parameter_by_argument = super::super::call_argument_parameter_indices(
+                        slots.args.len(),
+                        params.len(),
+                        slots.arg_names,
+                        slots.trailing_lambda,
+                        call_sig,
+                    )?;
+                    for (argument, parameter) in parameter_by_argument.into_iter().enumerate() {
+                        let kind = &argument_kinds[argument];
+                        let declared = *params.get(parameter)?;
+                        let expected =
+                            if call_sig.vararg_index == Some(parameter) && !kind.is_spread() {
+                                declared.array_read_elem().unwrap_or(declared)
+                            } else {
+                                declared
+                            };
+                        if !kind.fits_parameter(&*self.table.libraries, &source, expected) {
+                            return None;
+                        }
                     }
-                }
-                let mapped = super::super::map_call_sig_args_with_trailing(
-                    slots.args,
-                    slots.arg_names,
-                    params.len(),
-                    call_sig,
-                    slots.trailing_lambda,
-                )
-                .ok()?;
-                Some(super::super::CallCandidateScore {
-                    rank: (
-                        0,
-                        std::cmp::Reverse(mapped.iter().filter(|slot| slot.is_none()).count()),
-                        !call_sig.vararg,
-                    ),
-                    sam_signatures: Vec::new(),
-                })
+                    let mapped = super::super::map_call_sig_args_with_trailing(
+                        slots.args,
+                        slots.arg_names,
+                        params.len(),
+                        call_sig,
+                        slots.trailing_lambda,
+                    )
+                    .ok()?;
+                    Some(super::super::CallCandidateScore {
+                        rank: (
+                            0,
+                            std::cmp::Reverse(mapped.iter().filter(|slot| slot.is_none()).count()),
+                            !call_sig.vararg,
+                        ),
+                        sam_signatures: Vec::new(),
+                    })
+                },
             },
             super::super::MemberExtensionFunctionCall {
                 extension_receiver,
@@ -1310,11 +1253,19 @@ impl ProductionSignatureSemantics<'_> {
                     .into_iter()
                     .map(|(inherited, _, _)| inherited),
             ) {
-                if let Some(companion) = self
-                    .table
-                    .class_by_type_name(candidate)
-                    .and_then(|signature| signature.companion_internal)
-                {
+                // A dependency superclass publishes its companion through its classifier record,
+                // exactly as a source one does through its signature.
+                let companion = match self.table.class_by_type_name(candidate) {
+                    Some(signature) => signature.companion_internal,
+                    None => self
+                        .table
+                        .libraries
+                        .classifier(candidate)
+                        .and_then(|declaration| {
+                            declaration.companion_object.as_ref().map(|(_, c)| *c)
+                        }),
+                };
+                if let Some(companion) = companion {
                     let ty = Ty::obj_name(companion);
                     if !receivers.contains(&ty) {
                         receivers.push(ty);
@@ -1339,6 +1290,32 @@ impl ProductionSignatureSemantics<'_> {
             }
         }
         receivers
+    }
+
+    /// Classifier stub positions in one source. Built once: range containment is a per-declaration
+    /// question, and scanning every classifier in the module for it is quadratic.
+    fn classifier_stub_positions(&self, source: crate::fir::SourceFileId) -> Vec<usize> {
+        let missing = self.classifier_stubs_by_source.borrow().is_none();
+        if missing {
+            let mut by_source = Vec::new();
+            for (position, stub) in self.headers.stubs.iter().enumerate() {
+                if stub.kind != crate::fir::DeclarationKind::Classifier {
+                    continue;
+                }
+                let index = stub.source.raw() as usize;
+                if by_source.len() <= index {
+                    by_source.resize(index + 1, Vec::new());
+                }
+                by_source[index].push(position);
+            }
+            *self.classifier_stubs_by_source.borrow_mut() = Some(by_source);
+        }
+        self.classifier_stubs_by_source
+            .borrow()
+            .as_ref()
+            .and_then(|by_source| by_source.get(source.raw() as usize))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Internal names of the classifiers lexically enclosing this scope's declaration, innermost
@@ -1378,20 +1355,18 @@ impl ProductionSignatureSemantics<'_> {
             current = current_anchor.owner;
         }
         let mut enclosing = self
-            .headers
-            .stubs
-            .iter()
-            .filter(|stub| {
-                stub.source == scope.source
-                    && stub.kind == crate::fir::DeclarationKind::Classifier
-                    && stub.range.lo <= anchor.range.lo
-                    && anchor.range.hi <= stub.range.hi
-            })
-            .filter_map(|stub| {
-                self.classifier_types
-                    .get(&stub.id)
-                    .copied()
-                    .map(|classifier| (stub.range.hi - stub.range.lo, classifier))
+            .classifier_stub_positions(scope.source)
+            .into_iter()
+            .filter_map(|position| {
+                let stub = &self.headers.stubs[position];
+                (stub.range.lo <= anchor.range.lo && anchor.range.hi <= stub.range.hi).then(
+                    || {
+                        self.classifier_types
+                            .get(&stub.id)
+                            .copied()
+                            .map(|classifier| (stub.range.hi - stub.range.lo, classifier))
+                    },
+                )?
             })
             .collect::<Vec<_>>();
         // Innermost first, so lexical scope-tower priority remains source-correct.

@@ -126,6 +126,7 @@ fn annotation_implementation(
     IrClass {
         fq_name,
         is_source_declared: false,
+        is_compiler_generated: false,
         is_anonymous_object: false,
         enclosure: Some(enclosure),
         is_inner_class: false,
@@ -188,7 +189,7 @@ fn annotation_implementation(
         super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
         is_enum: false,
         enum_entries: Vec::new(),
-        enum_entry_of: None,
+        is_enum_entry: false,
         prop_ref: None,
         func_ref: None,
         lambda: None,

@@ -5,7 +5,7 @@
 //! `try`'s dispatch block, or out of the frame with the slot still set, which IS the propagation.
 //! A caller never reads the value a throwing call returned, because it checks first.
 //!
-//! `docs/BUILD_AND_NATIVE_PLAN.md` records why this and not the alternatives. Table-driven
+//! `docs/NATIVE.md` records why this and not the alternatives. Table-driven
 //! unwinding needs Cranelift emitting `.eh_frame`, the linker placing it, and a DWARF CFI
 //! interpreter in the runtime — a phase, not an increment. `setjmp`/`longjmp` is far smaller and
 //! is rejected on CORRECTNESS: it returns twice, which nothing in Cranelift's SSA can express, so
@@ -24,7 +24,7 @@ impl BodyLowering<'_, '_, '_> {
     /// Every call in a function body goes through here. A `throw` stores the exception in the
     /// runtime's one pending slot and RETURNS, so a caller that did not look would carry on with a
     /// zero value as though nothing had happened; looking is the whole mechanism. See "How an
-    /// exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md` for why this and not unwind tables
+    /// exception propagates" in `docs/NATIVE.md` for why this and not unwind tables
     /// (they need `.eh_frame` and a DWARF interpreter, which is a phase) or `setjmp`/`longjmp`
     /// (it returns twice, which Cranelift's SSA cannot express without silently stale registers).
     ///
@@ -171,7 +171,7 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         }
         let Some(thrown) = thrown else {
-            return Err("a `throw` of a `Unit` value".to_string());
+            return Err("a `throw` of a `Unit` value".into());
         };
         let id = self.file.import("kt_throw", &[any()], Ty::Unit)?;
         let func_ref = self.func_ref(id);
@@ -222,9 +222,7 @@ impl BodyLowering<'_, '_, '_> {
             (Some(_), Some(value)) => {
                 self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
             }
-            (Some(_), None) => {
-                return Err("a `try` arm of no value where one is needed".to_string())
-            }
+            (Some(_), None) => return Err("a `try` arm of no value where one is needed".into()),
             (None, _) => {
                 self.builder.ins().jump(merge, &[]);
             }
@@ -374,10 +372,10 @@ impl BodyLowering<'_, '_, '_> {
         expected: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let Some((&block, leading)) = args.split_last() else {
-            return Err("`assertFailsWith` with no block".to_string());
+            return Err("`assertFailsWith` with no block".into());
         };
         let Some(descriptor) = self.file.type_descriptor(expected.non_null())? else {
-            return Err(format!(
+            return Err(declined!(
                 "`assertFailsWith` of `{}`, which wears no runtime descriptor",
                 super::type_checks::type_name_of(expected)
             ));
@@ -387,7 +385,7 @@ impl BodyLowering<'_, '_, '_> {
         let message = match leading {
             [] => None,
             [only] if params.len() == args.len() => Some(*only),
-            _ => return Err("`assertFailsWith` with an unexpected argument shape".to_string()),
+            _ => return Err("`assertFailsWith` with an unexpected argument shape".into()),
         };
         let message = match message {
             Some(arg) => self.reference(arg)?,
@@ -495,9 +493,9 @@ impl BodyLowering<'_, '_, '_> {
         result: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
-        let result = Some(result).filter(|ty| carrier(*ty) != Carrier::Void);
+        let result = Some(result).filter(|ty| self.carrier(*ty) != Carrier::Void);
         if let Some(ty) = result {
-            let clif = carrier(ty).clif().expect("non-void carrier");
+            let clif = self.carrier(ty).clif().expect("non-void carrier");
             self.builder.append_block_param(merge, clif);
         }
         let dispatch = self.builder.create_block();
@@ -546,7 +544,7 @@ impl BodyLowering<'_, '_, '_> {
                 concrete => concrete,
             };
             let Some(descriptor) = self.file.type_descriptor(runtime_type)? else {
-                return Err(format!(
+                return Err(declined!(
                     "a `catch` of `{:?}`, which wears no runtime descriptor",
                     catch.ty
                 ));
@@ -662,14 +660,14 @@ impl BodyLowering<'_, '_, '_> {
             }
             (_, [checked]) => (*checked, None),
             (_, [checked, message]) => (*checked, Some(*message)),
-            _ => return Err("a precondition with an unexpected argument shape".to_string()),
+            _ => return Err("a precondition with an unexpected argument shape".into()),
         };
         // The value is evaluated ONCE — `requireNotNull(f())` calls `f` once and answers what it
         // returned — so what the check branches on is derived from the value already in hand.
         let (condition, held) = match precondition.shape {
             PreconditionShape::Holds => {
                 let Some(value) = self.coerce(checked, Ty::Boolean)? else {
-                    return Err("a precondition over a `Unit` value".to_string());
+                    return Err("a precondition over a `Unit` value".into());
                 };
                 (Condition::Holds(value), None)
             }
@@ -693,7 +691,9 @@ impl BodyLowering<'_, '_, '_> {
         // `requireNotNull` ANSWERS the value it checked, at the type the call site asked for: the
         // declaration is generic, so a site expecting an `Int` gets the box read back as one.
         match held {
-            Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),
+            Some(value) if self.carrier(ret) != Carrier::Void => {
+                self.convert(value, Some(any()), ret)
+            }
             _ => Ok(None),
         }
     }

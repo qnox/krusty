@@ -4,6 +4,20 @@ use std::collections::HashMap;
 
 use super::{intern, Ty};
 
+fn compose_in_projection(inner: Ty) -> Ty {
+    match inner {
+        Ty::StarProjection(_) | Ty::InProjection(_) => inner,
+        other => Ty::in_projection(other),
+    }
+}
+
+fn compose_out_projection(inner: Ty) -> Ty {
+    match inner {
+        Ty::StarProjection(_) | Ty::OutProjection(_) => inner,
+        other => Ty::out_projection(other),
+    }
+}
+
 /// Substitute semantic type parameters throughout one type shape. This belongs to the type model:
 /// providers, overload selection, checking, and lowering all consume the same transformation.
 fn substitute_type_parameters<F>(
@@ -83,13 +97,13 @@ where
             preserve_unbound,
             enforce_bound_nullability,
         )),
-        Ty::InProjection(inner) => Ty::in_projection(substitute_type_parameters(
+        Ty::InProjection(inner) => compose_in_projection(substitute_type_parameters(
             *inner,
             lookup,
             preserve_unbound,
             enforce_bound_nullability,
         )),
-        Ty::OutProjection(inner) => Ty::out_projection(substitute_type_parameters(
+        Ty::OutProjection(inner) => compose_out_projection(substitute_type_parameters(
             *inner,
             lookup,
             preserve_unbound,
@@ -138,6 +152,68 @@ fn recorded_binding(bindings: &HashMap<String, Ty>, name: &str) -> Option<Ty> {
 
 pub(crate) fn ty_subst(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
     substitute_type_parameters(ty, |name| recorded_binding(bindings, name), false, true)
+}
+
+/// Apply a typealias template to its use-site arguments.
+///
+/// A projection belongs to the alias argument. When that formal occurs directly as a structural
+/// function parameter/result, the function component consumes the projection and keeps its
+/// underlying semantic type (`typealias F<T> = () -> T; F<*>` returns the star's `Any?` bound).
+/// Projections below a classifier remain written generic arguments and must survive.
+pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+    fn normalize(ty: Ty) -> Ty {
+        match ty {
+            Ty::Fun(signature) => Ty::fun_with_shape(
+                signature
+                    .params
+                    .iter()
+                    .map(|parameter| function_component(normalize(*parameter)))
+                    .collect(),
+                function_component(normalize(signature.ret)),
+                signature.context_count,
+                signature.has_receiver,
+                signature.suspend,
+            ),
+            Ty::Nullable(inner) => Ty::nullable(normalize(*inner)),
+            Ty::PlatformNullable(inner) => Ty::platform_nullable(normalize(*inner)),
+            Ty::DefinitelyNotNull(inner) => {
+                Ty::DefinitelyNotNull(super::intern_ty(normalize(*inner)))
+            }
+            Ty::InProjection(inner) => Ty::in_projection(normalize(*inner)),
+            Ty::OutProjection(inner) => Ty::out_projection(normalize(*inner)),
+            Ty::StarProjection(inner) => Ty::star_projection(normalize(*inner)),
+            Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+                name,
+                &arguments
+                    .iter()
+                    .map(|argument| normalize(*argument))
+                    .collect::<Vec<_>>(),
+            ),
+            Ty::Intersection(parts) => Ty::intersection(
+                &parts
+                    .iter()
+                    .map(|part| normalize(*part))
+                    .collect::<Vec<_>>(),
+            ),
+            other => other,
+        }
+    }
+
+    fn function_component(ty: Ty) -> Ty {
+        match ty {
+            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
+                function_component(*inner)
+            }
+            Ty::Nullable(inner) => Ty::nullable(function_component(*inner)),
+            Ty::PlatformNullable(inner) => Ty::platform_nullable(function_component(*inner)),
+            Ty::DefinitelyNotNull(inner) => {
+                Ty::DefinitelyNotNull(super::intern_ty(function_component(*inner)))
+            }
+            other => other,
+        }
+    }
+
+    normalize(ty_subst(ty, bindings))
 }
 
 pub(crate) fn ty_subst_all(types: &[Ty], bindings: &HashMap<String, Ty>) -> Vec<Ty> {
@@ -324,5 +400,29 @@ mod tests {
             &HashMap::from([("callee:T".to_string(), Ty::nullable(Ty::String))]),
         );
         assert_eq!(concrete, Ty::String);
+    }
+
+    #[test]
+    fn alias_substitution_consumes_projections_at_function_boundaries_only() {
+        let formal = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let template = Ty::fun(vec![formal, Ty::obj_args("sample/Box", &[formal])], formal);
+        let bindings = HashMap::from([(
+            "T".to_string(),
+            Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
+        )]);
+
+        assert_eq!(
+            ty_subst_alias_expansion(template, &bindings),
+            Ty::fun(
+                vec![
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                    Ty::obj_args(
+                        "sample/Box",
+                        &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+                    ),
+                ],
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            )
+        );
     }
 }

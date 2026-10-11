@@ -156,6 +156,7 @@ pub(super) fn realize(
             | IrExpr::SingletonValue { .. }
             | IrExpr::GetValue(_)
             | IrExpr::SetValue { .. }
+            | IrExpr::SetFrameResult { .. }
             | IrExpr::Call { .. }
             | IrExpr::Return(_)
             | IrExpr::Block { .. }
@@ -380,4 +381,5 @@ pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy
     crate::backend::counted_loops::CountedLoopPolicy {
         style: crate::backend::counted_loops::CounterLoopStyle::JavaLike,
         inlining: crate::backend::counted_loops::HeaderInlining::Kotlinc,
+        until_steps: crate::backend::counted_loops::UntilSteps::Built,
     };

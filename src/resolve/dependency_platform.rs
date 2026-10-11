@@ -197,7 +197,7 @@ fn merge_functions(
             existing.call_sig = candidate.call_sig.clone();
             existing.default_values = candidate.default_values.clone();
             existing.context_count = candidate.context_count;
-            existing.annotations = candidate.annotations.clone();
+            existing.callable.annotations = candidate.callable.annotations.clone();
             existing.callable.inline = candidate.flags.inline;
             existing.callable.suspend = candidate.flags.suspend;
             existing.callable.is_abstract = candidate.flags.is_abstract;
@@ -331,10 +331,23 @@ impl SymbolSource for DependencyPlatform {
         self.platform.external_callable(identity)
     }
 
+    /// Dependency properties, like dependency callables, retain identities assigned by the
+    /// compiled platform underneath this source-declaration federation.
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.platform.external_property(identity)
+    }
+
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.source()
             .generated_serializer_singleton(classifier)
             .or_else(|| self.platform.generated_serializer_singleton(classifier))
+    }
+
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &self.symbols.sam_with_receiver_annotations
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
@@ -527,6 +540,17 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.is_erased_contract_callable(callable)
     }
 
+    fn top_level_callable_package(&self, callable: &crate::libraries::LibraryCallable) -> TypeName {
+        self.platform.top_level_callable_package(callable)
+    }
+
+    fn contract_dsl_member(
+        &self,
+        callable: &crate::contracts::SelectedDslCallable<'_>,
+    ) -> Option<crate::contracts::DslMember> {
+        self.platform.contract_dsl_member(callable)
+    }
+
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
         self.platform.boxed_primitive(ty)
     }
@@ -557,10 +581,6 @@ impl SemanticPlatform for DependencyPlatform {
 
     fn platform_default_import_packages(&self) -> &'static [&'static str] {
         self.platform.platform_default_import_packages()
-    }
-
-    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
-        self.platform.physical_property_getter_names(property)
     }
 
     fn inherited_accessor_properties(
@@ -617,6 +637,27 @@ mod tests {
             self.inherits_classifier_callables
         }
     }
+
+    struct PropertyPlatform;
+
+    impl SymbolSource for PropertyPlatform {
+        fn external_property(
+            &self,
+            identity: crate::fir::ExternalPropertyId,
+        ) -> Option<crate::libraries::ExternalPropertyRealization> {
+            (identity == crate::fir::ExternalPropertyId::from_raw(5)).then(|| {
+                crate::libraries::ExternalPropertyRealization {
+                    name: "dependencyValue".to_owned(),
+                    getter: crate::fir::ExternalCallableId::from_raw(8),
+                    setter: None,
+                    declares_value_class_storage: false,
+                    compile_time_constant: None,
+                }
+            })
+        }
+    }
+
+    impl SemanticPlatform for PropertyPlatform {}
 
     fn type_shape(is_public: bool) -> LibraryType {
         LibraryType {
@@ -710,6 +751,7 @@ mod tests {
             is_const: false,
             implicit_integer_coercion: false,
             compile_time_constant: None,
+            metadata_constant_read: false,
             visibility,
             owner,
             receiver_rank: 0,
@@ -755,6 +797,19 @@ mod tests {
         );
 
         assert!(platform.inherits_classifier_callables(classifier));
+    }
+
+    #[test]
+    fn dependency_wrapper_preserves_the_platforms_external_property_realization() {
+        let platform = DependencyPlatform::new(
+            Box::new(PropertyPlatform),
+            crate::resolve::SymbolTable::default(),
+        );
+        let realized = platform
+            .external_property(crate::fir::ExternalPropertyId::from_raw(5))
+            .expect("the dependency wrapper forwards the provider-owned identity");
+        assert_eq!(realized.name, "dependencyValue");
+        assert_eq!(realized.getter, crate::fir::ExternalCallableId::from_raw(8));
     }
 
     #[test]

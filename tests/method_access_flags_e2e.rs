@@ -121,6 +121,263 @@ fn vararg_method_flags_match_kotlinc() {
     assert_method_flags_match_kotlinc("Varargs", VARARGS, &["Crate", "Tier", "Shelf", "VarargsKt"]);
 }
 
+/// Visibility of overriding members: an override with NO visibility modifier keeps the overridden
+/// member's visibility (transitively down an override chain, and the most permissive one when it
+/// overrides several members), an explicit modifier wins, and a declared `protected abstract`
+/// member stays protected. Covers functions, properties, an enum-entry body, and a constructor
+/// property parameter.
+const OVERRIDE_VISIBILITY: &str = "abstract class Counter {\n\
+    protected abstract fun <T> countTime(block: () -> T): T\n\
+    protected abstract fun plain(): Int\n\
+    protected open fun openMeth(): Int = 1\n\
+}\n\
+abstract class Middle : Counter() {\n\
+    abstract override fun plain(): Int\n\
+}\n\
+class Simple : Middle() {\n\
+    override fun <T> countTime(block: () -> T): T = block()\n\
+    override fun plain(): Int = 2\n\
+    override fun openMeth(): Int = 3\n\
+    fun callAll(): Int = countTime { 1 } + plain() + openMeth()\n\
+}\n\
+open class Widened {\n\
+    protected open fun keep(): Int = 1\n\
+}\n\
+class Explicit : Widened() {\n\
+    public override fun keep(): Int = 4\n\
+}\n\
+interface Iface { fun m(): Int }\n\
+class Impl : Iface { override fun m(): Int = 6 }\n\
+open class BothBase { protected open fun f(): Int = 1 }\n\
+interface BothIface { fun f(): Int }\n\
+class Both : BothBase(), BothIface { override fun f(): Int = 7 }\n\
+open class PropBase {\n\
+    protected open val p: Int = 1\n\
+    protected open var q: Int = 2\n\
+}\n\
+class PropDerived : PropBase() {\n\
+    override val p: Int = 3\n\
+    override var q: Int = 4\n\
+    fun sum(): Int = p + q\n\
+}\n\
+enum class Mode {\n\
+    SLOW { override fun rate(): Int = 12 };\n\
+    protected abstract fun rate(): Int\n\
+    fun base(): Int = rate()\n\
+}\n\
+open class ParamBase { protected open val x: Int = 1 }\n\
+class ParamDerived(override val x: Int) : ParamBase() {\n\
+    fun read(): Int = x\n\
+}\n\
+fun box(): String {\n\
+    val total = Simple().callAll() + Explicit().keep() + Impl().m() +\n\
+        Both().f() + PropDerived().sum() + Mode.SLOW.base() + ParamDerived(8).read()\n\
+    return if (total == 50) \"OK\" else \"fail: \" + total\n\
+}\n";
+
+#[test]
+fn override_visibility_members_run() {
+    common::expect_box_ok_with_stdlib(OVERRIDE_VISIBILITY, "OverrideVisibility");
+}
+
+#[test]
+fn override_without_modifier_keeps_overridden_visibility_like_kotlinc() {
+    assert_method_flags_match_kotlinc(
+        "OverrideVisibility",
+        OVERRIDE_VISIBILITY,
+        &[
+            "Counter",
+            "Middle",
+            "Simple",
+            "Widened",
+            "Explicit",
+            "Iface",
+            "Impl",
+            "BothBase",
+            "BothIface",
+            "Both",
+            "PropBase",
+            "PropDerived",
+            "ParamBase",
+            "ParamDerived",
+        ],
+    );
+    // The enum and its entry subclass take the same assertion on every declared member row. Their
+    // CONSTRUCTOR rows are left out: kotlinc routes entry construction through a synthetic
+    // `DefaultConstructorMarker` constructor krusty does not emit, a pre-existing enum-entry shape
+    // gap unrelated to member visibility.
+    assert_methods_match_kotlinc(
+        "OverrideVisibility",
+        OVERRIDE_VISIBILITY,
+        &["Mode", "Mode$SLOW"],
+        |bytes| {
+            method_flags(bytes)
+                .into_iter()
+                .filter(|(name, _, _)| !name.starts_with('<'))
+                .collect()
+        },
+    );
+}
+
+/// A Kotlin subclass in the same package as a Java class whose member is package-private: kotlinc
+/// normalizes the inherited package-private visibility to `protected`
+/// (`JavaVisibilities.PackageVisibility.normalize()`), on the JVM access flags and in `@Metadata`
+/// alike.
+const JAVA_PACKAGE_PRIVATE_OVERRIDE: &str = "package j\n\
+class Derived : Base() {\n\
+    override fun plain() {}\n\
+}\n";
+
+#[test]
+fn java_package_private_override_inherits_protected_like_kotlinc() {
+    let Some((java, _)) = common::javac_compile(
+        &[(
+            "Base.java".to_string(),
+            "package j; public class Base { void plain() {} }".to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let comparison = common::compare_with_kotlinc_plugin_jdk_cp(
+        "Derived",
+        JAVA_PACKAGE_PRIVATE_OVERRIDE,
+        "j/Derived",
+        std::slice::from_ref(&java),
+        "1.8",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    assert_eq!(
+        method_flags(&comparison.krusty_bytes),
+        method_flags(&comparison.reference_bytes),
+        "j/Derived: methods"
+    );
+    assert_eq!(
+        common::raw_kotlin_metadata(&comparison.krusty_bytes),
+        common::raw_kotlin_metadata(&comparison.reference_bytes),
+        "j/Derived: @Metadata"
+    );
+}
+
+/// A protected Java collection parameter is the flexible `(Mutable)X!`. An override written with
+/// the mutable face or the read-only face is that member, so a missing visibility modifier inherits
+/// `protected` on the JVM access flags and in `@Metadata`. Covers a generic JDK method
+/// (`LinkedHashMap.removeEldestEntry`), a generic `List<T>` parameter, its read-only spelling, and
+/// a raw `Map.Entry` parameter whose classfile has no `Signature` attribute.
+const JAVA_COLLECTION_OVERRIDE: &str = "import java.util.LinkedHashMap\n\
+class MutableHost : LinkedHashMap<String, String>() {\n\
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = false\n\
+}\n\
+class ReadOnlyHost : LinkedHashMap<String, String>() {\n\
+    override fun removeEldestEntry(eldest: Map.Entry<String, String>?): Boolean = false\n\
+}\n";
+
+const JAVA_COLLECTION_FIXTURE_OVERRIDE: &str = "package j\n\
+class MutableTake : ListBox<String>() {\n\
+    override fun take(values: MutableList<String>?): Boolean = false\n\
+}\n\
+class ReadOnlyTake : ListBox<String>() {\n\
+    override fun take(values: List<String>?): Boolean = false\n\
+}\n\
+class RawTake : RawBox() {\n\
+    override fun take(eldest: MutableMap.MutableEntry<*, *>?): Boolean = false\n\
+}\n";
+
+#[test]
+fn java_collection_override_inherits_protected_like_kotlinc() {
+    assert_flags_and_metadata("MutableHost", JAVA_COLLECTION_OVERRIDE, "MutableHost", &[]);
+    assert_flags_and_metadata(
+        "ReadOnlyHost",
+        JAVA_COLLECTION_OVERRIDE,
+        "ReadOnlyHost",
+        &[],
+    );
+    let Some((java, _)) = common::javac_compile(
+        &[
+            (
+                "ListBox.java".to_string(),
+                "package j;\nimport java.util.List;\npublic class ListBox<T> {\n    protected boolean take(List<T> values) { return false; }\n}\n".to_string(),
+            ),
+            (
+                "RawBox.java".to_string(),
+                "package j;\nimport java.util.Map;\npublic class RawBox {\n    @SuppressWarnings(\"rawtypes\")\n    protected boolean take(Map.Entry eldest) { return false; }\n}\n".to_string(),
+            ),
+        ],
+        &[],
+    ) else {
+        return;
+    };
+    let extra = std::slice::from_ref(&java);
+    assert_flags_and_metadata(
+        "MutableTake",
+        JAVA_COLLECTION_FIXTURE_OVERRIDE,
+        "j/MutableTake",
+        extra,
+    );
+    assert_flags_and_metadata(
+        "ReadOnlyTake",
+        JAVA_COLLECTION_FIXTURE_OVERRIDE,
+        "j/ReadOnlyTake",
+        extra,
+    );
+    assert_flags_and_metadata(
+        "RawTake",
+        JAVA_COLLECTION_FIXTURE_OVERRIDE,
+        "j/RawTake",
+        extra,
+    );
+}
+
+fn assert_flags_and_metadata(name: &str, src: &str, class: &str, extra: &[std::path::PathBuf]) {
+    let comparison =
+        common::compare_with_kotlinc_plugin_jdk_cp(name, src, class, extra, "1.8", &[])
+            .expect("reference kotlinc and javap are provisioned");
+    assert_eq!(
+        method_flags(&comparison.krusty_bytes),
+        method_flags(&comparison.reference_bytes),
+        "{class}: methods"
+    );
+    assert_eq!(
+        common::raw_kotlin_metadata(&comparison.krusty_bytes),
+        common::raw_kotlin_metadata(&comparison.reference_bytes),
+        "{class}: @Metadata"
+    );
+}
+
+/// A body-local classifier's override also keeps the overridden member's visibility: the local
+/// class's override plan is published when its declaring body is checked, after the members were
+/// predeclared, and `finalize_inherited_statuses` re-reads the corrected header once every body
+/// has been.
+const LOCAL_OVERRIDE_VISIBILITY: &str = "open class Base {\n\
+    protected open fun f(): Int = 1\n\
+}\n\
+fun box(): String {\n\
+    class Local : Base() {\n\
+        override fun f(): Int = 2\n\
+        fun g(): Int = f()\n\
+    }\n\
+    return if (Local().g() == 2) \"OK\" else \"fail\"\n\
+}\n";
+
+#[test]
+fn local_override_members_run() {
+    common::expect_box_ok_with_stdlib(LOCAL_OVERRIDE_VISIBILITY, "LocalOverrideVisibility");
+}
+
+#[test]
+fn local_override_keeps_overridden_visibility_like_kotlinc() {
+    assert_method_flags_match_kotlinc(
+        "LocalOverrideVisibility",
+        LOCAL_OVERRIDE_VISIBILITY,
+        &[
+            "Base",
+            "LocalOverrideVisibilityKt",
+            "LocalOverrideVisibilityKt$box$Local",
+        ],
+    );
+}
+
 /// `ACC_VARARGS` on every vararg member shape: a declared abstract member, an `abstract override`,
 /// the concrete override under it, an interface member, an `open` member with its override, and the
 /// jvm-default compatibility surface — a default member's `access$…$jd` bridge and `$DefaultImpls`
@@ -185,6 +442,40 @@ fn abstract_vararg_method_flags_match_kotlinc() {
             "OpenBase",
             "OpenDerived",
         ],
+    );
+}
+
+/// An override of an `internal` member keeps `internal` and so stays JVM-public, as kotlinc's
+/// does. kotlinc mangles the member's JVM name (`f$main`) and records the mangled name in the
+/// `@Metadata` `jvm_signature` extension where krusty keeps the declared name — a pre-existing
+/// mangling gap, visible for a declared `internal` member alike — so only each method's descriptor
+/// and access flags are compared. The cross-module access rejection is covered by
+/// `diagnostics_language_parity_e2e::internal_override_visibility_access_matches_kotlinc_across_modules`.
+const INTERNAL_OVERRIDE: &str = "open class Base {\n\
+    internal open fun f(): Int = 1\n\
+}\n\
+class Derived : Base() {\n\
+    override fun f(): Int = 2\n\
+}\n\
+fun box(): String = if (Derived().f() == 2) \"OK\" else \"fail\"\n";
+
+#[test]
+fn internal_override_members_run() {
+    common::expect_box_ok_with_stdlib(INTERNAL_OVERRIDE, "InternalOverride");
+}
+
+#[test]
+fn internal_override_stays_jvm_public_like_kotlinc() {
+    assert_methods_match_kotlinc(
+        "InternalOverride",
+        INTERNAL_OVERRIDE,
+        &["Base", "Derived", "InternalOverrideKt"],
+        |bytes| {
+            method_flags(bytes)
+                .into_iter()
+                .map(|(_, descriptor, flags)| (descriptor, flags))
+                .collect()
+        },
     );
 }
 

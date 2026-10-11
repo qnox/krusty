@@ -4121,7 +4121,9 @@ Remaining:
   throws whatever its body does. That is not specific to `typeOf`.
 - Reified `typeOf` in an anonymous object's property initializer is specialized at the inline
   call, including when another inline function passes the outer reified parameter
-  (`reifiedAsNestedArgument`). `localClass` remains: two local objects compare equal.
+  (`reifiedAsNestedArgument`). An anonymous object that captures a `crossinline` lambda is copied
+  per call as well (`localClass`): a capture-free lambda is inlined into the copy, and `typeOf`
+  names that copy.
   Same-module `object` members (`reified/capture.kt`, `reified/innerObject.kt`) are copied at the
   inline call.
 - Reified intersection-type arguments (`intersectionType`,
@@ -4394,8 +4396,19 @@ deliberately much less than a general linker; each limit below is a decision, no
   multiple of the architecture's maximum page size (`Arch::max_page_size` in
   `src/native/target_contract.rs`: 4 KiB on x86_64 and riscv64, 64 KiB on AArch64) in the file and
   in memory, so file offset and address stay congruent and no kernel page size puts both segments
-  in one page. Both segments are aligned to that size. No PIC, GOT, PLT, dynamic section or section
-  headers. The whole image must fit the 4 GiB the small code models address.
+  in one page. Both segments are aligned to that size. No PIC or section headers. The whole image
+  must fit the 4 GiB the small code models address.
+- **Imports from shared libraries** (`src/native/linker/{dynamic,libraries}.rs`; design in
+  `docs/NATIVE.md`, "Importing from shared libraries"). A program that references functions it
+  does not define, which an `ImportLibrary` exports, is linked dynamically. The output adds
+  `PT_PHDR`, `PT_INTERP`, `PT_DYNAMIC` and `PT_GNU_STACK`, and gets one bind-now offset-table slot
+  plus one stub per import. Each import is bound at its library's default symbol version. It stays
+  non-PIE at the fixed base, so references to an import resolve at link time to its stub. Only
+  libraries something is imported from are `DT_NEEDED`; with no imports the image is the static
+  one, byte for byte. Variables in shared libraries (copy relocations) are refused. Tests:
+  `dynamic.rs` links a call for every target from in-memory `ImportLibrary`s and checks the
+  headers, dynamic entries, versions, relocation and stub. `mod.rs` links a program against the
+  host's own zlib and C library and runs it.
 - **Read-only data shares the executable segment.** A separate read-only segment is cheap to add
   when the runtime holds something worth protecting; until then `.rodata` is readable and
   executable.
@@ -4480,10 +4493,237 @@ each one lowering more and declining less:
   object), function types with a fixed `invoke` slot, SAM conversions, callable references to
   functions and properties including bound ones and dependency members, default arguments through
   one wrapper per omission shape, local functions, and the stdlib scope functions.
+- **Collections** (tier 4): arrays of every element width, lists, maps and sets as the runtime's
+  objects, ranges and progressions, iteration over each and over a class of the program that
+  implements `Iterable`/`CharSequence`, `lazy`, `Pair`, and property delegates (`ReadOnlyProperty`,
+  `ReadWriteProperty`, `Delegates.notNull`/`observable`).
+- **The conformance lane** (tier 5): `tests/kotlin_box_native_conformance.rs` compiles every
+  applicable `codegen/box` source set natively, links all emitted objects, and RUNS it. Multi-file
+  cases use the production source-set path. Backend declines, frontend rejections, missing harness
+  capabilities such as multi-module dependency wiring, and wrong executions are expected failures;
+  only genuine target/source-universe exclusions are not-applicable. The exact fail and
+  not-applicable inventories are committed as reviewable text for each `(native, Kotlin version)`;
+  every transition fails the ratchet until the reviewed inventory changes, and compiler panics are
+  never expected. A corpus case is prepared for its target
+  (`conformance::prepare_test_source(src, TestTarget::Native)`):
+  `OPTIONAL_JVM_INLINE_ANNOTATION` expands to nothing off the JVM, as Kotlin's own runner does.
+- **Cross-file calls.** A top-level function is defined as `kt_mod_<callable id>`, the checked
+  callable identity, so the defining file and a caller in another file of the module name the same
+  symbol without seeing each other's lowering. `Callee::Module`, and a `CrossFile` edge that still
+  carries that id, imports it and calls it directly. The module's objects are linked together.
+  Every file defines `kt_fileinit_<source file id>`, which runs that file's top-level initializers
+  at most once. The entry calls its own before `main` or `box`. A cross-file call calls the
+  defining file's before the function, so a property defined there has its value even when that
+  file is not the entry. The flag is set before the initializers run: a re-entrant use sees the
+  default and does not recurse. `kt_mod_<id>` and `kt_fileinit_<id>` are hidden: the module link
+  resolves them, and they are not dynamic exports.
+- **Public C ABI.** A public top-level function whose parameters are primitives or `String` and
+  whose result is one of those types or `Unit` is declared in `<module>.h` and exported under
+  `package_name`, with a `__Type` suffix when it has parameters. The wrapper runs the file
+  initializer, then the function. An `internal` function is neither declared nor exported. A
+  public function whose name or types this ABI cannot represent safely is named in the header and
+  not declared; colliding C spellings are likewise refused rather than emitted twice. The Kotlin
+  program still runs.
+   Tests: `tests/native_c_abi_e2e.rs`.
+- **Value classes** (tier 6), through the value-class semantics every backend
+  shares (`crate::value_classes`):
+  - **The inventory** (`native/value_classes.rs`): one exact inventory per file. It holds every
+    classifier the IR references, walked by the shared `IrFile::referenced_classifiers` (the JVM's
+    inventory starts from the same walk), plus every classifier their declared underlying types
+    reach. Each one's underlying type comes from the checked classifier facts
+    (`CheckedIrFile.classifiers`), local and dependency alike. It is refused when two publications
+    disagree, when a class the IR marks as a value class has no checked declaration, and when the
+    declaration graph reaches itself. The unsigned integers and the specialized primitive arrays
+    stay built-ins, as on the JVM.
+  - **The policy**: this target's `RepresentationPolicy`.
+    - A non-null `V` is carried as its underlying value.
+    - A `V?` is too, when that value is a reference that cannot itself be `null`.
+    - Anywhere else — a nullable scalar underlying value, a nullable underlying type, and any
+      position typed `Any`, a type parameter or an interface — `V` is carried as a BOX of `V`'s
+      own type.
+    - Every carrier decision (`FileLowering::carrier`, `classes::c_kind`) reads the projected
+      type.
+  - **Boundaries**: `convert` boxes and unboxes `V` itself at a representation boundary, never
+    the value inside. A cast to `V` unboxes what passed the check, and `!!` answers the value.
+  - **Members**: `V`'s own members take the value as `this`. Its box's vtable reaches them
+    through unboxing bridges (`Slot::ValueBridge`), and `equals`, `hashCode` and `toString` are
+    answered by the value (`Slot::ValueMember`).
+  - **Construction**: runs the constructor on a box, so `init` blocks run once when the value is
+    made, and then reads the value out.
+  - **Storage**: the box stores the value at the declared underlying type
+    (`classes::field_storage_ty`), which a generic value class's IR field spells as its type
+    parameter. The field is found by the property the declaration names, never by position.
+  - Boxing a value class this file does not declare declines. Stdlib functions over a value class
+    are not reimplemented by the backend; they require provider-owned bodies through common
+    lowering like every other dependency function.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host
   (`one_host_links_a_static_executable_for_every_supported_architecture`).
+
+## Native dependency bodies — decoded KLIB IR  ◐
+
+A native program that calls library code needs that code's bodies, and a KLIB stores them as
+serialized backend IR under `default/ir/`. Today the native backend realizes the stdlib it supports
+through hand-written runtime functions, and no other dependency can be linked. The route to library
+code is the one the code generator already names: provider-owned bodies through common lowering.
+
+- **Decoding (done).** `metadata::klib_ir::read_declaration_trees` decodes every top-level
+  declaration of a KLIB, members and bodies included, into one index-based arena per declaration
+  (`metadata/klib_ir/tree.rs`). It covers every operation of the Kotlin 2.4 schema and the pre-2.4
+  member-access and operation layouts that libraries compiled by older Kotlin still carry. Symbols
+  stay exact serialized identities: a public `CommonIdSignature`, a public property's accessor, or
+  a file-local slot that is never matched by spelling. The Kotlin/Native 2.4.20 stdlib decodes
+  completely (11,969 function bodies); so do the linuxX64 KLIBs of kotlinx-coroutines-core 1.11.0,
+  kotlinx-serialization-json 1.9.0, ktor-server-cio 3.6.0 and kaml 0.104.0. A tree keeps every
+  serialized declaration and expression fact (origins, raw flags, declaration and type annotations,
+  value-class representations, type-alias expansions, inlined-block file entries) except source
+  coordinates; `IrFile`-level facts are outside the trees.
+- **Signatures (done).** `metadata::id_signature` computes a declaration's public `IdSignature`
+  from its shape, as Kotlin's `IrMangleComputer` (signature mode) and CityHash64 do. The mangler is
+  target-free: a declaration model implements `SignatureType`, so the KLIB reader (over decoded
+  metadata) and a KLIB writer (over krusty's own declarations) agree on one identity. A type
+  parameter is located by its declaration identity (metadata's `TypeParameter.id`), never by its
+  spelling. The mask is an explicit input: `IS_EXPECT` from the declaration's and its classes'
+  metadata flags, `IS_NATIVE_INTEROP_LIBRARY` from the library. Metadata's `isStatic` marks a
+  `companion { … }` block member, signed `#static`, and a companion extension, whose recorded
+  receiver is the extended class and is signed `#companion@<ClassId>` in place of a receiver. Enum
+  classes get their implicit static `values` and `valueOf`, and `entries` only when the class
+  metadata sets `hasEnumEntries`. The unit tests pin a kotlinc-native
+  fixture KLIB (`tests/fixtures/klib_signatures`) whose metadata must sign every declaration and
+  accessor exactly as its IR declares them. Over the Kotlin/Native 2.4.20 stdlib it also reproduces
+  every public function, property, accessor, constructor and class signature; the misses are
+  `@OptionalExpectation` annotation classes, which IR omits, and non-public nested classes.
+- **Provider (in progress).** `klib_libraries::KlibLibraries` is a target-neutral `SymbolSource`
+  over decoded KLIB metadata, shared by Native and Wasm. It signs every declaration when it is
+  built and normalizes lazily, memoized per lookup key, through the target-free
+  `libraries::metadata_normalization` (which the JVM `.kotlin_builtins` path also uses for its
+  function signatures). Each published callable's identity is interned by its exact public
+  signature, and its realization carries that signature (`declaration_signature`) through to the
+  frozen `BackendCallableFact`, together with the declaration's validated parameter identities
+  (context roles, extension receiver, values). Normalization attaches no compiler intrinsic: a
+  KLIB declaration's implementation is its serialized IR body, and the provider attaches only
+  declaration-level semantic roles. Top-level functions and properties are published. A property
+  is signed with its public signature and its getter and setter accessor signatures, deduplicated
+  by its public signature, and normalized into the common `PropertyInfo` (semantic accessor
+  parameters, setter visibility and value name, context roles, a `const val`'s compile-time value;
+  no owner, descriptor or storage). Each accessor is an ordinary external callable whose
+  realization carries its `KlibDeclarationSignature::Accessor`; the property's
+  `ExternalPropertyRealization` joins the two accessor identities. A companion extension property
+  is signed but left to its classifier's namespace. Non-private classes are published from their
+  metadata: lookup through the package namespace and, for a nested class, its owner's classifier
+  namespace; exact kind, modality, `fun`-interface and `inner` flags, own and captured type
+  parameters (bounds, variance), the direct supertypes metadata lists (core walks inheritance),
+  companion identity and enum entries. Constructors are ordinary callables (`<init>`, primary or
+  secondary), and members, member extensions and member properties are normalized through the
+  same `CallablePlacement`-driven model as package declarations; each realizes its exact public or
+  accessor signature, deduplicated by signature. `companion { … }` block members, companion
+  extensions and an enum's `values`/`valueOf` (and `entries`, only with `hasEnumEntries`) are
+  receiver-less candidates of the classifier's namespace naming it as `associated_classifier`.
+  Private classes, members and constructors are not published, although IR gives a private class
+  member or constructor (an enum's, an object's) a public signature.
+- **Platform (done).** `KlibLibraries::open` publishes the KLIBs a compilation selects, zipped or
+  unpacked, and is a `SemanticPlatform`; each caller names its own target's libraries (Native's
+  `klib/common/stdlib`; `toolchain::kotlin_stdlib_klib` names each target's).
+  `for_compilation` starts another
+  compilation over the same signed declarations. Its hooks are target-neutral: the language's
+  `FunctionN`/`SuspendFunctionN`/`KFunctionN` classifiers (no KLIB serializes them), function and
+  reference types, `KClass`, value-class underlyings, and the contract intrinsic and DSL members,
+  recognized by `contracts::is_contract_intrinsic`/`dsl_member` as the JVM provider does. Against
+  the 2.4.20 Native box corpus the stdlib KLIB currently passes 2007 of 7089 applicable cases where
+  the JVM surface passes 5372. The gaps, largest first: KLIB default arguments (`assertEquals`'s
+  `message`, from the parameter's IR default), builtin members carrying no compiler intrinsic
+  (`Int.plus`, `String.plus`, `compareTo`), and inline stdlib bodies (`let`, `apply`, `run`). The
+  Native lane switches, as a per-lane libraries setting in `tests/box_lane.rs`, once it no longer
+  regresses.
+- **Builtin operations (done).** A KLIB builtin gets its compiler operation from the shared rules
+  the JVM provider uses (`builtin_member_realization`, `builtin_top_level_realization`,
+  `add_core_builtin_declarations`), by exact declaration, whether or not it has an IR body. A
+  target's own intrinsic annotation (`@TypedIntrinsic`, `@WasmOp`) is never read. The Native
+  corpus passes 3542 of 7089 against the stdlib KLIB (from 2007). Every `external` function of
+  each target's stdlib KLIB must carry an operation: `klib_libraries::tests::external_coverage`
+  checks Native, JS, wasm-js and wasm-wasi against `tests/klib_uncovered_externals/<target>/`,
+  lists that may only shrink (2.4.20: 402, 25, 16 and 1 uncovered).
+- **Parameter defaults (constants done).** `KlibLibraries::open` reads each library's IR
+  declarations and publishes the constant default of every function or constructor value parameter
+  (`klib_libraries::parameter_defaults`), so a call that omits it passes the constant itself, as
+  for any library default the provider states. A non-constant default stays unpublished and the
+  call is rejected. `parameter_default` also gives body lowering the default's IR expression.
+  The Native corpus passes 3991 of 7089 against the stdlib KLIB (from 3542); reading the whole IR
+  at open is a known compile-time cost to narrow to the declarations a compilation selects.
+- **Joining (done for top-level functions).** `klib_libraries::KlibDeclarationBodies` indexes the
+  decoded trees of a library set by linkable identity and answers a selected callable's frozen
+  `KlibDeclarationSignature` with its function and arena, never through a name or parameter tuple.
+  A signature two libraries both define rejects the set when it is built.
+- **Lowering (first slice).** `klib_lowering` (target-neutral, shared with Wasm) lowers a joined
+  body into a `DependencyBodyUnit`, one common-IR function per signature, lowering each once. The
+  function's parameters and result are the frozen `BackendCallableFact`'s; the serialized
+  parameter list must agree with them in role and type, or the body declines as an internal
+  inconsistency. Modelled so far: a block body ending in `return`, `return` to the function itself,
+  an `if`-`else` `when`, parameter reads, constants, and calls of the compiler built-in relations
+  (`kotlin.internal.ir.less`/`lessOrEqual`/`greater`/`greaterOrEqual` on `Int`, `Long`, `Float`,
+  `Double`), whose identities the mangler computes. Each lowers to exactly the common IR, and the
+  per-expression facts, checked FIR lowering produces for the equivalent source; the tests compare
+  the two renderings. Every other expression form, statement, callee, type (type parameters, type
+  arguments, function types) and declaration shape declines by name with a `KlibBodyDecline`
+  (`the KLIB body of `kotlin.ranges.coerceIn` (it uses `throw`)`), leaving the unit unchanged. The
+  stdlib's `coerceAtLeast`/`coerceAtMost` on the four primitives lower and pass the IR validators.
+- **Lowering (second slice).** Calls of other dependency functions: `lower_function` takes the
+  frozen declarations the caller selected (`KlibCalleeFacts`, keyed by `KlibDeclarationSignature`
+  over `KlibBodyCallable` views), declares each reached callee in the unit and lowers its body,
+  once per signature and cycle-safe; any declining body rolls the whole attempt back. A callee
+  without a frozen fact declined by name here; the fourth slice declares it from its header.
+  Also modelled: the `EQEQ`/`EQEQEQ`/`ieee754equals` built-ins and `Boolean.not` (with `!=`/`!==` folded as the source operator),
+  local `val`/`var` declarations, reads and assignments, no-op implicit casts, and multi-branch
+  `when`s by origin (`WHEN` flat, `IF` nested). The equality mode is the checker's own rule
+  (`EqualityMode::of_source_operands`). The stdlib's `Kotlin_equals` now lowers; most remaining
+  stdlib bodies decline on generics, member callees (classes and members are not published yet),
+  inlined function blocks, `throw`, `&&`/`||` and object construction.
+  Next: members and classes in the provider, `throw` and object construction, `&&`/`||`, then
+  wiring the unit into the Native lane switch (nothing is wired into a backend yet).
+- **Lowering (third slice).** Control and value forms, each lowered to what checked FIR lowering
+  produces for the equivalent source (`klib_lowering/body_lowering/` by form: `blocks`,
+  `conditionals`, `loops`, `string_templates`, `type_operators`, `calls`): `&&`/`||` with their
+  short-circuit facts; `if` and `when` without `else` as statements; nested plain blocks typed as
+  the source block and `Unit` bodies without a trailing `return`; the `Unit` coercions a KLIB adds,
+  dropped or converted by context; `throw`; string templates with merged literal runs; `while` and
+  `do`-`while` with labelled `break`/`continue`; `is`/`!is`, `as` and the `T?`-to-`T` smart cast;
+  `null` typed as the null literal. Still declining by form: constructor calls (a frozen
+  `KlibBodyCallable` has no classifier to construct, so `throw IllegalArgumentException(…)` and
+  `coerceIn` stop there), `as?`, `is` of a nullable type, implicit non-null assertions, other
+  implicit casts (a widening is not told from a narrowing without supertypes), blocks of a
+  compiler-introduced origin (inlined bodies, `for` loops) and composite blocks. The stdlib's
+  `boundsErrorMessage`, `messagePrefix`, `ensureNeverFrozen` and `initRuntimeIfNeeded` now lower
+  too; the remaining declines are led by generics, inlined blocks, file-private and member callees
+  and constructor calls.
+  Next: constructors and member callees in the provider, then the Native lane switch.
+- **Lowering (fourth slice): callees from their serialized headers.** A callee is joined to its
+  serialized declaration by exact signature, as a body is, and declared from that header: roles,
+  parameter and result types converted structurally, value parameters identified by their
+  serialized names. The KLIB IR header is the description of a dependency-only callee, so nothing
+  is frozen ahead of lowering and only reached bodies are read; a provider record of the same
+  identity (`KlibCalleeFacts`), when a checked call selected one, is cross-checked against the
+  header in name, parameter types and identities, context count and result, also when an already
+  declared function is reached or lowered as a root later. Lowering follows each call's serialized
+  `IdSignature` and never re-selects an overload. Declines by name: a call of a member function
+  (member dispatch is not modelled), a member signature no library serializes (a fake override;
+  the structural walk through the serialized class declarations to the real declaration comes
+  next), a header-only callee with context parameters (their kind is recorded only by a provider),
+  and a signature no loaded library declares. On the 2.4.20 stdlib no body calls a signature no
+  loaded library declares, and 160 non-generic top-level functions now lower past their first call
+  and decline inside a callee by the callee's own form: a body-less (intrinsic) declaration 51,
+  a member call 36, a compiler-introduced block 34, a parameter default 19, a file-private call 12,
+  a type with type arguments 6, a constructor call 2; none lowers end to end yet. Constructors are
+  not declared from their headers: a constructor call needs its class's layout and initializers,
+  not only a callable header. Next: member calls with their dispatch form and the fake-override
+  walk, callee parameter defaults, inlined function blocks, then constructors.
+- Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
+  `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
+  the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
+  topology, where krusty compiles each dependency module to a KLIB itself (metadata and serialized
+  IR) and then compiles the main module against it; kotlinc only supplies the expected output.
+  That needs a KLIB writer whose output this decoder reads back, and lands with lowering, the first
+  consumer of the trees.
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
@@ -4863,6 +5103,14 @@ shadow with no output change.
     inside a condition and otherwise forgets it, so the next mark is written. Box files
     byte-identical to kotlinc go from 580 to 680 (100 gained, none lost), box pass/fail unchanged
     (`tests/unsigned_loop_lines_e2e.rs`).
+  - ✅ An unsigned assignment whose right operand is itself unsigned (`r = r or (cur and mask)`)
+    records that line twice at the receiver load. A `while` or `do…while` condition is inside a
+    condition, so `cur and 0x80u == 0x80u` keeps the line on the receiver load and the comparison,
+    not on the mask literal (`tests/unsigned_bitwise_lines_e2e.rs`).
+  - ✅ An unsigned literal does not take the line from a property read or a captured mutable
+    local. An assignment into the captured local writes the line again at the store, and a
+    declaration keeps it on the holder store (the zero default after unboxing) and the element
+    store (`tests/captured_unsigned_lines_e2e.rs`).
   - ☐ 6c. Remaining line-only differences at 6b (127 files, 4,298 methods): unsigned range
     literals (`rangeTo`/`rangeUntil` are `@InlineOnly` and need their after-inline marks, ~58
     files; the range needs its selected operator declaration), a catch clause's line at the
@@ -5132,3 +5380,98 @@ types a holder parameter from the record alone; it neither matches accessor or f
 scans a body for holder operations. A missing entry fails lowering with
 `FirFileLoweringFailure::IncompleteFact`. Tests: `ir/semantic_validation/completeness_tests.rs`,
 `fir_lower/fact_completeness_tests.rs`.
+
+## An unread inlined parameter is popped  ✅
+
+An `@InlineOnly` parameter the body loads only for the null check the inliner removes is evaluated
+and popped, and it takes no local. An ordinary inline function still stores that parameter, so the
+caller's table keeps its `$iv` local. A direct vararg element used once is folded back into the
+array, so it is written where the array is filled, after the arguments before it. `String.format`
+therefore pops `StringCompanionObject.INSTANCE` and stores `""` straight into the vararg array. A
+parameter the body reads, including a used extension receiver, is still stored or read from its
+caller local. Tests: `tests/inline_format_arguments_e2e.rs`,
+`tests/delegated_properties_array_e2e.rs`.
+
+## A private property in an exported inline template uses an accessor  ✅
+
+A non-private `inline` function, and a private `inline` function it expands, calls
+`access$get<X>$p` / `access$set<X>$p` for a private property and `access$<name>` for a private
+function. The private inline function's own method uses those accessors, because the bytecode
+splicer copies that method into every caller, and that method opens with `$i$f$<name>`
+(an instance method included). A private `inline` function that declares a default does too:
+its `$default` stub is not private, so the stub's default expressions and the body it
+re-emits use the same accessors. A same-module non-inline caller re-emits the copied body
+and uses the same accessors; a lambda the caller substituted into that body keeps the
+caller's own access. A nested copy marks the outer frame's line on a `nop` before
+the caller continues. A private inline function with no default, expanded only from
+non-inline callers, still reads the field directly. Test:
+`tests/private_inline_property_access_e2e.rs`.
+
+## Wasm backend: wasm-js and wasm-wasi  🚧
+
+- `src/wasm/` lowers checked common IR to one WasmGC module per program for both kotlinc Wasm
+  targets; the targets share every instruction and differ only in the host write function and the
+  Node.js loader. Unsupported constructs decline the whole compilation by name.
+- First slice: top-level functions and properties over primitives and `String` (locals, `when`,
+  loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
+  same-file calls).
+- Box lanes `wasm-js` and `wasm-wasi` share Native's driver (`tests/box_lane.rs`) and ratchet; CI
+  runs both in a `wasm` row. They analyze against the JVM library surface until a Wasm klib
+  platform exists, so they gate the emitter and publish no conformance badge yet.
+- The backend reads each value's checked type (`IrFile::checked_type`) and the frontend-selected
+  entry (`IrFile::entry_point`, `IrFile::box_entry`); a missing or duplicate entry is rejected in
+  `Backend::check_module` before anything is emitted.
+- ✅ Arithmetic result types are a common-IR fact: every non-`Boolean` `PrimitiveBinOp` carries
+  the selected operator's declared result (`IrFile::add_arithmetic`, proven complete by
+  `IrFile::validate_complete_facts`). Native deleted its promotion table (`arithmetic_result`);
+  Native and Wasm only choose operand widening and narrowing to that result.
+- Classes: final, open and abstract classes, interfaces declared in the same file and `object`
+  declarations, with primary and secondary constructors, fields, properties, virtual and `super`
+  calls, interface dispatch, `is`/`!is`/`as`/`as?`, and `equals`/`hashCode`/`toString` a class
+  declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
+  program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
+  keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
+  struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Declined by name:
+  enum, value, annotation, inner and local capturing classes, companions, bridged overrides,
+  supertypes from another file or the library, and a call that could reach `kotlin.Any`'s own
+  `toString`/`hashCode`, which have no body in the module until the library's bodies are.
+  Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
+  181/181/182; Native's counts are unchanged by the shared tables.
+- Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
+  checked type, which Wasm declines rather than infer one.
+- Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
+- Next: exceptions on wasm EH, library calls keyed by the selected declaration, enums and
+  companions on the class tables, multi-file and `// MODULE:` programs, then a klib-backed library
+  provider shared with Native.
+
+## KLIB writer — krusty compiles a module to a Kotlin library  ◐
+
+A non-JVM dependency is distributed as a KLIB, and a dependent compilation reads its declarations
+(and, on Native, its bodies) from it. For krusty to build a multi-module Native program it has to
+write the dependency libraries itself; kotlinc only supplies the expected program output.
+
+- **Metadata container (this slice).** `klib::backend::KlibBackend` is a `Backend` that writes one
+  `PackageFragment` per checked file and lays them out with `klib::write::KlibWriter` (manifest,
+  `linkdata/module`, `package_<fq>/<n>_<seg>.knm`, `root_package/`). The records come from the same
+  builders as JVM `@Metadata` (`metadata::builder`), fed by target-free declaration records
+  (`metadata::declaration_records`); `metadata::klib_fragment` owns only the carrier: the fragment's
+  `StringTable` and `QualifiedNameTable`, per-container type tables, the file and constant-value
+  extensions, and the package name. The manifest is the reference compiler's for a metadata
+  library (`kotlinc-native -p library -Xmetadata-klib`); its `metadata_version` comes from the
+  compilation's finalized language level or `-Xmetadata-version` (`klib::write::KlibStamp`), never
+  from the selected reference release. Top-level functions, properties and typealiases are written,
+  and so are classes (below). Unit tests beside `klib::write` and `metadata::klib_fragment` check
+  the layout and read fragments back through the ordinary KLIB reader. The library has no
+  serialized IR, so a dependent Native program cannot link a body from it yet: this is not module
+  support.
+- **Class metadata (this slice).** A class's record is built once from common IR
+  (`metadata::class_records`); a target realizes it through `ClassRealization`, the JVM with its
+  signatures, storage and generated members (`jvm::ir_emit::class_metadata`), a KLIB with nothing
+  (`klib::class_realization`). The fragment carries the file's classifiers in nesting order, each
+  with its own type table and file name. A value class, a `companion { }` block and
+  compiler-plugin members are declined by name.
+- **Serialized IR (next).** Bodies are written as the IR the `metadata::klib_ir` decoder reads back.
+- **Native `// MODULE:` box cases (later).** The shared Native box harness writes each dependency
+  module's KLIB with this backend, the dependent compilation reads it through the KLIB library
+  provider, and Native links and runs `box()`; the expected-failure ratchet records each case until
+  it runs.

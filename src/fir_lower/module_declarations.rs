@@ -12,7 +12,7 @@ use crate::fir::{
 };
 use crate::ir::{
     Callee, IrCheckedOperation, IrClassifierKind, IrExpr, IrFile, IrHeaderAnnotation,
-    IrModuleCallable, IrModuleClassifier, IrModuleProperty, IrModuleSource,
+    IrModuleCallable, IrModuleClassifier, IrModuleConstructor, IrModuleProperty, IrModuleSource,
 };
 use crate::types::TypeName;
 
@@ -95,14 +95,21 @@ fn publish_callable(
         .iter()
         .map(|parameter| parameter.get())
         .collect::<Vec<_>>();
+    let mut defaulted =
+        index
+            .callable_default_bitmap(target)
+            .ok_or(FirFileLoweringFailure::MissingCallable(
+                callable.declaration,
+            ))?;
     if let Some(receiver) = callable.shape.extension_receiver {
         let position = callable.shape.context_parameter_count as usize;
-        if position > parameters.len() {
+        if position > parameters.len() || position > defaulted.len() {
             return Err(FirFileLoweringFailure::MissingCallable(
                 callable.declaration,
             ));
         }
         parameters.insert(position, receiver.get());
+        defaulted.insert(position, false);
     }
     ir.referenced_module_callables.insert(
         target,
@@ -128,6 +135,11 @@ fn publish_callable(
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             parameters: parameters.into_boxed_slice(),
+            default_parameters: defaulted
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &default)| default.then_some(position))
+                .collect(),
             type_parameters: super::generics::declaration_type_parameters(
                 index,
                 callable.declaration,
@@ -312,6 +324,68 @@ fn publish_classifier(
         IrModuleClassifier {
             singleton: header.flags.has(DeclarationFlags::SINGLETON),
             companion_owner,
+            kind: classifier_kind(header.flags),
+        },
+    );
+    Ok(())
+}
+
+/// Copy one module constructor's declaration facts. The declaring file and every constructing
+/// file publish the record through this one function, from the same checked declaration.
+fn publish_constructor(
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    constructor: DeclarationId,
+) -> Result<(), FirFileLoweringFailure> {
+    if ir.module_constructions.records.contains_key(&constructor) {
+        return Ok(());
+    }
+    let missing = || FirFileLoweringFailure::MissingCallable(constructor);
+    let callable = index
+        .callable_for_declaration(constructor)
+        .ok_or_else(missing)?;
+    let header = index.declaration_header(constructor).ok_or_else(missing)?;
+    let owner = index
+        .declaration_anchor(constructor)
+        .ok_or_else(missing)?
+        .owner
+        .ok_or_else(missing)?;
+    // A classifier with no module header is local to the body that declares it: no other file can
+    // name it, so it has no module constructor record and no file realizes one.
+    let Some(owner) = index.classifier_header(owner) else {
+        return Ok(());
+    };
+    let owner_flags = index
+        .declaration_header(owner.declaration)
+        .ok_or(FirFileLoweringFailure::MissingModuleClassifier(
+            owner.classifier,
+        ))?
+        .flags;
+    let outer = if owner_flags.has(DeclarationFlags::INNER) {
+        let outer = index.enclosing_owner_classifier(owner.declaration).ok_or(
+            FirFileLoweringFailure::MissingModuleClassifier(owner.classifier),
+        )?;
+        Some(outer.classifier)
+    } else {
+        None
+    };
+    let parameters = index
+        .signature(constructor)
+        .ok_or_else(missing)?
+        .parameters
+        .iter()
+        .map(|parameter| crate::types::stored_value_ty(parameter.get()))
+        .collect();
+    ir.module_constructions.records.insert(
+        constructor,
+        IrModuleConstructor {
+            owner: owner.classifier,
+            owner_flags,
+            flags: header.flags,
+            visibility: header.visibility,
+            context_parameter_count: callable.shape.context_parameter_count,
+            parameters,
+            outer,
         },
     );
     Ok(())
@@ -369,9 +443,23 @@ pub(super) fn publish_referenced(
                 properties.insert(*target);
             }
             IrExpr::Checked(IrCheckedOperation::PropertyReference { target, .. }) => match target {
-                FirPropertyReferenceTarget::Module(property)
-                | FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
+                FirPropertyReferenceTarget::Module(property) => {
                     properties.insert(*property);
+                }
+                FirPropertyReferenceTarget::SpecializedModule {
+                    property,
+                    reflection_owner,
+                    ..
+                } => {
+                    properties.insert(*property);
+                    // The classifier the reference was written on may be a subtype of the
+                    // declaring class, and it may live in another file. Realization names the
+                    // member on that classifier.
+                    if let Some(class) = *reflection_owner {
+                        if index.classifier_declaration(class).is_some() {
+                            classifiers.insert(class);
+                        }
+                    }
                 }
                 FirPropertyReferenceTarget::Classifier { .. }
                 | FirPropertyReferenceTarget::External { .. } => {}
@@ -381,10 +469,10 @@ pub(super) fn publish_referenced(
                     callables.insert(target);
                 }
             }
-            IrExpr::SingletonValue { classifier } => {
-                if index.classifier_declaration(*classifier).is_some() {
-                    classifiers.insert(*classifier);
-                }
+            IrExpr::SingletonValue { classifier }
+                if index.classifier_declaration(*classifier).is_some() =>
+            {
+                classifiers.insert(*classifier);
             }
             _ => {}
         }
@@ -415,6 +503,12 @@ pub(super) fn publish_referenced(
             crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
         }
     }));
+    properties.extend(ir.property_overrides.values().flatten().filter_map(|edge| {
+        match edge.overridden {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(target) => Some(target),
+            crate::fir::ResolvedPropertyOverrideTarget::External(_) => None,
+        }
+    }));
     for callable in callables {
         publish_callable(index, ir, callable)?;
     }
@@ -423,6 +517,20 @@ pub(super) fn publish_referenced(
     }
     for classifier in classifiers {
         publish_classifier(index, ir, classifier)?;
+    }
+    // Both sides of a module construction: what this file constructs, and what it declares and
+    // therefore exports.
+    let mut constructors = ir
+        .module_constructions
+        .selected
+        .values()
+        .chain(ir.checked_constructor_bodies.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    constructors.sort_unstable_by_key(|constructor| constructor.raw());
+    constructors.dedup();
+    for constructor in constructors {
+        publish_constructor(index, ir, constructor)?;
     }
     Ok(())
 }

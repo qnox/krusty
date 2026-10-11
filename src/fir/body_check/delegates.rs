@@ -131,6 +131,7 @@ impl BodyFirChecker<'_> {
         let storage = LocalBinding {
             value: self.allocate_local(),
             ty: storage_ty,
+            mutable: false,
             lateinit: false,
         };
         let storage_name = format!("{name}$delegate");
@@ -863,6 +864,7 @@ fn selected_delegate_call(
                     declared_result: None,
                     overridden_results: Box::new([]),
                     semantic_role: None,
+                    overridden_declarations: Box::new([]),
                     suspend: false,
                     can_inline: false,
                     inline_plan: None,
@@ -967,11 +969,18 @@ fn selected_delegate_call(
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice(),
                     semantic_role: callable.semantic_role,
+                    overridden_declarations: callable.overridden_declarations.clone(),
                     suspend: callable.suspend,
                     can_inline: callable.inline.can_inline(),
                     inline_plan: super::inline_body_plan::publish(
                         callable.inline_body_plan.as_deref(),
                         Some(0),
+                        super::inline_body_plan::type_parameter_receiver(
+                            callable
+                                .generic_sig
+                                .as_deref()
+                                .and_then(|signature| signature.receiver),
+                        ),
                     )
                     .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
                     extension_receiver_parameter: None,
@@ -1062,10 +1071,12 @@ fn selected_delegate_call(
                         declared_result: declared_ret.map(resolved).transpose()?,
                         overridden_results: Box::new([]),
                         semantic_role: None,
+                        overridden_declarations: Box::new([]),
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
                             inline_body_plan.as_deref(),
+                            None,
                             None,
                         )
                         .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
@@ -1116,11 +1127,27 @@ fn delegate_substitutions(
             let header = index
                 .type_parameter_header(parameter)
                 .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+            let reified = header.flags.is_reified();
+            let value = ResolvedTy::new(value)
+                .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?;
+            let runtime = if reified {
+                crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
+                    index.recorded_direct_supertypes(name)
+                })
+            } else {
+                value.get()
+            };
+            let reified_runtime = if runtime == value.get() {
+                value
+            } else {
+                ResolvedTy::new(runtime)
+                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?
+            };
             Ok(FirTypeSubstitution {
                 parameter: parameter.into(),
-                reified: header.flags.is_reified(),
-                value: ResolvedTy::new(value)
-                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?,
+                reified,
+                value,
+                reified_runtime,
                 additional_bounds: Box::new([]),
             })
         })

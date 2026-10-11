@@ -16,7 +16,11 @@
 //! them (see [`adjacency`]). Safe-call-chain reshaping and unused-LVT cleanup are separate kotlinc
 //! optimizations and are deliberately not approximated here: a body with a null check kotlinc could
 //! fold but this pass cannot is left as it was, and a local whose range a rewrite empties goes with
-//! the final dead-code step (`prepareForEmitting`).
+//! the final dead-code step (`prepareForEmitting`). The one representation-boundary exception is a
+//! post-coroutine safe-call receiver that krusty deliberately stored before FixStack ran: after the
+//! transformer, its selector line may separate the null check from the reload and a terminal arm
+//! may stand immediately before the null target. The caller identifies that transformed body, and
+//! the pass folds only the exact generated store/load shape.
 
 mod adjacency;
 mod null_check_folds;
@@ -42,10 +46,19 @@ pub(crate) struct Elimination {
 
 /// Rewrite `method`'s temporaries; `None` when nothing applies or the body is outside what the
 /// analysis models, leaving `method` as it was.
-pub(crate) fn eliminate(method: &mut MethodNode) -> Option<Elimination> {
+pub(crate) fn eliminate(
+    method: &mut MethodNode,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+    post_coroutine: bool,
+) -> Option<Elimination> {
     let original = method.nodes.clone();
     let mut body = Body::take(method);
-    let rewritten = rewrite(&mut body, method);
+    let rewritten = rewrite(
+        &mut body,
+        method,
+        preserved_unreachable_labels,
+        post_coroutine,
+    );
     method.nodes = match rewritten {
         Some(_) => body.list.to_nodes(),
         None => original,
@@ -53,10 +66,15 @@ pub(crate) fn eliminate(method: &mut MethodNode) -> Option<Elimination> {
     rewritten
 }
 
-fn rewrite(body: &mut Body, method: &mut MethodNode) -> Option<Elimination> {
+fn rewrite(
+    body: &mut Body,
+    method: &mut MethodNode,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+    post_coroutine: bool,
+) -> Option<Elimination> {
     let mut changed = trivial_cleanup::remove_discarded_loads(body);
     changed |= trivial_cleanup::remove_nops(body);
-    let folds = null_check_folds::fold(body)?;
+    let folds = null_check_folds::fold(body, preserved_unreachable_labels, post_coroutine)?;
     changed |= folds.folded;
     let mut analyzed = method.clone();
     analyzed.nodes = body.list.to_nodes();

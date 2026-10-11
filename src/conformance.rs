@@ -1,15 +1,20 @@
-//! Shared codegen/box conformance-test directives — the SINGLE source of truth for which tests apply
-//! to krusty's JVM backend and which extra libraries their classpath needs. Used by BOTH the
-//! conformance gate (`tests/kotlin_box_ir_jvm_conformance.rs`) and the `survey` bin, so their
-//! eligibility decisions and classpaths never drift (which previously let survey over-count by
-//! compiling against libraries a test didn't ask for, and let backend-excluded tests slip through).
+//! Shared codegen/box conformance-test directives and runner-provided source declarations. Target
+//! applicability stays explicit; source preparation shared by JVM, Native, and survey consumers
+//! must not drift into three subtly different test programs.
 
 use std::path::{Path, PathBuf};
 
 mod box_jdk;
+mod codegen_modes;
+mod compiler_arguments;
 mod reference_jvm;
 
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
+pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
+pub use compiler_arguments::{
+    case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_compiler_configuration,
+    unit_kotlinc_arguments, UnitCompilerConfiguration,
+};
 pub use reference_jvm::{reference_jvm_acceptance, ReferenceJvmAcceptance};
 
 /// Recursively collect Kotlin sources in deterministic path order. A source file is also accepted as
@@ -113,13 +118,98 @@ private fun <T> checkTypeEquality(
 ) {}
 "#;
 
+/// The target a corpus case is being prepared for.
+///
+/// Two of the placeholders Kotlin's runner expands mean different things per target, so a source
+/// prepared for one backend is a DIFFERENT PROGRAM from the same source prepared for another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestTarget {
+    Jvm,
+    Native,
+    WasmJs,
+    WasmWasi,
+}
+
+impl TestTarget {
+    /// The production source-semantics target represented by this corpus lane.
+    pub fn compilation_target(self) -> crate::compilation_target::CompilationTarget {
+        match self {
+            Self::Jvm => crate::compilation_target::CompilationTarget::Jvm,
+            Self::Native => crate::compilation_target::CompilationTarget::Native,
+            Self::WasmJs => crate::compilation_target::CompilationTarget::WasmJs,
+            Self::WasmWasi => crate::compilation_target::CompilationTarget::WasmWasi,
+        }
+    }
+}
+
+/// The `helpers` package source Kotlin's codegen runner injects for `// WITH_COROUTINES`.
+///
+/// This is shared by every corpus consumer so a survey, JVM run, and Native run compile the same
+/// source program. The corpus does not currently request the state-machine or tail-call checker
+/// variants, so this is the runner's `false, false` helper set.
+pub const COROUTINE_HELPERS: &str = r#"package helpers
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+fun <T> runBlocking(block: suspend () -> T): T {
+    var res: Result<T>? = null
+    block.startCoroutine(Continuation(EmptyCoroutineContext) {
+        res = it
+    })
+    return res!!.getOrThrow()
+}
+
+fun <T> handleResultContinuation(x: (T) -> Unit): Continuation<T> = object: Continuation<T> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<T>) {
+       x(result.getOrThrow())
+    }
+}
+
+fun handleExceptionContinuation(x: (Throwable) -> Unit): Continuation<Any?> = object: Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       result.exceptionOrNull()?.let(x)
+    }
+}
+
+open class EmptyContinuation(override val context: CoroutineContext = EmptyCoroutineContext) : Continuation<Any?> {
+    companion object : EmptyContinuation()
+    override fun resumeWith(result: Result<Any?>) {
+       result.getOrThrow()
+    }
+}
+
+class ResultContinuation : Continuation<Any?> {
+    override val context = EmptyCoroutineContext
+    override fun resumeWith(result: Result<Any?>) {
+       this.result = result.getOrThrow()
+    }
+
+    var result: Any? = null
+}
+"#;
+
 /// Apply source declarations that Kotlin's codegen-test runner supplies for directives. These are
 /// ordinary Kotlin declarations, not compiler intrinsics; keeping the expansion here makes the gate,
 /// focused corpus helpers, and survey compile the same source program.
-pub fn prepare_test_source(src: &str) -> String {
+///
+/// `OPTIONAL_JVM_INLINE_ANNOTATION` is the placeholder the corpus writes where a `value class`
+/// needs `@JvmInline`. The JVM runner inserts it only while `FullValueClasses` is disabled; Native
+/// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
+pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
+    let full_value_classes =
+        crate::features::LangFeatures::from_source(src).has("FullValueClasses");
+    let (value_class_annotation, backend) = match target {
+        TestTarget::Jvm if !full_value_classes => ("@JvmInline", "\"JVM_IR\""),
+        TestTarget::Jvm => ("", "\"JVM_IR\""),
+        TestTarget::Native => ("", "\"NATIVE\""),
+        TestTarget::WasmJs => ("", "\"WASM_JS\""),
+        TestTarget::WasmWasi => ("", "\"WASM_WASI\""),
+    };
     let mut prepared = src
-        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline")
-        .replace("BACKEND_UNDER_TEST", "\"JVM_IR\"");
+        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", value_class_annotation)
+        .replace("BACKEND_UNDER_TEST", backend);
     if directive(src, "CHECK_TYPE_WITH_EXACT") {
         prepared.push_str(EXACT_TYPE_HELPER);
     }
@@ -259,17 +349,33 @@ fn k2_language_configuration_applicable(src: &str) -> bool {
 }
 
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    // `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for
-    // their diagnostic half), so it always mentions ours.
-    let mentions = |line: &str| {
-        line.split(',')
-            .any(|t| t.trim() == "ANY" || names.contains(&t.trim()))
-    };
-    if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-        if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
-            return false;
-        }
+    backend_targeted(src, names) && !backend_muted(src, names)
+}
+
+/// `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for their
+/// diagnostic half), so it always mentions ours.
+fn mentions(line: &str, names: &[&str]) -> bool {
+    line.split(',')
+        .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+}
+
+/// Whether `// TARGET_BACKEND:` admits one of `names` — a case that names backends and none of
+/// ours is a case written for a platform this one is not.
+///
+/// Split from the mute half because the two ask different questions and a lane may answer them
+/// with different backend sets. A native lane targets `NATIVE` alone: a case marked JVM-only is
+/// JVM-only, and compiling it means compiling `java.lang.Runnable` against a target that has no
+/// JDK. Its mute query likewise names only `NATIVE`: a JVM mute may describe a JVM representation
+/// defect and is not evidence that Native should skip the shared frontend program.
+pub fn backend_targeted(src: &str, names: &[&str]) -> bool {
+    match src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
+        Some(line) => mentions(line.trim_start_matches("// TARGET_BACKEND:").trim(), names),
+        None => true,
     }
+}
+
+/// Whether any mute directive names one of `names`.
+pub fn backend_muted(src: &str, names: &[&str]) -> bool {
     src.lines()
         .filter(|l| {
             l.starts_with("// IGNORE_BACKEND:")
@@ -277,7 +383,7 @@ pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
                 || l.starts_with("// IGNORE_BACKEND_K2_MULTI_MODULE:")
                 || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
         })
-        .all(|l| !mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim()))
+        .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
 }
 
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).
@@ -701,6 +807,22 @@ pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
     (blocks, java_blocks)
 }
 
+/// One source-set fragment of a folded hierarchical-multiplatform unit, in the unit's
+/// dependency-first chain order. The reference oracle maps these to kotlinc's
+/// `-Xfragments`/`-Xfragment-sources`/`-Xfragment-refines` so an `actual` declared in an
+/// intermediate source set matches its `expect` in a refined-upon one — a hierarchy the flat
+/// `-Xcommon-sources` common/platform split cannot represent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentUnit {
+    pub name: String,
+    /// This fragment's own Kotlin files, as a contiguous count within the unit's `files` (whose
+    /// order is the same dependency-first chain order).
+    pub kotlin_file_count: usize,
+    /// The fragments this one directly refines (`dependsOn`); every name is another fragment of the
+    /// same unit.
+    pub refines: Vec<String>,
+}
+
 /// One module actually BUILT from a `// MODULE:` test: a `dependsOn` target (multiplatform common
 /// source set) folds INTO its dependents rather than building standalone, so a unit's `files` carry
 /// the transitive `dependsOn` chain's sources (dependency-first) ahead of the module's own.
@@ -717,6 +839,10 @@ pub struct ModuleUnit {
     /// module's own files are platform sources.
     pub common_file_count: usize,
     pub java_files: Vec<(String, String)>,
+    /// The folded `dependsOn` chain as HMPP fragments, dependency-first and ending with this unit's
+    /// own leaf fragment. A unit with no `dependsOn` carries exactly one fragment and compiles
+    /// without any multiplatform flag.
+    pub fragments: Vec<FragmentUnit>,
 }
 
 /// Fold [`ModuleBlock`]s into build units in declaration order (kotlinc's JVM MPP model: the
@@ -814,6 +940,14 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
                     }
                 }
             }
+            let fragments = chain
+                .iter()
+                .map(|m| FragmentUnit {
+                    name: m.name.clone(),
+                    kotlin_file_count: m.files.len(),
+                    refines: m.depends_on.clone(),
+                })
+                .collect();
             ModuleUnit {
                 name: u.name.clone(),
                 deps,
@@ -821,6 +955,7 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
                 files,
                 common_file_count,
                 java_files,
+                fragments,
             }
         })
         .collect()
@@ -869,19 +1004,58 @@ mod tests {
     fn exact_type_directive_injects_the_kotlin_test_declaration() {
         let prepared = prepare_test_source(
             "// CHECK_TYPE_WITH_EXACT\nfun box(): String { checkExactType<String>(\"OK\"); return \"OK\" }",
+            TestTarget::Jvm,
         );
         assert!(prepared.contains("private fun <T> checkExactType"));
         assert!(prepared.contains("value: @kotlin.internal.Exact T"));
     }
 
     #[test]
+    fn full_value_classes_drops_the_optional_jvm_inline_placeholder() {
+        let with_feature = prepare_test_source(
+            "// LANGUAGE: +MultiPlatformProjects, +FullValueClasses\nOPTIONAL_JVM_INLINE_ANNOTATION\nvalue class A(val x: Int)\n",
+            TestTarget::Jvm,
+        );
+        assert!(!with_feature.contains("@JvmInline"));
+        assert!(!with_feature.contains("OPTIONAL_JVM_INLINE_ANNOTATION"));
+        assert!(with_feature.contains("value class A"));
+        let without_feature = prepare_test_source(
+            "OPTIONAL_JVM_INLINE_ANNOTATION\nvalue class A(val x: Int)\n",
+            TestTarget::Jvm,
+        );
+        assert!(without_feature.starts_with("@JvmInline\n"));
+        assert!(!without_feature.contains("OPTIONAL_JVM_INLINE_ANNOTATION"));
+    }
+
+    #[test]
     fn backend_under_test_is_preprocessed_like_the_kotlin_runner() {
         let prepared = prepare_test_source(
             "val jvm = BACKEND_UNDER_TEST == \"JVM_IR\"\nval android = BACKEND_UNDER_TEST == \"ANDROID\"",
+            TestTarget::Jvm,
         );
         assert_eq!(
             prepared,
             "val jvm = \"JVM_IR\" == \"JVM_IR\"\nval android = \"JVM_IR\" == \"ANDROID\""
+        );
+    }
+
+    /// The same source is a DIFFERENT PROGRAM per target, and these two placeholders are why.
+    ///
+    /// A `value class` needs `@JvmInline` on the JVM and nowhere else, so Kotlin's own runner
+    /// expands the placeholder to nothing for a non-JVM target. Expanding it regardless put a
+    /// JVM-only annotation into every such program — and `kotlin.jvm.*` is not among a native
+    /// target's default imports, so it did not resolve.
+    #[test]
+    fn a_native_target_gets_the_program_its_own_runner_would_compile() {
+        let source = "OPTIONAL_JVM_INLINE_ANNOTATION\nvalue class V(val x: Int)\n\
+                      val here = BACKEND_UNDER_TEST";
+        assert_eq!(
+            prepare_test_source(source, TestTarget::Native),
+            "\nvalue class V(val x: Int)\nval here = \"NATIVE\""
+        );
+        assert_eq!(
+            prepare_test_source(source, TestTarget::Jvm),
+            "@JvmInline\nvalue class V(val x: Int)\nval here = \"JVM_IR\""
         );
     }
 
@@ -1625,6 +1799,23 @@ fun box(): String = f()
         assert_eq!(units[0].files.len(), 2);
         assert_eq!(units[0].files[0].0, "common");
         assert_eq!(units[0].files[1].0, "platform");
+        // The folded chain becomes two fragments: `common` (refining nothing) then `platform`
+        // refining it, each owning one Kotlin file in chain order.
+        assert_eq!(
+            units[0].fragments,
+            vec![
+                FragmentUnit {
+                    name: "common".to_string(),
+                    kotlin_file_count: 1,
+                    refines: Vec::new(),
+                },
+                FragmentUnit {
+                    name: "platform".to_string(),
+                    kotlin_file_count: 1,
+                    refines: vec!["common".to_string()],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1736,5 +1927,27 @@ fun box(): String = f()
         let names: Vec<&str> = units[0].files.iter().map(|(n, _)| n.as_str()).collect();
         // `common` appears once (via `mid`'s chain), before `mid`, before the module's own file.
         assert_eq!(names, vec!["common", "mid", "platform"]);
+        // The leaf `platform` refines BOTH `mid` and `common` (its two `dependsOn` targets); `mid`
+        // refines `common`. Each fragment owns one Kotlin file, in the same dependency-first order.
+        assert_eq!(
+            units[0].fragments,
+            vec![
+                FragmentUnit {
+                    name: "common".to_string(),
+                    kotlin_file_count: 1,
+                    refines: Vec::new(),
+                },
+                FragmentUnit {
+                    name: "mid".to_string(),
+                    kotlin_file_count: 1,
+                    refines: vec!["common".to_string()],
+                },
+                FragmentUnit {
+                    name: "platform".to_string(),
+                    kotlin_file_count: 1,
+                    refines: vec!["mid".to_string(), "common".to_string()],
+                },
+            ]
+        );
     }
 }

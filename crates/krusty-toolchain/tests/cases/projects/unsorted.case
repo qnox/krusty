@@ -1,0 +1,9 @@
+An unsorted list.
+--- project.yaml
+modules:
+  - libs/b
+  - ./libs/a
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/b/module.yaml
+product: jvm/lib

@@ -152,7 +152,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             f(*lhs);
             f(*rhs);
         }
-        IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => f(*value),
+        IrExpr::SetValue { value, .. }
+        | IrExpr::SetStatic { value, .. }
+        | IrExpr::SetFrameResult { value, .. } => f(*value),
         IrExpr::SetField {
             receiver, value, ..
         }

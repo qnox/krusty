@@ -8,6 +8,7 @@
 use super::{load, Emitter};
 use crate::ir::ExprId;
 use crate::jvm::classfile::CodeBuilder;
+use crate::jvm::suspend::ProbedContinuation;
 use crate::types::Ty;
 
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
@@ -29,13 +30,28 @@ impl Emitter<'_> {
                     );
                     return;
                 };
-                let Some(&declared) = self.slots.get(&continuation) else {
-                    self.run.set_emit_error(
-                        "a probed continuation has no declared value slot".to_string(),
-                    );
-                    return;
+                let binding = match continuation {
+                    ProbedContinuation::Value(value) => {
+                        let Some(&binding) = self.slots.get(&value) else {
+                            self.run.set_emit_error(
+                                "a probed continuation has no declared value slot".to_string(),
+                            );
+                            return;
+                        };
+                        binding
+                    }
+                    ProbedContinuation::Machine => {
+                        let Some(slot) = self.continuation_slot else {
+                            self.run.set_emit_error(
+                                "a machine-probed continuation is outside an emitted machine"
+                                    .to_string(),
+                            );
+                            return;
+                        };
+                        (slot, Ty::obj(CONTINUATION))
+                    }
                 };
-                Some(declared)
+                Some(binding)
             }
         };
         // The block ran as an inlined body, after which kotlinc writes the call's line afresh.

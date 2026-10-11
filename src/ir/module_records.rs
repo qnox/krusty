@@ -40,6 +40,8 @@ pub struct IrModuleCallable {
     /// a target-specific dispatch receiver, continuation, default mask, or marker. Backends use it
     /// for representation ABI without reopening FIR or reverse-engineering a synthetic descriptor.
     pub parameters: Box<[Ty]>,
+    /// The positions in `parameters` that declare a default value.
+    pub default_parameters: Box<[usize]>,
     /// Declaration type parameters and their complete bounds. A JVM realization erases a call to
     /// this declaration with the same primary class bound it uses for a same-file signature.
     pub type_parameters: Box<[IrCallableTypeParameter]>,
@@ -90,8 +92,67 @@ pub enum IrClassifierKind {
     Object,
 }
 
+/// A module constructor as every file that names it sees it. The file that declares the class
+/// and each file that constructs it copy this record from one checked declaration, so a target
+/// can realize both sides of the call from the same facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrModuleConstructor {
+    /// The constructed classifier's stable qualified identity.
+    pub owner: TypeName,
+    /// The constructed classifier's declaration flags: its kind, `abstract`/`sealed`, `inner`,
+    /// local, `expect`, and value-class shape.
+    pub owner_flags: crate::fir::DeclarationFlags,
+    pub flags: crate::fir::DeclarationFlags,
+    pub visibility: crate::types::Visibility,
+    pub context_parameter_count: u32,
+    /// The checked declaration signature, context parameters first, each at its stored value type.
+    /// An inner class's enclosing instance is not a declared parameter; `outer` names it.
+    pub parameters: Box<[Ty]>,
+    /// An inner class's enclosing classifier, whose instance a construction passes first.
+    pub outer: Option<TypeName>,
+}
+
+/// The module constructors a file names: what each construction selected, and the record of
+/// every module constructor that file constructs or declares.
+#[derive(Clone, Debug, Default)]
+pub struct IrModuleConstructions {
+    /// Construction `ExprId` → the checked constructor declaration it selected.
+    pub selected: std::collections::HashMap<super::ExprId, crate::fir::DeclarationId>,
+    pub records: std::collections::HashMap<crate::fir::DeclarationId, IrModuleConstructor>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrModuleClassifier {
     pub singleton: bool,
     pub companion_owner: Option<TypeName>,
+    /// Source kind of this classifier. A property reference calls an inherited member on the
+    /// classifier it was written on, and that kind chooses interface dispatch.
+    pub kind: IrClassifierKind,
+}
+
+impl super::IrFile {
+    /// Source classifier kind for an exact common-IR identity, regardless of whether the
+    /// declaration belongs to this file or another file in the module.
+    pub(crate) fn source_classifier_kind(&self, classifier: TypeName) -> Option<IrClassifierKind> {
+        if let Some(class) = self
+            .classes
+            .iter()
+            .find(|candidate| candidate.fq_name_id() == classifier)
+        {
+            return Some(if class.is_annotation {
+                IrClassifierKind::Annotation
+            } else if class.is_object {
+                IrClassifierKind::Object
+            } else if class.is_enum {
+                IrClassifierKind::Enum
+            } else if class.is_interface {
+                IrClassifierKind::Interface
+            } else {
+                IrClassifierKind::Class
+            });
+        }
+        self.referenced_module_classifiers
+            .get(&classifier)
+            .map(|classifier| classifier.kind)
+    }
 }

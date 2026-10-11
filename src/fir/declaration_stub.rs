@@ -90,6 +90,25 @@ impl DeclarationFlags {
     /// resolves exactly like a written companion extension; a target places it among the
     /// classifier's static members instead of the file's top-level declarations.
     pub const COMPANION_BLOCK_MEMBER: u64 = 1 << 38;
+    /// The declaration wrote a visibility modifier. An `override` with none keeps the overridden
+    /// member's visibility rather than defaulting to `public`.
+    pub const HAS_VISIBILITY_MODIFIER: u64 = 1 << 39;
+    /// The source wrote the `value` keyword. This is not the unboxed `@JvmInline` representation:
+    /// that is [`Self::VALUE`], decided after the annotation resolves. With `FullValueClasses` and
+    /// no `@JvmInline`, the class stays boxed and [`Self::FULL_VALUE`] records the structural
+    /// `equals`/`hashCode`/`toString` shape.
+    pub const VALUE_KEYWORD: u64 = 1 << 40;
+    /// A boxed multi-field `value class` (`+FullValueClasses`, no `@JvmInline`). It is a final
+    /// class with structural equality, not an unboxed inline class.
+    pub const FULL_VALUE: u64 = 1 << 41;
+    /// A compiler-generated structural identity member of a data or value class. This role is
+    /// declaration-owned: consumers must not rediscover it from the callable's spelling.
+    pub const GENERATED_STRUCTURAL_MEMBER: u64 = 1 << 42;
+    /// A classifier or property wrote `final`. A classifier's [`Self::FINAL`] is its effective
+    /// modality and a property records no `FINAL`, so this is what tells a written `final` from the
+    /// default when a compiler plugin changes the default modality (all-open) and must keep an
+    /// explicit one. A function's written `final` is its `FINAL`.
+    pub const FINAL_MODIFIER: u64 = 1 << 43;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

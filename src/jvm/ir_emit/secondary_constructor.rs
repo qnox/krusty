@@ -82,22 +82,12 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             Some(crate::types::Visibility::Protected) => 0x0004,
             _ => 0x0001,
         };
-        let enum_entry_subclass_target = !owner_prefix_tys.is_empty()
-            && c.enum_entries.iter().any(|entry| {
-                entry.subclass.is_some()
-                    && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
-            });
         let semantically_private =
             super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
                 || sc.vc_params
                 || !owner_prefix_tys.is_empty()
                 || declared_access == 0x0002;
-        let sc_access = (if enum_entry_subclass_target {
-            // Kotlin uses nestmate access for an entry-body subclass. Krusty does not emit
-            // nestmate attributes yet, so use the same package-private synthetic bridge contract
-            // as the enum primary constructor instead of emitting an inaccessible private target.
-            0x1000
-        } else if semantically_private {
+        let sc_access = (if semantically_private {
             0x0002
         } else {
             declared_access
@@ -285,7 +275,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let forwards_owner_prefix =
                 delegates_to_this || matches!(sc.delegate, CtorDelegateTarget::ImplicitEnumBase);
             if !delegates_to_this {
-                for &(parameter, field) in &c.pre_super_param_fields {
+                for &(parameter, field_index) in &c.pre_super_param_fields {
                     if parameter >= sc.prefix_params.len() as u32 {
                         continue;
                     }
@@ -303,7 +293,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         .iter()
                         .map(|ty| slot_words(*ty))
                         .sum::<u16>();
-                    let Some(field) = c.fields.get(field as usize) else {
+                    let Some(field) = c.fields.get(field_index as usize) else {
                         e.run.set_emit_error(
                             "secondary constructor prefix store references a missing field"
                                 .to_string(),
@@ -312,7 +302,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     };
                     sctor.aload(0);
                     load(ty, slot, &mut sctor);
-                    let physical_name = instance_field_jvm_name(ir, c, field);
+                    let physical_name = instance_field_jvm_name(ir, e.run, c, field_index as usize);
                     let reference =
                         e.cw.fieldref(fq_name, &physical_name, &type_descriptor(field.ty));
                     sctor.putfield(reference, slot_words(field.ty) as i32);
@@ -419,7 +409,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         .sum::<u16>();
                     sctor.aload(0);
                     load(ty, slot, &mut sctor);
-                    let physical_name = instance_field_jvm_name(ir, c, field);
+                    let physical_name = instance_field_jvm_name(ir, e.run, c, parameter);
                     let reference =
                         e.cw.fieldref(fq_name, &physical_name, &type_descriptor(field.ty));
                     sctor.putfield(reference, slot_words(field.ty) as i32);
@@ -438,7 +428,12 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             body_locals = std::mem::take(&mut e.open_locals);
         }
         if !sec_diverges {
-            sctor.ret_void();
+            if sc.generated_debug.fallthrough_line().is_some() {
+                // The producer maps this return to its own line, so the writer must know where.
+                sctor.implicit_ret_void();
+            } else {
+                sctor.ret_void();
+            }
         }
         // Body locals precede `this` and the parameters in kotlinc's table, as in a method, and
         // stay in scope through the return.
@@ -552,6 +547,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 entries.push((pc, line));
             }
             cw.set_method_lines("<init>", &sc_desc, &entries);
+        } else if let (Some(start), Some(fallthrough)) = (
+            sc.generated_debug.line(),
+            sc.generated_debug.fallthrough_line(),
+        ) {
+            // A body-less generated constructor whose producer asked for a closing entry: the
+            // delegation on the declaration's line and the implicit return on `fallthrough`.
+            if let Some(return_pc) = cw
+                .method_implicit_void_return_pc("<init>", &sc_desc)
+                .filter(|&pc| pc > 0 && start != fallthrough)
+            {
+                cw.set_method_lines("<init>", &sc_desc, &[(0, start), (return_pc, fallthrough)]);
+            }
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
@@ -560,7 +567,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             if sc.annotations.deprecated() {
                 cw.mark_method_deprecated("<init>", &sc_desc);
             }
-            if sc.annotations.deprecated_hidden() {
+            if super::function_annotations::hidden_realization_is_synthetic(&sc.annotations) {
                 cw.set_method_synthetic("<init>", &sc_desc);
             }
         }
@@ -588,18 +595,24 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let stub_access = if semantically_private { 0x1000 } else { 0x1001 };
             super::constructor_defaults::emit_ctor_default_stub_with_prefix(
                 ir,
-                fq_name,
-                c.fq_name,
-                facade,
-                &forwarded_prefix_tys,
-                sc_prefix_tys.len(),
-                &sc_source_tys,
-                &sc.defaults,
-                Some((sc.lines.decl_line, &default_lines, sc.lines.decl_end_line)),
-                sc.vc_params
-                    || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
-                sc.annotations.deprecated(),
-                stub_access,
+                super::constructor_defaults::ConstructorDefaultStub {
+                    owner: fq_name,
+                    owner_identity: c.fq_name,
+                    facade,
+                    physical_prefix: &forwarded_prefix_tys,
+                    logical_prefix_count: sc_prefix_tys.len(),
+                    real_params: &sc_source_tys,
+                    defaults: &sc.defaults,
+                    secondary_lines: Some((
+                        sc.lines.decl_line,
+                        &default_lines,
+                        sc.lines.decl_end_line,
+                    )),
+                    target_uses_marker_accessor: sc.vc_params
+                        || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
+                    deprecated: sc.annotations.deprecated(),
+                    access: stub_access,
+                },
                 cw,
                 env,
             );

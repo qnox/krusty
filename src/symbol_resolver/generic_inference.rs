@@ -7,13 +7,15 @@ use nullable_actual::nullable_generic_actual;
 mod bound_relations;
 mod call_constraints;
 mod call_site_variables;
+mod common_supertype;
+pub(crate) use common_supertype::reified_runtime_type;
 mod conditional_result;
 mod postponed_result;
 
 use bound_relations::complete_dependent_bound_bindings;
 pub(crate) use bound_relations::{
     complete_dependency_instantiated_bound_bindings,
-    complete_return_only_captured_receiver_bindings,
+    complete_return_only_captured_receiver_bindings, generic_binding_bound_violation,
     generic_bindings_admit_expected_return_intersection, generic_bindings_satisfy_bounds,
     resolve_bound_violating_bindings,
 };
@@ -25,7 +27,7 @@ pub(crate) use call_constraints::{
     infer_generic_call_constraints_with_receiver_from_symbols, publish_denotable_upper_bindings,
     seed_denotable_upper_placeholders, AssignabilityConstraints,
 };
-pub(crate) use call_site_variables::CallSiteVariables;
+pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;
 pub(crate) use postponed_result::{
     instantiate_unconstrained_result, nested_result_from_concrete_parameter,
@@ -189,7 +191,12 @@ pub(crate) fn infer_constructor_type_args_for_formals(
             continue;
         }
         for (p, a) in gsig.params.iter().zip(arg_tys) {
-            unify_inferred_ty(*p, *a, &mut binds);
+            // Keep this unification source-free. Passing the hierarchy in here would pin a
+            // constructor variable to the argument's own element (`ArrayList(listOf(s))` ->
+            // `E = String`) and block the expected-result widening (`ArrayList<CharSequence>`)
+            // that runs afterwards. Only the platform collection face is rewritten, so a Java
+            // `Map` parameter published as `MutableMap!` still matches a Kotlin `Map` by owner.
+            unify_inferred_ty(platform_argument_shape(source, *p, *a), *a, &mut binds);
         }
         break;
     }
@@ -510,6 +517,9 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             }
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
+                Ty::Fun(_) => {
+                    source.and_then(|source| supertype_with_classifier(source, actual, name))
+                }
                 Ty::Obj(_, _) => flexible_upper
                     .filter(|upper| {
                         upper
@@ -535,13 +545,20 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                 }
             }
         }
-        // Nullability/flexibility wraps the same generic shape; it does not hide type variables
-        // inside that shape. Java signatures routinely expose this as `Class<A>!` and `A!`.
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+        // Nullability wraps the same generic shape; it does not hide type variables inside that
+        // shape. Java signatures routinely expose this as `Class<A>!` and `A!`.
+        Ty::Nullable(inner) => {
             // A null-only value is the bottom inhabitant of `T?`, so it materializes the wrapped
             // inference variable as non-null `Nothing`. Other nullable values constrain the same
             // wrapped variable from their non-null component (`String?` -> `T = String`).
             unify_ty_impl(source, *inner, nullable_generic_actual(actual), binds);
+        }
+        Ty::PlatformNullable(inner) => {
+            let actual = nullable_generic_actual(actual);
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, *inner, actual))
+                .unwrap_or(*inner);
+            unify_ty_impl(source, inner, actual, binds);
         }
         _ => {}
     }
@@ -1089,6 +1106,9 @@ pub(super) fn unify_inferred_ty_impl(
             let actual = actual.non_null();
             let projected = match actual {
                 Ty::Obj(actual_name, _) if name == actual_name => Some(actual),
+                Ty::Fun(_) => {
+                    source.and_then(|source| supertype_with_classifier(source, actual, name))
+                }
                 Ty::Obj(_, _) => flexible_upper
                     .filter(|upper| {
                         upper
@@ -1114,8 +1134,15 @@ pub(super) fn unify_inferred_ty_impl(
                 }
             }
         }
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
+        Ty::Nullable(inner) => {
             unify_inferred_ty_impl(source, *inner, nullable_generic_actual(actual), binds);
+        }
+        Ty::PlatformNullable(inner) => {
+            let actual = nullable_generic_actual(actual);
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, *inner, actual))
+                .unwrap_or(*inner);
+            unify_inferred_ty_impl(source, inner, actual, binds);
         }
         _ => {}
     }
@@ -1209,6 +1236,31 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
+    let same_generic_classifier = match (current.non_null(), actual.non_null()) {
+        (Ty::Obj(left, left_arguments), Ty::Obj(right, right_arguments)) => {
+            left == right
+                && !left_arguments.is_empty()
+                && left_arguments.len() == right_arguments.len()
+        }
+        _ => false,
+    };
+    if same_generic_classifier {
+        // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not
+        // `Any`. Their common supertype keeps the classifier and captures the arguments' own common
+        // supertype. Do not apply this structural join to unrelated top-level classifiers: ordinary
+        // inference already has a stable nearest-hierarchy rule, and replacing it changes such
+        // established results as mixed scalar varargs and Java flexible collection expectations.
+        let supertype =
+            common_supertype::common_super_type(source, current.non_null(), actual.non_null());
+        if !supertype.is_erased_top() {
+            return if current.is_nullable() || actual.is_nullable() {
+                Ty::nullable(supertype.non_null())
+            } else {
+                supertype
+            };
+        }
+    }
+
     let left = receiver_hierarchy(source, current.non_null());
     let right = receiver_hierarchy(source, actual.non_null());
     let mut common = left
@@ -1241,6 +1293,56 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     } else {
         *common
     }
+}
+
+/// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is
+/// significant: a common type synthesized from the first pair is not itself a source constraint
+/// and must not make the answer depend on the order in which arguments were visited.
+pub(crate) fn merge_inferred_lower_bounds_from_symbols(
+    source: &dyn SymbolSource,
+    bounds: &[Ty],
+) -> Ty {
+    let bounds = bounds
+        .iter()
+        .map(|bound| inference_actual(*bound))
+        .collect::<Vec<_>>();
+    let Some((&first, rest)) = bounds.split_first() else {
+        return Ty::Error;
+    };
+    // A one-element constraint set is not a common-type problem. In particular, preserve a Java
+    // flexible wrapper verbatim: normalizing `Map<K, V>!` through the structural solver would turn
+    // it into ordinary `Map<K, V>?` and lose the mutable/read-only expectation bridge.
+    if rest.is_empty() {
+        return first;
+    }
+    let same_generic_classifier = bounds
+        .iter()
+        .copied()
+        .map(Ty::non_null)
+        .try_fold(None, |known, bound| {
+            let Ty::Obj(owner, arguments) = bound else {
+                return Err(());
+            };
+            if arguments.is_empty() {
+                return Err(());
+            }
+            match known {
+                None => Ok(Some((owner, arguments.len()))),
+                Some((known_owner, known_arity))
+                    if known_owner == owner && known_arity == arguments.len() =>
+                {
+                    Ok(known)
+                }
+                _ => Err(()),
+            }
+        })
+        .is_ok();
+    if same_generic_classifier {
+        return common_supertype::common_super_types(source, &bounds);
+    }
+    rest.iter().copied().fold(first, |known, actual| {
+        merge_inferred_ty_from_symbols(Some(source), known, actual)
+    })
 }
 
 pub(crate) fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
@@ -1789,6 +1891,50 @@ pub(crate) fn infer_generic_return_bindings_from_symbols(
     let mut projected = generic_sig.clone();
     projected.ret = declared;
     infer_generic_return_bindings_impl(Some(source), &projected, expected, admits)
+}
+
+/// The denotable face of a platform lower bound that `actual` inhabits.
+///
+/// A Java collection parameter is published as its mutable lower bound (`List<T>` becomes
+/// `MutableList<T>!`). A Kotlin `List` does not reach `MutableList`, but it does reach the
+/// provider's read-only upper face, and that is the face whose type arguments constrain the
+/// call. A value that already reaches the mutable face — a `MutableList`, or an `ArrayList` —
+/// keeps it. A non-collection platform type has no distinct upper face and is unchanged. A
+/// Kotlin `MutableList` parameter is not platform-wrapped, so it never reaches this function.
+pub(super) fn choose_platform_lower_face(source: &dyn SymbolSource, lower: Ty, actual: Ty) -> Ty {
+    let Ty::Obj(owner, _) = lower else {
+        return lower;
+    };
+    let actual = actual.projection_inner().unwrap_or(actual).non_null();
+    if supertype_with_classifier(source, actual, owner).is_some() {
+        return lower;
+    }
+    let upper = crate::assignable::TypeOracle::platform_flexible_upper_bound(
+        &crate::symbol_resolver::SourceOracle(source),
+        lower,
+    );
+    let Ty::Obj(upper_owner, _) = upper else {
+        return lower;
+    };
+    if upper_owner != owner && supertype_with_classifier(source, actual, upper_owner).is_some() {
+        upper
+    } else {
+        lower
+    }
+}
+
+/// `shape` with a platform collection lower bound replaced by the face `actual` reaches.
+///
+/// The platform marker stays: nullability is a separate constraint from which collection face
+/// contributes type arguments. Constructor inference then unifies without a hierarchy walk, so
+/// an expected `ArrayList<CharSequence>` can still widen an argument-inferred `String`.
+fn platform_argument_shape(source: &dyn SymbolSource, shape: Ty, actual: Ty) -> Ty {
+    match shape {
+        Ty::PlatformNullable(inner) => {
+            Ty::platform_nullable(choose_platform_lower_face(source, *inner, actual))
+        }
+        other => other,
+    }
 }
 
 /// The provider-declared upper face of a platform type, preserving the platform nullability marker.

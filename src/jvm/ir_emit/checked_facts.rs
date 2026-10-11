@@ -21,12 +21,16 @@ pub(crate) struct EmitMetadata<'a> {
     /// JVM entry guards selected from exact collection override edges.
     pub(crate) collection_method_entry_barriers:
         &'a crate::jvm::collection_barriers::MethodEntryBarriers,
+    /// JVM-only inherited collection bridge plans, keyed by emitted class identity.
+    pub(in crate::jvm) inherited_collection_bridges:
+        &'a crate::jvm::inherited_collection_bridges::InheritedCollectionBridges,
 }
 
 /// Checked semantic declarations plus JVM-only realization facts consumed by class emission.
 pub(crate) struct CheckedEmitFacts<'a> {
     pub(crate) metadata: EmitMetadata<'a>,
     pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
+    pub(crate) dependency_callables: &'a crate::backend::CheckedBackendCallables,
     pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     pub(crate) property_reference_realizations:
         &'a crate::jvm::property_references::PropertyReferenceRealizations,

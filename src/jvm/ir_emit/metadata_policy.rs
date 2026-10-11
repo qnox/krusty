@@ -5,7 +5,7 @@
 #[derive(Clone)]
 pub struct KotlinMetadata {
     pub k: i32,
-    pub mv: Vec<i32>,
+    pub stamp: crate::jvm::classfile::MetadataStamp,
     pub xi: i32,
     pub d1: Vec<String>,
     pub d2: Vec<String>,
@@ -26,6 +26,10 @@ pub(super) fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
 pub(super) const SYNTHETIC_PROTECTED: i32 = 2;
 pub(super) const SYNTHETIC_PUBLIC: i32 = 3;
 pub(super) const SYNTHETIC_LOCAL: i32 = 5;
+
+/// `JvmAnnotationNames.METADATA_PUBLIC_ABI_FLAG`. A class generated for a non-private `inline`
+/// function is part of that function's ABI.
+pub(super) const METADATA_PUBLIC_ABI_FLAG: i32 = 1 << 7;
 
 /// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
 /// visibility into bits 8–10; earlier releases wrote the IR flags alone.
@@ -50,7 +54,7 @@ pub(super) fn finish_local_synthetic_class(
 ) -> Vec<u8> {
     cw.set_kotlin_metadata(
         3,
-        &env.metadata_version,
+        env.metadata_stamp,
         synthetic_class_xi(SYNTHETIC_LOCAL),
         &[],
         &[],

@@ -422,11 +422,22 @@ impl Checker<'_> {
         } else {
             inferred
         };
+        // The body's own inferred result, before coercion to the selected function type's return.
+        // A backend that specializes the implementation method's signature (kotlinc's indy
+        // metafactory adaptation) reads this, not the caller-facing boundary type.
+        self.lambda_body_results.insert(lambda, inferred);
         match result_constraint {
             LambdaResultConstraint::Fixed(expected) => {
                 let result = super::conditional_branch::branch_value_expression(self.file, body);
                 self.expect_assignable(expected, inferred, self.span(result), "return");
-                expected
+                // A lambda whose every result is `Unit` (a statement tail such as an assignment or
+                // a declaration, an `else`-less `if`, a `Unit` call) returns `Unit` itself, a
+                // subtype of the expected function type, as kotlinc infers it.
+                if inferred == Ty::Unit {
+                    Ty::Unit
+                } else {
+                    expected
+                }
             }
             LambdaResultConstraint::Open => inferred,
         }

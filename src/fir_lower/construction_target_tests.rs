@@ -4,7 +4,7 @@
 //! `secondary_ctors[n - 1]` instead of choosing between constructors by their parameter types. These
 //! tests pin that common-IR record; they do not run a backend over it.
 
-use super::tests::lower_single_source;
+use super::tests::{lower_single_source, lower_source_from_set};
 use crate::ir::{for_each_child, IrConstructorAccess, IrConstructorTarget, IrExpr, IrFile};
 use crate::types::{type_name, Ty};
 
@@ -140,5 +140,59 @@ fn a_constructor_reference_adapter_constructs_through_the_selected_constructor()
     assert_eq!(
         constructions_under(&ir, adapter_body),
         [(target(2), vec![])]
+    );
+}
+
+/// A construction of a class another file declares records the constructor declaration the
+/// checker selected, and the constructing file and the declaring file carry one identical module
+/// record for it: the qualified owner, the complete declared parameter list, and an inner class's
+/// enclosing classifier.
+#[test]
+fn a_cross_file_construction_records_the_selected_constructor_and_its_declaration() {
+    let sources = [
+        (
+            "package demo\nclass Pair(val a: Int, val b: Int) {\n    constructor(n: Int) : this(n, n)\n    inner class Part(val label: String)\n}\n",
+            "defs",
+        ),
+        (
+            "package demo\nfun primary(): Pair = Pair(1, 2)\nfun secondary(): Pair = Pair(3)\nfun part(): Pair.Part = Pair(4).Part(\"x\")\n",
+            "box",
+        ),
+    ];
+    let declaring = lower_source_from_set(&sources, 0);
+    let constructing = lower_source_from_set(&sources, 1);
+    let pair = type_name("demo/Pair");
+    let part = type_name("demo/Pair$Part");
+    let mut selected = Vec::new();
+    for (id, expression) in constructing.exprs.iter().enumerate() {
+        if let IrExpr::New { internal, .. } = expression {
+            let constructor = constructing.module_constructions.selected[&(id as u32)];
+            let record = &constructing.module_constructions.records[&constructor];
+            assert_eq!(record.owner, *internal);
+            assert_eq!(
+                declaring.module_constructions.records.get(&constructor),
+                Some(record),
+                "the declaring file publishes the same record"
+            );
+            assert!(declaring
+                .checked_constructor_bodies
+                .contains_key(&constructor));
+            selected.push((
+                *internal,
+                constructing.construction_targets[&(id as u32)].ordinal,
+                record.parameters.to_vec(),
+                record.outer,
+            ));
+        }
+    }
+    selected.sort_by_key(|(owner, ordinal, ..)| (*owner == part, *ordinal));
+    assert_eq!(
+        selected,
+        [
+            (pair, 0, vec![Ty::Int, Ty::Int], None),
+            (pair, 1, vec![Ty::Int], None),
+            (pair, 1, vec![Ty::Int], None),
+            (part, 0, vec![Ty::String], Some(pair)),
+        ]
     );
 }

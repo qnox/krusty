@@ -1,0 +1,25 @@
+package kotlin.js.internal: fun BigInt(kotlin.Number): kotlin.js.internal.BigInt
+package kotlin.js: fun Array(kotlin.Int): kotlin.Array<T>
+package kotlin.js: fun arrayBufferIsView(kotlin.Any?): kotlin.Boolean
+package kotlin.js: fun eval(kotlin.String): kotlin.Nothing?
+package kotlin.js: fun imul(kotlin.Int, kotlin.Int): kotlin.Int
+package kotlin.js: fun js(kotlin.String): kotlin.Nothing?
+package kotlin.js: fun jsTypeOf(kotlin.Any?): kotlin.String
+package kotlin.js: fun nativeAcosh(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeAsinh(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeAtanh(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeBoolean(kotlin.Any?): kotlin.Boolean
+package kotlin.js: fun nativeClz32(kotlin.Int): kotlin.Int
+package kotlin.js: fun nativeCosh(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeExpm1(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeHypot(kotlin.Double, kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeLog10(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeLog1p(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeLog2(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeSign(kotlin.Number): kotlin.Double
+package kotlin.js: fun nativeSinh(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeTanh(kotlin.Double): kotlin.Double
+package kotlin.js: fun nativeTrunc(kotlin.Number): kotlin.Double
+package kotlin.js: fun parseFloat(kotlin.String, kotlin.Int): kotlin.Double
+package kotlin.js: fun parseInt(kotlin.String): kotlin.Int
+package kotlin.js: fun parseInt(kotlin.String, kotlin.Int): kotlin.Int

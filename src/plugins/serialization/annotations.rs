@@ -34,6 +34,8 @@ pub(super) fn custom_serializer_of(
     ctx.class_annotation_class_literal(ir, class_id, type_name(SERIALIZABLE_FQ))
 }
 
+/// The serializer a property-level `@Serializable(with = S::class) val v: T` names. This is the
+/// PROPERTY's annotation, which kotlinc also preserves on the `get<V>$annotations()` marker.
 pub(super) fn field_serializer_of(
     ctx: &PluginContext,
     ir: &IrFile,
@@ -41,6 +43,23 @@ pub(super) fn field_serializer_of(
     property: &str,
 ) -> Option<crate::types::TypeName> {
     ctx.property_annotation_class_literal(ir, class_id, property, type_name(SERIALIZABLE_FQ))
+}
+
+/// The serializer a property's elements are written and read with when the declaration names one:
+/// the property-level annotation, or the same annotation on the declared type itself
+/// (`val v: @Serializable(with = S::class) T`), which kotlinc honours identically but does not
+/// preserve on a property marker.
+pub(super) fn declared_serializer_of(
+    ctx: &PluginContext,
+    ir: &IrFile,
+    class_id: ClassId,
+    property: &str,
+) -> Option<crate::types::TypeName> {
+    field_serializer_of(ctx, ir, class_id, property).or_else(|| {
+        super::type_argument_serializers::named_serializer(
+            ctx.property_declared_type(ir, class_id, property),
+        )
+    })
 }
 
 pub(super) fn serial_name_of(

@@ -2,8 +2,8 @@
 
 use crate::ir::IrFile;
 use crate::jvm::classfile::{
-    ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SYNTHETIC,
-    ACC_VARARGS,
+    ACC_ABSTRACT, ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+    ACC_SYNTHETIC, ACC_VARARGS,
 };
 
 use super::{IrExpr, LambdaMode, LambdaModes};
@@ -15,6 +15,13 @@ fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
         crate::types::Visibility::Internal | crate::types::Visibility::Public => ACC_PUBLIC,
         crate::types::Visibility::PackagePrivate => 0,
     }
+}
+
+/// The access word of a body-less (abstract) method declaration, following kotlinc's
+/// `calculateMethodFlags`: the member's own visibility and `ACC_ABSTRACT`, never `ACC_FINAL`.
+/// Interface members record `public`, so their flags are unchanged.
+pub(super) fn abstract_method_access(ir: &IrFile, fid: u32) -> u16 {
+    jvm_visibility(ir.method_visibility(fid)) | ACC_ABSTRACT | varargs_access(ir, fid)
 }
 
 /// The access word of the method emitted for `fid`. `holder_static` is an interface member's body
@@ -32,7 +39,7 @@ pub(super) fn declared_method_access(
     let owner_is_iface = ir
         .classes
         .iter()
-        .any(|o| o.fq_name_matches(owner) && o.is_interface);
+        .any(|o| o.is_interface && o.fq_name_matches(owner));
     let access = if holder_static {
         // STATIC, with the member's own visibility: a private interface member's body is a PRIVATE
         // static on the holder, as kotlinc emits it.
@@ -40,9 +47,11 @@ pub(super) fn declared_method_access(
     } else if instance {
         // `ACC_FINAL` follows the member's own Kotlin modality, whatever the class's: an `open`,
         // `abstract` or non-`final` `override` member stays overridable even in a final class, and
-        // any other member is final even in an open one. A private member is final too. An
-        // interface method is never final (the JVM rejects it: `illegal modifiers 0x12`).
-        let fin = (private || !ir.open_methods.contains(&fid)) && !owner_is_iface;
+        // any other member is final even in an open one. A private member is final by default
+        // too, but not when a compiler plugin (all-open) made `open` its default modality, which
+        // kotlinc emits without `ACC_FINAL`. An interface method is never final (the JVM rejects
+        // it: `illegal modifiers 0x12`).
+        let fin = !ir.open_methods.contains(&fid) && !owner_is_iface;
         let vis = jvm_visibility(visibility);
         vis | if fin { ACC_FINAL } else { 0 }
     } else {
@@ -127,7 +136,8 @@ pub(super) fn class_realized_lambda_method(
     fid: u32,
     modes: LambdaModes,
 ) -> Option<&str> {
-    let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
+    let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid)
+        || ir.inline_anonymous_lambdas.contains(&fid);
     ir.exprs.iter().find_map(|expression| {
         let IrExpr::Lambda {
             impl_fn,

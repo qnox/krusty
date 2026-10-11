@@ -88,9 +88,15 @@ pub enum FirProgressionSource {
         end: super::FirExprId,
     },
     /// A progression value read through its `first`, `last` and `step`.
+    ///
+    /// `stepped` is the same progression when it is `start until end step step` with a constant
+    /// end and step and a constant or local start: kotlinc builds `until … step` as a value, since
+    /// `step` needs an inclusive last, but a target with no bytecode to match can count it with
+    /// `end - 1` as that last instead. Its operands are re-read, never re-evaluated.
     Value {
         progression: Box<FirProgressionClass>,
         iterable: super::FirExprId,
+        stepped: Option<Box<FirProgressionSource>>,
     },
     /// `nested step step`, moving `last` with the `getProgressionLastElement` overload resolution
     /// selected for the progression's class.

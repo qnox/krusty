@@ -19,7 +19,7 @@ const SRC: &str = "@JvmInline value class S(val text: String)\n\
     }\n";
 
 fn assert_same_defaults_constructor(class: &str, method: &str) {
-    match common::method_code_diff_against_kotlinc("Main", &[], SRC, class, method) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], SRC, class, method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{class}.{method}: reference toolchain unavailable"),
@@ -52,7 +52,12 @@ fn a_generic_class_value_class_default_constructs_the_carrier() {
 
 #[test]
 fn value_class_constructor_defaults_run() {
-    let output = common::compile_and_run_box(SRC, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }

@@ -237,7 +237,9 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             *lhs = map(*lhs);
             *rhs = map(*rhs);
         }
-        IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => *value = map(*value),
+        IrExpr::SetValue { value, .. }
+        | IrExpr::SetStatic { value, .. }
+        | IrExpr::SetFrameResult { value, .. } => *value = map(*value),
         IrExpr::SetField {
             receiver, value, ..
         }
@@ -351,6 +353,10 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(callable_reference_provenance);
     copy_map!(callable_reference_enclosures);
     copy_map!(checked_return_depths);
+    copy_map!(inline_return_frames);
+    if ir.inline_cleanup_results.contains(&source) {
+        ir.inline_cleanup_results.insert(target);
+    }
     copy_map!(annotation_constructions);
     copy_map!(generated_secondary_constructor_calls);
     copy_map!(expr_lines);
@@ -368,6 +374,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(binding_read_stability);
     copy_map!(short_circuits);
     copy_map!(physical_types);
+    if ir.jvm_erased_primitive_wrapper_values.contains(&source) {
+        ir.jvm_erased_primitive_wrapper_values.insert(target);
+    }
     copy_map!(reified_call_subst);
     copy_map!(reified_catch_markers);
     copy_map!(inline_call_type_arguments);
@@ -380,6 +389,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(jvm_protected_dependency_calls);
     copy_map!(construction_declared_params);
     copy_map!(construction_targets);
+    if let Some(constructor) = ir.module_constructions.selected.get(&source).copied() {
+        ir.module_constructions.selected.insert(target, constructor);
+    }
     copy_map!(static_extension_receivers);
     copy_map!(call_inline_modifiers);
     copy_map!(suspend_calls);
@@ -402,6 +414,14 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.call_operand_bindings.contains(&source) {
         ir.call_operand_bindings.insert(target);
     }
+    if ir.inline_synthetic_lines.contains(&source) {
+        ir.inline_synthetic_lines.insert(target);
+    }
+    if ir.external_inline_expansions.contains(&source) {
+        ir.external_inline_expansions.insert(target);
+    }
+    copy_map!(external_frame_lines);
+    copy_map!(external_frame_closes);
     if ir.null_guards.contains(&source) {
         ir.null_guards.insert(target);
     }
@@ -550,8 +570,13 @@ fn copy_function_implementation_facts(
     copy_map!(fn_signature_offsets);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
+    copy_map!(fn_contracts);
     copy_set!(fn_debug_locals);
     copy_map!(lambda_own_params_from);
+    if let Some(result) = ir.lambda_inferred_results.get(&source).copied() {
+        ir.lambda_inferred_results
+            .insert(target, ty_subst_keep_unbound(result, bindings));
+    }
     copy_map!(lambda_enclosures);
     copy_map!(lambda_sam_signature);
     if let Some((parameters, result)) = ir.lambda_sam_signature.get_mut(&target) {
@@ -703,6 +728,44 @@ mod tests {
         assert_eq!(ir.reified_call_subst.len(), 2);
         assert_eq!(ir.reified_call_subst.get(&source), Some(&reified));
         assert_eq!(ir.reified_call_subst.get(&target), Some(&reified));
+    }
+
+    #[test]
+    fn expression_clone_keeps_the_selected_dependency_declaration() {
+        // An inlined copy of a dependency call reaches its backend through the callee alone: the
+        // selected declaration identity is part of the node, so no call-site side table has to be
+        // copied for a target to realize the copy exactly as it realizes the original.
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(super::super::IrExpr::UnitInstance);
+        let callee = super::super::Callee::External {
+            target: crate::fir::ExternalCallableId::from_raw(7),
+            default_provider: None,
+            params: Vec::new(),
+            ret: Ty::String,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        };
+        let source = ir.add_expr(super::super::IrExpr::Call {
+            callee: callee.clone(),
+            dispatch_receiver: Some(receiver),
+            args: Vec::new(),
+        });
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        assert_ne!(source, target);
+        let super::super::IrExpr::Call {
+            callee: copied,
+            dispatch_receiver: Some(copied_receiver),
+            args,
+        } = ir.expr(target)
+        else {
+            panic!("the copy of a call is a call");
+        };
+        assert_eq!(copied, &callee);
+        assert_eq!(Some(copied_receiver), copies.get(&receiver));
+        assert!(args.is_empty());
     }
 
     #[test]

@@ -6,90 +6,11 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 
 mod cast_narrowing;
 mod constructor_expectations;
+mod result_approximation;
 mod scoped_constraint_frames;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
-
-/// Remove solver-local projection captures from an inferred declaration result. A capture is
-/// readable through its upper bound at the result root; inside a generic argument it is exposed as
-/// a star projection so the published signature does not claim an invariant type that callers
-/// could never name.
-fn denotable_signature_result(
-    ty: Ty,
-    denotable_parameters: &std::collections::HashSet<String>,
-) -> Ty {
-    fn result(
-        ty: Ty,
-        denotable: &std::collections::HashSet<String>,
-        visiting: &mut std::collections::HashSet<&'static str>,
-    ) -> Ty {
-        match ty {
-            // `Null` is the solver's literal-only bottom marker. A declaration inferred from that
-            // expression publishes Kotlin's denotable `Nothing?`; the literal marker must never
-            // cross into checked declaration headers, metadata, common lowering, or a backend.
-            Ty::Null => Ty::nullable(Ty::Nothing),
-            Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                if !visiting.insert(name) {
-                    return Ty::nullable(Ty::obj("kotlin/Any"));
-                }
-                let approximated = result(bound.projection_read_ty(), denotable, visiting);
-                visiting.remove(name);
-                approximated
-            }
-            Ty::TyParam(..) => ty,
-            Ty::Obj(owner, arguments) if !arguments.is_empty() => Ty::obj_args_name(
-                owner,
-                &arguments
-                    .iter()
-                    .map(|argument| match *argument {
-                        Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                            Ty::star_projection(result(
-                                bound.projection_read_ty(),
-                                denotable,
-                                visiting,
-                            ))
-                        }
-                        Ty::InProjection(inner) => {
-                            Ty::in_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::OutProjection(inner) => {
-                            Ty::out_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::StarProjection(inner) => {
-                            Ty::star_projection(result(*inner, denotable, visiting))
-                        }
-                        argument => result(argument, denotable, visiting),
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            Ty::Fun(signature) => Ty::fun_with_shape(
-                signature
-                    .params
-                    .iter()
-                    .map(|parameter| result(*parameter, denotable, visiting))
-                    .collect(),
-                result(signature.ret, denotable, visiting),
-                signature.context_count,
-                signature.has_receiver,
-                signature.suspend,
-            ),
-            Ty::Nullable(inner) => Ty::nullable(result(*inner, denotable, visiting)),
-            Ty::PlatformNullable(inner) => {
-                Ty::platform_nullable(result(*inner, denotable, visiting))
-            }
-            Ty::InProjection(inner) => Ty::in_projection(result(*inner, denotable, visiting)),
-            Ty::OutProjection(inner) => Ty::out_projection(result(*inner, denotable, visiting)),
-            Ty::StarProjection(inner) => Ty::star_projection(result(*inner, denotable, visiting)),
-            _ => ty,
-        }
-    }
-
-    result(
-        ty,
-        denotable_parameters,
-        &mut std::collections::HashSet::new(),
-    )
-}
+use result_approximation::denotable_signature_result;
 
 /// Select the language-defined SAM construction for a classifier call. Qualified and unqualified
 /// classifier spellings share this path; the qualifier affects only how the classifier was found,
@@ -125,7 +46,7 @@ impl ProductionSignatureSemantics<'_> {
     /// has already selected the lexical value and its semantic type; evaluating the dependency
     /// must consume that fact directly instead of pretending the generated field is a Kotlin
     /// property and reopening member lookup.
-    fn enclosing_capture_type(
+    pub(super) fn enclosing_capture_type(
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
@@ -155,7 +76,7 @@ impl ProductionSignatureSemantics<'_> {
     /// interpreted as a package or classifier namespace. Compact signature evaluation must keep
     /// that ordering too; trying `Provider.create` as a classifier call first is observably wrong
     /// when an enclosing class declares a property named `Provider`.
-    fn qualified_value_receiver(
+    pub(super) fn qualified_value_receiver(
         &self,
         scope: crate::fir::SignatureScope,
         qualifier: &str,
@@ -287,7 +208,7 @@ impl ProductionSignatureSemantics<'_> {
                 }
             }
             inferred.retain(|formal, _| active_formals.contains(formal.as_str()));
-            Self::merge_scoped_constraints(active, inferred);
+            Self::merge_scoped_constraints_from_symbols(&source, active, inferred);
         }
         crate::trace_compiler!(
             "signature",
@@ -492,6 +413,78 @@ impl ProductionSignatureSemantics<'_> {
         })?
     }
 
+    /// Property type parameters in the order the whole-table scans used to prefer them: a top-level
+    /// source property, then a top-level extension, then a member extension. The first recorded
+    /// declaration wins, including a property with no formals, so a miss still means "not a
+    /// property" and falls through to the header-only parameters.
+    fn property_type_parameters(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<super::DeclarationTypeParameters> {
+        let missing = self
+            .property_type_parameters_by_declaration
+            .borrow()
+            .is_none();
+        if missing {
+            let mut parameters = std::collections::HashMap::new();
+            let record = |parameters: &mut std::collections::HashMap<
+                crate::fir::DeclarationId,
+                super::DeclarationTypeParameters,
+            >,
+                          declaration: crate::fir::DeclarationId,
+                          formals: &[String],
+                          formal_bounds: &[Ty]| {
+                parameters
+                    .entry(declaration)
+                    .or_insert_with(|| super::DeclarationTypeParameters {
+                        formals: formals.to_vec(),
+                        bounds: formal_bounds
+                            .iter()
+                            .copied()
+                            .map(|bound| vec![bound])
+                            .collect(),
+                    });
+            };
+            for property in self.table.source_props.values() {
+                if let Some(declaration) = property.stable_declaration {
+                    record(
+                        &mut parameters,
+                        declaration,
+                        &property.formals,
+                        &property.formal_bounds,
+                    );
+                }
+            }
+            for property in self.table.ext_props.values().flatten() {
+                if let Some(declaration) = property.stable_declaration {
+                    record(
+                        &mut parameters,
+                        declaration,
+                        &property.formals,
+                        &property.formal_bounds,
+                    );
+                }
+            }
+            for class in self.table.classes.values() {
+                for property in class.member_ext_props.values().flatten() {
+                    if let Some(declaration) = property.stable_declaration() {
+                        record(
+                            &mut parameters,
+                            declaration,
+                            property.type_params(),
+                            property.type_param_bounds(),
+                        );
+                    }
+                }
+            }
+            *self.property_type_parameters_by_declaration.borrow_mut() = Some(parameters);
+        }
+        self.property_type_parameters_by_declaration
+            .borrow()
+            .as_ref()
+            .and_then(|parameters| parameters.get(&declaration).cloned())
+    }
+
     pub(super) fn with_signature_type_scope<T>(
         &self,
         scope: crate::fir::SignatureScope,
@@ -572,61 +565,12 @@ impl ProductionSignatureSemantics<'_> {
                 &generic.formals,
                 &generic.formal_bounds,
             );
-        } else if let Some(property) = self
-            .table
-            .source_props
-            .values()
-            .find(|property| property.stable_declaration == Some(scope.owner))
-        {
-            let bounds = property
-                .formal_bounds
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
+        } else if let Some(parameters) = self.property_type_parameters(scope.owner) {
             self.declare_semantic_type_parameters(
                 &lexical,
                 scope.owner,
-                &property.formals,
-                &bounds,
-            );
-        } else if let Some(property) = self
-            .table
-            .ext_props
-            .values()
-            .flatten()
-            .find(|property| property.stable_declaration == Some(scope.owner))
-        {
-            let bounds = property
-                .formal_bounds
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                &property.formals,
-                &bounds,
-            );
-        } else if let Some(property) = self
-            .table
-            .classes
-            .values()
-            .flat_map(|class| class.member_ext_props.values().flatten())
-            .find(|property| property.stable_declaration() == Some(scope.owner))
-        {
-            let bounds = property
-                .type_param_bounds()
-                .iter()
-                .copied()
-                .map(|bound| vec![bound])
-                .collect::<Vec<_>>();
-            self.declare_semantic_type_parameters(
-                &lexical,
-                scope.owner,
-                property.type_params(),
-                &bounds,
+                &parameters.formals,
+                &parameters.bounds,
             );
         } else {
             self.declare_header_only_type_parameters(&lexical, scope.owner)?;
@@ -832,6 +776,25 @@ impl ProductionSignatureSemantics<'_> {
                 .entry(formal)
                 .and_modify(|known| {
                     *known = crate::symbol_resolver::merge_inferred_ty(Some(*known), actual)
+                })
+                .or_insert(actual);
+        }
+    }
+
+    pub(super) fn merge_scoped_constraints_from_symbols(
+        oracle: &dyn crate::symbol_source::SymbolSource,
+        target: &mut crate::symbol_resolver::GSigBinds,
+        source: crate::symbol_resolver::GSigBinds,
+    ) {
+        for (formal, actual) in source {
+            target
+                .entry(formal)
+                .and_modify(|known| {
+                    *known = crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                        Some(oracle),
+                        *known,
+                        actual,
+                    )
                 })
                 .or_insert(actual);
         }
@@ -1272,439 +1235,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
         origin: crate::fir::OriginId,
-        _expected: Option<crate::fir::ResolvedTy>,
+        expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        crate::trace_compiler!(
-            "signature",
-            "select_value spelling={spelling} receivers={:?}",
-            self.implicit_receivers(scope),
-        );
-        if spelling.contains('.') {
-            // Bind the root once through the value tower. If it exists, every later segment is a
-            // member of that semantic receiver; never reinterpret the root spelling as a package
-            // or classifier when a later lookup fails.
-            if let Some(receiver) =
-                self.qualified_value_receiver(scope, spelling, origin, demand)?
-            {
-                return Ok(receiver);
-            }
-            if let Some((qualifier, name)) = spelling.rsplit_once('.') {
-                if qualifier
-                    .strip_prefix("this@")
-                    .is_some_and(|label| self.enclosing_enum_entry_receiver(scope, label).is_some())
-                {
-                    if let Some(declaration) = self.enclosing_enum_entry_property(scope, name) {
-                        return demand(declaration).map(|signature| signature.result);
-                    }
-                }
-                if qualifier == "super"
-                    || qualifier.starts_with("super<")
-                    || qualifier.starts_with("super@")
-                {
-                    return self
-                        .selected_super_member_property_result(scope, qualifier, name, demand);
-                }
-                if let Some(classifier) =
-                    self.qualified_classifier_or_source_alias(scope, qualifier)
-                {
-                    // The enum qualifier's value is its companion, but `Enum.entries` is still the
-                    // classifier property. `Enum.Companion.entries` names the companion member.
-                    if let Some(result) =
-                        self.prioritized_enum_entries_on_qualifier(scope, qualifier, name)
-                    {
-                        return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-                    }
-                    if let Some(result) =
-                        self.select_qualified_associated_property(scope, classifier, name, demand)?
-                    {
-                        return Ok(result);
-                    }
-                }
-            }
-            if let Ok(value) = self.qualified_receiver_ty(scope, spelling, origin, demand) {
-                return Ok(value);
-            }
-            if let Some((qualifier, name)) = spelling.rsplit_once('.') {
-                let package = crate::types::type_name(&qualifier.replace('.', "/"));
-                let file = self
-                    .headers
-                    .scopes
-                    .file(scope.source)
-                    .ok_or_else(Self::failure)?;
-                let access_package = self
-                    .headers
-                    .scopes
-                    .path(file.package)
-                    .iter()
-                    .map(|segment| self.headers.lookup_names.get(*segment))
-                    .collect::<Option<Vec<_>>>()
-                    .map(|segments| crate::types::type_name(&segments.join("/")))
-                    .ok_or_else(Self::failure)?;
-                let module =
-                    crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-                let property = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
-                    self.table.libraries.as_ref(),
-                    &module,
-                    std::slice::from_ref(&package),
-                )
-                .with_access_context(access_package, scope.source.raw(), Vec::new())
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-                .and_then(crate::symbol_resolver::Symbol::value)
-                .filter(|property| property.kind == crate::libraries::PropKind::TopLevel);
-                if let Some(property) = property {
-                    if let Some(signature) = self.demanded_source_signature(
-                        Some(scope),
-                        property.stable_declaration,
-                        demand,
-                    )? {
-                        return Ok(signature.result);
-                    }
-                    return crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure());
-                }
-            }
-            return Err(Self::failure());
-        }
-        if spelling == "this" {
-            return self
-                .implicit_receivers(scope)
-                .into_iter()
-                .next()
-                .and_then(|receiver| crate::fir::ResolvedTy::new(receiver).ok())
-                .ok_or_else(Self::failure);
-        }
-        // `super.p` / `super<C>.p` in an inferred initializer. The receiver of a super access is the
-        // SUPERTYPE, not the current class: without this the whole module's signatures decline with
-        // no diagnostic. An explicit qualifier names the supertype directly; a bare `super` takes the
-        // class supertype, which is the only one whose members a super access can read.
-        if spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@") {
-            let receivers = self.implicit_receivers(scope);
-            let label = spelling.rsplit_once('@').map(|(_, label)| label);
-            let current = match label {
-                Some(label) => receivers.into_iter().find(|receiver| {
-                    receiver.obj_internal().is_some_and(|classifier| {
-                        self.classifier_source_spelling(classifier) == label
-                    })
-                }),
-                None => receivers.into_iter().next(),
-            }
-            .ok_or_else(Self::failure)?;
-            let base_spelling = spelling.split('@').next().unwrap_or(spelling);
-            if let Some(qualifier) = base_spelling
-                .strip_prefix("super<")
-                .and_then(|rest| rest.strip_suffix('>'))
-            {
-                let internal = self
-                    .qualified_classifier(scope, qualifier)
-                    .ok_or_else(Self::failure)?;
-                return crate::fir::ResolvedTy::new(Ty::obj_name(internal))
-                    .map_err(|_| Self::failure());
-            }
-            let module =
-                crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
-            let source = &source as &dyn crate::symbol_source::SymbolSource;
-            let supertypes = crate::symbol_resolver::direct_supertypes(source, current);
-            let selected = self
-                .enum_entry_direct_super(scope, current)
-                .or_else(|| {
-                    supertypes
-                        .iter()
-                        .copied()
-                        .find(|supertype| {
-                            supertype.kotlin_class_internal().is_some_and(|internal| {
-                                source
-                                    .classifier(internal)
-                                    .is_some_and(|declaration| !declaration.is_interface())
-                            })
-                        })
-                        .or_else(|| supertypes.first().copied())
-                })
-                .ok_or_else(Self::failure)?;
-            return crate::fir::ResolvedTy::new(selected).map_err(|_| Self::failure());
-        }
-        if let Some(label) = spelling.strip_prefix("this@") {
-            if let Some(receiver) = self.enclosing_enum_entry_receiver(scope, label) {
-                return crate::fir::ResolvedTy::new(receiver).map_err(|_| Self::failure());
-            }
-            let labels_current_extension = self.headers.stub(scope.owner).is_some_and(|stub| {
-                stub.lookup_name
-                    .and_then(|name| self.headers.lookup_names.get(name))
-                    == Some(label)
-            });
-            if labels_current_extension {
-                if let Some(receiver) = self.declaration_extension_receiver(scope.owner) {
-                    return crate::fir::ResolvedTy::new(receiver).map_err(|_| Self::failure());
-                }
-            }
-            return self
-                .implicit_receivers(scope)
-                .into_iter()
-                .find(|receiver| {
-                    receiver.obj_internal().is_some_and(|classifier| {
-                        self.classifier_source_spelling(classifier) == label
-                    })
-                })
-                .and_then(|receiver| crate::fir::ResolvedTy::new(receiver).ok())
-                .ok_or_else(Self::failure);
-        }
-        // Primary-constructor parameters occupy the lexical initializer rung in front of dispatch
-        // properties. In `class C(vararg xs: Int) { val xs = xs }`, selecting the property first
-        // creates a false self-cycle; the right-hand `xs` is the normalized `IntArray` parameter.
-        if let Some(parameter) =
-            self.demanded_enclosing_constructor_parameter(scope, spelling, demand)?
-        {
-            return crate::fir::ResolvedTy::new(parameter).map_err(|_| Self::failure());
-        }
-        if let Some(capture) = self.enclosing_capture_type(scope, spelling) {
-            return crate::fir::ResolvedTy::new(capture).map_err(|_| Self::failure());
-        }
-        if let Some(declaration) = self.enclosing_enum_entry_property(scope, spelling) {
-            return demand(declaration).map(|signature| signature.result);
-        }
-        for rung in self.implicit_rungs(scope) {
-            let receiver = match rung {
-                ImplicitRung::PrioritizedClassifierProperties(owner) => {
-                    if let Some(result) =
-                        self.selected_implicit_classifier_property(scope, owner, spelling)
-                    {
-                        return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-                    }
-                    continue;
-                }
-                crate::resolve::implicit_rungs::ImplicitRung::StaticScope(classifier) => {
-                    if let Some(result) =
-                        self.select_static_scope_property(scope, classifier, spelling, demand)?
-                    {
-                        return Ok(result);
-                    }
-                    continue;
-                }
-                crate::resolve::implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
-            };
-            if let Some(result) =
-                self.selected_member_property_type(scope, receiver, spelling, demand)?
-            {
-                return Ok(result);
-            }
-            // Compile-time constants are declaration facts on the receiver classifier, not
-            // property accessor candidates. This is the same provider-normalized constant channel
-            // used for qualified reads; it also applies to a bare read inside an extension on a
-            // companion receiver (`fun Int.Companion.max() = MAX_VALUE`).
-            if let Some(internal) = receiver.non_null().obj_internal() {
-                if let Some(constant) = self
-                    .table
-                    .libraries
-                    .classifier(internal)
-                    .and_then(|declaration| declaration.constants.get(spelling).cloned())
-                {
-                    return crate::fir::ResolvedTy::new(constant.ty).map_err(|_| Self::failure());
-                }
-            }
-            if let Ok((result, member, extension)) = self.with_resolver(scope, |resolver| {
-                let crate::symbol_resolver::Symbol::Member(facets) = resolver.resolve_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    spelling,
-                    &[],
-                    &[],
-                )?
-                else {
-                    return None;
-                };
-                if let Some(property) = facets.extension_property {
-                    return Some((property.ty, None, Some(property)));
-                }
-                facets.read.map(|property| {
-                    let member = property.member;
-                    (property.ret, Some(member), None)
-                })
-            }) {
-                if let Some(member) = member.as_ref() {
-                    if let Some(signature) =
-                        self.demanded_member_signature(member.stable_declaration, demand)?
-                    {
-                        return self.apply_demanded_member(receiver, member, &signature, &[], &[]);
-                    }
-                }
-                if let Some(extension) = extension {
-                    if let Some(signature) =
-                        self.demanded_source_signature(None, extension.stable_declaration, demand)?
-                    {
-                        return Ok(signature.result);
-                    }
-                }
-                return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-            }
-            for dispatch_receiver in self.signature_dispatch_receivers(scope) {
-                let selected = self.member_extension_property_for(
-                    scope,
-                    receiver,
-                    dispatch_receiver,
-                    spelling,
-                );
-                let (result, declaration) = match selected {
-                    Ok(Some(selected)) => selected,
-                    Ok(None) => continue,
-                    Err(()) => {
-                        return Err(self.record_ambiguous_member(scope.owner, origin, spelling));
-                    }
-                };
-                crate::trace_compiler!(
-                    "signature",
-                    "member extension property selected name={spelling} extension={receiver:?} dispatch={dispatch_receiver:?} result={result:?} declaration={declaration:?}",
-                );
-                if let Some(declaration) = declaration {
-                    if self
-                        .headers
-                        .stub(declaration)
-                        .is_some_and(|stub| stub.signature_inference.is_some())
-                    {
-                        return demand(declaration).map(|signature| signature.result);
-                    }
-                }
-                return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-            }
-        }
-        for classifier in self.lexical_class_names(scope) {
-            if self.classifier_has_enum_entry(classifier, spelling) {
-                return crate::fir::ResolvedTy::new(Ty::obj_name(classifier))
-                    .map_err(|_| Self::failure());
-            }
-            if let Some(result) =
-                self.selected_implicit_classifier_property(scope, classifier, spelling)
-            {
-                return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-            }
-        }
-        // A provider may expose receiver-less properties through an inherited classifier namespace
-        // (for example a foreign superclass's associated declaration). Walk only namespaces whose
-        // provider explicitly permits that inheritance and consume the normalized Kotlin property;
-        // storage/realization never enters signature solving.
-        for owner in self.lexical_classifier_callable_owners(scope) {
-            if let Ok(property) = self.with_resolver(scope, |resolver| {
-                resolver.accessible_classifier_associated_property(owner, spelling)
-            }) {
-                return crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure());
-            }
-        }
-        // Enum entries are values exported by an explicit member import or a classifier star
-        // import. They have no callable/property facet, so the ordinary imported-value resolver
-        // cannot select them; retain the already-normalized classifier import rung and select the
-        // declaration fact directly. Lexical values and receiver members above remain nearer.
-        let imports = self.function_import_scope(scope.source)?;
-        if let Some((namespace, declared_name)) = imports.explicit_target(spelling) {
-            if let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace {
-                if self.classifier_has_enum_entry(owner, &declared_name) {
-                    return crate::fir::ResolvedTy::new(Ty::obj_name(owner))
-                        .map_err(|_| Self::failure());
-                }
-                // A companion-declared property may be realized by an associated platform
-                // accessor rather than an instance accessor (`@JvmField` on JVM). Explicit import
-                // still denotes the Kotlin property declaration; consume the provider-normalized
-                // property exactly as the ordinary Pass-2 checker does.
-                if let Ok(property) = self.with_resolver(scope, |resolver| {
-                    resolver.associated_property(owner, &declared_name)
-                }) {
-                    return crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure());
-                }
-            }
-        }
-        let mut imported_entry_owners = Vec::new();
-        for owner in imports.levels()[1].iter().copied() {
-            if self.classifier_has_enum_entry(owner, spelling)
-                && !imported_entry_owners.contains(&owner)
-            {
-                imported_entry_owners.push(owner);
-            }
-        }
-        match imported_entry_owners.as_slice() {
-            [owner] => {
-                return crate::fir::ResolvedTy::new(Ty::obj_name(*owner))
-                    .map_err(|_| Self::failure());
-            }
-            [_, _, ..] => return Err(Self::failure()),
-            [] => {}
-        }
-        let property = match self.with_resolver(scope, |resolver| {
-            let properties = resolver
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::TopLevel,
-                    spelling,
-                    &[],
-                    &[],
-                )?
-                .values();
-            let module =
-                crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
-            let oracle = crate::symbol_resolver::SourceOracle(&source);
-            let receivers = self.implicit_receivers(scope);
-            let mut applicable = properties
-                .into_iter()
-                .filter(|property| {
-                    property.kind == crate::libraries::PropKind::TopLevel
-                        && property.context_count <= property.getter.params.len()
-                        && super::super::context_argument_types(
-                            &receivers,
-                            &property.getter.params[..property.context_count],
-                            &oracle,
-                        )
-                        .is_some()
-                })
-                .collect::<Vec<_>>();
-            let best_context = applicable
-                .iter()
-                .map(|property| property.context_count)
-                .max()?;
-            applicable.retain(|property| property.context_count == best_context);
-            let [property] = applicable.as_slice() else {
-                return None;
-            };
-            Some(property.clone())
-        }) {
-            Ok(property) => property,
-            Err(_) => {
-                // A PRIMARY CONSTRUCTOR PARAMETER read from a member property initializer
-                // (`class A(y: Int) { var x = y }`). It is not a member and not a top-level value, so no
-                // ordinary lookup finds it; the enclosing classifier's constructor shape is where it lives.
-                if let Some(parameter) =
-                    self.demanded_enclosing_constructor_parameter(scope, spelling, demand)?
-                {
-                    return crate::fir::ResolvedTy::new(parameter).map_err(|_| Self::failure());
-                }
-                // The authoritative classifier operation owns lexical declaration, inherited,
-                // and file/import scope priority, including enum-entry-owned nested declarations.
-                let classifier = self
-                    .qualified_classifier(scope, spelling)
-                    .ok_or_else(Self::failure)?;
-                let Some(value) = self.classifier_value_type(classifier) else {
-                    crate::trace_compiler!(
-                        "signature",
-                        "select_value declined {spelling}: classifier is neither a singleton nor has a companion",
-                    );
-                    return Err(Self::failure());
-                };
-                return crate::fir::ResolvedTy::new(value).map_err(|_| Self::failure());
-            }
-        };
-        if let Some(signature) = self.demanded_source_signature_at(
-            Some(scope),
-            property.stable_declaration,
-            Some(origin),
-            demand,
-        )? {
-            return Ok(signature.result);
-        }
-        crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())
+        self.select_value_candidate(scope, spelling, origin, expected, demand)
+            .map(|selected| selected.result)
     }
 
     fn select_call(
@@ -1716,6 +1254,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
+        qualified_namespace: bool,
         expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -1800,28 +1339,30 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     demand,
                 );
             }
-            if let Some(receiver) =
-                self.qualified_value_receiver(scope, qualifier, origin, demand)?
-            {
-                return self
-                    .select_member_call(
-                        scope,
-                        name,
-                        origin,
-                        receiver,
-                        arguments,
-                        type_arguments,
-                        trailing_lambda,
-                        expected,
-                        demand,
-                    )
-                    .and_then(|selection| selection.ty.ok_or_else(Self::failure));
+            if !qualified_namespace {
+                if let Some(receiver) =
+                    self.qualified_value_receiver(scope, qualifier, origin, demand)?
+                {
+                    return self
+                        .select_member_call(
+                            scope,
+                            name,
+                            origin,
+                            receiver,
+                            arguments,
+                            type_arguments,
+                            trailing_lambda,
+                            expected,
+                            demand,
+                        )
+                        .and_then(|selection| selection.ty.ok_or_else(Self::failure));
+                }
             }
             // A dotted callee is either PACKAGE-qualified (`kotlin.collections.listOf`) or a member
             // call on a qualified RECEIVER (`E.valueOf`, `E.OK.toString`, `C.Companion.of`). The
-            // value-root form was committed above. With no value root, package and classifier
-            // namespace interpretations remain; associated values reached through those namespaces
-            // are folded into a receiver only after namespace resolution.
+            // compact graph has already committed an ordinary value-root form before this call.
+            // Package and classifier namespace interpretations remain; associated values reached
+            // through those namespaces are folded into a receiver only after namespace resolution.
             let package_call = self.select_qualified_package_call(
                 scope,
                 spelling,
@@ -2329,12 +1870,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         let scoped_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
         let selected = self.with_resolver(scope, |resolver| {
-            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
-            let candidates = if include_invisible {
-                resolver.top_level_candidates(spelling)
-            } else {
-                resolver.accessible_top_level_candidates(spelling)
-            };
+            let candidates = resolver.accessible_top_level_candidates(spelling);
             crate::trace_compiler!(
                 "signature",
                 "top-level candidates spelling={spelling} arguments={argument_types:?} candidates={:?}",
@@ -2354,23 +1890,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments,
                 trailing_lambda,
             ) {
-                let (selected, callable) = if include_invisible {
-                        resolver.select_top_level_function_candidates_with_expected_ignoring_visibility(
-                            spelling,
-                            explicit.candidates,
-                            &explicit.arguments,
-                            &resolved_type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )?
-                } else {
-                    resolver.select_top_level_function_candidates_with_expected(
+                let (selected, callable) = resolver
+                    .select_top_level_function_candidates_with_expected(
                         spelling,
                         explicit.candidates,
                         &explicit.arguments,
                         &resolved_type_arguments,
                         expected.map(crate::fir::ResolvedTy::get),
-                    )?
-                };
+                    )?;
                 return Some((
                     SelectedTopLevelCall::Callable {
                         parameter_by_argument: Self::selected_argument_parameters(
@@ -2400,36 +1927,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let (selected_arguments, selected_argument_types) = mapped
                 .clone()
                 .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
-            if include_invisible {
-                let all_top_level = candidates
-                    .iter()
-                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if let Some((selected, callable)) = resolver
-                    .select_top_level_function_candidates_with_expected_ignoring_visibility(
-                        spelling,
-                        all_top_level,
-                        &selected_arguments,
-                        &resolved_type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )
-                {
-                    return Some((
-                        SelectedTopLevelCall::Callable {
-                            parameter_by_argument: Self::selected_argument_parameters(
-                                &selected,
-                                arguments,
-                                trailing_lambda,
-                            ),
-                            callable: Box::new(callable),
-                            source: selected.source_key,
-                            declaration: selected.stable_declaration,
-                        },
-                        selected_argument_types,
-                    ));
-                }
-            }
             let selected_top_level = resolver.select_top_level_function_candidates_with_expected(
                 spelling,
                 candidates.clone(),
@@ -2470,27 +1967,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                 .filter(|candidate| {
                     let family = vec![(*candidate).clone()];
-                    if include_invisible {
-                        resolver
-                            .select_top_level_function_candidates_with_expected_ignoring_visibility(
-                                spelling,
-                                family,
-                                &selected_arguments,
-                                &resolved_type_arguments,
-                                expected.map(crate::fir::ResolvedTy::get),
-                            )
-                            .is_some()
-                    } else {
-                        resolver
-                            .select_top_level_function_candidates_with_expected(
-                                spelling,
-                                family,
-                                &selected_arguments,
-                                &resolved_type_arguments,
-                                expected.map(crate::fir::ResolvedTy::get),
-                            )
-                            .is_some()
-                    }
+                    resolver
+                        .select_top_level_function_candidates_with_expected(
+                            spelling,
+                            family,
+                            &selected_arguments,
+                            &resolved_type_arguments,
+                            expected.map(crate::fir::ResolvedTy::get),
+                        )
+                        .is_some()
                 })
                 .take(2)
                 .count();
@@ -2753,6 +2238,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
+        qualified: bool,
         _expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -2768,30 +2254,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // after materialization. Repeating a partial lookup here both wastes work and can reject a
         // valid later tower rung (callable properties, member extensions, header-only declarations)
         // which final selection already handles through the shared resolver.
-        if arguments
+        let all_typed = arguments
             .iter()
-            .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)))
-        {
+            .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)));
+        // A nested generic call is typed provisionally before its selected outer parameter is
+        // known. Only a structurally qualified namespace call reaches this operation with every
+        // argument typed but still needing contextual re-entry; value-root calls are represented
+        // by `MemberCall` and use `member_call_argument_expectations` directly.
+        let has_contextual_call = arguments.iter().any(|argument| {
+            matches!(argument, crate::fir::SigCallArgumentProbe::Typed(argument)
+                if argument.contextual_call)
+        });
+        if all_typed && !(qualified && has_contextual_call) {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         }
-        if spelling.contains('.') {
-            if let Some((qualifier, member)) = spelling.rsplit_once('.') {
-                if let Some(receiver) =
-                    self.qualified_value_receiver(scope, qualifier, origin, demand)?
-                {
-                    return self.member_call_argument_expectations(
-                        scope,
-                        member,
-                        origin,
-                        receiver,
-                        arguments,
-                        type_arguments,
-                        trailing_lambda,
-                        None,
-                        demand,
-                    );
-                }
-            }
+        if qualified {
             if let Ok(expectations) = self.qualified_package_call_argument_expectations(
                 scope,
                 spelling,
@@ -2843,12 +2320,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             (Vec<Ty>, Vec<Option<usize>>, crate::libraries::CallSig),
             _,
         > = self.with_resolver(scope, |resolver| {
-            let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
-            let candidates = if include_invisible {
-                resolver.top_level_candidates(spelling)
-            } else {
-                resolver.accessible_top_level_candidates(spelling)
-            };
+            let candidates = resolver.accessible_top_level_candidates(spelling);
             let argument_names = arguments
                 .iter()
                 .map(|argument| match argument {
@@ -2882,22 +2354,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             );
             let (kinds, slots) =
                 Self::probe_call_arguments(&candidates, arguments, trailing_lambda)?;
-            let visibility_override = include_invisible
-                .then(|| {
-                    resolver.select_top_level_function_candidates_ignoring_visibility(
-                        spelling,
-                        candidates
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.kind == crate::libraries::FnKind::TopLevel
-                            })
-                            .cloned()
-                            .collect(),
-                        &kinds,
-                        &resolved_type_arguments,
-                    )
-                })
-                .flatten()
+            let (selected, specialized_parameters) = resolver
+                .select_top_level_function_candidates(
+                    spelling,
+                    candidates.clone(),
+                    &kinds,
+                    &resolved_type_arguments,
+                )
                 .and_then(|(selected, _)| {
                     let parameters = crate::symbol_resolver::specialized_function_params(
                         &selected,
@@ -2906,27 +2369,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
                     let value_parameters = parameters.get(selected.context_count..)?.to_vec();
                     Some((selected, Some(value_parameters)))
-                });
-            let (selected, specialized_parameters) = visibility_override
-                .or_else(|| {
-                    resolver
-                        .select_top_level_function_candidates(
-                            spelling,
-                            candidates.clone(),
-                            &kinds,
-                            &resolved_type_arguments,
-                        )
-                        .and_then(|(selected, _)| {
-                            let parameters =
-                                crate::symbol_resolver::specialized_function_params(
-                                    &selected,
-                                    &kinds,
-                                    &resolved_type_arguments,
-                                );
-                            let value_parameters =
-                                parameters.get(selected.context_count..)?.to_vec();
-                            Some((selected, Some(value_parameters)))
-                        })
                 })
                 .or_else(|| {
                     let mut visible = candidates.iter().filter(|candidate| {
@@ -3692,6 +3134,29 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         let (property, mut candidates, inaccessible) = match candidates {
             Ok(candidates) => candidates,
             Err(_failure) if unbound => {
+                if let Some(alias) = self.applied_source_alias_expansion(scope, spelling, &[]) {
+                    let module = crate::module_symbols::ModuleSymbols::for_file(
+                        self.table,
+                        scope.source.raw(),
+                    );
+                    let source = crate::symbol_source::CompositeSource::new(vec![
+                        &module as &dyn crate::symbol_source::SymbolSource,
+                        &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+                    ]);
+                    if matches!(
+                        super::super::inner_constructor_calls::apply_inner_alias_outer_in_source(
+                            &source,
+                            alias.expansion,
+                            receiver.get(),
+                        ),
+                        super::super::inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch
+                    ) {
+                        // The selected alias is a constructor-reference candidate, not a missing
+                        // member. Checked-body selection owns its declaration-shaped receiver
+                        // diagnostic after the constructor inventory has been finalized.
+                        return Err(Self::failure());
+                    }
+                }
                 return Err(self.record_unresolved_reference(scope.owner, origin, spelling));
             }
             Err(failure) => return Err(failure),

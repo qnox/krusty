@@ -1,6 +1,29 @@
 //! Method parameter annotations and Java reflection names.
 
-use super::{descriptor_param_count, split_declaration_annotations, ClassWriter};
+use super::{split_declaration_annotations, ClassWriter};
+
+/// How many parameters a JVM method descriptor `(…)ret` declares — one per top-level type, an
+/// `L…;` or `[…` counting as one.
+fn descriptor_param_count(descriptor: &str) -> usize {
+    let bytes = descriptor.as_bytes();
+    let Some(end) = descriptor.find(')') else {
+        return 0;
+    };
+    let (mut i, mut count) = (1, 0);
+    while i < end {
+        while i < end && bytes[i] == b'[' {
+            i += 1;
+        }
+        if i < end && bytes[i] == b'L' {
+            while i < end && bytes[i] != b';' {
+                i += 1;
+            }
+        }
+        i += 1;
+        count += 1;
+    }
+    count
+}
 
 impl ClassWriter {
     /// Attach source parameter annotations, split by retention and padded to physical JVM arity.

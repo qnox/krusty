@@ -40,6 +40,11 @@ pub struct IrCheckedProperty {
     /// included, else 0. Accepted like [`Self::decl_line`] and kept apart from it: the constructor's
     /// store of the property maps here, its accessors to `decl_line`.
     pub decl_start_line: u32,
+    /// Lines of the getter and setter headers when each was written with a body (else 0), accepted
+    /// like [`Self::decl_line`]. Such an accessor is a declaration of its own and anchors on its
+    /// own line; any other accessor anchors on [`Self::decl_line`].
+    pub getter_decl_line: u32,
+    pub setter_decl_line: u32,
     /// Exact semantic position among the owning class's property initializers and `init` blocks.
     /// This is copied from the stable FIR declaration header, never reconstructed from source.
     pub initialization_order: Option<u32>,
@@ -51,6 +56,9 @@ pub struct IrCheckedProperty {
     pub visibility: crate::types::Visibility,
     pub flags: crate::fir::DeclarationFlags,
     pub initializer: Option<ExprId>,
+    /// Kotlin metadata's `HAS_CONSTANT`: an immutable property of a `const val` type whose checked
+    /// initializer is a constant to kotlinc's serializer (see `fir_lower::metadata_constants`).
+    pub has_constant_initializer: bool,
     pub delegate: Option<ExprId>,
     pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
     pub getter: Option<ExprId>,
@@ -73,6 +81,9 @@ pub struct IrCheckedProperty {
 #[derive(Clone, Debug)]
 pub struct MemberExtProp {
     pub name: String,
+    /// Stable source declaration order. This identifies the property for declaration-owned facts
+    /// such as its checked type spelling; `name` is metadata payload and may be shared by overloads.
+    pub source_order: u32,
     /// Declared extension receiver (`Int` in `val Int.doubled`).
     pub receiver: crate::types::Ty,
     /// Declared property type.
@@ -174,6 +185,8 @@ pub struct IrProperty {
     /// A `private` property. kotlinc emits NO accessor for one — in-class reads go straight to the
     /// backing field — so a use from outside the declaring class has nothing to call, and whichever
     /// path is lowering it does not own the access.
+    /// See [`IrCheckedProperty::has_constant_initializer`].
+    pub has_constant_initializer: bool,
     pub is_private: bool,
     /// The resolved visibility of a `var`'s setter: its own modifier (`private set`, `protected set`),
     /// else the property's. This is declaration visibility, not a JVM flag: every backend must
@@ -193,6 +206,9 @@ pub struct IrProperty {
     /// accessor for it (`access$get<X>$p` on the JVM); without one the splice would be illegal, and
     /// silently degrading the `inline` call instead would change what the program does.
     pub needs_access_bridge: bool,
+    /// Annotations written on this property's accessors, whether source declared each accessor or
+    /// a backend realizes its default.
+    pub accessor_annotations: super::AccessorAnnotations,
 }
 
 /// A property declared by another file of the module, as the file's code selects it.

@@ -379,9 +379,11 @@ impl<'a> CommonIrBodySink<'a> {
         self.predeclare_inline_payload(index, declaration, &body)?;
         let mut dependencies = std::collections::HashSet::new();
         body.collect_referenced_module_callables(&mut dependencies);
-        let defaults = bodies.defaults(callable).cloned();
+        let defaults = bodies.defaults(callable).map(<[FirBody]>::to_vec);
         if let Some(defaults) = &defaults {
-            defaults.collect_referenced_module_callables(&mut dependencies);
+            for default in defaults {
+                default.collect_referenced_module_callables(&mut dependencies);
+            }
         }
         let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
         dependencies.sort_unstable_by_key(|dependency| dependency.raw());
@@ -391,6 +393,10 @@ impl<'a> CommonIrBodySink<'a> {
         visiting.remove(&callable);
 
         let nested = body.inline_nested_declaration_bodies().to_vec();
+        // A template from another source carries that file's line count. The caller's source map
+        // identity range is the caller's own count, so the foreign count is rolled back after the
+        // template, its nested declarations, and its defaults have been lowered.
+        let caller_line_count = (anchor.source != self.source).then_some(self.ir.source_line_count);
         if let Err(error) = self.accept_body(index, body.owner(), body) {
             crate::trace_compiler!(
                 "lower",
@@ -417,7 +423,12 @@ impl<'a> CommonIrBodySink<'a> {
             .get(&callable)
             .is_some_and(|function| self.ir.has_param_defaults(*function));
         if let Some(defaults) = defaults.filter(|_| !defaults_attached) {
-            self.accept_body(index, defaults.owner(), defaults)?;
+            for default in defaults {
+                self.accept_body(index, default.owner(), default)?;
+            }
+        }
+        if let Some(caller_line_count) = caller_line_count {
+            self.ir.source_line_count = caller_line_count;
         }
         self.materialized_inline_callables.insert(callable);
         Ok(())
@@ -482,16 +493,12 @@ impl<'a> CommonIrBodySink<'a> {
         // over stable ownership to carry every header belonging to the selected local classifiers.
         loop {
             let mut changed = false;
-            for raw in 0..index.declaration_count() {
-                let declaration = DeclarationId::from_raw(raw as u32);
-                let Some(owner) = index
-                    .declaration_anchor(declaration)
-                    .and_then(|anchor| anchor.owner)
-                else {
-                    continue;
-                };
-                if declarations.contains(&owner) && declarations.insert(declaration) {
-                    changed = true;
+            let owners = declarations.iter().copied().collect::<Vec<_>>();
+            for owner in owners {
+                for &declaration in index.owned_declarations(owner) {
+                    if declarations.insert(declaration) {
+                        changed = true;
+                    }
                 }
             }
             if !changed {
@@ -672,12 +679,43 @@ impl<'a> CommonIrBodySink<'a> {
         index: &ResolvedModuleIndex,
         allow_deferred_body_local: bool,
     ) -> Result<(), FirFileLoweringFailure> {
+        for (&key, construction) in index.serialization_type_use_serializer_constructors() {
+            let target = match construction.target {
+                crate::fir::ResolvedCustomSerializerConstructorTarget::Module(declaration) => {
+                    crate::ir::IrCustomSerializerConstructorTarget::Module(
+                        super::constructors::module_constructor_target(index, declaration)
+                            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?,
+                    )
+                }
+                crate::fir::ResolvedCustomSerializerConstructorTarget::External(declaration) => {
+                    crate::ir::IrCustomSerializerConstructorTarget::External(
+                        crate::ir::IrExternalConstructorTarget::unresolved(declaration),
+                    )
+                }
+            };
+            let lowered = crate::ir::IrCustomSerializerConstruction {
+                serializer: construction.serializer,
+                parameters: construction
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                operands: construction.operands.clone(),
+                target,
+            };
+            if let Some(existing) = self.ir.type_use_serializer_constructions.get(&key) {
+                assert_eq!(existing, &lowered, "one checked type-use constructor plan");
+            } else {
+                self.ir
+                    .type_use_serializer_constructions
+                    .insert(key, lowered);
+            }
+        }
         let mut newly_declared = std::collections::HashSet::new();
         let mut pending_local_names = Vec::new();
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
+        for declaration in
+            super::declarations_for_lowering(index, self.source, &self.inline_payload_declarations)
+        {
             let Some(anchor) = index.declaration_anchor(declaration) else {
                 continue;
             };
@@ -690,10 +728,7 @@ impl<'a> CommonIrBodySink<'a> {
                 anchor.owner,
                 index.declaration_name(declaration),
             );
-            if (anchor.source != self.source
-                && !self.inline_payload_declarations.contains(&declaration))
-                || anchor.kind != DeclarationKind::Classifier
-            {
+            if anchor.kind != DeclarationKind::Classifier {
                 continue;
             }
             if self
@@ -710,10 +745,10 @@ impl<'a> CommonIrBodySink<'a> {
                         .classifier_header(declaration)
                         .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
                         .classifier;
-                    if let Some(interfaces) = index.superclass_interfaces(declaration) {
+                    if let Some(defaults) = index.inherited_defaults(declaration) {
                         self.ir
-                            .superclass_interfaces
-                            .insert(classifier_identity, interfaces.to_vec());
+                            .inherited_defaults
+                            .insert(classifier_identity, defaults.to_vec());
                     }
                     // A local classifier may have a stable skeleton before an inferred member is
                     // checked. Refresh only the semantic override payload once Pass 2 marks both
@@ -785,13 +820,13 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish one applied hierarchy per IR file"
             );
-            if let Some(interfaces) = index.superclass_interfaces(declaration) {
+            if let Some(defaults) = index.inherited_defaults(declaration) {
                 assert!(
                     self.ir
-                        .superclass_interfaces
-                        .insert(classifier_identity, interfaces.to_vec())
+                        .inherited_defaults
+                        .insert(classifier_identity, defaults.to_vec())
                         .is_none(),
-                    "a source classifier may publish superclass interface facts once"
+                    "a source classifier may publish its inherited defaults once"
                 );
             }
             let property_overrides = lower_property_override_plans(index, declaration);
@@ -826,8 +861,10 @@ impl<'a> CommonIrBodySink<'a> {
                         .map(|parameter| parameter.get())
                         .collect(),
                     operands: operands.into(),
-                    target: super::constructors::module_constructor_target(index, constructor)
-                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                    target: crate::ir::IrCustomSerializerConstructorTarget::Module(
+                        super::constructors::module_constructor_target(index, constructor)
+                            .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                    ),
                 };
                 self.ir
                     .custom_serializer_constructions
@@ -871,16 +908,11 @@ impl<'a> CommonIrBodySink<'a> {
             }
             newly_declared.insert(declaration);
             let mut type_aliases = Vec::new();
-            for alias_raw in 0..index.declaration_count() {
-                let alias = DeclarationId::from_raw(
-                    u32::try_from(alias_raw).expect("too many stable declarations for a packed id"),
-                );
+            for alias in index.owned_declarations(declaration).iter().copied() {
                 let Some(alias_anchor) = index.declaration_anchor(alias) else {
                     continue;
                 };
-                if alias_anchor.owner != Some(declaration)
-                    || alias_anchor.kind != DeclarationKind::TypeAlias
-                {
+                if alias_anchor.kind != DeclarationKind::TypeAlias {
                     continue;
                 }
                 let Some(alias_header) = index.type_alias_header(alias) else {
@@ -931,32 +963,20 @@ impl<'a> CommonIrBodySink<'a> {
                     "a source classifier may publish its type aliases only once"
                 );
             }
-            for entry_raw in 0..index.declaration_count() {
-                let entry = DeclarationId::from_raw(
-                    u32::try_from(entry_raw).expect("too many stable declarations for a packed id"),
-                );
+            for entry in index.owned_declarations(declaration).iter().copied() {
                 let Some(entry_anchor) = index.declaration_anchor(entry) else {
                     continue;
                 };
-                if entry_anchor.owner != Some(declaration)
-                    || entry_anchor.kind != DeclarationKind::EnumEntry
-                {
+                if entry_anchor.kind != DeclarationKind::EnumEntry {
                     continue;
                 }
                 let name = index
                     .declaration_name(entry)
                     .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(entry))?
                     .to_owned();
-                let has_body = (0..index.declaration_count()).any(|child_raw| {
-                    let child = DeclarationId::from_raw(
-                        u32::try_from(child_raw)
-                            .expect("too many stable declarations for a packed id"),
-                    );
-                    index
-                        .declaration_anchor(child)
-                        .is_some_and(|child_anchor| child_anchor.owner == Some(entry))
-                });
-                let subclass = has_body.then(|| header.classifier.nested_child(&name));
+                let subclass = index
+                    .enum_entry_has_body(entry)
+                    .then(|| header.classifier.nested_child(&name));
                 let source_order = index
                     .source_order(entry)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(entry))?;
@@ -967,6 +987,7 @@ impl<'a> CommonIrBodySink<'a> {
                         argument_prelude: Vec::new(),
                         args: Vec::new(),
                         constructor_parameter_types: Vec::new(),
+                        constructor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
                         default_parameters: Vec::new(),
                         decl_line: 0,
                         source_order,
@@ -979,7 +1000,7 @@ impl<'a> CommonIrBodySink<'a> {
                     // constructor with a different parameter list. Finalization installs that
                     // already-selected list after the entry body arrives; predeclaration only marks
                     // this skeleton as an enum-entry subclass.
-                    entry_class.enum_entry_of = Some(Vec::new());
+                    entry_class.is_enum_entry = true;
                     let entry_class = self.ir.add_class(entry_class);
                     assert!(
                         self.ir
@@ -1043,13 +1064,9 @@ impl<'a> CommonIrBodySink<'a> {
                 "a source classifier may publish one target-neutral naming plan"
             );
         }
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
-            if !newly_declared.contains(&declaration) {
-                continue;
-            }
+        let mut declared = newly_declared.iter().copied().collect::<Vec<_>>();
+        declared.sort_by_key(|declaration| declaration.raw());
+        for declaration in declared {
             let Some(header) = index.declaration_header(declaration) else {
                 continue;
             };
@@ -1122,13 +1139,9 @@ impl<'a> CommonIrBodySink<'a> {
             class.constructor_prefix_count += 1;
             class.pre_super_param_fields.push((0, 0));
         }
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
-            if !newly_declared.contains(&declaration) {
-                continue;
-            }
+        let mut declared = newly_declared.iter().copied().collect::<Vec<_>>();
+        declared.sort_by_key(|declaration| declaration.raw());
+        for declaration in declared {
             let Some(header) = index.declaration_header(declaration) else {
                 continue;
             };
@@ -1168,17 +1181,13 @@ impl<'a> CommonIrBodySink<'a> {
         &mut self,
         index: &ResolvedModuleIndex,
     ) -> Result<(), FirFileLoweringFailure> {
-        for raw in 0..index.declaration_count() {
-            let declaration = DeclarationId::from_raw(
-                u32::try_from(raw).expect("too many stable declarations for a packed id"),
-            );
+        for declaration in
+            super::declarations_for_lowering(index, self.source, &self.inline_payload_declarations)
+        {
             let Some(anchor) = index.declaration_anchor(declaration) else {
                 continue;
             };
-            if (anchor.source != self.source
-                && !self.inline_payload_declarations.contains(&declaration))
-                || anchor.kind != DeclarationKind::Function
-            {
+            if anchor.kind != DeclarationKind::Function {
                 continue;
             }
             let Some(declaration_header) = index.declaration_header(declaration) else {
@@ -1346,6 +1355,9 @@ impl<'a> CommonIrBodySink<'a> {
             }
             if index.has_function_typed_parameter(callable.id) {
                 self.ir.function_typed_parameter_fns.insert(function);
+            }
+            if let Some(contract) = index.contract(declaration).filter(|_| class.is_some()) {
+                self.ir.fn_contracts.insert(function, contract.clone());
             }
             // An override also inherits `operator` / `infix`; see `finalize_inherited_statuses`.
             if declaration_header
@@ -1654,16 +1666,11 @@ impl<'a> CommonIrBodySink<'a> {
         if lowered.is_empty() {
             return Ok(());
         }
-        if self
-            .ir
-            .fn_params
-            .get(&function)
-            .is_some_and(|parameters| parameters.defaults.is_some())
-        {
-            return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
-        }
         let physical_count = self.ir.functions[function as usize].params.len();
-        let mut defaults = vec![None; physical_count];
+        let info = self.ir.fn_params.entry(function).or_default();
+        let defaults = info
+            .defaults
+            .get_or_insert_with(|| vec![None; physical_count]);
         for (parameter, value) in lowered {
             let mut position = parameter as usize;
             if callable.shape.extension_receiver.is_some()
@@ -1677,11 +1684,11 @@ impl<'a> CommonIrBodySink<'a> {
                     callable.declaration,
                 ));
             };
-            *slot = Some(value);
+            if slot.replace(value).is_some() {
+                return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+            }
         }
-        let info = self.ir.fn_params.entry(function).or_default();
-        info.defaults = Some(defaults);
-        info.defaults_inherited = defaults_inherited;
+        info.defaults_inherited |= defaults_inherited;
         Ok(())
     }
 }
@@ -1708,11 +1715,14 @@ impl CheckedBodySink for IndexedCommonIrBodySink<'_, '_> {
     }
 }
 
-/// Record what each lowered callable inherits from the declarations it overrides: its
-/// return-value status and `operator` / `infix`. A local classifier's override plan, and with it
-/// what its members inherit, is published when the body declaring it is checked, after the members
-/// were predeclared, so these are read once every body has been.
+/// Record what each lowered callable inherits from the declarations it overrides: its return-value
+/// status, `operator` / `infix`, and final visibility, and the language role of every
+/// current-module function that has one, which a call in this file may select from another file.
+/// Access checking already consumed the same corrected declaration header. This refresh is a
+/// representation handoff for body-local methods, which can be predeclared before their local
+/// classifier publishes its override plan.
 fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
+    let mut visibilities = Vec::new();
     for (&callable, &function) in &ir.checked_callable_functions {
         let inherited = index.callable_inherited_status(callable);
         if inherited.return_value != crate::types::ReturnValueStatus::Unspecified {
@@ -1725,5 +1735,17 @@ fn finalize_inherited_statuses(index: &ResolvedModuleIndex, ir: &mut IrFile) {
         if inherited.infix {
             ir.infix_fns.insert(function);
         }
+        if let Some(header) = index
+            .callable(callable)
+            .and_then(|callable| index.declaration_header(callable.declaration))
+            .filter(|header| header.kind == DeclarationKind::Function)
+        {
+            visibilities.push((function, header.visibility));
+        }
     }
+    for (function, visibility) in visibilities {
+        ir.set_method_visibility(function, visibility);
+    }
+    ir.callable_semantic_roles
+        .extend(index.inherited_semantic_roles());
 }

@@ -19,7 +19,34 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
         .get(&declaration)
         .copied()
         .unwrap_or(semantic);
-    ir_ty_to_jvm(&stored_value_ty(declared))
+    let slot = ir_ty_to_jvm(&stored_value_ty(declared));
+    erased_inline_parameter_slot(ir, declaration, semantic).unwrap_or(slot)
+}
+
+/// The verifier type of an inlined type-parameter value.
+///
+/// kotlinc stores that parameter as its erased bound (`T : AutoCloseable?` is `AutoCloseable`) and
+/// `checkcast`s back to the call-site type at each use. An unconstrained `T` stays the specialized
+/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization
+/// stays unboxed.
+fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
+    let declared = ir.inline_declared_type(declaration)?;
+    if !matches!(declared.non_null(), Ty::TyParam(..)) {
+        return None;
+    }
+    let erased = ir_ty_to_jvm(&stored_value_ty(declared));
+    let specialized = ir_ty_to_jvm(&stored_value_ty(semantic));
+    if !erased.is_reference() || !specialized.is_reference() || erased == specialized {
+        return None;
+    }
+    let top = erased
+        .obj_internal()
+        .is_some_and(crate::jvm::jvm_class_map::is_jvm_erased_top);
+    if top {
+        None
+    } else {
+        Some(erased)
+    }
 }
 
 fn emit_deferred_zero(
@@ -60,6 +87,19 @@ impl Emitter<'_> {
             // only a callable control-flow return uses the JVM void representation.
             .unwrap_or_else(|| slot_type(self.ir, declaration, semantic_ty));
 
+        // The synthetic zero on an inline-return result exists for common-IR definite assignment;
+        // it is not a JVM store. Keep the semantic slot binding now so it survives the loop body's
+        // scope restore, but defer occupying the physical frame slot until the first real store.
+        // Locals inside the returned operand can then reuse this slot exactly as kotlinc does.
+        if self.open_inline_return_frame(declaration, index, slot_ty) {
+            let slot = self
+                .frame
+                .enter_deferred(super::frame_map::FrameKey::Value(index), slot_ty);
+            self.slots.insert(index, (slot, slot_ty));
+            self.unassigned_values.insert(index);
+            return;
+        }
+
         // A spilled local is declared twice with the same value identity. Reuse its slot when the
         // verifier types agree, or when both are references; never alias differing primitives.
         let is_reference = |ty: Ty| matches!(ty, Ty::String | Ty::Obj(..)) || ty.is_array();
@@ -78,9 +118,7 @@ impl Emitter<'_> {
             (!holds_operand).then(|| self.enter_unassigned_value(index, slot_ty, false))
         });
 
-        if let Some(cell) =
-            initializer.and_then(|value| self.stored_shared_cell(declaration, value))
-        {
+        if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
@@ -112,9 +150,23 @@ impl Emitter<'_> {
                 .get(&initializer)
                 .copied()
                 .unwrap_or(source);
+            // An inlined body forgets the caller's line. kotlinc's `visitVariable` marks the
+            // declaration before it narrows the erased result, so the `checkcast` — not the store
+            // after it — starts that line (`val value = fetch(slot)`). An unsigned
+            // bitwise result still forgets after its carrier conversion, and the store is the mark
+            // that follows.
+            let restore_inlined_line =
+                code.line_forgotten() && !self.completes_unsigned_bitwise_value(initializer);
+            if restore_inlined_line {
+                self.mark_declared_initializer_line(declaration, initializer, code);
+            }
             self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
-            self.mark_expression_start(initializer, code);
-            debug_lines::mark_statement(self.ir, declaration, code);
+            if self.completes_unsigned_bitwise_value(initializer) {
+                code.forget_line();
+            }
+            if !restore_inlined_line {
+                self.mark_declared_initializer_line(declaration, initializer, code);
+            }
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
@@ -128,5 +180,27 @@ impl Emitter<'_> {
         self.slots.insert(index, (slot, slot_ty));
         // A `lateinit` declaration emits no store, but its lexical debug lifetime still starts here.
         self.open_declared_local(declaration, slot, slot_ty, code);
+    }
+
+    /// The declaration's line, after the initializer's own start when that start is a different
+    /// expression. A declaration inside an external inline body maps through the class source map.
+    fn mark_declared_initializer_line(
+        &mut self,
+        declaration: ExprId,
+        initializer: ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        self.mark_expression_start(initializer, code);
+        match self.ir.external_frame_lines.get(&declaration).cloned() {
+            Some(frame) => {
+                let line = self.map_external_frame_line(&frame);
+                code.mark_line(line);
+            }
+            None => {
+                if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+                    self.mark_expression_line(declaration, line, code);
+                }
+            }
+        }
     }
 }

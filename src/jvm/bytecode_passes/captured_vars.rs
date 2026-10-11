@@ -463,6 +463,51 @@ fn remove_or_replace_by_nop(editable: &mut EditableMethod, id: NodeId) {
     }
 }
 
+/// Store the unboxed default before `new_insn`, and move declaration lines that sit on the
+/// holder's store onto that default.
+fn plant_unboxed_default(
+    editable: &mut EditableMethod,
+    new_insn: NodeId,
+    range_start: Option<NodeId>,
+    default_value: &Node,
+    store: u8,
+    slot: u16,
+) {
+    let new_index = editable.insns.index_of(new_insn);
+    let mut lines = Vec::new();
+    if let Some(range_start) = range_start {
+        let range_index = editable.insns.index_of(range_start);
+        for id in editable.insns.ids() {
+            let Node::Line {
+                line,
+                start: line_start,
+            } = *editable.insns.node(id)
+            else {
+                continue;
+            };
+            let Some(label) = editable.insns.label_node(line_start) else {
+                continue;
+            };
+            let at = editable.insns.index_of(label);
+            if at > new_index && at < range_index {
+                lines.push((id, line));
+            }
+        }
+    }
+    let moved = editable.method.new_label();
+    editable.insns.insert_before(
+        new_insn,
+        vec![
+            Node::Label(moved),
+            default_value.clone(),
+            Node::Insn(Insn::Var { op: store, slot }),
+        ],
+    );
+    for (id, line) in lines {
+        editable.insns.set(id, Node::Line { line, start: moved });
+    }
+}
+
 /// `rewriteRefValue`.
 fn rewrite(editable: &mut EditableMethod, ids: &[NodeId], var: &CapturedVar) {
     let load = descriptors::typed_opcode(var.element, ILOAD);
@@ -484,17 +529,10 @@ fn rewrite(editable: &mut EditableMethod, ids: &[NodeId], var: &CapturedVar) {
             .iter()
             .any(|&put| start_index.is_some_and(|start| editable.insns.index_of(ids[put]) < start))
         {
-            // The local must hold a value before its range begins.
-            editable.insns.insert_before(
-                new_insn,
-                vec![
-                    default_value.clone(),
-                    Node::Insn(Insn::Var {
-                        op: store,
-                        slot: var.slot,
-                    }),
-                ],
-            );
+            // The unboxed local must hold a value before its range begins. The declaration's
+            // line sits on the holder's store, between `new` and that range; it belongs on the
+            // default store, which is the first instruction of the declaration once the box is gone.
+            plant_unboxed_default(editable, new_insn, start, &default_value, store, var.slot);
         }
         // `findCleanInstructions`: the `aconst_null; astore` that end the `Ref`'s scope.
         let mut clean = Vec::new();

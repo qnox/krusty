@@ -11,9 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -48,8 +47,10 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && krusty::toolchain::stdlib_jar().is_some())
-        .then_some(target)
+    (krusty::native::can_link(target)
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some())
+    .then_some(target)
 }
 
 /// Whether this environment can run the native tests at all.
@@ -60,8 +61,7 @@ fn available() -> bool {
 /// Compile a single-file program with the code generator for the host.
 fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let target = host().expect("checked by `available`");
-    let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -71,10 +71,13 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let mut features = krusty::features::LangFeatures::new();
     features.apply_source_directives(source);
     let mut diags = DiagSink::new();
+    let backend = CraneliftBackend::new(target).verified();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
     );
-    let backend = CraneliftBackend::new(target);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
 }
@@ -89,6 +92,7 @@ fn execute(source: &str) -> std::process::Output {
     );
     let objects = artifacts
         .iter()
+        .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
     let image = krusty::native::link_program(&objects, target)
@@ -301,6 +305,39 @@ fn a_failed_cast_fails_loudly_naming_both_types() {
     assert!(
         stderr.contains("A") && stderr.contains("cannot be cast to") && stderr.contains("B"),
         "the failure must name both types: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_failed_cast_to_an_array_fails_loudly_too() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // An array is not a class the program declares, so there was no class id to look a descriptor
+    // up by and the cast fell through to a coercion — which changes nothing about a reference, and
+    // therefore let an `Array<String>` be read as an `IntArray`: four bytes out of every
+    // eight-byte slot, and a pointer answered as a number. The runtime names every array type it
+    // lays out, so this is the same check a class already gets.
+    let output = execute(
+        "fun main() {\n\
+         \x20   println(\"before\")\n\
+         \x20   val value: Any = arrayOf(\"a\")\n\
+         \x20   val ints = value as IntArray\n\
+         \x20   println(ints[0])\n\
+         }\n",
+    );
+    assert!(
+        !output.status.success(),
+        "a failed cast must not let the program continue"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("kotlin.Array")
+            && stderr.contains("cannot be cast to")
+            && stderr.contains("kotlin.IntArray"),
+        "the failure must name both array types: {stderr:?}"
     );
 }
 
@@ -820,6 +857,36 @@ fn an_abstract_member_carries_the_default_its_override_is_called_with() {
 }
 
 #[test]
+fn a_default_on_an_abstract_member_reads_the_receiver_it_was_declared_on() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The default is an expression in the CALLEE's frame, so it may read the receiver — which is
+    // the whole reason it cannot be computed at the call site. Here it reads an abstract property
+    // each implementation answers differently, so a wrapper evaluating it against the wrong
+    // receiver, or once and for all, prints the wrong line.
+    assert_eq!(
+        run("interface Named {\n\
+             \x20   val tag: String\n\
+             \x20   fun greet(who: String = tag): String\n\
+             }\n\
+             class A : Named {\n\
+             \x20   override val tag = \"a\"\n\
+             \x20   override fun greet(who: String) = \"A->\" + who\n\
+             }\n\
+             class B : Named {\n\
+             \x20   override val tag = \"b\"\n\
+             \x20   override fun greet(who: String) = \"B->\" + who\n\
+             }\n\
+             fun main() {\n\
+             \x20   for (n in listOf<Named>(A(), B())) println(n.greet())\n\
+             }\n"),
+        "A->a\nB->b\n"
+    );
+}
+
+#[test]
 fn an_override_called_by_its_own_type_takes_the_defaults_of_the_member_it_overrides() {
     if !available() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -857,20 +924,5 @@ fn an_override_called_by_its_own_type_takes_the_defaults_of_the_member_it_overri
              \x20   println(K().h())\n\
              }\n"),
         "Mid:23b\nLeaf:1b\nLeaf:23z\nMid:45\nK:7\n"
-    );
-}
-
-/// A `value class` declines until the backend reads what the frontend checked about it.
-///
-/// It is not a one-field class: Kotlin answers its `equals`, `hashCode` and `toString` by the
-/// value it wraps, and where it is boxed is the representation policy's to decide. Emitting it as
-/// an ordinary class would answer `W(1) == W(1)` by identity, so it is refused rather than guessed.
-#[test]
-fn a_value_class_declines_until_its_declarations_are_read() {
-    common::expect_native_decline(
-        "@JvmInline value class W(val v: Int)\n\
-         fun box(): String = if (W(1) == W(1)) \"OK\" else \"fail\"\n",
-        "ValueClassDeclines",
-        "a value class",
     );
 }

@@ -1,0 +1,14 @@
+Defaults that follow another setting, and the ones derived from it.
+--- module.yaml
+product: jvm/lib
+settings:
+  jvm:
+    jdk:
+      version: 21
+  kotlin:
+    version: 2.4.0
+  publishing:
+    group: org.example
+    pom:
+      scm:
+        url: https://example.org/repo

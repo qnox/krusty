@@ -92,6 +92,7 @@ mod tests {
             is_open: false,
             modifiers: Default::default(),
             delegate_field: None,
+            has_constant_initializer: false,
             is_private: false,
             setter_visibility: Visibility::Public,
             getter: None,
@@ -99,6 +100,7 @@ mod tests {
             getter_jvm_name: None,
             setter_jvm_name: None,
             needs_access_bridge: false,
+            accessor_annotations: Default::default(),
         }
     }
 

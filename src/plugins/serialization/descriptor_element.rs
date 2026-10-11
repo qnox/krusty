@@ -3,10 +3,10 @@
 
 use crate::ir::{Callee, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
-use crate::plugins::{FrontendSelectedCall, PluginContext, PluginExpressionPlan};
+use crate::plugins::{FrontendExpressionContext, FrontendSelectedCall, PluginExpressionPlan};
 use crate::types::{type_name, Ty};
 
-use super::{element_serializer_expr, KSERIALIZER_FQ};
+use super::KSERIALIZER_FQ;
 
 pub(super) const SERIAL_DESCRIPTORS_FQ: &str =
     "kotlinx/serialization/descriptors/SerialDescriptorsKt";
@@ -17,8 +17,12 @@ Lkotlinx/serialization/descriptors/SerialDescriptor;Ljava/util/List;Z)V";
 
 /// Attach the plugin operation to the exact descriptor helper selected and argument-mapped by the
 /// frontend. The body phase must not rediscover it from a lowered JVM owner, `$default` mask, or
-/// source spelling.
-pub(super) fn plan(call: &FrontendSelectedCall) -> Option<PluginExpressionPlan> {
+/// source spelling. The element's serializer is planned here too, as kotlinx's `serializer<T>()`
+/// intrinsic inside `element` obtains it, and travels as the last operand.
+pub(super) fn plan(
+    ctx: &FrontendExpressionContext<'_>,
+    call: &FrontendSelectedCall,
+) -> Option<PluginExpressionPlan> {
     let signature = call.generic_sig.as_ref()?;
     let builder = type_name(CLASS_SERIAL_DESCRIPTOR_BUILDER_FQ);
     if call.owner != type_name(SERIAL_DESCRIPTORS_FQ)
@@ -58,26 +62,21 @@ pub(super) fn plan(call: &FrontendSelectedCall) -> Option<PluginExpressionPlan> 
     if let Some(is_optional) = is_optional {
         operands.push((*is_optional, call.params[2]));
     }
+    let serializer = super::intrinsic_serializer::plan(ctx, *element)?;
     Some(PluginExpressionPlan {
         plugin: "serialization",
         operation,
         data: Vec::new(),
-        types: vec![*element],
+        types: Vec::new(),
         implicit_receiver,
         operands,
+        synthesized: vec![serializer],
     })
 }
 
 /// Realize one planned descriptor-element operation. `true` means the kind belongs to this module;
 /// a malformed or unsupported plan deliberately remains a placeholder so emission fails closed.
-pub(super) fn specialize(
-    ir: &mut IrFile,
-    ctx: &PluginContext,
-    index: usize,
-    kind: &str,
-    exprs: &[u32],
-    types: &[Ty],
-) -> bool {
+pub(super) fn specialize(ir: &mut IrFile, index: usize, kind: &str, exprs: &[u32]) -> bool {
     let defaults = match kind {
         "descriptorElement" => (false, false),
         "descriptorElementDefaultAnnotations" => (true, false),
@@ -85,7 +84,8 @@ pub(super) fn specialize(
         "descriptorElementDefaultBoth" => (true, true),
         _ => return false,
     };
-    let [element] = types else {
+    // The element serializer, planned in the frontend, is the last operand.
+    let Some((&serializer, exprs)) = exprs.split_last() else {
         return true;
     };
     let Some((&receiver, rest)) = exprs.split_first() else {
@@ -100,9 +100,6 @@ pub(super) fn specialize(
         (false, true, [annotations]) => (Some(*annotations), None),
         (true, true, []) => (None, None),
         _ => return true,
-    };
-    let Some(serializer) = element_serializer_expr(ir, ctx, element) else {
-        return true;
     };
     let descriptor = ir.add_expr(IrExpr::Call {
         callee: Callee::realized_virtual(

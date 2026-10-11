@@ -3,6 +3,31 @@
 
 use super::*;
 
+/// Rebuild a native scalar value class from the carrier currently on the stack. The semantic type
+/// supplies both the value-class owner and its carrier; callers do not spell either JVM detail.
+pub(super) fn emit_native_value_class_constructor(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    semantic: Ty,
+) -> bool {
+    let semantic = semantic.canonical_semantic().non_null();
+    let Some(owner) = semantic.kotlin_class_internal() else {
+        return false;
+    };
+    let Some(carrier) = semantic.scalar_value_repr() else {
+        return false;
+    };
+    if carrier == semantic {
+        return false;
+    }
+    let owner = owner.render();
+    let descriptor = method_descriptor(&[carrier], carrier);
+    let constructor = cw.methodref(&owner, "constructor-impl", &descriptor);
+    let words = slot_words(carrier) as i32;
+    code.invokestatic(constructor, words, words);
+    true
+}
+
 /// Unbox the `value_class` on the stack to its `target` carrier with `unbox-impl`; a `nullable`
 /// carrier takes a null past the instance call.
 pub(super) fn emit_value_class_unbox_adapter(

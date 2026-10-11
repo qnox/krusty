@@ -76,12 +76,35 @@ fn recordings_are_scoped_to_one_exact_compiler_version() {
     assert!(!index.contains(".."), "{index}");
     assert!(archive_path(&root).is_file());
     assert!(!index.contains("2.4.10"), "{index}");
-    assert!(
-        parse_modules(
-            "[[mod]]\n[key]\n2.4.20.. 00000000000000000000000000000000 00000000000000000000000000000000\n"
-        )
-        .is_none(),
-        "the current archive format must reject version inheritance"
+    let historical = parse_modules(
+        "[[mod]]\n[key]\n2.4.20.. 00000000000000000000000000000000 00000000000000000000000000000000\n",
+    )
+    .expect("a historical open range is the release that recorded it");
+    let historical = &historical["mod"]["key"];
+    assert_eq!(historical.len(), 1);
+    assert_eq!(historical[0].version, KotlinVersion::new(2, 4, 20));
+    assert_eq!(historical[0].channel, Channel::Release);
+    let closed = parse_modules(
+        "[[mod]]\n[key]\n2.4.0..2.4.10 00000000000000000000000000000000 00000000000000000000000000000000\n",
+    )
+    .expect("a closed historical range names the releases inside it");
+    let closed = &closed["mod"]["key"];
+    assert!(closed
+        .iter()
+        .all(|entry| entry.version <= KotlinVersion::new(2, 4, 10)));
+    assert!(!closed
+        .iter()
+        .any(|entry| entry.version == KotlinVersion::new(2, 4, 20)));
+    let open_from_older = parse_modules(
+        "[[mod]]\n[key]\n2.4.0.. 00000000000000000000000000000000 00000000000000000000000000000000\n",
+    )
+    .expect("an open range does not grow into later releases");
+    assert_eq!(
+        open_from_older["mod"]["key"]
+            .iter()
+            .map(|entry| entry.version)
+            .collect::<Vec<_>>(),
+        vec![KotlinVersion::new(2, 4, 0)]
     );
     let newer = DumpVersion {
         version: KotlinVersion::new(2, 4, 30),
@@ -155,6 +178,7 @@ fn a_release_dump_is_reused_and_a_snapshot_never_is() {
         key: "case|Stem|default|plain",
         compiler,
         fingerprint,
+        legacy_fingerprint: fingerprint,
         force,
         compile_missing: false,
         write: true,
@@ -221,6 +245,7 @@ fn a_missing_release_dump_fails_without_compiling() {
                 key: "case|Stem|default|plain",
                 compiler: Some(version("2.4.20-release-1")),
                 fingerprint,
+                legacy_fingerprint: fingerprint,
                 force: false,
                 compile_missing: false,
                 write: false,
@@ -273,6 +298,7 @@ fn a_read_only_partial_cache_compiles_a_new_fingerprint_without_writing() {
             key,
             compiler: Some(release),
             fingerprint: new_fingerprint,
+            legacy_fingerprint: new_fingerprint,
             force: false,
             compile_missing: true,
             write: false,
@@ -348,6 +374,51 @@ fn a_published_miss_stores_the_live_invocation_and_a_private_miss_does_not() {
 }
 
 #[test]
+fn replayed_diagnostics_use_the_current_source_spelling() {
+    let root = temp_root("diagnostic-source");
+    let recorded = root.join("recorded/F.kt");
+    let current = root.join("current/F.kt");
+    for source in [&recorded, &current] {
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, "fun f() = 1\n").unwrap();
+    }
+    let out = root.join("out");
+    let args = |source: &Path| {
+        vec![
+            "-d".to_string(),
+            out.display().to_string(),
+            source.display().to_string(),
+        ]
+    };
+    let recorded_stderr = format!(
+        "error: warnings found and -Werror specified\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
+        recorded.display()
+    );
+    let release = version("2.4.20");
+    remember_live_compile(
+        &args(&recorded),
+        1,
+        &recorded_stderr,
+        &root,
+        Some(release),
+        true,
+    );
+
+    let replayed =
+        replay_class_dump_with_policy(&args(&current), &root, Some(release), false, false)
+            .expect("identical source bytes replay");
+    assert_eq!(replayed.code, 1);
+    assert_eq!(
+        replayed.stderr,
+        format!(
+            "error: warnings found and -Werror specified\n{}:1:1: warning: visibility required\nfun f() = 1\n^^^^^\n",
+            current.display()
+        )
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn distinct_class_sets_do_not_share_a_dump_key() {
     assert_ne!(classes_suffix(&["pkg/A"]), classes_suffix(&["pkg/B"]));
     assert_eq!(classes_suffix(&["pkg/B", "pkg/A"]), "#pkg/A,pkg/B");
@@ -389,6 +460,7 @@ fn a_hit_missing_a_requested_class_fails_until_recorded() {
         key,
         compiler: Some(release),
         fingerprint,
+        legacy_fingerprint: fingerprint,
         force: false,
         compile_missing: false,
         write: true,
@@ -604,6 +676,108 @@ fn a_common_sources_flag_ignores_its_scratch_path() {
         normalize_invocation_flag("-jvm-target=17").unwrap(),
         "-jvm-target=17"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_fragment_sources_flag_keeps_the_fragment_and_hashes_the_source() {
+    let root = temp_root("fragment-src");
+    let left_dir = root.join("left");
+    let right_dir = root.join("right");
+    std::fs::create_dir_all(&left_dir).unwrap();
+    std::fs::create_dir_all(&right_dir).unwrap();
+    let left = left_dir.join("Common.kt");
+    let right = right_dir.join("Common.kt");
+    std::fs::write(&left, "expect class A\n").unwrap();
+    std::fs::write(&right, "expect class A\n").unwrap();
+    let flag =
+        |fragment: &str, file: &Path| format!("-Xfragment-sources={fragment}:{}", file.display());
+
+    assert_eq!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("common", &right)).unwrap(),
+        "equal fragment source bytes at distinct scratch paths share one recording"
+    );
+    assert_ne!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("platform", &left)).unwrap(),
+        "the semantic fragment identity remains part of the key"
+    );
+    std::fs::write(&right, "expect class B\n").unwrap();
+    assert_ne!(
+        normalize_invocation_flag(&flag("common", &left)).unwrap(),
+        normalize_invocation_flag(&flag("common", &right)).unwrap(),
+        "changed fragment source bytes change the recording"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_friend_paths_flag_fingerprints_output_directories_not_their_paths() {
+    let root = temp_root("friend-paths");
+    // Two friend MODULES, each a class OUTPUT DIRECTORY, joined with the platform path separator
+    // exactly as the reference oracle emits `-Xfriend-paths`. Reading a directory as a file would
+    // error and abort the recorder; the flag must hash each directory tree's CONTENT instead, so
+    // the same classes at a different scratch path still key the same recorded entry.
+    let make = |base: &str, bytes: &[u8]| -> PathBuf {
+        let dir = root.join(base).join("classes");
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        std::fs::write(dir.join("pkg").join("A.class"), bytes).unwrap();
+        dir
+    };
+    let left_a = make("left/a", b"AAAA");
+    let left_b = make("left/b", b"BBBB");
+    let right_a = make("right/a", b"AAAA");
+    let right_b = make("right/b", b"BBBB");
+    let flag = |a: &Path, b: &Path| {
+        format!(
+            "-Xfriend-paths={}",
+            std::env::join_paths([a, b]).unwrap().to_string_lossy()
+        )
+    };
+    assert_eq!(
+        normalize_invocation_flag(&flag(&left_a, &left_b)).unwrap(),
+        normalize_invocation_flag(&flag(&right_a, &right_b)).unwrap(),
+        "equal friend-class content at distinct scratch paths must share one key"
+    );
+    assert_ne!(flag(&left_a, &left_b), flag(&right_a, &right_b));
+    std::fs::write(right_a.join("pkg").join("A.class"), b"ZZZZ").unwrap();
+    assert_ne!(
+        normalize_invocation_flag(&flag(&left_a, &left_b)).unwrap(),
+        normalize_invocation_flag(&flag(&right_a, &right_b)).unwrap(),
+        "changed friend-module bytes must change the key"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_mpp_invocation_fingerprints_common_files_and_friend_directories_without_panic() {
+    let root = temp_root("mpp-invocation");
+    let source = root.join("platform.kt");
+    std::fs::write(&source, "fun box() = \"OK\"\n").unwrap();
+    let common = root.join("common.kt");
+    std::fs::write(&common, "expect fun f(): String\n").unwrap();
+    let friend = root.join("friend").join("classes");
+    std::fs::create_dir_all(&friend).unwrap();
+    std::fs::write(friend.join("Dep.class"), b"friend").unwrap();
+    let args = vec![
+        "-d".to_string(),
+        root.join("out").to_string_lossy().into_owned(),
+        "-Xmulti-platform".to_string(),
+        format!("-Xcommon-sources={}", common.to_string_lossy()),
+        format!(
+            "-Xfriend-paths={}",
+            std::env::join_paths([&friend]).unwrap().to_string_lossy()
+        ),
+        source.to_string_lossy().into_owned(),
+    ];
+    // The whole invocation parses: a comma-separated common-source FILE list and a
+    // path-separated friend-class DIRECTORY list are both content-fingerprinted, no panic.
+    let invocation = parse_invocation(&args)
+        .expect("the common-sources and friend-paths flags parse")
+        .expect("the invocation names an output and sources");
+    assert!(invocation.out.ends_with("out"));
+    assert_eq!(invocation.label, "platform.kt");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1588,7 +1762,7 @@ fn clean_observation_rejects_an_equal_metadata_corrupt_atomic_replacement() {
 }
 
 #[test]
-fn deletion_and_corruption_never_resurrect_cached_archive_state() {
+fn deletion_drops_cached_bytes_and_publication_replaces_an_unreadable_archive() {
     let release = version("2.4.20");
     let fingerprint = fingerprint_parts(&[b"source"]);
     let key = "case|A|default|plain";
@@ -1652,10 +1826,23 @@ fn deletion_and_corruption_never_resurrect_cached_archive_state() {
     let corrupt_bytes = b"replacement is corrupt";
     std::fs::write(archive_path(&pending_corrupt), corrupt_bytes).unwrap();
     flush_archive(&pending_corrupt);
-    assert_eq!(
+    assert_ne!(
         std::fs::read(archive_path(&pending_corrupt)).unwrap(),
         corrupt_bytes,
-        "pending memory must not overwrite a corrupt concurrent replacement"
+        "an unreadable archive is replaced, so the next run is not stuck missing"
+    );
+    assert_eq!(
+        load_files(
+            &pending_corrupt,
+            "mod",
+            "case|B|default|plain",
+            release,
+            fingerprint_parts(&[b"new"])
+        )
+        .unwrap()
+        .get("pkg/A")
+        .unwrap(),
+        b"new"
     );
 
     let _ = std::fs::remove_dir_all(&deleted);
@@ -1677,6 +1864,123 @@ fn disk_index(root: &Path) -> String {
     let raw = decompress(&std::fs::read(archive_path(root)).unwrap());
     let end = raw.iter().position(|byte| *byte == 0).unwrap();
     String::from_utf8(raw[..end].to_vec()).unwrap()
+}
+
+#[test]
+fn a_historical_open_range_replays_that_release_only() {
+    let root = temp_root("historical-range");
+    let raw = encode_raw(&files(b"recorded"));
+    let blob = fingerprint_parts(&[&raw]);
+    let fingerprint = fingerprint_parts(&[b"legacy inputs"]);
+    let index =
+        format!("[[mod]]\n[case|Stem|default|plain]\n2.4.20.. {fingerprint:032x} {blob:032x}\n");
+    write_index_archive(&root, &index, blob, &raw);
+    let release = version("2.4.20");
+    assert_eq!(
+        load_files(
+            &root,
+            "mod",
+            "case|Stem|default|plain",
+            release,
+            fingerprint
+        )
+        .unwrap()
+        .get("pkg/A")
+        .unwrap(),
+        b"recorded"
+    );
+    let newer = DumpVersion {
+        version: KotlinVersion::new(2, 4, 30),
+        channel: Channel::Release,
+    };
+    assert!(
+        load_files(&root, "mod", "case|Stem|default|plain", newer, fingerprint).is_none(),
+        "an open range does not apply to a later compiler"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_miss_on_the_current_fingerprint_replays_the_legacy_one() {
+    let root = temp_root("legacy-fingerprint");
+    let release = version("2.4.20");
+    let current = fingerprint_parts(&[b"current"]);
+    let legacy = fingerprint_parts(&[b"legacy"]);
+    let key = "case|Stem|default|plain";
+    store_files(&root, "mod", key, release, legacy, &files(b"old-key"));
+    flush_archive(&root);
+    let mut compiles = 0u32;
+    let hit = recall(
+        Recall {
+            root: &root,
+            module: "mod",
+            key,
+            compiler: Some(release),
+            fingerprint: current,
+            legacy_fingerprint: legacy,
+            force: false,
+            compile_missing: true,
+            write: true,
+        },
+        |_| true,
+        || {
+            compiles += 1;
+            Some(files(b"live"))
+        },
+    );
+    assert_eq!(compiles, 0, "the legacy fingerprint is a hit");
+    assert_eq!(hit.unwrap().get("pkg/A").unwrap(), b"old-key");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_invocation_miss_replays_the_pre_toolchain_fingerprint() {
+    let root = temp_root("legacy-invocation");
+    let source = root.join("Box.kt");
+    std::fs::write(&source, "fun box() = 1\n").unwrap();
+    let out = root.join("out");
+    let args = vec![
+        "-d".to_string(),
+        out.display().to_string(),
+        source.display().to_string(),
+    ];
+    let invocation = parse_invocation(&args)
+        .expect("readable invocation")
+        .expect("output and source");
+    let current_classpath =
+        super::fingerprint::classpath_content_fingerprint(&[]).expect("current classpath");
+    let legacy_classpath =
+        super::fingerprint::legacy_classpath_fingerprint(&[]).expect("legacy classpath");
+    assert!(
+        !legacy_classpath.contains("toolchain:"),
+        "{legacy_classpath}"
+    );
+    if current_classpath.contains("toolchain:") {
+        assert_ne!(invocation.fingerprint, invocation.legacy_fingerprint);
+    }
+    let raw = encode_raw(&files(b"class"));
+    let blob = fingerprint_parts(&[&raw]);
+    let key = hex128(invocation.legacy_fingerprint);
+    let index = format!(
+        "[[{INVOCATION_MODULE}]]\n[{key}]\n2.4.20.. {:032x} {blob:032x}\n",
+        invocation.legacy_fingerprint
+    );
+    write_index_archive(&root, &index, blob, &raw);
+    let replayed =
+        replay_class_dump_with_policy(&args, &root, Some(version("2.4.20")), false, true)
+            .expect("historical invocation");
+    assert_eq!(replayed.files.get("pkg/A").unwrap(), b"class");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn write_index_archive(root: &Path, index: &str, blob: u128, raw: &[u8]) {
+    let mut body = index.as_bytes().to_vec();
+    body.push(0);
+    body.extend_from_slice(&1u32.to_be_bytes());
+    body.extend_from_slice(&blob.to_be_bytes());
+    body.extend_from_slice(&(raw.len() as u32).to_be_bytes());
+    body.extend_from_slice(raw);
+    std::fs::write(archive_path(root), compress(&body)).unwrap();
 }
 
 fn temp_root(label: &str) -> PathBuf {
@@ -1706,4 +2010,36 @@ fn make_cached_metadata_equal_but_keep_prior_identity(path: &Path) {
         inode: prior.inode,
         ..replacement
     });
+}
+
+#[test]
+fn a_live_kotlinc_line_names_the_test_sources_and_fingerprint() {
+    let root = temp_root("live-line");
+    let src = root.join("Naming.kt");
+    std::fs::write(&src, "fun box() = 1\n").unwrap();
+    let args = vec![
+        "-d".to_string(),
+        root.join("out").display().to_string(),
+        src.display().to_string(),
+    ];
+    let invocation = parse_invocation(&args)
+        .expect("readable invocation")
+        .expect("output directory and source");
+    let line = format_live_kotlinc_line(
+        "cache-miss",
+        "naming::box",
+        &invocation.label,
+        &hex128(invocation.fingerprint),
+    );
+    assert_eq!(
+        line,
+        format!(
+            "class-dump: live kotlinc cache-miss test=naming::box sources=Naming.kt fingerprint={}\n",
+            hex128(invocation.fingerprint)
+        )
+    );
+    assert_eq!(classify_live_kotlinc(false, true), "uncached-compiler");
+    assert_eq!(classify_live_kotlinc(true, true), "record");
+    assert_eq!(classify_live_kotlinc(true, false), "cache-miss");
+    let _ = std::fs::remove_dir_all(&root);
 }

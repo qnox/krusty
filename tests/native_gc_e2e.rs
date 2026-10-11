@@ -184,6 +184,16 @@ const FAILURES: &[(i32, &str)] = &[
         30,
         "a mixed live set did not come through repeated collections intact",
     ),
+    (
+        31,
+        "slots freed behind where the previous allocations stopped were not reused: the heap \
+          grew while free slots existed",
+    ),
+    (
+        32,
+        "a reused slot of some size class was recorded as another slot: a live object was freed \
+          and handed out again",
+    ),
 ];
 
 fn describe(code: i32) -> String {
@@ -225,6 +235,14 @@ typedef struct Leaf {
     kt_long address;
 } Leaf;
 static const KType leaf_type = {"Leaf", 4, sizeof(Leaf), 0, 0, NULL};
+
+/* One granule: the smallest size class. Allocated at every small size, since the collector
+   reads only the header and the (absent) reference fields. */
+typedef struct Tiny {
+    KObjectHeader header;
+    kt_long value;
+} Tiny;
+static const KType tiny_type = {"Tiny", 4, sizeof(Tiny), 0, 0, NULL};
 
 /* Larger than the largest small size class, so it takes the large-object path. */
 typedef struct Big {
@@ -374,6 +392,67 @@ __attribute__((noinline)) static void test_swept_slots_are_reused(void) {
     allocate_garbage(10000);
     if (kt_gc_heap_bytes() != before) {
         fail(17);
+    }
+    clobber_stack();
+    kt_gc_collect();
+}
+
+/* 7c. A slot taken from a reuse list is recorded as allocated at its own index, in every size
+   class. Half of a batch stays reachable from the stack and the other half dies; refilling the
+   freed half and collecting twice more must leave every survivor untouched. A slot recorded at the
+   wrong index lets a collection free a live object, and the next allocation overwrites it. */
+__attribute__((noinline)) static void test_reused_slots_keep_their_own_index(void) {
+    static const uint32_t sizes[] = {16,  32,  48,  64,   96,   128,  192,
+                                     256, 384, 512, 768, 1024, 1536, 2048};
+    for (uint32_t s = 0; s < sizeof sizes / sizeof sizes[0]; s++) {
+        Tiny *kept[256];
+        Tiny *refilled[256];
+        for (uint32_t i = 0; i < 512; i++) {
+            Tiny *tiny = (Tiny *)kt_gc_allocate(&tiny_type, sizes[s]);
+            tiny->value = (kt_long)i;
+            if (i % 2 == 1) {
+                kept[i / 2] = tiny;
+            }
+        }
+        clobber_stack();
+        kt_gc_collect();
+        for (uint32_t i = 0; i < 256; i++) {
+            refilled[i] = (Tiny *)kt_gc_allocate(&tiny_type, sizes[s]);
+            refilled[i]->value = -1 - (kt_long)i;
+        }
+        clobber_stack();
+        kt_gc_collect();
+        allocate_garbage(1000);
+        for (uint32_t i = 0; i < 256; i++) {
+            Tiny *tiny = (Tiny *)kt_gc_allocate(&tiny_type, sizes[s]);
+            tiny->value = 0;
+        }
+        clobber_stack();
+        kt_gc_collect();
+        for (uint32_t i = 0; i < 256; i++) {
+            if (kept[i]->value != (kt_long)(2 * i + 1) || refilled[i]->value != -1 - (kt_long)i) {
+                fail(32);
+            }
+        }
+    }
+    clobber_stack();
+    kt_gc_collect();
+}
+
+/* 7b. Allocation resumes where it last found room, which after two batches is the oldest chunk.
+   A collection frees slots in every chunk, so the next batch must start over from the newest one
+   again rather than from where the previous batch stopped. */
+__attribute__((noinline)) static void test_a_collection_rewinds_allocation(void) {
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    allocate_garbage(20000);
+    clobber_stack();
+    kt_gc_collect();
+    size_t before = kt_gc_heap_bytes();
+    allocate_garbage(20000);
+    if (kt_gc_heap_bytes() != before) {
+        fail(31);
     }
     clobber_stack();
     kt_gc_collect();
@@ -678,6 +757,9 @@ void kt_program_entry(void) {
     test_heap_tracing_is_precise();
     clobber_stack();
     test_swept_slots_are_reused();
+    clobber_stack();
+    test_a_collection_rewinds_allocation();
+    test_reused_slots_keep_their_own_index();
     clobber_stack();
     test_large_objects();
     clobber_stack();

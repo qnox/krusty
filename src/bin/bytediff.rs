@@ -29,7 +29,7 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         &krusty::features::LangFeatures::from_source(src),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut d,
@@ -167,7 +167,8 @@ fn main() {
             break;
         }
         let src = std::fs::read_to_string(f).unwrap_or_default();
-        let src = src.replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline");
+        let src =
+            krusty::conformance::prepare_test_source(&src, krusty::conformance::TestTarget::Jvm);
         if src.contains("// FILE:")
             || src.contains("// MODULE:")
             || !src.contains("fun box()")

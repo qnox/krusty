@@ -835,13 +835,15 @@ fn stdio_server_reports_no_diagnostics_for_vararg_spread_and_named_shapes() {
     // Valid Kotlin vararg call shapes that used to surface false positives: a mixed
     // element + spread call on a vararg extension, and a named argument binding the
     // defaulted parameter after positional vararg elements. Both must produce NO diagnostics.
+    // The server compiles without a JDK, so the source touches no `Int` or `Array` member: kotlinc
+    // reports their missing `java.io.Serializable` supertype there.
     let diagnostics = diagnostics_after_open(
         &[],
         "file:///vararg_shapes.kt",
         "class B(val n: Int)\n\
-         fun B.segd(vararg s: String, flag: Boolean = false): Int = n + s.size\n\
-         fun topd(vararg s: String, flag: Boolean = false): Int = s.size\n\
-         fun use(b: B, xs: Array<String>): Int = b.segd(\"a\", *xs) + topd(\"x\", \"y\", flag = true)",
+         fun B.segd(vararg s: String, flag: Boolean = false): B = this\n\
+         fun topd(vararg s: String, flag: Boolean = false) {}\n\
+         fun use(b: B, xs: Array<String>) { b.segd(\"a\", *xs); topd(\"x\", \"y\", flag = true) }",
     );
     assert_eq!(diagnostics, Vec::<Value>::new());
 }
@@ -986,7 +988,7 @@ fun combine(entries: Array<Entry>): String {
     return result
 }";
     let diagnostics = diagnostics_after_open(
-        &["-Xname-based-destructuring=complete"],
+        &["-Xname-based-destructuring=only-syntax"],
         "file:///feature.kt",
         source,
     );

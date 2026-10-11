@@ -61,6 +61,19 @@ impl<'a> ModuleSymbols<'a> {
         })
     }
 
+    fn type_alias_at(
+        &self,
+        namespace: SymbolNamespace,
+        name: &str,
+    ) -> Option<crate::libraries::AliasExpansion> {
+        let identity = match namespace {
+            SymbolNamespace::Package(package) | SymbolNamespace::Classifier(package) => {
+                crate::types::existing_type_name_child(package, name)?
+            }
+        };
+        self.type_alias_binding(identity)
+    }
+
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
         self.syms
             .classes
@@ -82,11 +95,8 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.annotation_retention(classifier)
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.syms.annotation_targets(classifier)
+    pub(crate) fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
+        self.syms.annotation_targets()
     }
 
     /// Temporary Pass-1 graph access for inference-only checker operations. The streamed module
@@ -234,6 +244,7 @@ impl<'a> ModuleSymbols<'a> {
                 Ty::Unit,
                 String::new(),
             );
+            constructor.set_is_primary_constructor(true);
             let param_names = c
                 .ctor_param_names
                 .iter()
@@ -426,7 +437,7 @@ impl<'a> ModuleSymbols<'a> {
             access: c.visibility.into(),
             source_file: Some(c.source_file),
             stable_declaration: c.stable_declaration,
-            is_nested: c.internal_name().contains("$"),
+            is_nested: c.is_nested,
             outer_instance: c.inner_of,
             kind,
             inheritance: crate::libraries::ClassifierInheritance {
@@ -851,6 +862,7 @@ impl<'a> ModuleSymbols<'a> {
                 is_const: false,
                 implicit_integer_coercion: false,
                 compile_time_constant: None,
+                metadata_constant_read: false,
                 visibility: declaration.visibility(),
                 owner: internal,
                 receiver_rank: 0,
@@ -963,15 +975,18 @@ fn fn_info(
     let declared_params = Some(params.clone().into_boxed_slice());
     let call_sig = sig.call_sig();
     let callable = LibraryCallable {
+        annotations: sig.annotations.clone(),
         external_identity: None,
         external_default_provider: None,
         external_property_identity: None,
+        declaration_owner: None,
         owner,
         name: name.to_string(),
         physical_name: None,
         reflection_name: Some(name.to_string()),
         compiler_intrinsic: None,
         semantic_role: None,
+        overridden_declarations: Box::new([]),
         collection_barrier: None,
         inline_body_plan: None,
         plugin_expression: sig.plugin_expression,
@@ -1019,6 +1034,7 @@ fn fn_info(
         // sees the declaration itself. The fact exists for callables read back from a class file.
         declared_ret: None,
         overridden_results: Box::new([]),
+        enhanced_result: crate::libraries::EnhancedResult::NONE,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -1048,7 +1064,6 @@ fn fn_info(
             return_value_status: None,
         },
         visibility: sig.visibility,
-        annotations: sig.annotations.clone(),
         ..FunctionInfo::plain(kind, receiver, callable)
     }
 }
@@ -1092,14 +1107,17 @@ fn source_callable(
     let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
         external_identity: None,
+        annotations: Vec::new(),
         external_default_provider: None,
         external_property_identity: None,
+        declaration_owner: None,
         owner,
         reflection_name: Some(name.clone()),
         name,
         physical_name: None,
         compiler_intrinsic: None,
         semantic_role: None,
+        overridden_declarations: Box::new([]),
         collection_barrier: None,
         inline_body_plan: None,
         plugin_expression: None,
@@ -1136,6 +1154,7 @@ fn source_callable(
         overridden_call_realizations: Box::new([]),
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
+        enhanced_result: crate::libraries::EnhancedResult::NONE,
         overridden_results: Box::new([]),
     }
 }
@@ -1194,6 +1213,7 @@ fn source_property(
         is_const: property.is_const,
         implicit_integer_coercion: false,
         compile_time_constant: None,
+        metadata_constant_read: false,
         visibility: property.visibility,
         owner,
         receiver_rank,
@@ -1213,6 +1233,10 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &self.syms.sam_with_receiver_annotations
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         crate::types::existing_type_name_child(parent, name)
             .is_some_and(|package| self.syms.source_packages.contains(&package))
@@ -1240,21 +1264,19 @@ impl SymbolSource for ModuleSymbols<'_> {
         // their declaring package (a same-file function has no recorded facade — it lives in the file's own
         // package, which the resolver queries as the same-package candidate fqn).
         let declaration = namespace.existing_classifier(name);
-        let alias_target =
-            declaration.and_then(|identity| self.syms.source_alias_fqns.get(&identity).copied());
-        let classifier_name = match alias_target {
-            Some(target) => Some(target),
-            None => declaration.filter(|&internal| self.classifier_record(internal).is_some()),
-        };
+        let type_alias = self.type_alias_at(namespace, name);
+        let classifier_name = type_alias
+            .as_ref()
+            .map(|alias| alias.target)
+            .or_else(|| declaration.filter(|&internal| self.classifier_record(internal).is_some()));
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
-        let classifier_declaration = classifier_name.and_then(|_| {
-            declaration.map(|identity| {
-                self.type_alias_binding(identity).map_or(
-                    crate::libraries::ClassifierDeclaration::Ordinary(identity),
-                    crate::libraries::ClassifierDeclaration::TypeAlias,
-                )
-            })
-        });
+        let classifier_declaration = type_alias
+            .map(crate::libraries::ClassifierDeclaration::TypeAlias)
+            .or_else(|| {
+                classifier_name.and_then(|_| {
+                    declaration.map(crate::libraries::ClassifierDeclaration::Ordinary)
+                })
+            });
         let name = name.to_string();
         let associated_owner = match namespace {
             SymbolNamespace::Classifier(owner) => Some(owner),
@@ -1442,6 +1464,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 is_const: property.is_const,
                 implicit_integer_coercion: property.implicit_integer_coercion,
                 compile_time_constant: property.compile_time_constant.clone(),
+                metadata_constant_read: false,
                 visibility: property.visibility,
                 owner,
                 receiver_rank: 0,
@@ -1533,6 +1556,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     is_const: false,
                     implicit_integer_coercion: false,
                     compile_time_constant: None,
+                    metadata_constant_read: false,
                     visibility: property.visibility,
                     owner,
                     receiver_rank: 0,
@@ -1648,6 +1672,8 @@ mod tests {
             stable_declaration: None,
             source_file: 0,
             source_decl: None,
+            name_span: crate::diag::Span::new(0, 0),
+            is_nested: false,
             visibility: Visibility::Public,
             annotations: vec![],
             applied_annotations: vec![],
@@ -1697,6 +1723,7 @@ mod tests {
             nullable_tparam_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
+            full_value: false,
             generic_methods: HashMap::new(),
         }
     }

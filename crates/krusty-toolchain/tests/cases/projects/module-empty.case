@@ -1,0 +1,4 @@
+An empty module file.
+--- project.yaml
+modules: [a]
+--- a/module.yaml

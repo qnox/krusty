@@ -3,6 +3,7 @@
 use super::inline_body_plan::publish as publish_inline_body_plan;
 use super::*;
 
+mod super_calls;
 mod targets;
 use targets::ExternalCallTarget;
 pub(super) use targets::{MemberExtensionFirTarget, SelectedOperatorTarget};
@@ -19,6 +20,59 @@ pub(super) fn selected_extension_intrinsic(
             crate::libraries::MemberRealization::Intrinsic(intrinsic) => Some(intrinsic),
             _ => None,
         })
+}
+
+/// The first non-reified type parameter named by `ty` whose declared bound graph contains a
+/// cycle. Source occurrences are bound in the current declaration scope once; recursive traversal
+/// then follows the stable parameter identities published in the module index.
+fn recursive_type_of_parameter(
+    index: &ResolvedModuleIndex,
+    owner: DeclarationId,
+    ty: Ty,
+) -> Option<crate::fir::TypeParameterId> {
+    let mut names = Vec::new();
+    crate::ir::type_reflection::type_parameters_named_by(ty, &mut names);
+    names.into_iter().find_map(|name| {
+        let parameter = index.type_parameter_in_declaration_scope(owner, name)?;
+        let header = index.type_parameter_header(parameter)?;
+        (!header.flags.is_reified()
+            && parameter_references_recursive_bound(index, parameter, &mut Vec::new()))
+        .then_some(parameter)
+    })
+}
+
+fn parameter_references_recursive_bound(
+    index: &ResolvedModuleIndex,
+    parameter: crate::fir::TypeParameterId,
+    path: &mut Vec<crate::fir::TypeParameterId>,
+) -> bool {
+    if path.contains(&parameter) {
+        return true;
+    }
+    let Some(header) = index.type_parameter_header(parameter) else {
+        return false;
+    };
+    path.push(parameter);
+    let recursive = header
+        .bounds
+        .iter()
+        .any(|bound| type_references_recursive_bound(index, bound.ty.get(), path));
+    path.pop();
+    recursive
+}
+
+fn type_references_recursive_bound(
+    index: &ResolvedModuleIndex,
+    ty: Ty,
+    path: &mut Vec<crate::fir::TypeParameterId>,
+) -> bool {
+    let mut names = Vec::new();
+    crate::ir::type_reflection::type_parameters_named_by(ty, &mut names);
+    names.into_iter().any(|name| {
+        index
+            .type_parameter_by_semantic_name(name)
+            .is_some_and(|parameter| parameter_references_recursive_bound(index, parameter, path))
+    })
 }
 
 fn intrinsic_binary_operation(
@@ -54,6 +108,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::PrimitiveCompare
         | crate::libraries::CompilerIntrinsic::BooleanNot
         | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
+        | crate::libraries::CompilerIntrinsic::PrimitiveEquals
         | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
         | crate::libraries::CompilerIntrinsic::Assert
         | crate::libraries::CompilerIntrinsic::AssertFailsWith
@@ -325,7 +380,8 @@ impl BodyFirChecker<'_> {
                 {
                     return Ok(FirExprKind::Constant(FirConstant::String(constant)));
                 }
-                let receiver = self.explicit_receiver(receiver)?;
+                let receiver =
+                    self.explicit_extension_receiver(expression, receiver, extension.receiver)?;
                 self.selected_extension_call(expression, arguments, *extension, Some(receiver))
             }
             Some(ResolvedCall::MemberExtension {
@@ -367,7 +423,11 @@ impl BodyFirChecker<'_> {
                 Ok(FirExprKind::Call(FirCall {
                     target: target.target,
                     dispatch_receiver: Some(dispatch_receiver),
-                    extension_receiver: Some(self.explicit_receiver(receiver)?),
+                    extension_receiver: Some(self.explicit_extension_receiver(
+                        expression,
+                        receiver,
+                        target.extension_receiver,
+                    )?),
                     parameter_types,
                     arguments: self.member_extension_arguments(
                         expression,
@@ -610,10 +670,12 @@ impl BodyFirChecker<'_> {
                     declared_result: member.declared_ret,
                     overridden_results: &member.overridden_results,
                     semantic_role: member.semantic_role,
+                    overridden_declarations: &member.overridden_declarations,
                     suspend: member.suspend(),
                     can_inline: member.inline.can_inline(),
                     inline_plan: member.inline_body_plan.as_deref(),
                     inline_receiver_parameter: None,
+                    inline_declared_receiver: None,
                     reified_type_parameter_ordinals: &member
                         .call_sig
                         .reified_type_parameter_ordinals,
@@ -700,9 +762,13 @@ impl BodyFirChecker<'_> {
                 )
             })
             .filter(|_| {
-                arguments
-                    .iter()
-                    .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. }))
+                arguments.iter().any(|argument| {
+                    matches!(self.file.expr(*argument), Expr::Lambda { .. })
+                        || matches!(
+                            self.info.expr_lowers.get(argument),
+                            Some(crate::resolve::ExprLowering::ConstructorRef { .. })
+                        )
+                })
             });
         if let Some(body_plan) = collection_transform {
             let span = self.file.expr_span(expression);
@@ -745,7 +811,7 @@ impl BodyFirChecker<'_> {
             expression,
             arguments,
             &parameters,
-            extension.context_args.iter().map(Some),
+            extension.context_args.iter().map(Option::as_ref),
             extension.vararg_index,
         )?;
         Ok(FirExprKind::Call(FirCall {
@@ -883,10 +949,15 @@ impl BodyFirChecker<'_> {
                         declared_result: extension.callable.declared_ret,
                         overridden_results: &extension.callable.overridden_results,
                         semantic_role: extension.callable.semantic_role,
+                        overridden_declarations: &extension.callable.overridden_declarations,
                         suspend: extension.callable.suspend,
                         can_inline: extension.callable.inline.can_inline(),
                         inline_plan,
                         inline_receiver_parameter: None,
+                        inline_declared_receiver:
+                            super::inline_body_plan::signature_type_parameter_receiver(
+                                extension.callable.generic_sig.as_deref(),
+                            ),
                         reified_type_parameter_ordinals: &extension
                             .callable
                             .reified_type_parameter_ordinals,
@@ -1001,7 +1072,7 @@ impl BodyFirChecker<'_> {
                     target,
                     substitutions,
                     true,
-                    selected.context_args.iter().cloned().map(Some).collect(),
+                    selected.context_args.clone(),
                     selected.vararg_index,
                     parameters,
                 ))
@@ -1085,11 +1156,19 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: selected.member.semantic_role,
+                        overridden_declarations: selected.member.overridden_declarations.clone(),
                         suspend: selected.member.suspend(),
                         can_inline: selected.member.inline.can_inline(),
                         inline_plan: publish_inline_body_plan(
                             selected.member.inline_body_plan.as_deref(),
                             None,
+                            super::inline_body_plan::type_parameter_receiver(
+                                selected
+                                    .member
+                                    .generic_sig
+                                    .as_ref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -1169,11 +1248,19 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: selected.callable.semantic_role,
+                        overridden_declarations: selected.callable.overridden_declarations.clone(),
                         suspend: selected.callable.suspend,
                         can_inline: selected.callable.inline.can_inline(),
                         inline_plan: publish_inline_body_plan(
                             selected.callable.inline_body_plan.as_deref(),
                             Some(context_count),
+                            super::inline_body_plan::type_parameter_receiver(
+                                selected
+                                    .callable
+                                    .generic_sig
+                                    .as_deref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -1200,7 +1287,7 @@ impl BodyFirChecker<'_> {
                     context_parameters,
                     value_parameters: parameters,
                     vararg_index: selected.vararg_index,
-                    context_arguments: selected.context_args.iter().cloned().map(Some).collect(),
+                    context_arguments: selected.context_args.clone(),
                 })
             }
             Some(ResolvedCall::MemberExtension {
@@ -1263,12 +1350,17 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: None,
+                        overridden_declarations: Box::new([]),
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
-                        inline_plan: publish_inline_body_plan(inline_body_plan.as_deref(), None)
-                            .map_err(|_| {
-                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                            })?,
+                        inline_plan: publish_inline_body_plan(
+                            inline_body_plan.as_deref(),
+                            None,
+                            None,
+                        )
+                        .map_err(|_| {
+                            self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                        })?,
                         extension_receiver_parameter: Some(extension_parameter),
                     }
                 };
@@ -1361,15 +1453,18 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedCallShape,
                     )
                 })?;
+                let reified = header.flags.is_reified();
+                let value = ResolvedTy::new(value).map_err(|error| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnpublishableType(error),
+                    )
+                })?;
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
-                    reified: header.flags.is_reified(),
-                    value: ResolvedTy::new(value).map_err(|error| {
-                        self.failure(
-                            self.file.expr_span(expression),
-                            BodyCheckFailureKind::UnpublishableType(error),
-                        )
-                    })?,
+                    reified,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
+                    value,
                     additional_bounds,
                 })
             })
@@ -1403,10 +1498,15 @@ impl BodyFirChecker<'_> {
                 declared_result: callable.declared_ret,
                 overridden_results: &callable.overridden_results,
                 semantic_role: callable.semantic_role,
+                overridden_declarations: &callable.overridden_declarations,
                 suspend: callable.suspend,
                 can_inline: callable.inline.can_inline(),
                 inline_plan,
                 inline_receiver_parameter,
+                inline_declared_receiver:
+                    super::inline_body_plan::signature_type_parameter_receiver(
+                        callable.generic_sig.as_deref(),
+                    ),
                 reified_type_parameter_ordinals: &callable.reified_type_parameter_ordinals,
             },
         )?;
@@ -1496,6 +1596,7 @@ impl BodyFirChecker<'_> {
                 substitutions: self.call_substitutions(expression, *declaration)?,
                 parameters,
                 extension_parameter: None,
+                extension_receiver: *extension_receiver,
             });
         }
 
@@ -1530,10 +1631,12 @@ impl BodyFirChecker<'_> {
                 declared_result: *declared_ret,
                 overridden_results,
                 semantic_role: None,
+                overridden_declarations: &[],
                 suspend: *suspend,
                 can_inline: inline.can_inline(),
                 inline_plan: inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
+                inline_declared_receiver: None,
                 reified_type_parameter_ordinals,
             },
         )?;
@@ -1558,6 +1661,7 @@ impl BodyFirChecker<'_> {
             substitutions,
             parameters,
             extension_parameter: Some(extension_parameter),
+            extension_receiver: *extension_receiver,
         })
     }
 
@@ -1602,10 +1706,12 @@ impl BodyFirChecker<'_> {
             declared_result,
             overridden_results,
             semantic_role,
+            overridden_declarations,
             suspend,
             can_inline,
             inline_plan,
             inline_receiver_parameter,
+            inline_declared_receiver,
             reified_type_parameter_ordinals,
         } = call;
         let resolved = |ty| {
@@ -1651,13 +1757,16 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedCallShape,
                     )
                 })?;
+                let reified = reified_type_parameter_ordinals.contains(&ordinal);
+                let value = resolved(value)?;
                 Ok(FirTypeSubstitution {
                     parameter: FirTypeParameterRef::External {
                         callable: declaration,
                         ordinal,
                     },
-                    reified: reified_type_parameter_ordinals.contains(&ordinal),
-                    value: resolved(value)?,
+                    reified,
+                    value,
+                    reified_runtime: self.reified_substitution_runtime(reified, value),
                     additional_bounds,
                 })
             })
@@ -1678,15 +1787,20 @@ impl BodyFirChecker<'_> {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
                 semantic_role,
+                overridden_declarations: overridden_declarations.into(),
                 suspend,
                 can_inline,
-                inline_plan: publish_inline_body_plan(inline_plan, inline_receiver_parameter)
-                    .map_err(|_| {
-                        self.failure(
-                            self.file.expr_span(expression),
-                            BodyCheckFailureKind::UnsupportedCallShape,
-                        )
-                    })?,
+                inline_plan: publish_inline_body_plan(
+                    inline_plan,
+                    inline_receiver_parameter,
+                    inline_declared_receiver,
+                )
+                .map_err(|_| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?,
                 extension_receiver_parameter: None,
             },
             substitutions.into_boxed_slice(),
@@ -1727,6 +1841,36 @@ impl BodyFirChecker<'_> {
             selected.callable.ret,
             self.info.resolved_call_type_args.get(&expression),
         );
+        if selected.callable.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::TypeOf)
+            && !self.file.recursive_type_of
+        {
+            let ty = self
+                .info
+                .resolved_call_type_args
+                .get(&expression)
+                .and_then(|arguments| arguments.first())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })?;
+            let owner = DeclarationId::from_raw(self.body.owner().raw());
+            if let Some(parameter) = recursive_type_of_parameter(self.index, owner, ty) {
+                let name = self.index.type_parameter_name(parameter).ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::MissingStableCallTarget,
+                    )
+                })?;
+                return Err(self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::RecursiveTypeOf(name.into()),
+                ));
+            }
+        }
         let dispatch_receiver = selected
             .callable
             .singleton_dispatch
@@ -2157,6 +2301,16 @@ impl BodyFirChecker<'_> {
         selected: &crate::symbol_resolver::ResolvedMember,
         receiver: FirReceiver,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let cause = self.expression_origin(expression)?;
+        let receiver = FirReceiver {
+            value: receiver.value,
+            conversion: self.receiver_conversion(
+                expression,
+                cause,
+                receiver,
+                Some(selected.receiver),
+            )?,
+        };
         let (target, substitutions) = self.member_call_target(expression, selected)?;
         let parameters = self.selected_call_parameters(
             expression,
@@ -2300,10 +2454,12 @@ impl BodyFirChecker<'_> {
                 declared_result: selected.member.declared_ret,
                 overridden_results: &selected.member.overridden_results,
                 semantic_role: selected.member.semantic_role,
+                overridden_declarations: &selected.member.overridden_declarations,
                 suspend: selected.member.suspend(),
                 can_inline: selected.member.inline.can_inline(),
                 inline_plan: selected.member.inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
+                inline_declared_receiver: None,
                 reified_type_parameter_ordinals: &selected
                     .member
                     .call_sig
@@ -2544,15 +2700,20 @@ impl BodyFirChecker<'_> {
                 .resolved_whole_array_vararg_args
                 .contains(&operand)
             {
-                arguments.push(FirCallArgument::Expression {
+                arguments.push(FirCallArgument::Vararg {
                     parameter: parameter_id,
-                    value,
-                    conversion: self.selected_value_conversion(
-                        operand,
+                    origin: cause,
+                    elements: vec![FirVarargElement {
                         value,
-                        parameter_ty,
-                        cause,
-                    )?,
+                        spread: true,
+                        conversion: self.selected_value_conversion(
+                            operand,
+                            value,
+                            parameter_ty,
+                            cause,
+                        )?,
+                    }]
+                    .into_boxed_slice(),
                 });
                 continue;
             }
@@ -2822,162 +2983,5 @@ impl BodyFirChecker<'_> {
         }
         self.source_member_statement_operator_on_value(statement, convention, receiver)
             .map(FirExprKind::Call)
-    }
-}
-
-impl BodyFirChecker<'_> {
-    /// The function a `super` call selected: its current-module callable, or its dependency
-    /// callable. A function selection with neither has no stable target to call. An accessor has
-    /// no callable of its own; its [`crate::fir::FirSuperCallKind`] names its property instead.
-    fn super_declaration(
-        &self,
-        span: Option<Span>,
-        target: &crate::resolve::ResolvedSuperCall,
-        kind: crate::fir::FirSuperCallKind,
-    ) -> Result<Option<crate::fir::ResolvedFunctionOverrideTarget>, BodyCheckFailure> {
-        if kind != crate::fir::FirSuperCallKind::Function {
-            return Ok(None);
-        }
-        match (target.stable_declaration, target.external_declaration) {
-            (Some(declaration), _) => self
-                .index
-                .callable_for_declaration(declaration)
-                .map(|callable| crate::fir::ResolvedFunctionOverrideTarget::Module(callable.id)),
-            (None, Some(external)) => Some(crate::fir::ResolvedFunctionOverrideTarget::External(
-                external,
-            )),
-            (None, None) => None,
-        }
-        .map(Some)
-        .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))
-    }
-
-    /// Check a `super`-qualified call against the supertype declaration the checker already selected.
-    ///
-    /// `super` is not a receiver expression: the recorded [`ImplicitReceiverSelection`] names which
-    /// enclosing instance supplies `this` (a labeled `super@Outer` targets an outer one), and the
-    /// callable is fixed to one supertype declaration, so dispatch must stay non-virtual.
-    pub(super) fn selected_super_call(
-        &mut self,
-        expression: ExprId,
-        arguments: &[ExprId],
-        target: &crate::resolve::ResolvedSuperCall,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let span = self.file.expr_span(expression);
-        let cause = self.expression_origin(expression)?;
-        self.selected_super_call_at(
-            span,
-            cause,
-            Some(expression),
-            arguments,
-            target,
-            crate::fir::FirSuperCallKind::Function,
-        )
-    }
-
-    /// As [`Self::selected_super_call`], but for a site that is a STATEMENT rather than an
-    /// expression (`super.p = v`, whose selected setter is an ordinary super call whose single
-    /// argument is the assigned value).
-    pub(super) fn selected_super_call_at(
-        &mut self,
-        span: Option<Span>,
-        cause: OriginId,
-        expression: Option<ExprId>,
-        arguments: &[ExprId],
-        target: &crate::resolve::ResolvedSuperCall,
-        kind: crate::fir::FirSuperCallKind,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let dispatch_receiver = self
-            .materialize_implicit_receiver(cause, span, &target.receiver)?
-            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-        let parameters = target
-            .params
-            .iter()
-            .copied()
-            .map(|parameter| {
-                ResolvedTy::new(parameter).map_err(|error| {
-                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let checked = match expression {
-            Some(expression) => self
-                .call_arguments(expression, arguments, &target.params)?
-                .into_vec(),
-            None => {
-                if arguments.len() != target.params.len() {
-                    return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
-                }
-                arguments
-                    .iter()
-                    .enumerate()
-                    .map(|(parameter, argument)| {
-                        let value = self.expression(*argument)?;
-                        Ok(FirCallArgument::Expression {
-                            parameter: u32::try_from(parameter).map_err(|_| {
-                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
-                            })?,
-                            value,
-                            conversion: self.selected_value_conversion(
-                                *argument,
-                                value,
-                                parameters[parameter],
-                                cause,
-                            )?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, BodyCheckFailure>>()?
-            }
-        };
-        let result = ResolvedTy::new(target.ret)
-            .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
-        let dispatch_owner = target
-            .receiver
-            .ty
-            .non_null()
-            .obj_internal()
-            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-        // The declaration's physical parameters derive the descriptor only for a source
-        // declaration, which publishes none, and must then be parallel to the call's parameters.
-        // A provider-described declaration keeps its own ABI shape (a dependency suspend member
-        // ends with the classfile's CPS continuation), which the target consumes as published.
-        if target.descriptor.is_empty() && target.physical_params.len() != parameters.len() {
-            return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
-        }
-        let declaration_parameters = target
-            .physical_params
-            .iter()
-            .copied()
-            .map(|parameter| {
-                ResolvedTy::new(parameter).map_err(|error| {
-                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(FirExprKind::Call(FirCall {
-            target: FirCallTarget::Super {
-                owner: target.owner,
-                dispatch_owner,
-                enclosing_dispatch: !target.receiver.current,
-                kind,
-                name: target.name.clone(),
-                parameters: declaration_parameters.into_boxed_slice(),
-                result,
-                interface: target.interface,
-                realization: target.realization,
-                descriptor: target.descriptor.clone(),
-                physical_result: ResolvedTy::new(target.physical_ret).map_err(|error| {
-                    self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
-                })?,
-                declaration: self.super_declaration(span, target, kind)?,
-                source_member: target.source_member,
-                suspend: target.suspend,
-            },
-            dispatch_receiver: Some(dispatch_receiver),
-            extension_receiver: None,
-            parameter_types: parameters.into_boxed_slice(),
-            arguments: checked.into_boxed_slice(),
-            substitutions: Box::new([]),
-        }))
     }
 }

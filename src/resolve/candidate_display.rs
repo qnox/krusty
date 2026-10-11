@@ -1,11 +1,28 @@
-//! Source rendering of callable candidates for overload diagnostics.
+//! Source rendering of callable and classifier candidates for overload diagnostics.
 //!
 //! Every candidate is rendered from its semantic record. A function reads
 //! `fun <T> R.name(p: P): Ret`; a constructor collected into a receiver's member level reads as
-//! kotlinc prints it, `Outer.constructor(p: P): Outer.Inner`. Declaration origin affects neither
-//! shape nor text.
+//! kotlinc prints it, `Outer.constructor(p: P): Outer.Inner`. A classifier reads as its declaration
+//! header, `class Box<T> : Any`, and a typealias as `typealias Name<T> = Expansion<T>`.
+//! Declaration origin affects neither shape nor text.
 
 use super::*;
+
+pub(super) fn inaccessible_classifier_message(
+    name: &str,
+    access: crate::symbol_source::ClassifierAccess,
+) -> String {
+    use crate::symbol_source::ClassifierAccess;
+
+    let kind = match access {
+        ClassifierAccess::Private => "private",
+        ClassifierAccess::Protected => "protected",
+        ClassifierAccess::Internal => "internal",
+        ClassifierAccess::PackagePrivate => "package-private",
+        ClassifierAccess::Public => "public",
+    };
+    format!("cannot access '{name}': it is {kind}")
+}
 
 impl Checker<'_> {
     /// Render a callable directly from its semantic record. The receiver is an attribute of an
@@ -173,4 +190,108 @@ fn parameters_display(signature: &crate::libraries::GenericSig, call_sig: &CallS
             )
         })
         .collect()
+}
+
+/// kotlinc's `OVERLOAD_RESOLUTION_AMBIGUITY` for a classifier name: each equally visible
+/// classifier rendered as its declaration header, in candidate order. A candidate named through a
+/// typealias renders as that alias declaration.
+pub(super) fn ambiguous_classifier_message<
+    Shape: std::ops::Deref<Target = crate::libraries::LibraryType>,
+>(
+    candidates: &[crate::symbol_resolver::ScopedClassifier],
+    shape: impl Fn(TypeName) -> Option<Shape>,
+) -> String {
+    let mut message = "overload resolution ambiguity between candidates:".to_string();
+    for candidate in candidates {
+        let display = match &candidate.alias {
+            Some(alias) => Some(type_alias_display(alias)),
+            None => shape(candidate.classifier)
+                .map(|shape| classifier_access_display_from_shape(candidate.classifier, &shape)),
+        };
+        if let Some(display) = display {
+            message.push('\n');
+            message.push_str(&display);
+        }
+    }
+    message
+}
+
+/// kotlinc's declaration header of a typealias: `typealias Name<T> = Expansion<T>`.
+fn type_alias_display(alias: &crate::libraries::AliasExpansion) -> String {
+    let formals = if alias.formals.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<{}>",
+            alias
+                .formals
+                .iter()
+                .map(|formal| crate::types::type_parameter_source_name(formal))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "typealias {}{formals} = {}",
+        alias.identity.nested_segment_ref(),
+        alias.expansion.source_name()
+    )
+}
+
+/// kotlinc's descriptor rendering of a classifier: `class Helper : Any`, `class Box<out T> : Any`.
+pub(super) fn classifier_access_display_from_shape(
+    internal: TypeName,
+    shape: &crate::libraries::LibraryType,
+) -> String {
+    let kind = match shape.kind {
+        crate::libraries::TypeKind::Class => "class",
+        crate::libraries::TypeKind::Interface => "interface",
+        crate::libraries::TypeKind::Annotation => "annotation class",
+        crate::libraries::TypeKind::Enum => "enum class",
+        crate::libraries::TypeKind::Object => "object",
+    };
+    let supertypes = shape
+        .supertypes
+        .iter_ids()
+        .map(|supertype| {
+            let ty = Ty::obj_name(supertype);
+            if ty.is_erased_top() {
+                "Any".to_string()
+            } else {
+                ty.source_name()
+            }
+        })
+        .collect::<Vec<_>>();
+    let supertypes = if supertypes.is_empty() {
+        String::new()
+    } else {
+        format!(" : {}", supertypes.join(", "))
+    };
+    let own_type_parameters = shape
+        .type_params
+        .iter()
+        .zip(shape.type_param_variances.iter())
+        .take(shape.own_type_parameter_count)
+        .map(|(name, variance)| {
+            let variance = match variance {
+                crate::types::TypeVariance::Invariant => "",
+                crate::types::TypeVariance::In => "in ",
+                crate::types::TypeVariance::Out => "out ",
+            };
+            format!(
+                "{variance}{}",
+                crate::types::type_parameter_source_name(name)
+            )
+        })
+        .collect::<Vec<_>>();
+    let type_parameters = if own_type_parameters.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", own_type_parameters.join(", "))
+    };
+    format!(
+        "{} {}{type_parameters}{supertypes}",
+        kind,
+        internal.nested_segment_ref()
+    )
 }

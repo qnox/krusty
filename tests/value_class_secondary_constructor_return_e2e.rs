@@ -26,7 +26,7 @@ const SRC: &str = "var log = \"\"\n\
     }\n";
 
 fn assert_same_method(method: &str) {
-    match common::method_code_diff_against_kotlinc("Main", &[], SRC, "Foo", method) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], SRC, "Foo", method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("Foo.{method}: reference toolchain unavailable"),
@@ -45,7 +45,12 @@ fn a_return_operand_is_evaluated_before_the_constructed_value() {
 
 #[test]
 fn secondary_constructor_returns_run() {
-    let output = common::compile_and_run_box(SRC, "Main", &[common::stdlib_jar()], None)
-        .expect("krusty compiles and the JVM runs the box function");
+    let output = common::compile_and_run_box(
+        SRC,
+        "Main",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("krusty compiles and the JVM runs the box function");
     assert_eq!(output, "OK");
 }

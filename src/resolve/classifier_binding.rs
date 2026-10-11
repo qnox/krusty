@@ -3,7 +3,7 @@
 //! rediscover alias-ness from the source spelling after selection.
 
 use super::*;
-use crate::symbol_resolver::{CandidateSelectionWithTies, ClassifierMiss};
+use crate::symbol_resolver::{CandidateSelectionWithTies, ClassifierMiss, ScopedClassifier};
 
 /// The typealias binding selected on the classifier tower together with its expanded classifier.
 /// A declared alias carries its qualified identity. `identity` is absent only for a statement-local
@@ -47,6 +47,29 @@ fn selected_alias_from_declaration(
                 .map(Some)
         }
     }
+}
+
+/// The alias template an explicit import's classifier facet carries, validated against the
+/// classifier it names.
+fn explicit_import_alias(candidate: &ScopedClassifier) -> SelectedAliasProvenance {
+    candidate
+        .alias
+        .clone()
+        .map(|alias| {
+            selected_alias_from_expansion(alias.identity, candidate.classifier, Some(alias))
+        })
+        .transpose()
+}
+
+/// Star/default-import candidates whose classifier facets name no typealias declaration.
+fn unaliased_candidates(candidates: Vec<TypeName>) -> Vec<ScopedClassifier> {
+    candidates
+        .into_iter()
+        .map(|classifier| ScopedClassifier {
+            classifier,
+            alias: None,
+        })
+        .collect()
 }
 
 fn same_selected_alias(
@@ -187,14 +210,68 @@ impl Checker<'_> {
             }
             InheritedNestedClassifier::NotFound => {}
         }
-        if let Some((classifier, declaration)) = self.explicit_import_classifier_binding(root_name)
-        {
-            let Ok(alias) = selected_alias_from_declaration(classifier, declaration.as_ref())
-            else {
-                return Self::invalid_alias_selection(root_name);
-            };
-            if let Some(binding) = offer(classifier, alias) {
-                return binding;
+        // Explicit imports rank above the current package. Every explicit import under the root is
+        // one rung; conflicting imports are reported on the import list and stay candidates here.
+        let explicit = crate::symbol_resolver::explicit_classifier_candidates(
+            &source,
+            &self.function_import_scope,
+            root_name,
+        );
+        match explicit.as_slice() {
+            [] => {}
+            [candidate] => {
+                let Ok(alias) = explicit_import_alias(candidate) else {
+                    return Self::invalid_alias_selection(root_name);
+                };
+                if let Some(binding) = offer(candidate.classifier, alias) {
+                    return binding;
+                }
+            }
+            // An expression qualifier commits its root before any suffix is examined, and a
+            // conflicting import binds no root: the reference names its unbound root (kotlinc
+            // 2.4.20 reports `Same()` as an unresolved reference).
+            [_, _, ..] if mode == QualifiedRoot::Committed => {
+                return (
+                    InheritedNestedClassifier::NotFound,
+                    Some(ClassifierMiss::Unresolved(root_name.clone())),
+                    None,
+                );
+            }
+            // A type reference selects among the complete explicit paths: one completion binds,
+            // several are an ambiguity between those candidates.
+            [_, _, ..] => {
+                let mut completed: Vec<(ClassifierBinding, ScopedClassifier)> = Vec::new();
+                for candidate in &explicit {
+                    let Ok(alias) = explicit_import_alias(candidate) else {
+                        return Self::invalid_alias_selection(root_name);
+                    };
+                    let Some(binding) = offer(candidate.classifier, alias) else {
+                        continue;
+                    };
+                    let InheritedNestedClassifier::Found(classifier) = binding.0 else {
+                        return binding;
+                    };
+                    let alias = (classifier == candidate.classifier)
+                        .then(|| candidate.alias.clone())
+                        .flatten();
+                    completed.push((binding, ScopedClassifier { classifier, alias }));
+                }
+                match completed.len() {
+                    0 => {}
+                    1 => return completed.remove(0).0,
+                    _ => {
+                        return (
+                            InheritedNestedClassifier::Ambiguous,
+                            Some(ClassifierMiss::Ambiguous(
+                                completed
+                                    .into_iter()
+                                    .map(|(_, candidate)| candidate)
+                                    .collect(),
+                            )),
+                            None,
+                        );
+                    }
+                }
             }
         }
         if let Some((classifier, alias)) = self.selected_same_package_classifier(root_name) {
@@ -220,7 +297,7 @@ impl Checker<'_> {
                 CompleteImportedSelection::Ambiguous(candidates) => {
                     return (
                         InheritedNestedClassifier::Ambiguous,
-                        Some(ClassifierMiss::Ambiguous(candidates)),
+                        Some(ClassifierMiss::Ambiguous(unaliased_candidates(candidates))),
                         None,
                     );
                 }
@@ -254,7 +331,7 @@ impl Checker<'_> {
                 CandidateSelectionWithTies::Ambiguous(candidates) => {
                     return nearest_miss.take().unwrap_or((
                         InheritedNestedClassifier::Ambiguous,
-                        Some(ClassifierMiss::Ambiguous(candidates)),
+                        Some(ClassifierMiss::Ambiguous(unaliased_candidates(candidates))),
                         None,
                     ));
                 }

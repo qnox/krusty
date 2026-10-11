@@ -19,16 +19,24 @@ impl Parser<'_> {
         let mut params = Vec::new();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             // Optional parameter name `name: Type`.
-            if self.at(TokenKind::Ident)
+            let name = (self.at(TokenKind::Ident)
                 && self
                     .t
                     .get(self.i + 1)
-                    .is_some_and(|t| t.kind == TokenKind::Colon)
-            {
+                    .is_some_and(|t| t.kind == TokenKind::Colon))
+            .then(|| {
+                let name = self.text().to_string();
                 self.bump(); // name
                 self.bump(); // ':'
+                name
+            });
+            let parameter = self.parse_type();
+            if let Some(name) = name {
+                self.file
+                    .function_type_parameter_names
+                    .insert(parameter.span.lo, name);
             }
-            params.push(self.parse_type());
+            params.push(parameter);
             if !self.eat(TokenKind::Comma) {
                 break;
             }

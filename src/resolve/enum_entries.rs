@@ -59,12 +59,19 @@ impl Checker<'_> {
     /// Enum entries and static members exported by a classifier star import (`import Game.*`) use
     /// the classifier as their import scope; treating every star path as a package loses this rung.
     pub(super) fn explicitly_imported_enum_entry(&self, name: &str) -> Option<(TypeName, String)> {
-        let (namespace, declared_name) = self.function_import_scope.explicit_target(name)?;
-        let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace else {
-            return None;
-        };
-        let is_entry = self.classifier_has_enum_entry(owner, &declared_name);
-        is_entry.then_some((owner, declared_name))
+        let mut entries = self
+            .function_import_scope
+            .explicit_targets(name)
+            .into_iter()
+            .filter_map(|(namespace, declared_name)| {
+                let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace else {
+                    return None;
+                };
+                self.classifier_has_enum_entry(owner, &declared_name)
+                    .then_some((owner, declared_name))
+            })
+            .collect::<Vec<_>>();
+        (entries.len() == 1).then(|| entries.pop()).flatten()
     }
 
     /// The synthetic classifier property on the owner the scope tower already selected.

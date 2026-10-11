@@ -34,6 +34,8 @@
 //! - `slots` — local-slot releases that break the frame's stack discipline
 //!   (`jvm/ir_emit/frame_map.rs`).
 //! - `native` — native lowering decisions (`native/codegen/lower.rs`).
+//! - `class_tables` — the shared class dispatch tables (`backend/class_tables`).
+//! - `override` — inherited override status/visibility publication (`resolve/override_plans.rs`).
 
 /// The canonical trace categories (see the module docs). Listed here so the set is discoverable in one
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
@@ -53,6 +55,8 @@ pub const CATEGORIES: &[&str] = &[
     "bytecode",
     "slots",
     "native",
+    "class_tables",
+    "override",
 ];
 
 #[cfg(feature = "trace")]

@@ -75,6 +75,23 @@ impl IrFile {
     /// inlines, a `@JvmField` is its own surface, and a private property is reached only through
     /// its field or `access$…$p` bridges, so none of those has default accessors; a declared getter
     /// is an ordinary function.
+    /// The annotations on the accessors of the source property `index` stores.
+    pub(crate) fn static_accessor_annotations(
+        &self,
+        index: u32,
+    ) -> Option<&crate::ir::AccessorAnnotations> {
+        self.local_property_layouts
+            .iter()
+            .find_map(|(property, layout)| match layout {
+                crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. }
+                    if *storage == index =>
+                {
+                    self.accessor_annotations.get(property)
+                }
+                _ => None,
+            })
+    }
+
     pub(crate) fn has_jvm_default_static_getter(&self, index: u32) -> bool {
         self.publishes_jvm_default_static_accessors(index)
             && self.statics[index as usize].accessors.getter == IrStaticAccessor::Default

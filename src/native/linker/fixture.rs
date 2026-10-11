@@ -400,10 +400,14 @@ impl Image<'_> {
             .collect()
     }
 
-    /// `(p_offset, p_vaddr)` of the writable segment.
+    /// `(p_offset, p_vaddr)` of the writable segment: the writable `PT_LOAD`.
     fn data_segment(&self) -> (u64, u64) {
-        let phdr = 64 + 56;
-        (self.u64_at_offset(phdr + 8), self.u64_at_offset(phdr + 16))
+        let data = self
+            .program_headers()
+            .into_iter()
+            .find(|header| header.p_type == 1 && header.p_flags == 6)
+            .expect("a writable PT_LOAD");
+        (data.p_offset, data.p_vaddr)
     }
 
     /// Where the writable segment starts in memory.

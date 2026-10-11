@@ -1,23 +1,21 @@
 //! What the native target promises about concurrency today, pinned so it cannot drift quietly.
 //!
-//! **There are no threads.** The runtime talks to the kernel through four syscalls — write, mmap,
-//! munmap, exit_group — and creates nothing that runs concurrently; the collector stops nothing
-//! because there is nothing else running. `docs/BUILD_AND_NATIVE_PLAN.md` records the decision that
-//! this target will follow **Kotlin/Native's** memory model rather than the JVM's when threads do
-//! arrive, and `docs/SPEC.md` records what that will require. None of it is implemented, and the
-//! honest thing is to say so in a test rather than leave a reader to infer it from an absence.
+//! **Threads share one heap under one mutator lock.** A thread runs Kotlin because the runtime
+//! started it (`kt_thread_start`: the kernel's `clone` on a stack the runtime maps, Go's way, with
+//! no C library) or because foreign code did and called into Kotlin. Every such thread holds the
+//! lock while it runs Kotlin and releases it while it is in foreign code, so at most one thread
+//! runs Kotlin at a time and every hand-off of the lock orders memory. `docs/SPEC.md` records that
+//! decision and what it leaves for later (safepoints, so that a thread looping in Kotlin cannot
+//! keep the others waiting). `tests/native_runtime_e2e.rs` drives the lock with real threads.
 //!
 //! So these tests pin the contract as it stands: a construct whose meaning is exhausted by
-//! single-threaded execution compiles and runs, and a construct that needs real concurrency is
-//! DECLINED rather than compiled into something that quietly ignores it. When threads land, the
-//! second half of that is what has to be revisited — and these tests are what will say so, by
-//! failing.
+//! one-thread-at-a-time execution compiles and runs, and a construct that needs real concurrency is
+//! DECLINED rather than compiled into something that quietly ignores it.
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -52,15 +50,16 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && krusty::toolchain::stdlib_jar().is_some())
-        .then_some(target)
+    (krusty::native::can_link(target)
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some())
+    .then_some(target)
 }
 
 /// Compile one program with the native code generator for the host.
 fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let target = host().expect("checked by the caller");
-    let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -69,10 +68,13 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let mut diags = DiagSink::new();
     let mut features = krusty::features::LangFeatures::new();
     features.apply_source_directives(source);
+    let backend = CraneliftBackend::new(target).verified();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
     );
-    let backend = CraneliftBackend::new(target);
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
         &["Main".to_string()],
@@ -93,6 +95,7 @@ fn run(source: &str) -> String {
     );
     let objects = artifacts
         .iter()
+        .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
     let image = krusty::native::link_program(&objects, target).expect("link");
@@ -121,10 +124,11 @@ fn a_volatile_property_compiles_and_reads_back_what_was_written() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     }
-    // `@Volatile` orders a field against OTHER THREADS. With one thread its meaning is exhausted
-    // by ordinary reads and writes, so compiling it as a plain property is not an approximation —
-    // there is no observer for it to be wrong for. This test exists to be re-read the day threads
-    // arrive, when the annotation acquires a meaning the generator does not yet implement.
+    // `@Volatile` orders a field against OTHER THREADS. Only the holder of the mutator lock runs
+    // Kotlin, and every hand-off of the lock is a release and an acquire, so every write before a
+    // hand-off is visible after it: ordinary reads and writes already give the field the meaning
+    // the annotation asks for. This test is to be re-read the day threads run Kotlin in parallel,
+    // when the annotation acquires a meaning the generator does not yet implement.
     assert_eq!(
         run("@Volatile var flag: Boolean = false\n\
              @Volatile var counter: Int = 0\n\
@@ -185,24 +189,25 @@ fn a_real_suspension_is_declined_rather_than_dropped() {
 }
 
 #[test]
-fn the_runtime_starts_no_threads() {
-    // The whole of the runtime's kernel interface, and none of it creates a thread: a program that
-    // links this runtime is single-threaded by construction, not by convention. This reads the
-    // syscall header rather than trusting a comment, so adding `clone` without revisiting the
-    // memory-model question fails here first.
+fn the_runtime_talks_to_the_kernel_directly() {
+    // The runtime's whole kernel interface, read from the syscall header rather than trusted to a
+    // comment: it starts threads with `clone`, waits and wakes on the mutator lock with `futex`,
+    // and never goes through a C library to do either. A `pthread` here would make every static
+    // program need a target libc, which is the toolchain the freestanding runtime exists to avoid.
     let syscalls = common::native_sys_header();
-    for forbidden in ["SYS_CLONE", "clone", "futex", "pthread"] {
-        assert!(
-            !syscalls.contains(forbidden),
-            "the runtime names `{forbidden}`: if threads are arriving, the Kotlin/Native memory \
-             model this target committed to needs implementing, and these tests need rewriting"
-        );
-    }
+    assert!(
+        !syscalls.contains("pthread"),
+        "the runtime names `pthread`: a static program must not need a C library"
+    );
     for expected in [
         "KT_SYS_WRITE",
         "KT_SYS_MMAP",
         "KT_SYS_MUNMAP",
         "KT_SYS_EXIT",
+        "KT_SYS_EXIT_THREAD",
+        "KT_SYS_CLONE",
+        "KT_SYS_GETTID",
+        "KT_SYS_FUTEX",
     ] {
         assert!(syscalls.contains(expected), "missing {expected}");
     }

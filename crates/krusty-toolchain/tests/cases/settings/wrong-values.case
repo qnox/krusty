@@ -1,0 +1,9 @@
+A value of the wrong type is reported and its default shown.
+--- module.yaml
+product: jvm/lib
+settings:
+  jvm:
+    release: twenty
+    storeParameterNames: maybe
+  kotlin:
+    freeCompilerArgs: -Xone

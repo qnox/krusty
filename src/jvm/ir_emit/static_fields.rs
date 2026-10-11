@@ -30,12 +30,6 @@ pub(super) fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool
     )
 }
 
-/// Whether `init` is a literal the source wrote, the only initializer Kotlin metadata's
-/// `HAS_CONSTANT` describes: a value folded from an operation over constants is not one.
-pub(super) fn literal_initializer(ir: &IrFile, init: crate::ir::ExprId) -> bool {
-    const_value_idx_peek(ir, init) && !ir.folded_constants.contains(&init)
-}
-
 /// The initializer `<clinit>` runs for static `s`: its source initializer, unless a `const val`
 /// folds it into a `ConstantValue`. `None` for a static with no initializer (`lateinit var`).
 pub(super) fn clinit_initializer(
@@ -98,9 +92,11 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // emitter, and without this a top-level property's element type was lost to erasure.
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
-        // backing field.
+        // backing field, except a `lateinit` one, which holds null until assigned.
         let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
-        let field_ann = super::nullability_annotation(nullability);
+        let field_ann = (!s.is_lateinit)
+            .then(|| super::nullability_annotation(nullability))
+            .flatten();
         // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
         // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
         // LATE adds: kotlinc visits the facade's fields AFTER its methods, so a backing field's name
@@ -151,6 +147,10 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             .iter()
             .filter_map(|(_, property)| property.init),
     );
+    e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+        env.signature_symbols,
+    ));
+    e.record_locals = true;
     let mut code = CodeBuilder::new(0);
     e.emit_delegated_property_array(env, env.facade_class, facade, &mut code);
     // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
@@ -166,6 +166,16 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         e.emit_static_initializer_store(facade, index, init, &mut code);
     }
     code.ret_void();
+    // `<clinit>` normally keeps only its declaration-owned entries, not incidental marks from a
+    // nested initializer expression. A classpath inline call is different: its mapped callee lines
+    // and caller-line restoration are part of kotlinc's public debug surface. Keep only marks that
+    // the inliner explicitly tagged, then merge them with the curated property entries.
+    clinit_lines.extend(
+        code.inlined_line_marks()
+            .map(|(pc, line)| (pc, u32::from(line))),
+    );
+    clinit_lines.sort_by_key(|&(pc, _)| pc);
+    clinit_lines.dedup();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
@@ -243,30 +253,35 @@ pub(super) fn emit_default_static_accessor(
     // same generic `Signature` its backing field does — kotlinc signs `getXs()` as
     // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
     let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
+    let declared = ir.static_accessor_annotations(static_index);
     if accessor == StaticAccessor::Setter {
         emit_default_static_setter(
             cw,
             owner,
             s,
             ir.static_field_jvm_name(static_index),
-            &signatures,
-            acc_ann,
+            DefaultSetterHeader {
+                signature: signatures.setter.as_deref(),
+                nullability: acc_ann,
+                annotations: declared.map(|declared| &declared.setter),
+            },
             param_assertions && nullability == 1,
         );
         return;
     }
     let gname = property_getter_name(&s.name);
     let field_name = ir.static_field_jvm_name(static_index);
-    cw.reserve_method_name(&gname);
-    cw.seed_utf8(&format!("(){desc}"));
-    // kotlinc interns an accessor's `Signature` between its descriptor and its nullability
-    // annotation, BEFORE the body's field cluster.
-    if let Some(signature) = &signatures.getter {
-        cw.seed_utf8(signature);
-    }
-    if let Some(a) = acc_ann {
-        cw.seed_utf8(a);
-    }
+    // kotlinc interns an accessor's `Signature` between its descriptor and its annotations (the
+    // declared ones, then nullability), BEFORE the body's field cluster.
+    let annotations = declared.map(|declared| &declared.getter);
+    reserve_default_accessor_pool(
+        cw,
+        &gname,
+        &format!("(){desc}"),
+        signatures.getter.as_deref(),
+        acc_ann,
+        annotations,
+    );
     let mut g = CodeBuilder::new(0);
     if s.line != 0 {
         g.mark_line(s.line);
@@ -301,6 +316,37 @@ pub(super) fn emit_default_static_accessor(
         signatures.getter.as_deref(),
     );
     cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
+    if let Some(annotations) = annotations {
+        super::function_annotations::emit_declared(cw, annotations, &gname, &format!("(){desc}"));
+    }
+}
+
+/// Intern a default accessor's header as kotlinc visits it: name, descriptor, `Signature`, the
+/// declared annotations, then the nullability annotation.
+fn reserve_default_accessor_pool(
+    cw: &mut ClassWriter,
+    name: &str,
+    descriptor: &str,
+    signature: Option<&str>,
+    nullability: Option<&str>,
+    annotations: Option<&crate::ir::DeclarationAnnotations>,
+) {
+    cw.reserve_method_name(name);
+    cw.reserve_method_pool_with_annotations(
+        name,
+        descriptor,
+        signature,
+        &nullability.into_iter().collect::<Vec<_>>(),
+        annotations.unwrap_or(&crate::ir::DeclarationAnnotations::default()),
+        &[],
+    );
+}
+
+/// What a default static setter's header carries besides its name and descriptor.
+struct DefaultSetterHeader<'a> {
+    signature: Option<&'a str>,
+    nullability: Option<&'a str>,
+    annotations: Option<&'a crate::ir::DeclarationAnnotations>,
 }
 
 /// A static property's compiler-default `setX`; see [`emit_default_static_accessor`].
@@ -309,10 +355,14 @@ fn emit_default_static_setter(
     owner: &str,
     s: &crate::ir::IrStatic,
     field_name: &str,
-    signatures: &JvmPropertySignatures,
-    acc_ann: Option<&str>,
+    header: DefaultSetterHeader<'_>,
     checks_parameter: bool,
 ) {
+    let DefaultSetterHeader {
+        signature,
+        nullability: acc_ann,
+        annotations,
+    } = header;
     let jt = jvm_declared_ty(&s.ty);
     let desc = type_descriptor(jt);
     // A value-class-typed property's setter carries the value-class mangle: the parameter
@@ -323,8 +373,18 @@ fn emit_default_static_setter(
         .unwrap_or_else(|| property_setter_name(&s.name));
     cw.reserve_method_name(&sname);
     cw.seed_utf8(&format!("({desc})V"));
-    if let Some(signature) = &signatures.setter {
+    if let Some(signature) = signature {
         cw.seed_utf8(signature);
+    }
+    if let Some(annotations) = annotations {
+        reserve_default_accessor_pool(
+            cw,
+            &sname,
+            &format!("({desc})V"),
+            signature,
+            None,
+            Some(annotations),
+        );
     }
     let words = slot_words(jt);
     let mut st = CodeBuilder::new(words);
@@ -348,15 +408,11 @@ fn emit_default_static_setter(
     let fref = cw.fieldref(owner, field_name, &desc);
     st.putstatic(fref, slot_words(jt) as i32);
     st.ret_void();
-    finish_code_sig::<0x0019>(
-        cw,
-        &sname,
-        &format!("({desc})V"),
-        &mut st,
-        words,
-        signatures.setter.as_deref(),
-    );
+    finish_code_sig::<0x0019>(cw, &sname, &format!("({desc})V"), &mut st, words, signature);
     cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
+    if let Some(annotations) = annotations {
+        super::function_annotations::emit_declared(cw, annotations, &sname, &format!("({desc})V"));
+    }
     // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
     cw.set_method_debug(
         &sname,
@@ -421,14 +477,17 @@ pub(super) fn emit_class_static_fields(
         // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
         let synthetic = ir.is_compiler_generated_static(static_index);
         let acc = if synthetic { acc | 0x1000 } else { acc };
-        // Reference-typed statics, including private hoisted fields, carry nullability annotations.
-        let ann = (!synthetic && (desc.starts_with('L') || desc.starts_with('['))).then(|| {
-            if s.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
+        // Reference-typed statics, including private hoisted fields, carry nullability annotations,
+        // except a `lateinit` one, which holds null until assigned.
+        let ann =
+            (!synthetic && !s.is_lateinit && (desc.starts_with('L') || desc.starts_with('[')))
+                .then(|| {
+                    if s.ty.is_nullable() {
+                        "Lorg/jetbrains/annotations/Nullable;"
+                    } else {
+                        "Lorg/jetbrains/annotations/NotNull;"
+                    }
+                });
         let signature = property_jvm_signatures(signature_formatter, &s.ty, None).field;
         cw.add_field_late_sig(
             acc,
@@ -546,6 +605,10 @@ fn companion_initializer_loads_instance(ir: &IrFile, body: crate::ir::ExprId) ->
             }),
             _ => None,
         };
+        if let crate::ir::IrExpr::Lambda { captures, .. } = ir.expr(expr) {
+            // The lambda's `inline_body` numbers its own values; only its captures read ours.
+            return captures.iter().any(|&capture| walk(ir, capture));
+        }
         let mut found = false;
         crate::ir::for_each_child(&ir.exprs, expr, &mut |child| {
             if dropped_receiver == Some(child) {
@@ -636,6 +699,10 @@ pub(super) fn emit_class_static_initializer(
                 .map(|&(_, _, init)| init)
                 .chain(companion_initializer),
         );
+        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+            env.signature_symbols,
+        ));
+        e.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
         emit_companion_init(e.cw, &mut clinit, fq_name, c);
@@ -758,7 +825,7 @@ impl Emitter<'_> {
         // re-enter it: the read is inside that getter.
         if let Some(storage) = crate::jvm::private_static_access::bridged_getter(self.ir, i)
             .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
-            .filter(|storage| self.static_owner != Some(storage.owner))
+            .filter(|storage| self.static_owner != Some(storage.owner) || self.export_private_calls)
         {
             let m = static_accessors::static_methodref(
                 self.cw,
@@ -860,7 +927,7 @@ impl Emitter<'_> {
         // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)
             .or_else(|| crate::jvm::private_static_access::declared_backing_setter(self.ir, index))
-            .filter(|storage| self.static_owner != Some(storage.owner))
+            .filter(|storage| self.static_owner != Some(storage.owner) || self.export_private_calls)
         {
             let m = static_accessors::static_methodref(
                 self.cw,
@@ -942,7 +1009,7 @@ impl Emitter<'_> {
         if self.diverges(init) {
             return;
         }
-        let physical = jvm_declared_ty(&field.ty);
+        let physical = jvm_value_ty(&field.ty);
         self.adapt_physical_operand_for(init, self.value_ty(init), physical, code);
         // Static storage is identified by its place in the file's static table.
         let reference = self.cw.fieldref(

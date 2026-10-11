@@ -3,7 +3,7 @@ use crate::libraries::{GenericSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
-use super::{infer_generic_return_bindings, semantic_arg_assignable, GSigBinds};
+use super::{infer_generic_return_bindings, semantic_arg_assignable};
 
 #[derive(Clone, Debug)]
 pub(crate) enum CallArgKind {
@@ -54,31 +54,6 @@ impl CallArgKind {
             // This probe never becomes an expression type. Applicability recognizes the explicit
             // variant and generic inference skips it.
             Self::OmittedDefault => Ty::Error,
-        }
-    }
-
-    pub(crate) fn substitute_types(&self, bindings: &GSigBinds) -> Self {
-        let substitute = |ty| super::ty_subst_keep_unbound(ty, bindings);
-        match self {
-            Self::Typed(ty) => Self::Typed(substitute(*ty)),
-            Self::Spread(ty) => Self::Spread(substitute(*ty)),
-            Self::LambdaLiteral(ty) => Self::LambdaLiteral(substitute(*ty)),
-            Self::CallableReference { nominal, function } => Self::CallableReference {
-                nominal: substitute(*nominal),
-                function: substitute(*function),
-            },
-            Self::ExpectedTypeCallable {
-                provisional,
-                generic_sig,
-            } => Self::ExpectedTypeCallable {
-                provisional: substitute(*provisional),
-                generic_sig: generic_sig.clone(),
-            },
-            Self::IntegerLiteral { ty, constant } => Self::IntegerLiteral {
-                ty: substitute(*ty),
-                constant: *constant,
-            },
-            Self::OmittedDefault => Self::OmittedDefault,
         }
     }
 

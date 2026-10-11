@@ -97,14 +97,9 @@ fn lambda_publishes_exact_enclosing_type_parameter_identities_and_bound_closure(
     assert_eq!(names, ["V", "T"]);
 }
 
-#[test]
-fn effect_only_lambda_result_publishes_its_unit_value_widening() {
-    let (body, _) = checked_function_body(
-        "fun consume(block: () -> Any?) {}\n\
-         fun test() { consume { while (false) {} } }\n",
-        "test",
-    );
-    let lambda_body = (0..body.expression_count())
+/// The checked lambda body in `source`'s `test` function.
+fn only_lambda_body(body: &FirBody) -> &FirBody {
+    (0..body.expression_count())
         .find_map(|raw| {
             let expression = body.expr(FirExprId::from_raw(raw as u32))?;
             let FirExprKind::Lambda { body, .. } = &expression.kind else {
@@ -112,18 +107,42 @@ fn effect_only_lambda_result_publishes_its_unit_value_widening() {
             };
             Some(body.as_ref())
         })
-        .expect("checked lambda");
+        .expect("checked lambda")
+}
+
+#[test]
+fn effect_only_lambda_returns_unit_under_an_any_result() {
+    let (body, _) = checked_function_body(
+        "fun consume(block: () -> Any?) {}\n\
+         fun test() { consume { while (false) {} } }\n",
+        "test",
+    );
+    assert_eq!(
+        only_lambda_body(&body).result_type().map(ResolvedTy::get),
+        Some(Ty::Unit)
+    );
+}
+
+#[test]
+fn effect_only_lambda_result_publishes_its_unit_value_widening() {
+    let (body, _) = checked_function_body(
+        "fun consume(block: () -> Any?) {}\n\
+         fun test(flag: Boolean) { consume { if (flag) return@consume null; while (false) {} } }\n",
+        "test",
+    );
+    let lambda_body = only_lambda_body(&body);
     assert_eq!(
         lambda_body.result_type().map(ResolvedTy::get),
         Some(Ty::nullable(Ty::obj("kotlin/Any")))
     );
-    let FirStatementKind::Expression(result) = lambda_body
-        .statement(lambda_body.roots()[0])
-        .expect("lambda result root")
-        .kind
-    else {
-        panic!("lambda result must be an expression statement")
-    };
+    let result = lambda_body
+        .roots()
+        .iter()
+        .find_map(|&root| match lambda_body.statement(root)?.kind {
+            FirStatementKind::Expression(result) => Some(result),
+            _ => None,
+        })
+        .expect("lambda result root");
     assert!(matches!(
         lambda_body.expr(result).map(|expression| &expression.kind),
         Some(FirExprKind::ImplicitConversion {
@@ -804,7 +823,16 @@ fn selected_sam_recheck_keeps_members_from_every_type_parameter_bound() {
                 .callable(target)
                 .and_then(|callable| index.callable_name(callable.id))?;
             let receiver = call.dispatch_receiver.as_ref()?;
-            let receiver_ty = lambda_body.expr(receiver.value)?.ty.get();
+            let receiver_ty = match receiver.conversion {
+                Some(FirConversion {
+                    kind: FirConversionKind::SmartCast { to },
+                    ..
+                }) => to.get(),
+                None => lambda_body.expr(receiver.value)?.ty.get(),
+                Some(conversion) => panic!(
+                    "intersection member receiver must use a smart-cast conversion, got {conversion:?}"
+                ),
+            };
             matches!(name, "foo" | "bar").then_some((name, receiver_ty))
         })
         .collect::<Vec<_>>();
@@ -1202,7 +1230,7 @@ fn a_provider_member_without_an_identity_fails_as_missing_stable_call_target() {
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[crate::source::SourceInput::kotlin(SOURCE).with_file_stem("UnidentifiedSam")],
-        Box::new(unidentified_action()),
+        crate::frontend::PlatformProvider::jvm(Box::new(unidentified_action())),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );

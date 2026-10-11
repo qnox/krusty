@@ -14,19 +14,28 @@ use super::{kotlinc_compile, language_directives, scratch_dir, stdlib_jar};
 /// A release or RC compiler reuses a dump of that output, including `.kotlin_module` files, so a
 /// later run does not invoke kotlinc again. A snapshot, dev, or beta compiler always compiles.
 pub fn kotlinc_lib_out(sources: &[(&str, &str)]) -> Option<PathBuf> {
-    let fingerprint = lib_fingerprint(sources);
+    kotlinc_lib_out_with(sources, &[])
+}
+
+/// [`kotlinc_lib_out`] with additional public kotlinc options. The options are part of the cache
+/// identity: a dependency compiled at one language/API level must never stand in for another.
+pub(crate) fn kotlinc_lib_out_with(
+    sources: &[(&str, &str)],
+    kotlinc_extra: &[String],
+) -> Option<PathBuf> {
+    let fingerprint = lib_fingerprint(sources, kotlinc_extra);
     let slot = format!("{fingerprint:032x}");
     if let Some(files) = byte_dump::load_shared_files(&slot, fingerprint) {
         return materialize(&files);
     }
-    let out = compile_lib(sources)?;
+    let out = compile_lib(sources, kotlinc_extra)?;
     if let Some(files) = read_output(&out) {
         byte_dump::store_shared_files(&slot, fingerprint, &files);
     }
     Some(out)
 }
 
-fn lib_fingerprint(sources: &[(&str, &str)]) -> u128 {
+fn lib_fingerprint(sources: &[(&str, &str)], kotlinc_extra: &[String]) -> u128 {
     let mut blob = Vec::new();
     for (name, src) in sources {
         blob.extend_from_slice(&(name.len() as u64).to_le_bytes());
@@ -34,10 +43,14 @@ fn lib_fingerprint(sources: &[(&str, &str)]) -> u128 {
         blob.extend_from_slice(&(src.len() as u64).to_le_bytes());
         blob.extend_from_slice(src.as_bytes());
     }
+    for argument in kotlinc_extra {
+        blob.extend_from_slice(&(argument.len() as u64).to_le_bytes());
+        blob.extend_from_slice(argument.as_bytes());
+    }
     fingerprint_parts(&[&blob])
 }
 
-fn compile_lib(sources: &[(&str, &str)]) -> Option<PathBuf> {
+fn compile_lib(sources: &[(&str, &str)], kotlinc_extra: &[String]) -> Option<PathBuf> {
     let stdlib = stdlib_jar();
     let work = scratch_dir()?;
     let out = work.join("libout");
@@ -60,6 +73,7 @@ fn compile_lib(sources: &[(&str, &str)]) -> Option<PathBuf> {
         }
     }
     args.extend(language);
+    args.extend(kotlinc_extra.iter().cloned());
     match kotlinc_compile(&args) {
         Some((0, _)) => Some(out),
         Some((code, err)) => panic!("kotlinc(lib) failed ({code}): {err}"),

@@ -43,6 +43,8 @@ impl BodyLowering<'_> {
             if *suspend && !self.ir.suspend_funs.contains(&function) {
                 self.ir.suspend_funs.push(function);
             }
+            let captured_type_parameters = self.local_captured_type_parameters(body);
+            self.attach_local_type_parameters(function, body, &captured_type_parameters);
             let realization = LocalCallableRealization {
                 function,
                 suspend: *suspend,
@@ -52,6 +54,7 @@ impl BodyLowering<'_> {
                 implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
                 context_parameter_count: body.context_receiver_types().len() as u32,
                 has_extension_receiver: body.receiver_type().is_some(),
+                captured_type_parameters,
             };
             let previous = self
                 .local_callable_scopes
@@ -372,13 +375,29 @@ impl BodyLowering<'_> {
         callable: LocalCallableId,
         body: &FirBody,
         suspend: bool,
+        // Whether the lambda implements a functional interface method that returns `Unit`.
+        unit_method: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let (function, owner) = self.predeclare_local_function(body, callable)?;
-        let unit_as_value = body
-            .result_type()
-            .is_some_and(|result| result.get() == Ty::Unit);
+        if let Some(inferred) = body.inferred_result_type() {
+            self.ir
+                .lambda_inferred_results
+                .insert(function, inferred.get());
+        }
+        let unit_as_value = !unit_method
+            && body
+                .result_type()
+                .is_some_and(|result| result.get() == Ty::Unit);
         if unit_as_value {
             self.ir.functions[function as usize].ret = Ty::obj("kotlin/Unit");
+        }
+        let captured_type_parameters = self.local_captured_type_parameters(body);
+        // A lambda literal's method is signed without generics; an anonymous function's is not.
+        if body
+            .source_lambda()
+            .is_some_and(|lambda| lambda.form() == crate::fir::FirLambdaForm::AnonymousFunction)
+        {
+            self.attach_local_type_parameters(function, body, &captured_type_parameters);
         }
         let realization = LocalCallableRealization {
             function,
@@ -389,6 +408,7 @@ impl BodyLowering<'_> {
             implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
             context_parameter_count: body.context_receiver_types().len() as u32,
             has_extension_receiver: body.receiver_type().is_some(),
+            captured_type_parameters,
         };
         let previous = self
             .local_callable_scopes
@@ -1066,6 +1086,7 @@ impl BodyLowering<'_> {
                             crate::ir::IrLambdaForm::AnonymousFunction
                         }
                     },
+                    explicit_suspend: source_lambda.explicit_suspend(),
                     class_provenance: None,
                 },
             );
@@ -1198,6 +1219,11 @@ impl BodyLowering<'_> {
             let inline =
                 inline_callable_body(nested.ir, &roots, result, body.has_implicit_return());
             let (inline, _) = crate::ir::clone_expression_dag(nested.ir, inline);
+            // The clone is the call site's template. A `Unit` body reuses its source block, so
+            // reshape only the clone: the callable method keeps the block lowering built.
+            if body.has_implicit_return() && result == Ty::Unit {
+                reshape_cloned_unit_inline_block(nested.ir, inline);
+            }
             Some(
                 super::inline_returns::prepare_inline_template(
                     nested.ir,
@@ -1255,38 +1281,102 @@ struct NestedCallableBodies {
 
 /// Build the value-producing form consumed by declaration-defined inline expansion. Unlike a
 /// callable method body, this form has no synthetic return: source returns remain control-flow
-/// nodes, while an implicit result remains the block value at the call site.
+/// nodes, while an implicit result remains the block value at the call site. The form carries its
+/// checked value type like every lowered expression, so a backend placing it never reconstructs the
+/// type from the callable's physical result.
 fn inline_callable_body(
     ir: &mut crate::ir::IrFile,
     roots: &[ExprId],
     result: Ty,
     implicit_return: bool,
 ) -> ExprId {
-    if !implicit_return {
-        return ir.add_expr(IrExpr::Block {
+    if !implicit_return || result == Ty::Unit {
+        // A single body block is the template root. Wrapping it, or copying its statements into
+        // a new block, nests the locals or leaves a second block that declares them beside the
+        // callable and the inlined copy (`repeat(n) { val byte = it; … }`).
+        if implicit_return {
+            if let Some(block) = unit_body_block(ir, roots) {
+                return block;
+            }
+        }
+        let value = implicit_return.then(|| ir.add_expr(IrExpr::UnitInstance));
+        let block = ir.add_expr(IrExpr::Block {
             stmts: roots.to_vec(),
-            value: None,
+            value,
         });
-    }
-    if result == Ty::Unit {
-        let unit = ir.add_expr(IrExpr::UnitInstance);
-        return ir.add_expr(IrExpr::Block {
-            stmts: roots.to_vec(),
-            value: Some(unit),
-        });
+        ir.logical_types.insert(block, Ty::Unit);
+        return block;
     }
     let mut statements = roots.to_vec();
     let value = statements
         .pop()
         .expect("checked implicit non-Unit body has a result expression");
     if statements.is_empty() {
-        value
-    } else {
-        ir.add_expr(IrExpr::Block {
-            stmts: statements,
-            value: Some(value),
-        })
+        return value;
     }
+    let block = ir.add_expr(IrExpr::Block {
+        stmts: statements,
+        value: Some(value),
+    });
+    if let Some(&ty) = ir.logical_types.get(&value) {
+        ir.logical_types.insert(block, ty);
+    }
+    block
+}
+
+/// The block whose statements are a `Unit` inline body's outermost scope.
+///
+/// A lambda body lowers to that block. A coercion whose value is `UnitInstance` and whose only
+/// statement is another block is not a scope: the template uses the inner block. A block nested
+/// inside the body's own statements stays nested.
+fn unit_body_block(ir: &crate::ir::IrFile, roots: &[ExprId]) -> Option<ExprId> {
+    let &[mut block] = roots else {
+        return None;
+    };
+    loop {
+        let IrExpr::Block { stmts, value } = ir.expr(block) else {
+            return None;
+        };
+        let unit_value = value.is_some_and(|value| matches!(ir.expr(value), IrExpr::UnitInstance));
+        if unit_value {
+            if let &[inner] = stmts.as_slice() {
+                if matches!(ir.expr(inner), IrExpr::Block { .. }) {
+                    block = inner;
+                    continue;
+                }
+            }
+        }
+        return Some(block);
+    }
+}
+
+/// Make a cloned `Unit` inline block the template's outermost scope.
+///
+/// The callable method still owns the block this clone came from. A non-`Unit` block value
+/// becomes a statement, and the template's value is `UnitInstance`, so the locals cover the void
+/// return the bytecode inliner turns into the brace `nop`. The clone is that scope; a second
+/// block repeating the same statements would be an extra non-scope beside the callable.
+fn reshape_cloned_unit_inline_block(ir: &mut crate::ir::IrFile, block: ExprId) {
+    let IrExpr::Block { stmts, value } = ir.expr(block).clone() else {
+        return;
+    };
+    let unit_value = value.is_some_and(|value| matches!(ir.expr(value), IrExpr::UnitInstance));
+    let mut stmts = stmts;
+    let unit = if let Some(value) = value {
+        if unit_value {
+            value
+        } else {
+            stmts.push(value);
+            ir.add_expr(IrExpr::UnitInstance)
+        }
+    } else {
+        ir.add_expr(IrExpr::UnitInstance)
+    };
+    ir.exprs[block as usize] = IrExpr::Block {
+        stmts,
+        value: Some(unit),
+    };
+    ir.logical_types.insert(block, Ty::Unit);
 }
 
 /// Where a declaration parameter sits among the logical parameters.
@@ -1590,6 +1680,7 @@ pub(super) fn record_lifting_sites(
                 lifted: site.lifted,
                 scope,
                 container,
+                order: step.position,
             },
         );
     }

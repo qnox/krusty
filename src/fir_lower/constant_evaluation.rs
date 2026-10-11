@@ -33,7 +33,12 @@ pub(super) struct EvaluatedConstant {
 /// One argument of a folded string concatenation.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum TemplateRun {
-    Constant(FirConstant),
+    /// Neighbouring constants folded into one literal. `source` is the first constant in the run:
+    /// kotlinc marks the folded literal on that part's line, not on a later constant absorbed into it.
+    Constant {
+        value: FirConstant,
+        source: FirExprId,
+    },
     Part(ConcatenationPart),
 }
 
@@ -82,6 +87,23 @@ impl ConstantEvaluation {
         (constant.ty == body.expr(expression)?.ty.get().canonical_semantic()).then_some(constant)
     }
 
+    /// Fold a checker-selected conversion carried by an expression edge. Numeric constant
+    /// conversions are intrinsic-const just like an explicit conversion node; a plain numeric
+    /// widening remains a runtime conversion.
+    pub(super) fn fold_conversion(
+        &mut self,
+        body: &FirBody,
+        expression: FirExprId,
+        conversion: FirConversion,
+    ) -> Option<EvaluatedConstant> {
+        let FirConversionKind::NumericConversion { to } = conversion.kind else {
+            return None;
+        };
+        let constant = self.evaluate(body, expression)?;
+        let converted = convert(constant, conversion)?;
+        (converted.ty == to.get().canonical_semantic()).then_some(converted)
+    }
+
     /// A flattened concatenation's parts with each run of constant parts merged into one
     /// `String` constant, as kotlinc folds a string concatenation whose neighbouring arguments
     /// are constants or operations over constants.
@@ -91,7 +113,7 @@ impl ConstantEvaluation {
         parts: &[ConcatenationPart],
     ) -> Vec<TemplateRun> {
         let mut runs = Vec::with_capacity(parts.len());
-        let mut run: Option<KtStringBuf> = None;
+        let mut run: Option<(FirExprId, KtStringBuf)> = None;
         for &part in parts {
             let text = self.evaluate(body, part.value).and_then(|constant| {
                 let mut text = KtStringBuf::new();
@@ -99,17 +121,26 @@ impl ConstantEvaluation {
                 Some(text.finish())
             });
             match text {
-                Some(text) => run.get_or_insert_with(KtStringBuf::new).push_kt(&text),
+                Some(text) => {
+                    let entry = run.get_or_insert_with(|| (part.value, KtStringBuf::new()));
+                    entry.1.push_kt(&text);
+                }
                 None => {
-                    if let Some(text) = run.take() {
-                        runs.push(TemplateRun::Constant(FirConstant::String(text.finish())));
+                    if let Some((source, text)) = run.take() {
+                        runs.push(TemplateRun::Constant {
+                            value: FirConstant::String(text.finish()),
+                            source,
+                        });
                     }
                     runs.push(TemplateRun::Part(part));
                 }
             }
         }
-        if let Some(text) = run {
-            runs.push(TemplateRun::Constant(FirConstant::String(text.finish())));
+        if let Some((source, text)) = run {
+            runs.push(TemplateRun::Constant {
+                value: FirConstant::String(text.finish()),
+                source,
+            });
         }
         runs
     }

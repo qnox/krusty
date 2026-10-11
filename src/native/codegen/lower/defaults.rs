@@ -77,7 +77,7 @@ impl<'a> FileLowering<'a> {
             // implements it. What has nothing to call is a body-less declaration with no receiver
             // to dispatch on; the emit side refuses a member with no slot separately.
             if declaration.body.is_none() && declaration.dispatch_receiver.is_none() {
-                return Err(format!(
+                return Err(declined!(
                     "a call with a defaulted argument to `{}`, which has no body",
                     declaration.name
                 ));
@@ -156,7 +156,7 @@ impl<'a> FileLowering<'a> {
             .get(&key.function)
             .and_then(|info| info.defaults.clone())
         else {
-            return Err(format!(
+            return Err(declined!(
                 "a call with a defaulted argument to `{}`, whose defaults were not recorded",
                 declaration.name
             ));
@@ -194,19 +194,25 @@ impl<'a> FileLowering<'a> {
         // arguments does not decide which implementation runs. Where the method has a slot, the
         // wrapper dispatches through it; a method with none — a top-level function, or a final
         // member with no vtable entry — is called directly.
+        // A value class is final and its member takes the VALUE as `this`, so the member is
+        // called directly.
+        let value_receiver = declaration
+            .dispatch_receiver
+            .is_some_and(|owner| self.values.is_value_class(owner));
         let virtual_slot = declaration
             .dispatch_receiver
+            .filter(|_| !value_receiver)
             .and_then(|owner| self.ir.class_id_by_name(owner))
             .and_then(|class| {
                 let key = model::function_key(self.ir, class, key.function);
                 self.model.slot(class, &key)
             });
-        if declaration.dispatch_receiver.is_some() && virtual_slot.is_none() {
+        if declaration.dispatch_receiver.is_some() && !value_receiver && virtual_slot.is_none() {
             // Calling the declaration directly would run the base's body for a receiver whose
             // class overrides it. A member with no slot is one this model does not dispatch — a
             // member extension today — so the call is declined rather than answered by the wrong
             // implementation.
-            return Err(format!(
+            return Err(declined!(
                 "a defaulted call to a member with no dispatch slot (`{}`)",
                 declaration.name
             ));
@@ -232,14 +238,14 @@ impl<'a> FileLowering<'a> {
             // Declaration order, because a later default may read an earlier one's parameter.
             for ordinal in &omitted {
                 let Some(Some(expression)) = defaults.get(*ordinal as usize) else {
-                    return Err(format!(
+                    return Err(declined!(
                         "an omitted argument with no default (`{}`)",
                         declaration.name
                     ));
                 };
                 let slot = (*ordinal as usize) + receiver;
                 let Some(value) = body.coerce(*expression, slots[slot])? else {
-                    return Err(format!(
+                    return Err(declined!(
                         "a `Unit` default argument (`{}`)",
                         declaration.name
                     ));
@@ -266,7 +272,137 @@ impl<'a> FileLowering<'a> {
                 }
             };
             match returned {
-                Some(value) if carrier(result) != Carrier::Void => {
+                Some(value) if body.carrier(result) != Carrier::Void => {
+                    body.builder.ins().return_(&[value]);
+                }
+                _ => {
+                    body.builder.ins().return_(&[]);
+                }
+            }
+            body.terminate();
+            Ok(())
+        })
+    }
+}
+
+/// The mask words a module default entry takes after the function's frame: bit `k % 32` of word
+/// `k / 32` marks parameter `k` as omitted.
+pub(super) fn module_default_masks(parameters: usize) -> Vec<Ty> {
+    vec![Ty::Int; parameters.div_ceil(32)]
+}
+
+/// A top-level function another file of the module calls with arguments left out.
+///
+/// A per-shape wrapper cannot serve that call. The caller's file does not hold the defaults, and
+/// this file is compiled without knowing which shapes other files leave out. So every top-level
+/// function that declares a default also exports one entry taking its whole frame and a mask of
+/// the omitted ordinals; the caller puts a zero in each omitted slot and sets its bit, and the
+/// entry evaluates the marked defaults in declaration order before calling the function.
+impl<'a> FileLowering<'a> {
+    pub(super) fn declare_module_default_entries(&mut self) -> Result<(), Unsupported> {
+        let mut functions: Vec<(crate::fir::CallableId, u32)> = self
+            .ir
+            .checked_callable_functions
+            .iter()
+            .filter(|(_, &function)| {
+                let declaration = &self.ir.functions[function as usize];
+                declaration.dispatch_receiver.is_none()
+                    && self.functions[function as usize].is_some()
+                    && self
+                        .ir
+                        .fn_params
+                        .get(&function)
+                        .and_then(|info| info.defaults.as_ref())
+                        .is_some_and(|defaults| defaults.iter().any(Option::is_some))
+            })
+            .map(|(callable, &function)| (*callable, function))
+            .collect();
+        // The map's order is not the object's: emit in function order so builds are reproducible.
+        functions.sort_unstable_by_key(|(_, function)| *function);
+        for (callable, function) in functions {
+            let declaration = &self.ir.functions[function as usize];
+            let mut parameters = declaration.params.clone();
+            parameters.extend(module_default_masks(declaration.params.len()));
+            let signature = self.signature_of(&parameters, declaration.ret)?;
+            let symbol = super::super::super::symbols::module_default_symbol(callable);
+            let id = self
+                .module
+                .declare_function(&symbol, Linkage::Hidden, &signature)
+                .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
+            self.module_default_entries.push((function, id));
+        }
+        Ok(())
+    }
+
+    pub(super) fn define_module_default_entries(&mut self) -> Result<(), Unsupported> {
+        for (function, id) in self.module_default_entries.clone() {
+            self.define_module_default_entry(function, id)?;
+        }
+        Ok(())
+    }
+
+    fn define_module_default_entry(
+        &mut self,
+        function: u32,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let declaration = self.ir.functions[function as usize].clone();
+        let defaults = self.ir.fn_params[&function]
+            .defaults
+            .clone()
+            .expect("declared only for a function with defaults");
+        let mut parameters = declaration.params.clone();
+        parameters.extend(module_default_masks(declaration.params.len()));
+        let signature = self.signature_of(&parameters, declaration.ret)?;
+        let target =
+            self.functions[function as usize].expect("declared only for a defined function");
+        let slots = captures::carried_parameters(self.ir, function);
+        let name = format!("{}$defaults", declaration.name);
+        let result = declaration.ret;
+        self.emit_function(id, signature, result, &name, &mut |body, params| {
+            // The callee's own frame, every parameter at its own ordinal and each slot declared
+            // once, so a default reading an earlier parameter finds what was put there.
+            let mut variables = Vec::with_capacity(slots.len());
+            for (slot, ty) in slots.iter().enumerate() {
+                let variable = body.declare_value(slot as u32, *ty)?;
+                body.builder.def_var(variable, params[slot]);
+                variables.push(variable);
+            }
+            let masks = &params[slots.len()..];
+            // Declaration order, because a later default may read an earlier one's parameter.
+            for (ordinal, default) in defaults.iter().enumerate() {
+                let Some(expression) = *default else {
+                    continue;
+                };
+                let omitted = body
+                    .builder
+                    .ins()
+                    .band_imm_u(masks[ordinal / 32], 1i64 << (ordinal % 32));
+                let fill = body.builder.create_block();
+                let next = body.builder.create_block();
+                body.builder.ins().brif(omitted, fill, &[], next, &[]);
+                body.continue_in(fill);
+                let value = body.coerce(expression, slots[ordinal])?;
+                if !body.terminated {
+                    let Some(value) = value else {
+                        return Err(declined!(
+                            "a `Unit` default argument (`{}`)",
+                            declaration.name
+                        ));
+                    };
+                    body.builder.def_var(variables[ordinal], value);
+                    body.builder.ins().jump(next, &[]);
+                }
+                body.continue_in(next);
+            }
+            let arguments: Vec<Value> = variables
+                .iter()
+                .map(|variable| body.builder.use_var(*variable))
+                .collect();
+            let func_ref = body.func_ref(target);
+            let call = body.emit_call(func_ref, &arguments)?;
+            match body.builder.inst_results(call).first().copied() {
+                Some(value) if body.carrier(result) != Carrier::Void => {
                     body.builder.ins().return_(&[value]);
                 }
                 _ => {
@@ -280,6 +416,62 @@ impl<'a> FileLowering<'a> {
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// A call to a top-level function in another file that leaves arguments out, through the
+    /// entry that file exports for it: zeros in the omitted slots, and their bits in the mask.
+    pub(super) fn module_defaulted_call(
+        &mut self,
+        target: crate::fir::CallableId,
+        params: &[Ty],
+        ret: Ty,
+        omitted: &[u32],
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let symbol = super::super::super::symbols::module_default_symbol(target);
+        let mut signature = params.to_vec();
+        signature.extend(module_default_masks(params.len()));
+        let id = self.file.import(&symbol, &signature, ret)?;
+        let supplied: Vec<Ty> = params
+            .iter()
+            .enumerate()
+            .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
+            .map(|(_, ty)| *ty)
+            .collect();
+        if args.len() != supplied.len() {
+            return Err(declined!(
+                "a cross-file call supplying {} of {} arguments (`{symbol}`)",
+                args.len(),
+                supplied.len()
+            ));
+        }
+        let mut supplied = self.arguments(args, &supplied)?.into_iter();
+        if self.terminated {
+            return Ok(None);
+        }
+        let mut masks = vec![0u32; params.len().div_ceil(32)];
+        let mut arguments = Vec::with_capacity(signature.len());
+        for (ordinal, ty) in params.iter().enumerate() {
+            if omitted.contains(&(ordinal as u32)) {
+                masks[ordinal / 32] |= 1 << (ordinal % 32);
+                arguments.push(self.zero_of(*ty));
+            } else {
+                arguments.push(supplied.next().expect("counted above"));
+            }
+        }
+        for mask in masks {
+            arguments.push(
+                self.builder
+                    .ins()
+                    .iconst(types::I32, i64::from(mask as i32)),
+            );
+        }
+        // As for a call that supplies everything: operands first, then the defining file's
+        // initializer, then the call — whose defaults may read that file's top-level state.
+        self.initialize_defining_file(target)?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+
     /// Call through the wrapper for this omission shape.
     pub(super) fn defaulted_call(
         &mut self,
@@ -287,13 +479,14 @@ impl BodyLowering<'_, '_, '_> {
         omitted: &[u32],
         receiver: Option<u32>,
         args: &[u32],
+        site: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let key = super::defaults::Omission {
             function,
             omitted: omitted.to_vec(),
         };
         let Some(&id) = self.file.default_wrappers.get(&key) else {
-            return Err("a call with a defaulted argument".to_string());
+            return Err("a call with a defaulted argument".into());
         };
         let declaration = &self.file.ir.functions[function as usize];
         let wants_receiver = declaration.dispatch_receiver.is_some();
@@ -306,14 +499,26 @@ impl BodyLowering<'_, '_, '_> {
             .collect();
         let mut arguments = Vec::with_capacity(parameters.len() + 1);
         match (wants_receiver, receiver) {
-            (true, Some(receiver)) => {
-                let Some(object) = self.receiver(receiver)? else {
-                    return Ok(None);
-                };
-                self.null_check(object)?;
-                arguments.push(object);
-            }
-            (true, None) => return Err("a defaulted member call with no receiver".to_string()),
+            (true, Some(receiver)) => match declaration.dispatch_receiver {
+                // The wrapper takes a value class's receiver as the value, which is never null.
+                Some(owner) if self.file.values.is_value_class(owner) => {
+                    let Some(value) = self.coerce(receiver, Ty::Obj(owner, &[]))? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    arguments.push(value);
+                }
+                _ => {
+                    let Some(object) = self.receiver(receiver)? else {
+                        return Ok(None);
+                    };
+                    self.null_check(object)?;
+                    arguments.push(object);
+                }
+            },
+            (true, None) => return Err("a defaulted member call with no receiver".into()),
             (false, _) => {}
         }
         arguments.extend(self.arguments(args, &parameters)?);
@@ -322,7 +527,17 @@ impl BodyLowering<'_, '_, '_> {
         }
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
-        Ok(self.builder.inst_results(call).first().copied())
+        let Some(result) = self.builder.inst_results(call).first().copied() else {
+            return Ok(None);
+        };
+        // The wrapper answers in the declaration's representation. An inherited provider declares
+        // the result as its own type parameter, so `Input<V>.foo()` answers a box where the call
+        // reads a `V`.
+        let declared = self.file.ir.functions[function as usize].ret;
+        match self.type_of(site) {
+            Some(read) => self.convert(result, Some(declared), read),
+            None => Ok(Some(result)),
+        }
     }
 }
 
@@ -352,7 +567,11 @@ impl<'a> FileLowering<'a> {
     /// The physical parameter frame of one of a class's constructors — the primary's, or a
     /// SECONDARY's, which leads with the compiler-supplied prefix every constructor of the class
     /// shares before its own declared parameters.
-    fn constructor_frame_of(&self, class: ClassId, secondary: Option<usize>) -> Option<Vec<Ty>> {
+    pub(super) fn constructor_frame_of(
+        &self,
+        class: ClassId,
+        secondary: Option<usize>,
+    ) -> Option<Vec<Ty>> {
         let Some(index) = secondary else {
             return Some(self.constructor_frame(class));
         };
@@ -451,14 +670,38 @@ impl<'a> FileLowering<'a> {
         Some((*internal, ctor_params.clone(), omitted))
     }
 
-    /// The physical ordinals a class's primary `super(…)` delegation omits, if any.
+    /// Which constructor of its superclass `class`'s `super(…)` delegation calls: `None` for the
+    /// primary, the secondary's index otherwise, as the checker recorded it. `Err` when the
+    /// recorded ordinal names no constructor this file declares for the superclass.
+    pub(super) fn super_constructor(&self, class: ClassId) -> Result<Option<usize>, Unsupported> {
+        let declaration = &self.ir.classes[class as usize];
+        let Some(secondary) = declaration.super_ctor.ordinal.checked_sub(1) else {
+            return Ok(None);
+        };
+        let parent = self
+            .ir
+            .class_id_by_name(declaration.superclass)
+            .map(|parent| &self.ir.classes[parent as usize]);
+        match parent.and_then(|parent| parent.secondary_ctors.get(secondary as usize)) {
+            Some(constructor) if constructor.prefix_params.is_empty() => {
+                Ok(Some(secondary as usize))
+            }
+            _ => Err(declined!(
+                "a superclass call of `{}` to a constructor its superclass does not declare here",
+                declaration.fq_name()
+            )),
+        }
+    }
+
+    /// The physical ordinals a class's `super(…)` delegation omits, if any, with the superclass
+    /// constructor it calls.
     ///
     /// The IR records SEMANTIC ordinals — a backend's own prefix is not its to know — so they are
     /// shifted past the superclass's compiler-supplied leading parameters here.
     pub(super) fn omitted_super_arguments(
         &self,
         class: ClassId,
-    ) -> Option<(TypeName, Option<Vec<Ty>>, Vec<u32>)> {
+    ) -> Option<(TypeName, Option<usize>, Vec<u32>)> {
         let declaration = &self.ir.classes[class as usize];
         let omitted = self
             .ir
@@ -471,29 +714,30 @@ impl<'a> FileLowering<'a> {
         let prefix = self.ir.classes[parent as usize].constructor_prefix_count;
         let mut physical: Vec<u32> = omitted.iter().map(|ordinal| ordinal + prefix).collect();
         physical.sort_unstable();
-        // WHICH of the base's constructors the supertype call names, by the parameter list the
-        // class recorded for it. A base whose only constructor is a SECONDARY is reached this way
-        // — `class C : B()` where `B`'s one constructor defaults its argument — and reading the
-        // primary's frame for it would fill a frame that does not exist.
-        Some((
-            declaration.superclass,
-            Some(declaration.super_ctor_params.clone()),
-            physical,
-        ))
+        // A base whose only constructor is a SECONDARY is reached this way — `class C : B()`
+        // where `B`'s one constructor defaults its argument — and reading the primary's frame
+        // for it would fill a frame that does not exist.
+        let secondary = self.super_constructor(class).ok()?;
+        Some((declaration.superclass, secondary, physical))
     }
 
     /// Declare a wrapper for every omission shape the file's constructions use.
     pub(super) fn declare_default_constructors(&mut self) -> Result<(), Unsupported> {
         // A `class B : A()` whose base leaves arguments out needs the same wrapper a `A()` written
         // as an expression would, and the delegation is not an expression, so both are collected.
-        let shapes: Vec<(TypeName, Option<Vec<Ty>>, Vec<u32>)> = (0..self.ir.classes.len()
+        let shapes: Vec<(TypeName, Option<usize>, Vec<u32>)> = (0..self.ir.classes.len()
             as ClassId)
             .filter_map(|class| self.omitted_super_arguments(class))
             .chain(
                 self.ir
                     .exprs
                     .iter()
-                    .filter_map(Self::omitted_constructor_arguments),
+                    .filter_map(Self::omitted_constructor_arguments)
+                    .filter_map(|(internal, selected, omitted)| {
+                        let class = self.ir.class_id_by_name(internal)?;
+                        let secondary = self.selected_constructor(class, selected.as_deref())?;
+                        Some((internal, secondary, omitted))
+                    }),
             )
             // An enum CONSTANT leaving an argument out is the same omission written a third way:
             // `RED` where the enum's constructor declares `(val rgb: Int = 0)` is not an
@@ -508,19 +752,18 @@ impl<'a> FileLowering<'a> {
                     }
                     let mut omitted = entry.default_parameters.clone();
                     omitted.sort_unstable();
-                    Some((class.fq_name_id(), None, omitted))
+                    let secondary = (!entry.constructor.primary())
+                        .then_some(entry.constructor.ordinal as usize - 1);
+                    Some((class.fq_name_id(), secondary, omitted))
                 })
             }))
             .collect();
-        for (internal, selected, omitted) in shapes {
+        for (internal, secondary, omitted) in shapes {
             // A construction naming a class this file does not declare, or a constructor whose
             // parameter list names none of this class's, declares no wrapper; the call site then
             // finds none and declines there, rather than this phase failing the whole file for one
             // construction.
             let Some(class) = self.ir.class_id_by_name(internal) else {
-                continue;
-            };
-            let Some(secondary) = self.selected_constructor(class, selected.as_deref()) else {
                 continue;
             };
             let declared = match secondary {
@@ -541,7 +784,9 @@ impl<'a> FileLowering<'a> {
             let Some(frame) = self.constructor_frame_of(class, secondary) else {
                 continue;
             };
-            let mut parameters = vec![Ty::Obj(self.ir.classes[class as usize].fq_name_id(), &[])];
+            // The constructor fills the object the call site allocated, a value class's box
+            // included, so `this` is a reference whatever the class's own carrier is.
+            let mut parameters = vec![any()];
             for (ordinal, ty) in frame.iter().enumerate() {
                 if key.omitted.contains(&(ordinal as u32)) {
                     continue;
@@ -587,16 +832,16 @@ impl<'a> FileLowering<'a> {
         let declaration = self.ir.classes[key.class as usize].clone();
         let name = declaration.fq_name();
         let Some(defaults) = self.constructor_defaults_of(key.class, key.secondary) else {
-            return Err(format!(
+            return Err(declined!(
                 "a construction with a defaulted argument of `{name}`, whose defaults were not recorded"
             ));
         };
         let Some(frame) = self.constructor_frame_of(key.class, key.secondary) else {
-            return Err(format!(
+            return Err(declined!(
                 "a construction with a defaulted argument of `{name}`, whose constructor is absent"
             ));
         };
-        let mut parameters = vec![Ty::Obj(declaration.fq_name_id(), &[])];
+        let mut parameters = vec![any()];
         let mut supplied = Vec::new();
         for (ordinal, ty) in frame.iter().enumerate() {
             if key.omitted.contains(&(ordinal as u32)) {
@@ -614,7 +859,7 @@ impl<'a> FileLowering<'a> {
                 .copied(),
         }
         .expect("checked when the wrapper was declared");
-        let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
+        let mut slots = vec![any()];
         slots.extend(frame.iter().copied());
         let omitted = key.omitted.clone();
         let label = format!("{name}.<init>$defaults");
@@ -634,13 +879,15 @@ impl<'a> FileLowering<'a> {
             // Declaration order, because a later default may read an earlier parameter.
             for ordinal in &omitted {
                 let Some(Some(expression)) = defaults.get(*ordinal as usize) else {
-                    return Err(format!(
+                    return Err(declined!(
                         "an omitted constructor argument with no default (`{name}`)"
                     ));
                 };
                 let slot = *ordinal as usize + 1;
                 let Some(value) = body.coerce(*expression, slots[slot])? else {
-                    return Err(format!("a `Unit` default constructor argument (`{name}`)"));
+                    return Err(declined!(
+                        "a `Unit` default constructor argument (`{name}`)"
+                    ));
                 };
                 if body.terminated {
                     return Ok(());
@@ -676,7 +923,7 @@ impl BodyLowering<'_, '_, '_> {
         // Which constructor the selection names — the primary's, or a secondary's, whose defaults
         // live on the constructor rather than on the class.
         let Some(secondary) = self.file.selected_constructor(class, selected) else {
-            return Err(format!(
+            return Err(declined!(
                 "a defaulted call to a constructor of `{name}` this file does not declare"
             ));
         };
@@ -686,7 +933,7 @@ impl BodyLowering<'_, '_, '_> {
             omitted: omitted.to_vec(),
         };
         let Some(&id) = self.file.default_constructors.get(&key) else {
-            return Err(format!("a constructor default argument (`{name}`)"));
+            return Err(declined!("a constructor default argument (`{name}`)"));
         };
         let parameters: Vec<Ty> = match secondary {
             // The primary's frame reads each parameter's PHYSICAL type, which a value-class
@@ -715,7 +962,7 @@ impl BodyLowering<'_, '_, '_> {
             }
         };
         if args.len() != parameters.len() {
-            return Err(format!(
+            return Err(declined!(
                 "a construction supplying {} of {} arguments (`{name}`)",
                 args.len(),
                 parameters.len()
@@ -733,6 +980,6 @@ impl BodyLowering<'_, '_, '_> {
         arguments.insert(0, object);
         let func_ref = self.func_ref(id);
         self.emit_call(func_ref, &arguments)?;
-        Ok(Some(object))
+        self.constructed(object, class)
     }
 }

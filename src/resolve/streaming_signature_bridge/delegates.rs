@@ -741,7 +741,7 @@ mod tests {
         let mut diagnostics = crate::diag::DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            platform,
+            crate::frontend::PlatformProvider::jvm(platform),
             &crate::features::LangFeatures::new(),
             |_, _| {},
             &mut diagnostics,

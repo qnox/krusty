@@ -53,6 +53,7 @@ pub enum MetadataDecodeError {
     MalformedWire,
     MissingField(&'static str),
     InvalidVariance(u64),
+    InvalidContract,
 }
 
 impl From<ParameterDecodeError> for MetadataDecodeError {
@@ -244,6 +245,8 @@ const IS_INLINE_BIT: u64 = 1 << 10;
 const IS_OPERATOR_BIT: u64 = 1 << 8;
 /// `IS_INFIX` follows `IS_OPERATOR` in Kotlin metadata's function flags.
 const IS_INFIX_BIT: u64 = 1 << 9;
+/// `IS_SECONDARY` follows constructor visibility in Kotlin metadata's constructor flags.
+const IS_SECONDARY_CONSTRUCTOR_BIT: u64 = 1 << 4;
 
 /// A `JvmMethodSignature`. Both fields are independently optional in the protobuf: an omitted name
 /// means the Kotlin declaration name, while an omitted descriptor is derived from the Kotlin types.
@@ -317,8 +320,8 @@ struct ParsedFunction {
     /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
     /// them.
     return_value_status: crate::types::ReturnValueStatus,
-    /// `Function.flags` companion bit: a `companion { … }` block member, or a written
-    /// `companion fun C.f()` when a receiver is present.
+    /// `Function.flags.isStatic`, represented here as the companion-source shape it denotes for
+    /// JVM declarations.
     is_companion: bool,
     visibility: crate::types::Visibility,
     name_id: u64,
@@ -515,9 +518,9 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         return_value_status,
-        // The companion bit exists only in the modern flag layout.
+        // The static bit exists only in the modern flag layout.
         is_companion: modern_flags
-            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_COMPANION != 0),
+            .is_some_and(|flags| flags & crate::metadata::function_flags::IS_STATIC != 0),
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -1159,6 +1162,8 @@ pub struct MetaConstructor {
     pub params: ParamList,
     pub jvm_name: &'static str,
     pub jvm_desc: Option<&'static str>,
+    /// Kotlin metadata's declaration kind, retained independently of constructor order.
+    pub primary: bool,
     /// `@Deprecated(level = HIDDEN)`: binary-compatibility-only, never a resolution candidate.
     /// Stamped from the realization method's `kotlin.Deprecated` annotation after decode.
     pub deprecated_hidden: bool,
@@ -1198,6 +1203,9 @@ pub struct MetaProp {
     /// Decoded from the current `Property.flags` word only; `old_flags` predates the status bits.
     pub return_value_status: crate::types::ReturnValueStatus,
     pub is_const: bool,
+    /// Whether repeated reads observe one value, from the declaration's flags alone. Only a reader
+    /// in the declaring module or a friend of it may rely on it (kotlinc's smart-cast stability).
+    pub read_stability: crate::libraries::PropertyReadStability,
     /// Semantic property modality from metadata. The classfile accessor can still be abstract when
     /// a legacy `$DefaultImpls` method realizes this concrete declaration.
     pub is_abstract: bool,
@@ -2087,31 +2095,13 @@ fn decode_functions(
                         None,
                         function_type_table,
                     );
-                    let contract = pf.contract_body.as_deref().and_then(|body| {
-                        let tparams = type_parameter_context(
-                            &[],
-                            &[],
-                            &pf.type_params,
-                            records,
-                            d2,
-                            function_type_table,
-                        )
-                        .map(|c| c.names)
-                        .unwrap_or_default();
-                        // Function-level table wins if present; the container's otherwise.
-                        contract::decode_contract(body, records, d2, &tparams, function_type_table)
-                            .map(std::sync::Arc::new)
-                    });
-                    if pf.contract_body.is_some() {
-                        crate::trace_compiler!(
-                            "metadata_contracts",
-                            "contract function={} value_params={} context_params={} context_receivers={}",
-                            kotlin_name,
-                            pf.value_params.len(),
-                            pf.context_params.len(),
-                            pf.context_receiver_bodies.len() + pf.context_receiver_type_ids.len(),
-                        );
-                    }
+                    let contract = contract::decode_function_contract(
+                        &kotlin_name,
+                        &pf,
+                        (class_tparams, class_tparam_bounds),
+                        (records, d2),
+                        function_type_table,
+                    )?;
                     // `JvmMethodSignature.desc` is optional when the physical descriptor is the
                     // default derived from the protobuf types. Omission therefore does not mean
                     // that the callable lacks a JVM realization. Materialize the default here,
@@ -2397,6 +2387,7 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                     params,
                     jvm_name: intern(jvm_name.as_deref().unwrap_or("<init>")),
                     jvm_desc: jvm_desc.map(|descriptor| intern(&descriptor)),
+                    primary: flags & IS_SECONDARY_CONSTRUCTOR_BIT == 0,
                     deprecated_hidden: false,
                 });
             }
@@ -2536,6 +2527,7 @@ pub enum BuiltinTy {
     },
     Param {
         name: String,
+        id: crate::metadata::semantic::KotlinTypeParameterId,
         nullable: bool,
     },
     InProjection(Box<BuiltinTy>),
@@ -2578,7 +2570,7 @@ impl BuiltinTy {
                 nullable,
                 ..
             } => (internal.clone(), args.as_slice(), *nullable),
-            BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+            BuiltinTy::Param { name, nullable, .. } => (name.clone(), &[][..], *nullable),
             BuiltinTy::InProjection(inner) => return format!("in {}", inner.render()),
             BuiltinTy::OutProjection(inner) => return format!("out {}", inner.render()),
         };
@@ -2625,32 +2617,13 @@ pub struct BuiltinMember {
     pub annotations: Vec<crate::types::TypeName>,
 }
 
-/// A top-level `.kotlin_builtins` function. It has no JVM facade method; resolution consumes its
-/// complete semantic signature and the backend supplies its physical realization.
-pub struct BuiltinFunction {
-    pub name: String,
-    pub receiver: Option<BuiltinTy>,
-    pub params: Vec<BuiltinTy>,
-    pub ret: BuiltinTy,
-    pub formals: Vec<BuiltinTypeParam>,
-    pub param_names: Vec<String>,
-    pub param_defaults: Vec<bool>,
-    pub vararg: Option<usize>,
-    pub visibility: crate::types::Visibility,
-    pub is_inline: bool,
-    pub has_reified_type_params: bool,
-    pub is_suspend: bool,
-    pub is_operator: bool,
-    pub is_infix: bool,
-    /// Leading unnamed context receivers followed by named context parameters.
-    pub context_count: usize,
-    pub annotations: Vec<crate::types::TypeName>,
-}
-
 #[derive(Default)]
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
-    pub functions: Vec<BuiltinFunction>,
+    /// Top-level functions in their common semantic shape. A builtin function has no JVM facade
+    /// method; resolution consumes this complete declaration and the backend supplies its physical
+    /// realization.
+    pub functions: Vec<crate::metadata::semantic::KotlinFunction>,
     pub properties: Vec<BuiltinProperty>,
 }
 
@@ -2679,6 +2652,7 @@ pub struct BuiltinConstructor {
 /// (`E` unbounded, `T : Comparable<T>`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltinTypeParam {
+    pub id: crate::metadata::semantic::KotlinTypeParameterId,
     pub name: String,
     pub bounds: Vec<BuiltinTy>,
     pub variance: crate::types::TypeVariance,
@@ -2997,7 +2971,7 @@ mod builtin_class_access_tests {
 mod module_reader_tests {
     use super::{
         builtin_bridge, decode_metadata_type, decode_properties, parse_function, parse_type_facts,
-        primary_erasure_bounds, read_kotlin_module, value_parameter_type, BuiltinTy, MetaCtx,
+        primary_erasure_bounds, read_kotlin_module, value_parameter_type, MetaCtx,
         ParsedValueParam,
     };
     use crate::metadata::module::build_kotlin_module;
@@ -3074,7 +3048,10 @@ mod module_reader_tests {
         assert!(
             req.effects.contains(&Effect::ConditionalReturns {
                 returns: ReturnsValue::Any,
-                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+                conclusion: Condition::BoolParam {
+                    param: ParamRef::Param(0),
+                    negated: false,
+                },
             }),
             "require contract effects: {:?}",
             req.effects
@@ -3651,7 +3628,13 @@ mod module_reader_tests {
         assert!(package.classes.is_empty());
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].name, "main");
-        assert_eq!(package.functions[0].params, Vec::<BuiltinTy>::new());
-        assert_eq!(package.functions[0].ret, BuiltinTy::class("kotlin/Unit"));
+        assert_eq!(
+            package.functions[0].params,
+            Vec::<crate::metadata::semantic::KotlinType>::new()
+        );
+        assert_eq!(
+            package.functions[0].ret,
+            crate::metadata::semantic::KotlinType::class("kotlin/Unit")
+        );
     }
 }

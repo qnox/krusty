@@ -1,7 +1,7 @@
 use super::test_support::{
     checked_function_body, checked_function_body_with_features,
     checked_function_body_with_platform, checked_function_body_with_platform_and_features,
-    jvm_semantics, jvm_stdlib_semantics, root_expression,
+    checked_source_set_function_body, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
 use crate::fir::{FirExpressionDebugLines, FirInlineBodyPlan};
@@ -134,6 +134,180 @@ fn same_named_source_declaration_wins_over_provider_default() {
     let target = call.target.module().expect("source declaration identity");
     assert_eq!(index.callable_name(target), Some("sameName"));
     assert!(call.arguments.is_empty());
+}
+
+#[test]
+fn source_overload_call_keeps_the_selected_stable_callable() {
+    let (body, index) = checked_function_body(
+        "fun pick(value: Int): String = \"int\"\n\
+         fun pick(value: String): String = value\n\
+         fun box(): String = pick(\"OK\")\n",
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("source overload call")
+        .kind
+    else {
+        panic!("selected source overload must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String]
+    );
+    assert_eq!(signature.result.get(), Ty::String);
+}
+
+#[test]
+fn cross_file_call_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "fun helper(value: String): String = value",
+            "fun box(): String = helper(\"OK\")",
+        ],
+        1,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("cross-file source call")
+        .kind
+    else {
+        panic!("cross-file source call must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(index.callable_name(callable.id), Some("helper"));
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(0),
+    );
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String],
+    );
+}
+
+#[test]
+fn cross_file_overload_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "fun helper(value: Int): String = \"int\"",
+            "fun helper(value: String): String = value",
+            "fun box(): String = helper(\"OK\")",
+        ],
+        2,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("cross-file overload call")
+        .kind
+    else {
+        panic!("selected cross-file overload must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(1),
+    );
+    let signature = index
+        .signature(callable.declaration)
+        .expect("selected source signature");
+    assert_eq!(
+        signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        [Ty::String],
+    );
+}
+
+#[test]
+fn package_scope_call_keeps_the_selected_stable_source_declaration() {
+    let (body, index) = checked_source_set_function_body(
+        &[
+            "package a\nfun helper(): String = \"a\"",
+            "package b\nfun helper(): String = \"OK\"",
+            "package b\nfun box(): String = helper()",
+        ],
+        2,
+        "box",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("package-scoped source call")
+        .kind
+    else {
+        panic!("package-scoped source call must become checked call FIR")
+    };
+    let callable = index
+        .callable(call.target.module().expect("stable source target"))
+        .expect("selected source callable");
+    assert_eq!(index.callable_name(callable.id), Some("helper"));
+    assert_eq!(
+        index
+            .declaration_anchor(callable.declaration)
+            .expect("stable source declaration")
+            .source,
+        SourceFileId::from_raw(1),
+    );
+}
+
+#[test]
+fn source_context_call_keeps_context_and_default_argument_ordinals() {
+    let (body, index) = checked_function_body(
+        "class A(val value: String)\n\
+         context(a: A) fun leaf(text: String = \"OK\"): String = text\n\
+         context(a: A) fun mid(): String = leaf()\n",
+        "mid",
+    );
+    let FirExprKind::Call(call) = &body
+        .expr(root_expression(&body))
+        .expect("context call")
+        .kind
+    else {
+        panic!("context call must become checked call FIR")
+    };
+    let target = call.target.module().expect("stable source target");
+    let callable = index.callable(target).expect("selected source callable");
+    assert_eq!(callable.shape.context_parameter_count, 1);
+    assert_eq!(call.arguments.len(), 2);
+    assert!(matches!(
+        call.arguments[0],
+        FirCallArgument::Expression { parameter: 0, .. }
+    ));
+    assert!(matches!(
+        call.arguments[1],
+        FirCallArgument::Default { parameter: 1, .. }
+    ));
 }
 
 #[test]
@@ -3748,7 +3922,7 @@ fn omitted_source_call_vararg_is_an_explicit_empty_pack() {
 }
 
 #[test]
-fn named_whole_array_vararg_is_not_repacked() {
+fn named_whole_array_vararg_is_one_spread_array() {
     let (body, _) = checked_function_body(
         "fun join(vararg values: String): Int = 0\n\
          fun read(values: Array<String>): Int = join(values = values)\n",
@@ -3763,7 +3937,11 @@ fn named_whole_array_vararg_is_not_repacked() {
     };
     assert!(matches!(
         call.arguments.as_ref(),
-        [FirCallArgument::Expression { parameter: 0, .. }]
+        [FirCallArgument::Vararg {
+            parameter: 0,
+            elements,
+            ..
+        }] if matches!(elements.as_ref(), [element] if element.spread)
     ));
 }
 
@@ -3934,23 +4112,6 @@ fn ordinary_map_literal_keeps_the_selected_external_call_without_splice_plan() {
 }
 
 #[test]
-fn inline_function_value_keeps_the_selected_external_call_without_splice_plan() {
-    let (body, _) = checked_function_body_with_platform(
-        "fun read(block: (String) -> Int): Int = \"value\".let(block)\n",
-        "read",
-        jvm_stdlib_semantics(),
-    );
-    let root = body.expr(root_expression(&body)).expect("root call");
-    let FirExprKind::Call(call) = &root.kind else {
-        panic!("let must remain a checked call")
-    };
-    let FirCallTarget::External { inline_plan, .. } = &call.target else {
-        panic!("stdlib let must retain its selected external identity")
-    };
-    assert!(inline_plan.is_none());
-}
-
-#[test]
 fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
     let (body, _) = checked_function_body_with_platform(
         "operator fun <K, V> Map<K, V>.iterator(): Iterator<Map.Entry<K, V>> =\n\
@@ -4024,7 +4185,7 @@ fn suspending_map_publishes_a_complete_provider_owned_collection_plan() {
     else {
         panic!("Map.map must use its structurally decoded member capacity")
     };
-    let crate::fir::FirInlineCollectionAppend::Member(append) = append else {
+    let crate::fir::FirInlineCollectionAppend::Member(append) = append.as_ref() else {
         panic!("Map.map must use its structurally decoded member append")
     };
     let identities = [
@@ -4078,11 +4239,14 @@ fn suspending_flat_map_specializes_every_extension_append_parameter() {
     });
     let Some(FirInlineBodyPlan::CollectionTransform {
         capacity,
-        append: crate::fir::FirInlineCollectionAppend::Extension(append),
+        append,
         accumulator,
         ..
     }) = plan
     else {
+        panic!("selected flatMap call must publish its exact extension append contract")
+    };
+    let crate::fir::FirInlineCollectionAppend::Extension(append) = append.as_ref() else {
         panic!("selected flatMap call must publish its exact extension append contract")
     };
     assert!(capacity.is_none());
@@ -4427,6 +4591,40 @@ fn flow_intersection_type_argument_preserves_all_bounds_in_checked_fir() {
         panic!("the argument must retain its primary intersection projection")
     };
     assert_eq!(to.get(), Ty::obj("A"));
+}
+
+#[test]
+fn reified_intersection_argument_records_its_common_supertype() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter\n\
+         interface X\n\
+         interface Y\n\
+         object A : X, Y\n\
+         object B : X, Y\n\
+         fun <T> sel(left: T, right: T): T = left\n\
+         inline fun <reified T> T.keep(): T = this\n\
+         fun run() { sel(A, B).keep() }\n",
+        "run",
+    );
+    let call = (0..body.expression_count())
+        .find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let target = call.target.module()?;
+            (index.callable_name(target) == Some("keep")).then_some(call)
+        })
+        .expect("reified extension call");
+    let [substitution] = call.substitutions.as_ref() else {
+        panic!("keep must publish its reified type argument")
+    };
+    assert!(substitution.reified);
+    assert!(
+        matches!(substitution.value.get(), Ty::Intersection(parts) if parts.len() == 2),
+        "the semantic argument stays the intersection, got {:?}",
+        substitution.value.get()
+    );
+    assert_eq!(substitution.reified_runtime.get(), Ty::obj("kotlin/Any"));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! JVM realization of checked instance-field reads.
 
 use super::{
-    instance_field_jvm_name, jvm_declared_ty, slot_words, static_accessors, static_storage,
+    instance_field_jvm_name, jvm_value_ty, slot_words, static_accessors, static_storage,
     type_descriptor, Emitter,
 };
 use crate::ir::{ClassId, IrExpr};
@@ -18,19 +18,28 @@ impl Emitter<'_> {
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
         let source_name = field.name.clone();
-        let name = instance_field_jvm_name(self.ir, class_decl, field);
-        let field_ty = jvm_declared_ty(&field.ty);
+        let name = instance_field_jvm_name(self.ir, self.run, class_decl, index as usize);
+        let field_ty = jvm_value_ty(&field.ty);
         let owner = class_decl.fq_name();
         let is_lateinit = field.is_lateinit();
-        if let Some(method) = static_accessors::cross_class_backing_field_method(
-            self.cw,
-            self.ir,
-            &self.facade,
-            self.static_owner,
-            class,
-            index,
-            false,
-        ) {
+        let reader = (!self.export_private_calls)
+            .then_some(self.static_owner)
+            .flatten();
+        let method = {
+            let planned = self.run.static_accessor_plan.borrow();
+            static_accessors::cross_class_backing_field_method(
+                self.cw,
+                self.ir,
+                self.run,
+                &self.facade,
+                &planned,
+                reader,
+                class,
+                index,
+                false,
+            )
+        };
+        if let Some(method) = method {
             self.emit_value(receiver, code);
             code.invokestatic(method, 1, slot_words(field_ty) as i32);
         } else if static_storage(self.ir, class_decl) {

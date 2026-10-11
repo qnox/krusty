@@ -1,0 +1,93 @@
+The highest version requested anywhere in a graph wins; a POM's scopes decide which classpaths
+its dependencies are on, and optional dependencies are on neither.
+--- module.yaml
+product: jvm/app
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:lib:1.0
+  - org.example:dep:2.0
+  - org.example:old:1.0
+--- m2/org/example/lib/1.0/lib-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>lib</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>dep</artifactId><version>1.0</version></dependency>
+      <dependency><groupId>org.example</groupId><artifactId>rt</artifactId><version>1.0</version><scope>runtime</scope></dependency>
+      <dependency><groupId>org.example</groupId><artifactId>tested</artifactId><version>1.0</version><scope>test</scope></dependency>
+      <dependency><groupId>org.example</groupId><artifactId>provided</artifactId><version>1.0</version><scope>provided</scope></dependency>
+      <dependency><groupId>org.example</groupId><artifactId>opt</artifactId><version>1.0</version><optional>true</optional></dependency>
+      <dependency><groupId>org.example</groupId><artifactId>old</artifactId><version>1.5</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/dep/1.0/dep-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>dep</artifactId>
+  <version>1.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>leaf</artifactId><version>1.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/dep/2.0/dep-2.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>dep</artifactId>
+  <version>2.0</version>
+  <dependencies>
+      <dependency><groupId>org.example</groupId><artifactId>leaf</artifactId><version>2.0</version></dependency>
+  </dependencies>
+</project>
+--- m2/org/example/leaf/1.0/leaf-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>leaf</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/leaf/2.0/leaf-2.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>leaf</artifactId>
+  <version>2.0</version>
+</project>
+--- m2/org/example/rt/1.0/rt-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>rt</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/old/1.0/old-1.0.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>old</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/old/1.5/old-1.5.pom
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>old</artifactId>
+  <version>1.5</version>
+</project>
+--- m2/org/example/dep/2.0/dep-2.0.jar
+--- m2/org/example/leaf/2.0/leaf-2.0.jar
+--- m2/org/example/lib/1.0/lib-1.0.jar
+--- m2/org/example/old/1.5/old-1.5.jar
+--- m2/org/example/rt/1.0/rt-1.0.jar

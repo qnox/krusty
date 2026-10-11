@@ -24,8 +24,9 @@ mod tests;
 
 use super::analysis::{analyze, opcode, AnalyzerError, Frame};
 use super::opcodes::*;
-use crate::jvm::method_node::{Insn, MethodNode, Node};
+use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 use interpreter::{int_constant, ConstValue, ConstantPropagationInterpreter};
+use std::collections::BTreeSet;
 
 const IFLT: u8 = 0x9b;
 const IFGE: u8 = 0x9c;
@@ -42,6 +43,15 @@ enum Rewrite {
     Decided { pops: usize, jumps: bool },
     /// Pop the known `0`, then compare the first operand with zero by this `if<cond>`.
     WithZero(u8),
+}
+
+/// What the pass changed, including the otherwise-unobservable labels it kept when deleting
+/// unreachable instructions. Later adjacency-sensitive passes consume this provenance instead of
+/// reconstructing whether constant-condition elimination ran from the rewritten body.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Elimination {
+    pub(crate) changed: bool,
+    pub(crate) preserved_unreachable_labels: BTreeSet<LabelId>,
 }
 
 /// Whether `value` satisfies the `if<cond>` `op` (`IFEQ`…`IFLE`).
@@ -121,13 +131,18 @@ fn rewrite(op: u8, frame: &Frame<ConstValue>) -> Option<Rewrite> {
 }
 
 /// One round (`ConstantConditionsOptimization.run`); `true` when it changed the method.
-fn round(method: &mut MethodNode, owner: &str) -> Result<bool, AnalyzerError> {
+fn round(
+    method: &mut MethodNode,
+    owner: &str,
+    preserved_unreachable_labels: &mut BTreeSet<LabelId>,
+) -> Result<bool, AnalyzerError> {
     let frames = analyze(method, owner, &mut ConstantPropagationInterpreter)?;
     let mut changed = false;
     let mut nodes = Vec::with_capacity(method.nodes.len());
     for (node, frame) in std::mem::take(&mut method.nodes).into_iter().zip(&frames) {
         let Some(frame) = frame else {
-            if matches!(node, Node::Label(_)) {
+            if let Node::Label(label) = node {
+                preserved_unreachable_labels.insert(label);
                 nodes.push(node);
             } else {
                 changed = true;
@@ -161,14 +176,17 @@ fn round(method: &mut MethodNode, owner: &str) -> Result<bool, AnalyzerError> {
 }
 
 /// Fold every `int` jump of `method`, a member of `owner`, whose outcome its constant operands
-/// decide; `true` when anything changed.
-pub(crate) fn eliminate(method: &mut MethodNode, owner: &str) -> Result<bool, AnalyzerError> {
+/// decide, and the exact labels retained in deleted unreachable regions.
+pub(crate) fn eliminate(
+    method: &mut MethodNode,
+    owner: &str,
+) -> Result<Elimination, AnalyzerError> {
     if !has_optimizable_conditions(method) {
-        return Ok(false);
+        return Ok(Elimination::default());
     }
-    let mut changed = false;
-    while round(method, owner)? {
-        changed = true;
+    let mut result = Elimination::default();
+    while round(method, owner, &mut result.preserved_unreachable_labels)? {
+        result.changed = true;
     }
-    Ok(changed)
+    Ok(result)
 }

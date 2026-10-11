@@ -163,6 +163,10 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
                 ),
                 _ => unreachable!("construction shape was checked above"),
             };
+        let constructor = ir
+            .construction_targets
+            .remove(&construction)
+            .ok_or(FirFileLoweringFailure::MissingCallable(entry.declaration))?;
         let expected_classifier = ir
             .classes
             .get(entry.class as usize)
@@ -187,10 +191,38 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
                 .collect()
         });
         if let Some(subclass) = subclass {
+            // A constant with a body is an instance of its own subclass, and that subclass's
+            // constructor is what calls the enum's: the arguments are its superclass call, evaluated
+            // inside it, as for any `class B : A(args)`. The constant itself is constructed bare.
             let subclass = ir
                 .class_id_by_name(subclass)
                 .ok_or(FirFileLoweringFailure::MissingClassifier(entry.declaration))?;
-            ir.classes[subclass as usize].enum_entry_of = Some(constructor_parameters.clone());
+            let mut supplied = arguments.into_iter();
+            let mut super_args = Vec::with_capacity(constructor_parameters.len());
+            for (parameter, &ty) in constructor_parameters.iter().enumerate() {
+                let argument = if default_parameters.contains(&(parameter as u32)) {
+                    ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty)))
+                } else {
+                    supplied
+                        .next()
+                        .ok_or(FirFileLoweringFailure::MissingCallable(entry.declaration))?
+                };
+                super_args.push(argument);
+            }
+            if supplied.next().is_some() {
+                return Err(FirFileLoweringFailure::MissingCallable(entry.declaration));
+            }
+            let class = &mut ir.classes[subclass as usize];
+            class.super_arg_prelude = argument_prelude;
+            class.super_args = super_args;
+            class.super_ctor_params = constructor_parameters;
+            class.super_ctor = constructor;
+            let subclass_name = class.fq_name_id();
+            if !default_parameters.is_empty() {
+                ir.super_constructor_default_arguments
+                    .insert(subclass_name, default_parameters);
+            }
+            continue;
         }
         let target = ir
             .classes
@@ -202,6 +234,7 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
         target.argument_prelude = argument_prelude;
         target.args = arguments;
         target.constructor_parameter_types = constructor_parameters;
+        target.constructor = constructor;
         target.default_parameters = default_parameters;
     }
     Ok(())
@@ -213,10 +246,9 @@ fn enum_entry_ordinal(
     target: DeclarationId,
 ) -> Option<u32> {
     let mut ordinal = 0u32;
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(u32::try_from(raw).ok()?);
+    for &declaration in index.owned_declarations(owner) {
         let anchor = index.declaration_anchor(declaration)?;
-        if anchor.owner == Some(owner) && anchor.kind == DeclarationKind::EnumEntry {
+        if anchor.kind == DeclarationKind::EnumEntry {
             if declaration == target {
                 return Some(ordinal);
             }

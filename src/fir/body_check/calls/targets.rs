@@ -10,6 +10,9 @@ pub(in crate::fir::body_check) struct MemberExtensionFirTarget {
     /// receiver into the provider parameter list.
     pub(in crate::fir::body_check) parameters: Vec<Ty>,
     pub(in crate::fir::body_check) extension_parameter: Option<u32>,
+    /// The extension receiver parameter's type as the checker applied it, which an explicit
+    /// receiver argument is converted to.
+    pub(in crate::fir::body_check) extension_receiver: Ty,
 }
 
 pub(super) struct ExternalCallTarget<'a> {
@@ -21,10 +24,13 @@ pub(super) struct ExternalCallTarget<'a> {
     pub(super) declared_result: Option<Ty>,
     pub(super) overridden_results: &'a [Ty],
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::libraries::InlineBodyPlan>,
     pub(super) inline_receiver_parameter: Option<usize>,
+    /// Unsubstituted type-parameter receiver the inline plan stores as its erased bound.
+    pub(super) inline_declared_receiver: Option<Ty>,
     pub(super) reified_type_parameter_ordinals: &'a [u32],
 }
 

@@ -1,20 +1,19 @@
 //! Kotlin to a native executable through krusty's OWN code generator and linker.
 //!
-//! No C is emitted anywhere on this path. The frontend produces checked common IR; the Cranelift
-//! backend lowers it to a relocatable object; krusty's linker joins that with the runtime that was
-//! prebuilt when krusty itself was built, and writes a static ELF executable — which is then RUN
-//! and its output compared. Nothing here inspects generated code, for the same reason the rest of
-//! the native track never did: code that reads right and prints the wrong thing is exactly what a
-//! shape assertion cannot catch.
+//! The frontend produces checked common IR; the Cranelift backend lowers it to a relocatable
+//! object; krusty's linker joins that with the runtime that was prebuilt when krusty itself was
+//! built, and writes a static ELF executable — which is then RUN and its output compared. The
+//! public C ABI is a header beside those objects, not a C translation of the program. Nothing here
+//! inspects generated code, for the same reason the rest of the native track never did: code that
+//! reads right and prints the wrong thing is exactly what a shape assertion cannot catch.
 //!
 //! Skips (never fails) when this build of krusty carries no prebuilt runtime for the host, which
 //! happens when no C cross-compiler was available at krusty's build time.
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::Artifact;
+use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::jvm::classpath::Classpath;
 use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
@@ -49,14 +48,29 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && krusty::toolchain::stdlib_jar().is_some())
-        .then_some(target)
+    (krusty::native::can_link(target)
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some())
+    .then_some(target)
 }
 
 /// Compile `sources` with the Cranelift backend for `target`.
+fn objects_of(artifacts: &[Artifact]) -> Vec<&[u8]> {
+    artifacts
+        .iter()
+        .filter(|(name, _)| name.ends_with(".o"))
+        .map(|(_, bytes)| bytes.as_slice())
+        .collect()
+}
+
 fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Vec<String>) {
-    let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    let (artifacts, diags) = compile_with_sink(sources, target);
+    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
+}
+
+fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, DiagSink) {
+    // The JVM front end resolves against the classpath kotlinc would: the stdlib and the JDK.
+    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
@@ -74,12 +88,15 @@ fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Ve
         features.apply_source_directives(source);
     }
     let mut diags = DiagSink::new();
+    let backend = CraneliftBackend::new(target).verified();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs, platform, &features, &mut diags,
+        &inputs,
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        &features,
+        &mut diags,
     );
-    let backend = CraneliftBackend::new(target);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
-    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
+    (artifacts, diags)
 }
 
 /// Compile, link with krusty's linker, run, and return stdout.
@@ -90,10 +107,7 @@ fn run(source: &str) -> String {
         diagnostics.is_empty(),
         "the code generator rejected the program: {diagnostics:?}"
     );
-    let objects = artifacts
-        .iter()
-        .map(|(_, bytes)| bytes.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     assert!(!objects.is_empty(), "no object was emitted");
     let image = krusty::native::link_program(&objects, target)
         .unwrap_or_else(|error| panic!("krusty's linker must link the program: {error}"));
@@ -139,15 +153,19 @@ fn the_executable_is_a_static_elf_with_no_interpreter() {
     };
     let (artifacts, diagnostics) = compile(&[("Main", "fun main() { println(\"hi\") }")], target);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert!(
-        artifacts.iter().all(|(name, _)| name.ends_with(".o")),
-        "the code generator must emit relocatable objects, never source text: {:?}",
-        artifacts.iter().map(|(n, _)| n).collect::<Vec<_>>()
-    );
-    let objects = artifacts
+    let names = artifacts
         .iter()
-        .map(|(_, b)| b.as_slice())
+        .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>();
+    assert!(
+        names.iter().filter(|name| name.ends_with(".o")).count() >= 1
+            && names.iter().any(|name| name.ends_with(".h"))
+            && names
+                .iter()
+                .all(|name| name.ends_with(".o") || name.ends_with(".h")),
+        "the code generator emits relocatable objects and a C ABI header, never C source: {names:?}"
+    );
+    let objects = objects_of(&artifacts);
     let image = krusty::native::link_program(&objects, target).expect("link");
     assert_eq!(&image[..4], b"\x7fELF");
     assert_eq!(
@@ -181,8 +199,8 @@ fn elf_machine(image: &[u8]) -> u16 {
 
 #[test]
 fn one_host_links_a_static_executable_for_every_supported_architecture() {
-    if krusty::toolchain::stdlib_jar().is_none() {
-        eprintln!("skipping: needs the Kotlin stdlib");
+    if krusty::toolchain::stdlib_jar().is_none() || krusty::toolchain::jdk_modules().is_none() {
+        eprintln!("skipping: needs the Kotlin stdlib and a JDK");
         return;
     }
     // The Go property, now with nothing but krusty in the loop: the code generator emits each
@@ -216,10 +234,7 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
             target,
         );
         assert!(diagnostics.is_empty(), "{target}: {diagnostics:?}");
-        let objects = artifacts
-            .iter()
-            .map(|(_, b)| b.as_slice())
-            .collect::<Vec<_>>();
+        let objects = objects_of(&artifacts);
         let image = krusty::native::link_program(&objects, target)
             .unwrap_or_else(|error| panic!("linking for {target} must succeed: {error}"));
         assert_eq!(&image[..4], b"\x7fELF", "{target}");
@@ -472,6 +487,64 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
     );
 }
 
+/// Compile `sources` for the host and render every diagnostic as `file:line:column: …`, in
+/// emission order, against the files they belong to.
+fn rendered_diagnostics(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, String) {
+    let (artifacts, diags) = compile_with_sink(sources, target);
+    let files: Vec<(String, &str)> = sources
+        .iter()
+        .map(|(stem, text)| (format!("{stem}.kt"), *text))
+        .collect();
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), *text))
+        .collect();
+    (artifacts, diags.render_all(&files))
+}
+
+#[test]
+fn declines_with_the_same_message_are_reported_at_each_ones_own_position() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // The same still-declined construct twice, at different lines and columns, in the second file
+    // of a module and below code that lowers. A file stops at its first decline, so it reports the
+    // first occurrence once; with that one gone, the second is reported at its own position. The
+    // message is identical both times: only the node decides where it lands.
+    let helpers = "package demo\nfun one(): Int = 1\n";
+    let both = "package demo\n\nfun main() {\n    println(one())\n  val a = runCatching { 1 }.getOrNull()\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
+    let second = "package demo\n\nfun main() {\n    println(one())\n  val a = 1\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
+    let (artifacts, rendered) =
+        rendered_diagnostics(&[("Helpers", helpers), ("Main", both)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
+    assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
+    let (_, rendered) = rendered_diagnostics(&[("Helpers", helpers), ("Main", second)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
+}
+
+#[test]
+fn a_decline_nested_in_lowered_expressions_is_reported_at_the_innermost_one() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // The decline surfaces through the argument list, `listOf`, the `println` call and the
+    // statement around them; the node it names is the innermost one, the `getOrNull` call.
+    let main = "fun main() {\n    println(listOf(1, runCatching { 2 }.getOrNull()))\n}\n";
+    let (_, rendered) = rendered_diagnostics(&[("Main", main)], target);
+    assert_eq!(
+        rendered,
+        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+    );
+}
+
 #[test]
 fn a_library_module_defines_no_entry_point() {
     let Some(target) = host() else {
@@ -481,19 +554,14 @@ fn a_library_module_defines_no_entry_point() {
     let (artifacts, diagnostics) =
         compile(&[("Greeter", "fun greet(): String = \"hi\"\n")], target);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert_eq!(
-        artifacts
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Greeter.o"]
+    assert!(
+        artifacts.iter().any(|(name, _)| name == "Greeter.o"),
+        "{:?}",
+        artifacts.iter().map(|(name, _)| name).collect::<Vec<_>>()
     );
     // A module with no `main` is a library; inventing an entry point for it would produce a program
     // that silently does nothing. Linked alone, the runtime's `_start` has nothing to call.
-    let objects = artifacts
-        .iter()
-        .map(|(_, b)| b.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     match krusty::native::link_program(&objects, target) {
         Err(krusty::native::ProgramLinkError::UndefinedSymbol(symbol)) => {
             assert_eq!(symbol, "kt_program_entry");
@@ -833,10 +901,7 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
         target,
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    let objects = artifacts
-        .iter()
-        .map(|(_, bytes)| bytes.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     let image = krusty::native::link_program(&objects, target).expect("link");
     let scratch = Scratch::new("notnull");
     let executable = scratch.path().join("program");
@@ -881,10 +946,7 @@ fn a_slice_between_the_halves_of_one_character_keeps_the_selected_utf16_units() 
         target,
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    let objects = artifacts
-        .iter()
-        .map(|(_, bytes)| bytes.as_slice())
-        .collect::<Vec<_>>();
+    let objects = objects_of(&artifacts);
     let image = krusty::native::link_program(&objects, target).expect("link");
     let scratch = Scratch::new("surrogate");
     let executable = scratch.path().join("program");
@@ -934,10 +996,7 @@ fn a_throw_a_program_wrote_stops_it_and_says_what_happened() {
     ] {
         let (artifacts, diagnostics) = compile(&[("Main", source)], target);
         assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
-        let objects = artifacts
-            .iter()
-            .map(|(_, bytes)| bytes.as_slice())
-            .collect::<Vec<_>>();
+        let objects = objects_of(&artifacts);
         let image = krusty::native::link_program(&objects, target).expect("link");
         let scratch = Scratch::new("throw");
         let executable = scratch.path().join("program");
@@ -1097,6 +1156,193 @@ fn the_unit_value_is_the_runtimes_own() {
 }
 
 #[test]
+fn arrays_read_write_and_know_their_size() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A primitive array and a reference array, built three ways: element by element, sized and
+    // zero-filled, and filled by a loop. Every element kind has a stride of its own, and reading
+    // back what was written is what proves the generator and the runtime agree on it.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val ints = intArrayOf(3, 1, 4)\n\
+             \x20   println(ints.size)\n\
+             \x20   println(ints[0])\n\
+             \x20   ints[0] = ints[2]\n\
+             \x20   println(ints[0])\n\
+             \x20   val zeros = IntArray(4)\n\
+             \x20   println(zeros.size)\n\
+             \x20   println(zeros[3])\n\
+             \x20   var i = 0\n\
+             \x20   var total = 0\n\
+             \x20   while (i < ints.size) { total = total + ints[i]; i = i + 1 }\n\
+             \x20   println(total)\n\
+             \x20   val words = arrayOf(\"a\", \"bb\")\n\
+             \x20   println(words.size)\n\
+             \x20   println(words[1])\n\
+             \x20   words[0] = words[1]\n\
+             \x20   println(words[0])\n\
+             \x20   val longs = longArrayOf(1L, 2L)\n\
+             \x20   println(longs[1])\n\
+             \x20   val flags = booleanArrayOf(true, false)\n\
+             \x20   println(flags[0])\n\
+             \x20   println(flags[1])\n\
+             \x20   val chars = charArrayOf('k', 't')\n\
+             \x20   println(chars[1])\n\
+             \x20   val bytes = byteArrayOf(7, 8)\n\
+             \x20   println(bytes[1])\n\
+             }\n"),
+        "3\n3\n4\n4\n0\n9\n2\nbb\nbb\n2\ntrue\nfalse\nt\n8\n"
+    );
+}
+
+#[test]
+fn an_array_index_outside_its_bounds_fails_loudly() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // Kotlin throws IndexOutOfBoundsException; there are no exceptions yet, so the honest
+    // realization is a diagnosable exit. A negative index must be caught by the same check.
+    for index in ["3", "-1"] {
+        let (artifacts, diagnostics) = compile(
+            &[(
+                "Main",
+                &format!(
+                    "fun at(a: IntArray, i: Int): Int = a[i]\n\
+                     fun main() {{ println(\"before\"); println(at(intArrayOf(1, 2, 3), {index})) }}\n"
+                ),
+            )],
+            target,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let objects = artifacts
+            .iter()
+            .filter(|(name, _)| name.ends_with(".o"))
+            .map(|(_, bytes)| bytes.as_slice())
+            .collect::<Vec<_>>();
+        let image = krusty::native::link_program(&objects, target).expect("link");
+        let scratch = Scratch::new("bounds");
+        let executable = scratch.path().join("program");
+        std::fs::write(&executable, &image).expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output =
+            common::run_freshly_written(std::process::Command::new(&executable).env_clear())
+                .expect("run");
+        assert!(!output.status.success(), "index {index} must not continue");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+        // Kotlin's `IndexOutOfBoundsException`, which a program may catch; uncaught, it is
+        // reported at the entry like any other.
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("kotlin.IndexOutOfBoundsException"),
+            "index {index}: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn a_reference_array_is_traced_through_collection() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The array holds the only reference to each of its heap strings, and the loop allocates far
+    // past the collection threshold — so the elements have to be traced as references, at the
+    // stride the descriptor declares. A `LongArray` of the same element width must NOT be walked
+    // as pointers, which is why the descriptor carries both the stride and whether to look inside.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val kept = arrayOfNulls<String>(3)\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 3) { kept[i] = \"kept-$i\"; i = i + 1 }\n\
+             \x20   val decoys = LongArray(3)\n\
+             \x20   i = 0\n\
+             \x20   while (i < 3) { decoys[i] = 140737488355328L + i; i = i + 1 }\n\
+             \x20   var garbage = \"\"\n\
+             \x20   var n = 0\n\
+             \x20   while (n < 100000) { garbage = \"garbage-$n\"; n = n + 1 }\n\
+             \x20   println(kept[0])\n\
+             \x20   println(kept[2])\n\
+             \x20   println(decoys[1])\n\
+             \x20   println(garbage)\n\
+             }\n"),
+        "kept-0\nkept-2\n140737488355329\ngarbage-99999\n"
+    );
+}
+
+#[test]
+fn a_reference_array_of_a_primitive_boxes_at_the_element_boundary() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Array<Int>` stores BOXED elements, unlike `IntArray`. A read therefore produces a reference
+    // where the reader may want an `Int` — the conversion belongs at the element boundary, which
+    // is the same place the JVM puts its `checkcast` and `intValue()`.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val a = arrayOfNulls<Int>(5)\n\
+             \x20   for (i in 0..4) a[i] = i + 1\n\
+             \x20   var sum = 0\n\
+             \x20   for (el in (a as Array<Int>)) sum = sum + el\n\
+             \x20   println(sum)\n\
+             \x20   val ints = IntArray(5)\n\
+             \x20   for (i in 0..4) ints[i] = i + 1\n\
+             \x20   var plain = 0\n\
+             \x20   for (el in ints) plain = plain + el\n\
+             \x20   println(plain)\n\
+             }\n"),
+        "15\n15\n"
+    );
+}
+
+#[test]
+fn a_callable_reference_is_a_function_value_like_any_other() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `::f` and `obj::m` differ from a lambda in how they are written and in nothing else that
+    // matters: common lowering synthesizes the adapter that calls the referenced function, and a
+    // bound receiver is simply the first value the reference carries. So a reference with nothing
+    // bound is one object, as `{}` is.
+    assert_eq!(
+        run("class Greeter(val name: String) {\n\
+             \x20   fun greet(): String = \"hi ${name}\"\n\
+             \x20   fun loud(n: Int): String = \"HI ${name} $n\"\n\
+             }\n\
+             fun double(n: Int): Int = n * 2\n\
+             fun applyTo(f: (Int) -> Int, n: Int): Int = f(n)\n\
+             fun call(f: () -> String): String = f()\n\
+             fun callWith(f: (Int) -> String, n: Int): String = f(n)\n\
+             fun main() {\n\
+             \x20   println(applyTo(::double, 5))\n\
+             \x20   val g = Greeter(\"k\")\n\
+             \x20   println(call(g::greet))\n\
+             \x20   println(callWith(g::loud, 7))\n\
+             \x20   val f = ::double\n\
+             \x20   println(f(21))\n\
+             \x20   var total = 0\n\
+             \x20   val fns = arrayOfNulls<(Int) -> Int>(3)\n\
+             \x20   val ref: (Int) -> Int = ::double\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 3) { fns[i] = ref; i = i + 1 }\n\
+             \x20   i = 0\n\
+             \x20   while (i < 3) { total = total + fns[i]!!(i); i = i + 1 }\n\
+             \x20   println(total)\n\
+             }\n"),
+        "10\nhi k\nHI k 7\n42\n6\n",
+        "a reference is stored, passed and called like any other function value"
+    );
+}
+
+#[test]
 fn two_references_to_one_declaration_are_equal_through_two_variables() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -1215,6 +1461,37 @@ fn a_scope_function_whose_block_is_a_function_value_runs() {
              \x20   println(made)\n\
              }\n"),
         "7\n9\n32\n42\n4\n"
+    );
+}
+
+#[test]
+fn a_scope_function_whose_block_is_a_captured_function_value_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The function value reaches the scope function through an object's capture field, not a
+    // local or parameter of the calling body. It is still one stored value: evaluated once and
+    // invoked, whether the capture is a plain field or the shared cell of a captured `var`.
+    assert_eq!(
+        run("interface Sink { fun accept(value: Int?): Int }\n\
+             fun captured(block: (Int) -> Int): Sink = object : Sink {\n\
+             \x20   override fun accept(value: Int?): Int = value?.let(block) ?: -1\n\
+             }\n\
+             fun shared(start: (Int) -> Int): Sink {\n\
+             \x20   var block = start\n\
+             \x20   val sink = object : Sink {\n\
+             \x20       override fun accept(value: Int?): Int = value!!.let(block)\n\
+             \x20   }\n\
+             \x20   block = { it * 3 }\n\
+             \x20   return sink\n\
+             }\n\
+             fun main() {\n\
+             \x20   println(captured { it + 1 }.accept(41))\n\
+             \x20   println(captured { it + 1 }.accept(null))\n\
+             \x20   println(shared { it + 1 }.accept(5))\n\
+             }\n"),
+        "42\n-1\n15\n"
     );
 }
 
@@ -1609,6 +1886,106 @@ fn a_class_may_have_more_than_one_constructor() {
 }
 
 #[test]
+fn an_enum_class_is_built_whole_when_it_is_touched() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin initializes an enum as a whole: every constant in declaration order, then the
+    // companion — so a program that only ever mentions one constant still runs every constructor,
+    // and in that order. Each constant is a singleton, so identity answers as equality does;
+    // `toString` is the name, not the identity `kotlin.Any` would give; and `values()` hands back a
+    // fresh array each call.
+    assert_eq!(
+        run("var order = \"\"\n\
+             enum class Step(val weight: Int) {\n\
+             \x20   FIRST(1), SECOND(2);\n\
+             \x20   init { order += name + \"(\" + weight + \")\" }\n\
+             \x20   companion object { init { order += \"|companion\" } }\n\
+             }\n\
+             fun describe(step: Step) = when (step) {\n\
+             \x20   Step.FIRST -> \"one\"\n\
+             \x20   Step.SECOND -> \"two\"\n\
+             }\n\
+             fun main() {\n\
+             \x20   val selected = Step.SECOND\n\
+             \x20   println(selected.name)\n\
+             \x20   println(order)\n\
+             \x20   println(Step.SECOND.ordinal)\n\
+             \x20   println(Step.FIRST.toString())\n\
+             \x20   println(Step.FIRST === Step.FIRST)\n\
+             \x20   println(Step.FIRST == Step.SECOND)\n\
+             \x20   println(describe(Step.SECOND))\n\
+             \x20   println(Step.values().size)\n\
+             \x20   println(Step.values()[0].weight)\n\
+             \x20   println(Step.valueOf(\"SECOND\").ordinal)\n\
+             }\n"),
+        "SECOND\nFIRST(1)SECOND(2)|companion\n1\nFIRST\ntrue\nfalse\ntwo\n2\n1\n1\n"
+    );
+}
+
+#[test]
+fn enum_and_companion_initializers_run_without_stdlib_calls() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Keep this independent of String.plus or any other stdlib body: it isolates constructor and
+    // companion initialization from dependency-call realization.
+    assert_eq!(
+        run("var initialized = 0\n\
+             enum class Marker {\n\
+             \x20   FIRST, SECOND;\n\
+             \x20   init { initialized += 1 }\n\
+             \x20   companion object { init { initialized += 10 } }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val selected = Marker.SECOND\n\
+             \x20   println(selected.name)\n\
+             \x20   println(initialized)\n\
+             }\n"),
+        "SECOND\n12\n"
+    );
+}
+
+#[test]
+fn an_adapted_callable_reference_runs() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A reference is ADAPTED when the function it names does not match the type it is used as: an
+    // argument left to its default, a `vararg` given one element, a result discarded because the
+    // expected type returns `Unit`. The checked lowering builds an adapter for each, and the
+    // adapter is an ordinary function — so these need nothing of the generator beyond what any
+    // reference needs, which is what removing the decline showed.
+    assert_eq!(
+        run(
+            "fun greet(name: String, mark: String = \"!\"): String = name + mark\n\
+             fun join(vararg parts: String): String {\n\
+             \x20   var joined = \"\"\n\
+             \x20   for (part in parts) joined += part\n\
+             \x20   return joined\n\
+             }\n\
+             var counted = 0\n\
+             fun count(): Int { counted = counted + 1; return counted }\n\
+             class Box(val n: Int) { fun plus(extra: Int = 5): Int = n + extra }\n\
+             fun apply(f: (String) -> String) = f(\"k\")\n\
+             fun run(f: () -> Unit) { f() }\n\
+             fun value(f: () -> Int) = f()\n\
+             fun main() {\n\
+             \x20   println(apply(::greet))\n\
+             \x20   println(apply(::join))\n\
+             \x20   run(::count)\n\
+             \x20   println(counted)\n\
+             \x20   println(value(Box(10)::plus))\n\
+             }\n"
+        ),
+        "k!\nk\n1\n15\n"
+    );
+}
+
+#[test]
 fn a_class_declared_inside_a_function_runs() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -1933,6 +2310,70 @@ fn a_construction_may_leave_arguments_out() {
 }
 
 #[test]
+fn an_enum_with_no_constants_is_still_an_enum() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `enum class Empty` declares no constants and is a real Kotlin declaration all the same.
+    // Enum-ness was being read off the CONSTANT LIST, which makes this one indistinguishable from
+    // a class that is not an enum: it was skipped when slots were declared and then panicked the
+    // moment `values()` looked itself up. The answers fall out once it is registered — a
+    // zero-length array, and a `valueOf` with no candidate to find.
+    assert_eq!(
+        run("enum class Empty\n\
+             fun main() {\n\
+             \x20   println(Empty.values().size)\n\
+             \x20   println(Empty.values() === Empty.values())\n\
+             }\n"),
+        "0\nfalse\n"
+    );
+}
+
+#[test]
+fn an_enum_constant_may_have_a_body() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `ADD { … }` is not the enum: it is an instance of a synthesized subclass, which is how it
+    // overrides a member and how it can declare state of its own. Common IR names that subclass on
+    // the entry and records only the USER parameter types on it, because the JVM's enum ABI gives
+    // its constructor a leading `(String name, int ordinal)` that is a realization rather than a
+    // Kotlin fact. This generator stores the name and ordinal itself. The constant constructs the
+    // subclass through its bare primary constructor; that constructor's recorded superclass call
+    // evaluates and passes the user arguments to the selected enum constructor. Everything else
+    // about a constant, `values()`, `valueOf`, `toString`, `is`, is unchanged because the subclass
+    // inherits the enum's whole layout and table.
+    //
+    // `Plain.B.name + Plain.B.ordinal` is here for a gap this found in passing: `name` and
+    // `ordinal` belong to `kotlin.Enum`, which no file declares, so the checked property table had
+    // nothing to say about their types and a concatenation of one could not be typed.
+    assert_eq!(
+        run("enum class Op(val tag: String) {\n\
+             \x20   ADD(\"+\") { override fun apply(a: Int, b: Int) = a + b },\n\
+             \x20   MUL(\"*\") {\n\
+             \x20       val scale = 2\n\
+             \x20       override fun apply(a: Int, b: Int) = a * b * scale\n\
+             \x20   };\n\
+             \x20   abstract fun apply(a: Int, b: Int): Int\n\
+             \x20   fun described(): String = tag + name + ordinal\n\
+             }\n\
+             enum class Plain { A, B }\n\
+             fun main() {\n\
+             \x20   println(Op.ADD.apply(2, 3))\n\
+             \x20   println(Op.MUL.apply(2, 3))\n\
+             \x20   println(Op.MUL.described())\n\
+             \x20   println(Op.valueOf(\"ADD\").apply(1, 1))\n\
+             \x20   for (op in Op.values()) println(op.toString())\n\
+             \x20   println(Op.ADD is Op)\n\
+             \x20   println(Plain.B.name + Plain.B.ordinal)\n\
+             }\n"),
+        "5\n12\n*MUL1\n2\nADD\nMUL\ntrue\nB1\n"
+    );
+}
+
+#[test]
 fn floating_point_values_render_as_kotlin_renders_them() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
@@ -2133,6 +2574,36 @@ fn a_break_in_an_expression_under_a_finally_still_runs_the_finally() {
              \x20   println(ran)\n\
              }\n"),
         "OK\n1\n"
+    );
+}
+
+#[test]
+fn a_collection_literal_calls_its_companion_operator_on_the_companion() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `operator fun of` is an ordinary member of the companion object, but the literal spells no
+    // receiver for it. The call used to be emitted with the arguments alone — one short of the
+    // declaration — which the code generator's verifier refused outright. Both overloads are
+    // exercised so the shortfall is visible at two different arities.
+    assert_eq!(
+        run("// LANGUAGE: +CollectionLiterals\n\
+             class MyList(val data: String) {\n\
+             \x20   companion object {\n\
+             \x20       operator fun of(vararg parts: String) = MyList(parts.size.toString())\n\
+             \x20       operator fun of(first: String, second: String) = MyList(first + second)\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val pair: MyList = [\"O\", \"K\"]\n\
+             \x20   val many: MyList = [\"a\", \"b\", \"c\"]\n\
+             \x20   val none: MyList = []\n\
+             \x20   println(pair.data)\n\
+             \x20   println(many.data)\n\
+             \x20   println(none.data)\n\
+             }\n"),
+        "OK\n3\n0\n"
     );
 }
 
@@ -2486,31 +2957,41 @@ fn a_class_may_extend_an_exception_the_runtime_owns() {
     common::expect_native_box(source, "RuntimeBase", "OK");
 }
 
-/// A collection declines by the declaration it names rather than reaching a runtime function
-/// through a table that happens to know the name. A list, a map and a range are the runtime's
-/// objects, and nothing here yet lowers a call that makes or reads one.
 #[test]
-fn a_collection_declines_by_the_declaration_it_names() {
-    common::expect_native_decline(
-        "fun box(): String {\n\
-         \x20   val xs = listOf(\"O\", \"K\")\n\
+fn a_list_answers_its_first_and_last_element() {
+    // `first()` and `last()` with no predicate are a question about the ends of the list, which
+    // the runtime already had the pieces for. Kotlin raises `NoSuchElementException` on an empty
+    // one rather than answering null, and the distinction is not academic: a list of a nullable
+    // element type has a perfectly good null first element, and the two must stay apart.
+    //
+    // The one-argument forms take a LAMBDA and are a different question entirely — an inline
+    // declaration whose body decides which element — so they are not these.
+    let source = "fun box(): String {\n\
+         \x20   val letters = listOf(\"O\", \"K\", \"!\")\n\
+         \x20   if (letters.first() != \"O\") return \"fail 1\"\n\
+         \x20   if (letters.last() != \"!\") return \"fail 2\"\n\
+         \x20   val one = listOf(7)\n\
+         \x20   if (one.first() != 7) return \"fail 3\"\n\
+         \x20   if (one.last() != 7) return \"fail 4\"\n\
+         \x20   val nullable: List<String?> = listOf(null, \"x\")\n\
+         \x20   if (nullable.first() != null) return \"fail 5\"\n\
+         \x20   if (nullable.last() != \"x\") return \"fail 6\"\n\
+         \x20   val empty = listOf<String>()\n\
+         \x20   var raised = \"none\"\n\
+         \x20   try {\n\
+         \x20       empty.first()\n\
+         \x20   } catch (e: NoSuchElementException) {\n\
+         \x20       raised = \"first\"\n\
+         \x20   }\n\
+         \x20   if (raised != \"first\") return \"fail 7: $raised\"\n\
+         \x20   try {\n\
+         \x20       empty.last()\n\
+         \x20   } catch (e: NoSuchElementException) {\n\
+         \x20       raised = \"last\"\n\
+         \x20   }\n\
+         \x20   if (raised != \"last\") return \"fail 8: $raised\"\n\
          \x20   return \"OK\"\n\
-         }\n",
-        "CollectionDeclines",
-        "listOf",
-    );
-}
-
-/// Kotlin's other entry point declines by name. This target does not pass a program its
-/// arguments yet, and without the decline the file lowers with no entry at all and the link fails
-/// on a symbol that says nothing about `main`.
-#[test]
-fn a_main_taking_its_arguments_declines() {
-    common::expect_native_decline(
-        "fun main(args: Array<String>) {\n\
-         \x20   println(\"OK\")\n\
-         }\n",
-        "MainWithArguments",
-        "a `main` that takes its arguments",
-    );
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "ListEnds");
+    common::expect_native_box(source, "ListEnds", "OK");
 }

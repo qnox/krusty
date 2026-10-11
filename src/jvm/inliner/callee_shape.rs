@@ -215,6 +215,38 @@ pub(crate) fn can_inline_arguments_in_place(callee: &MethodNode) -> bool {
     })
 }
 
+/// Whether the first bytecode the prepared inline body retains is its first parameter load.
+///
+/// Parameter null checks are removed before the body enters its caller, so they do not count as a
+/// prefix. A real instruction before the load does: kotlinc leaves the call-site line off that
+/// generated prefix and starts it where the in-place source argument is evaluated.
+pub(crate) fn in_place_arguments_begin_at_entry(callee: &MethodNode) -> bool {
+    let first_slot = if callee.access & ACC_STATIC == 0 {
+        1
+    } else {
+        0
+    };
+    let mut at = 0usize;
+    while at < callee.nodes.len() {
+        match &callee.nodes[at] {
+            Node::Label(_) | Node::Line { .. } => at += 1,
+            Node::Insn(Insn::Op(0x00)) => at += 1,
+            Node::Insn(Insn::Var {
+                op: 0x15..=0x19,
+                slot,
+            }) if *slot == first_slot => {
+                if is_parameter_null_check(&callee.nodes, at) {
+                    at += 3;
+                } else {
+                    return true;
+                }
+            }
+            Node::Insn(_) => return false,
+        }
+    }
+    false
+}
+
 /// `aload x; ldc "…"; invokestatic Intrinsics.check…` starting at `at` (ASM's `next` steps over
 /// labels and lines too, so the three must be adjacent nodes).
 fn is_parameter_null_check(nodes: &[Node], at: usize) -> bool {

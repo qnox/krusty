@@ -902,7 +902,7 @@ fn lifted_functions_name_their_captures_like_kotlinc() {
     ];
     for (source, stem, method) in lifted {
         let class = format!("{stem}Kt");
-        common::method_code_diff_against_kotlinc(stem, &[], source, &class, method)
+        common::class_bytes_diff_against_kotlinc(stem, &[], source, &class, method)
             .expect("reference kotlinc is provisioned")
             .unwrap_or_else(|diff| panic!("{diff}"));
     }

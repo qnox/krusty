@@ -56,7 +56,7 @@ impl JvmLibraries {
             self.cp
                 .method_code_name(callable.owner, callable.physical_name(), body_descriptor)?;
         let instructions = inline::disassemble(&body.code)?;
-        let recognized = recognize(
+        let (recognized, element_slot) = recognize(
             callable,
             &instructions,
             &body.source_cp,
@@ -115,7 +115,27 @@ impl JvmLibraries {
             *decode_unavailable = true;
             return None;
         };
+        // Every recognized iteration template requires the declaration's own function-marker
+        // store (`instructions[6..8]`), so these are never `@InlineOnly` bodies. The loop starts
+        // right after that store; the frame closes on the body's final return.
+        let element = body
+            .locals
+            .iter()
+            .find(|local| local.slot == element_slot)
+            .map(|local| local.name.as_str().into());
+        let frame = crate::libraries::InlineBodyFrame {
+            callee: callable.name.as_str().into(),
+            inline_only: false,
+            source: super::recognized_body_source(
+                &body,
+                &instructions,
+                8,
+                instructions.len() - 1,
+                element,
+            ),
+        };
         Some(InlineBodyPlan::Iteration {
+            frame,
             lambda_parameter,
             index,
             traversal,
@@ -252,7 +272,7 @@ pub(super) fn recognize<'a>(
     source_cp: &'a [C],
     parameter_slots: &[u16],
     handlers: &[ExcEntry],
-) -> Option<RecognizedIteration<'a>> {
+) -> Option<(RecognizedIteration<'a>, u16)> {
     if !handlers.is_empty()
         || callable.context_count != 0
         || callable.ret != Ty::Unit
@@ -286,7 +306,9 @@ pub(super) fn recognize<'a>(
     let lambda_slot = parameter_slots[1];
     match action.params.len() {
         1 => {
-            let traversal = if let Some(traversal) = recognize_plain_iterator(
+            // Each recognizer fixes the element local's slot: the plain iterator derives it from
+            // the lambda parameter's slot; the array and counted templates pin it exactly.
+            let (traversal, element_slot) = if let Some(traversal) = recognize_plain_iterator(
                 instructions,
                 source_cp,
                 *invoke,
@@ -294,7 +316,7 @@ pub(super) fn recognize<'a>(
                 lambda_slot,
                 action.params[0],
             ) {
-                Some(traversal)
+                Some((traversal, lambda_slot + 3))
             } else if recognize_array_plain(
                 callable,
                 action.params[0],
@@ -304,7 +326,7 @@ pub(super) fn recognize<'a>(
                 receiver_slot,
                 lambda_slot,
             ) {
-                Some(RecognizedTraversal::Array)
+                Some((RecognizedTraversal::Array, 5))
             } else if char_sequence_action_matches(
                 callable.params[0],
                 callable.physical_params[0],
@@ -316,14 +338,17 @@ pub(super) fn recognize<'a>(
                 receiver_slot,
                 lambda_slot,
             ) {
-                counted_traversal(instructions, source_cp, 12, 16)
+                counted_traversal(instructions, source_cp, 12, 16).map(|traversal| (traversal, 4))
             } else {
                 None
             }?;
-            Some(RecognizedIteration::Plain {
-                lambda_parameter: 1,
-                traversal,
-            })
+            Some((
+                RecognizedIteration::Plain {
+                    lambda_parameter: 1,
+                    traversal,
+                },
+                element_slot,
+            ))
         }
         2 => {
             recognize_iterable_indexed(instructions, source_cp, *invoke, receiver_slot, lambda_slot)
@@ -340,10 +365,15 @@ pub(super) fn recognize<'a>(
                         iterator_traversal(instructions, source_cp, &[11], 14, 17)?,
                     ))
                 })
-                .map(|(overflow, traversal)| RecognizedIteration::CheckedIndex {
-                    lambda_parameter: 1,
-                    overflow,
-                    traversal,
+                .map(|(overflow, traversal)| {
+                    (
+                        RecognizedIteration::CheckedIndex {
+                            lambda_parameter: 1,
+                            overflow,
+                            traversal,
+                        },
+                        5,
+                    )
                 })
                 .or_else(|| {
                     if recognize_array_indexed(
@@ -355,7 +385,7 @@ pub(super) fn recognize<'a>(
                         receiver_slot,
                         lambda_slot,
                     ) {
-                        Some(RecognizedTraversal::Array)
+                        Some((RecognizedTraversal::Array, 6))
                     } else if char_sequence_action_matches(
                         callable.params[0],
                         callable.physical_params[0],
@@ -368,12 +398,18 @@ pub(super) fn recognize<'a>(
                         lambda_slot,
                     ) {
                         counted_traversal(instructions, source_cp, 14, 18)
+                            .map(|traversal| (traversal, 5))
                     } else {
                         None
                     }
-                    .map(|traversal| RecognizedIteration::UncheckedIndex {
-                        lambda_parameter: 1,
-                        traversal,
+                    .map(|(traversal, element_slot)| {
+                        (
+                            RecognizedIteration::UncheckedIndex {
+                                lambda_parameter: 1,
+                                traversal,
+                            },
+                            element_slot,
+                        )
                     })
                 })
         }
@@ -1466,8 +1502,47 @@ mod tests {
         instructions: &[Insn],
         source_cp: &'a [C],
         handlers: &[ExcEntry],
-    ) -> Option<RecognizedIteration<'a>> {
+    ) -> Option<(RecognizedIteration<'a>, u16)> {
         recognize(callable, instructions, source_cp, &[0, 1], handlers)
+    }
+
+    #[test]
+    fn iteration_frame_carries_the_declaration_bodys_resolved_debug_source() {
+        let version = crate::toolchain::kotlin_version();
+        if !matches!(version.as_str(), "2.4.0" | "2.4.10" | "2.4.20") {
+            return;
+        }
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib],
+        )))
+        .expect("JVM provider initialization");
+        let for_each = callable(
+            &libraries,
+            "kotlin/collections",
+            "forEach",
+            "(Ljava/lang/Iterable;Lkotlin/jvm/functions/Function1;)V",
+        );
+        let Some(InlineBodyPlan::Iteration { frame, .. }) = for_each.inline_body_plan.as_deref()
+        else {
+            panic!("Iterable.forEach must publish an iteration plan")
+        };
+        assert_eq!(frame.callee.as_ref(), "forEach");
+        assert!(!frame.inline_only);
+        let source = frame
+            .source
+            .as_ref()
+            .expect("forEach maps its own body lines");
+        assert_eq!(source.file.as_ref(), "_Collections.kt");
+        assert_eq!(
+            source.path.as_ref(),
+            "kotlin/collections/CollectionsKt___CollectionsKt"
+        );
+        assert_eq!(source.invoke_line, 2199);
+        assert_eq!(source.close_line, 2200);
+        assert_eq!(source.element.as_deref(), Some("element"));
     }
 
     #[test]
@@ -1652,10 +1727,13 @@ mod tests {
         declaration.name = "visitEveryElement".to_string();
         assert!(matches!(
             recognize_body(&declaration, &instructions, &source_cp, &handlers),
-            Some(RecognizedIteration::Plain {
-                traversal: RecognizedTraversal::Iterator { ref prepare, .. },
-                ..
-            }) if prepare.len() == 2
+            Some((
+                RecognizedIteration::Plain {
+                    traversal: RecognizedTraversal::Iterator { ref prepare, .. },
+                    ..
+                },
+                _
+            )) if prepare.len() == 2
         ));
 
         let cast = instructions
@@ -1696,7 +1774,7 @@ mod tests {
         let (instructions, source_cp, handlers) = decoded_body(&libraries, &plain);
         assert!(matches!(
             recognize_body(&plain, &instructions, &source_cp, &handlers),
-            Some(RecognizedIteration::Plain { .. })
+            Some((RecognizedIteration::Plain { .. }, _))
         ));
 
         let mut extra_effect = instructions.clone();
@@ -1733,7 +1811,7 @@ mod tests {
         let (mut instructions, source_cp, handlers) = decoded_body(&libraries, &indexed);
         assert!(matches!(
             recognize_body(&indexed, &instructions, &source_cp, &handlers),
-            Some(RecognizedIteration::CheckedIndex { .. })
+            Some((RecognizedIteration::CheckedIndex { .. }, _))
         ));
         instructions[21] = Insn::Plain {
             op: 0x84,

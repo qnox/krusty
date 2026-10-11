@@ -1,0 +1,12 @@
+Plain paths, quoted, with ./ and .. segments.
+--- project.yaml
+modules:
+  - "libs/a"
+  - ./libs/b
+  - libs/x/../c
+--- libs/a/module.yaml
+product: jvm/lib
+--- libs/b/module.yaml
+product: jvm/lib
+--- libs/c/module.yaml
+product: jvm/lib

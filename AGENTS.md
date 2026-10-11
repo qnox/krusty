@@ -83,6 +83,11 @@ upstream release notes, which can name an assistant that contributed upstream. T
 - The AST/IR stays **index-based** (`u32` ids into parallel `Vec`s — no `Box`/`Rc` graphs).
 - Correctness is defined by the **differential harness** vs the real `kotlinc`: don't claim a
   feature works without an ABI-signature diff and/or a round-trip test.
+- **Toolchain versions are exact identities.** Never strip `-RC`, `-Beta`, `-dev`, `-SNAPSHOT`, or
+  another suffix; never alias a configured Kotlin compiler/KGP version to a stable release; and
+  never retry with a different supported version. Add and validate that exact version, reject it
+  explicitly, or correct a checkout-specific misconfiguration in that checkout rather than in
+  krusty production code.
 - Record every Kotlin-semantics decision in `docs/SPEC.md` with a test.
 - Keep `docs/SPEC.md`, `docs/IMPLEMENTATION_PLAN.md`, and `docs/METADATA_NOTES.md` current.
 
@@ -321,6 +326,9 @@ change, not a quiet reset inside yours.
 ## Validation
 
 - Work test-first and compare diagnostics/behavior with kotlinc through the repository harness.
+- A portable Native regression must establish its expected result through the JVM/kotlinc oracle
+  before asserting the Native result. Use `expect_box_ok_with_stdlib` (or the result-returning
+  equivalent when the exact value matters) before `expect_native_box`.
 - Use `./run-tests.sh`; do not use release builds for ordinary validation.
 - `gate` is a Cargo profile: `--profile gate`. Never `--target-dir target/gate` or
   `CARGO_TARGET_DIR=target/gate`; that builds the dev profile into `target/gate/debug`, which
@@ -329,8 +337,10 @@ change, not a quiet reset inside yours.
   semantically distinct source forms.
 - Resolver work is complete only when the conformance survey has no resolver-related skips or
   regressions, including previously skipped cases.
-- Keep one test process unless parallel execution is strictly necessary. The suite-wide timeout is
-  120 seconds by default and must remain configurable for slow systems; timeout output must identify
-  the active test/case well enough to diagnose loops.
+- Keep one test process unless parallel execution is strictly necessary. Ordinary test processes
+  use a 120-second deadline by default. The product e2e suite is one process under
+  `KRUSTY_E2E_TIMEOUT_SECONDS` (30 minutes); do not split it into shards to stay under the ordinary
+  ceiling. Deadlines must remain configurable for slow systems; timeout output must identify the
+  active test/case well enough to diagnose loops.
 
 See also `docs/ARCHITECTURE.md`, `docs/COMPILER_REVIEW.md`, and `docs/TEST_HARNESS.md`.

@@ -5,12 +5,23 @@
 //! declared expected type does not accept `null`. The recorded positions become
 //! `Intrinsics.checkNotNullExpressionValue` on the JVM.
 
-use super::{Checker, PlatformNarrowing, ResolvedCall, TypeInfo};
+use super::{Checker, TypeInfo};
 use crate::ast::{Expr, ExprId};
-use crate::libraries::ResultEnhancement;
 use crate::symbol_resolver::ResolvedMember;
 use crate::types::Ty;
-use std::collections::HashMap;
+
+/// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
+/// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
+/// branch is checked where it produces its value; a value argument does not, so the merged value is
+/// checked instead — which is why the two are distinguished rather than treated as one position set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformNarrowing {
+    /// A property/local with an explicit type, a return, an assignment.
+    Declaration,
+    /// A value argument (including the parameter of a non-null-typed lambda), a default argument,
+    /// or an extension call's explicit receiver.
+    Argument,
+}
 
 impl Checker<'_> {
     /// Record that `e`'s PLATFORM type is committed to a declared non-null `expected` here.
@@ -20,8 +31,9 @@ impl Checker<'_> {
     /// skip null handling, Java nullness checkers reading `@NotNull`, krusty's own smart casts — is
     /// entitled to rely on it. kotlinc guards exactly this transition (see
     /// [`super::TypeInfo::platform_narrowings`]), unboxing into a primitive included; positions that
-    /// keep the flexibility (`T?`, another `T!`) are left alone. A Java result enhanced to not-null
-    /// ([`ResultEnhancement::NotNull`]) is typed `T`, but Java never checked it either, so it is
+    /// keep the flexibility (`T?`, another `T!`) are left alone. A value carrying
+    /// `EnhancedNullability` (a Java result enhanced to not-null, or a value derived from one
+    /// through a marked type argument) is typed `T`, but Java never checked it either, so it is
     /// guarded at the same positions.
     ///
     /// The expression's RECORDED type is read rather than a caller-supplied one: lowering consumes
@@ -43,6 +55,38 @@ impl Checker<'_> {
         }
     }
 
+    /// An extension call's explicit `receiver` is the argument of the extension's receiver
+    /// parameter, and kotlinc's implicit not-null cast guards it like one: a Java value is checked
+    /// where the DECLARED receiver (`Iterable<T>`, not a `T` whose bound admits `null`) rejects
+    /// `null`, against the receiver as the call `applied` it. A safe call has tested the receiver.
+    pub(super) fn narrow_extension_receiver(
+        &mut self,
+        call: ExprId,
+        receiver: ExprId,
+        declared: Option<Ty>,
+        applied: Ty,
+    ) {
+        if !matches!(self.file.expr(call), Expr::SafeCall { .. })
+            && !declared.unwrap_or(applied).upper_bound_admits_null()
+        {
+            self.narrow_platform_value(applied, receiver, PlatformNarrowing::Argument);
+        }
+    }
+
+    /// A member extension's explicit receiver is the argument of its extension receiver
+    /// parameter, guarded like an ordinary extension's against the receiver the member extension
+    /// declares (its dispatch class's type arguments applied).
+    pub(super) fn narrow_member_extension_receiver(
+        &mut self,
+        call: ExprId,
+        selected: &super::MemberExtensionFunctionCandidate,
+    ) {
+        if let Some(receiver) = crate::ast::explicit_call_receiver(self.file, call) {
+            let declared = Some(selected.priority.declared_receiver);
+            self.narrow_extension_receiver(call, receiver, declared, selected.extension_receiver);
+        }
+    }
+
     /// An enhanced Java result initializing a declaration whose type is inferred from it.
     ///
     /// kotlinc's expected type there is the declaration's own type, which is the initializer's
@@ -56,8 +100,8 @@ impl Checker<'_> {
         }
     }
 
-    /// Whether `e` produces an enhanced result: a call whose selected declaration's result is
-    /// enhanced to not-null, or a value conditional one of whose branches produces one (a common
+    /// Whether `e` produces an enhanced result: a call whose value carries `EnhancedNullability`,
+    /// or a value conditional one of whose branches produces one (a common
     /// supertype keeps the attribute). A declared type reaching the conditional then guards its
     /// branches where they produce their values.
     fn has_enhanced_result(&self, e: ExprId) -> bool {
@@ -94,7 +138,7 @@ impl Checker<'_> {
     }
 
     fn has_enhanced_call_result(&self, e: ExprId) -> bool {
-        enhanced_call_result(&self.resolved_calls, e)
+        self.value_enhancement(e).head()
     }
 
     /// The selected member's value parameters as the member DECLARES them for this receiver: the
@@ -135,6 +179,29 @@ impl Checker<'_> {
     }
 }
 
+impl super::ContextualCallShape {
+    /// The source-visible parameters as the callee declares them, before the call's own type
+    /// arguments apply: kotlinc reads an argument's implicit not-null cast from the unsubstituted
+    /// parameter, so a value passed to `fun <T> T.to(that: T)` or `class Box<T>(value: T)` is not
+    /// guarded. `declared` is the callee's parameter list in the layout this shape was built from;
+    /// a list too short to hold them leaves the selected parameters as declared.
+    pub(super) fn declared_params(&self, declared: &[Ty]) -> Vec<Ty> {
+        if declared.len()
+            < self
+                .parameter_indices
+                .iter()
+                .max()
+                .map_or(0, |&index| index + 1)
+        {
+            return self.params.clone();
+        }
+        self.parameter_indices
+            .iter()
+            .map(|&parameter| declared[parameter])
+            .collect()
+    }
+}
+
 /// Whether a value committed to the declared `expected` type must not be `null`: the negation of
 /// kotlinc's `acceptsNullValues` in `Fir2IrImplicitCastInserter.insertSpecialCast`. A nullable or
 /// flexible type accepts `null`, and so does a type parameter whose upper bound does. A value
@@ -164,23 +231,13 @@ pub(super) fn expected_type_rejects_null(expected: Ty) -> bool {
 
 impl TypeInfo {
     /// Whether `e` itself produces a value Java never checked: a flexible `T!` or a call result
-    /// enhanced to not-null.
+    /// carrying `EnhancedNullability`.
     ///
     /// A conditional committed to a declared type is guarded branch by branch, and kotlinc's
     /// implicit cast lands only where a branch's own value is such a value: a sibling branch that
     /// produces a Kotlin `String` stays unchecked.
     pub(crate) fn produces_unchecked_java_value(&self, e: ExprId) -> bool {
         matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_))
-            || enhanced_call_result(&self.resolved_calls, e)
+            || self.enhanced_values.contains(&e)
     }
-}
-
-fn enhanced_call_result(resolved_calls: &HashMap<ExprId, ResolvedCall>, e: ExprId) -> bool {
-    let call_sig = match resolved_calls.get(&e) {
-        Some(ResolvedCall::Member(member)) => &member.member.call_sig,
-        Some(ResolvedCall::Companion(member)) => &member.call_sig,
-        Some(ResolvedCall::TopLevel(call)) => &call.call_sig,
-        _ => return false,
-    };
-    call_sig.result_enhancement == ResultEnhancement::NotNull
 }

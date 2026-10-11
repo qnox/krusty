@@ -13,6 +13,20 @@
 
 use super::*;
 
+/// Stub positions grouped by source file. Signature collection used to scan every stub in the
+/// module once per classifier; a file only needs its own declarations.
+fn stub_positions_by_source(headers: &crate::fir::StreamedHeaderModule) -> Vec<Vec<usize>> {
+    let mut by_source = Vec::new();
+    for (position, stub) in headers.stubs.iter().enumerate() {
+        let source = stub.source.raw() as usize;
+        if by_source.len() <= source {
+            by_source.resize(source + 1, Vec::new());
+        }
+        by_source[source].push(position);
+    }
+    by_source
+}
+
 pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
@@ -20,7 +34,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     diags: &mut DiagSink,
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     compact_local_contexts: Option<&[PassOneLocalClassContext]>,
+    target: crate::compilation_target::CompilationTarget,
 ) -> SymbolTable {
+    let stubs_by_source = compact_headers.map(stub_positions_by_source);
     let SourceTypeUniverse {
         file_type_aliases,
         source_packages,
@@ -55,6 +71,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
+    table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
     let mut declaration_annotation_resolution_attempts = std::collections::HashSet::new();
     for file_index in 0..source_packages.len() {
         diags.set_file(file_index as u32);
@@ -163,9 +180,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         );
             common || !optional
         });
-    // Normalize source annotation retention once identities are bound. The explicit retention
-    // argument is interpreted only under the resolved `kotlin.annotation.Retention` declaration;
-    // later phases receive the enum fact and never inspect its source spelling.
+    // Register every source annotation class with the default retention. A declared `@Retention`
+    // replaces it once the classifier-annotation pass has checked the application and selected its
+    // enum entry; the header never reads the argument's spelling.
     if let Some(headers) = compact_headers {
         collect_compact_annotation_policies(headers, &mut table);
     } else {
@@ -177,77 +194,14 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 if class.kind != crate::ast::ClassKind::Annotation {
                     continue;
                 }
-                let retention = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Retention"))?;
-                        let &argument = arguments.first()?;
-                        let Expr::Member { name, .. } = file.expr(argument) else {
-                            return None;
-                        };
-                        match name.as_str() {
-                            "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
-                            "BINARY" => Some(crate::types::AnnotationRetention::Binary),
-                            "SOURCE" => Some(crate::types::AnnotationRetention::Source),
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or(crate::types::AnnotationRetention::Default);
                 let Some(annotation_identity) = file_class_names[file_index].get_class(&class.name)
                 else {
                     continue;
                 };
-                table
-                    .annotation_retentions
-                    .insert(annotation_identity, retention);
-                // `@Target(AnnotationTarget.X, …)` decides where an application written with no use-site
-                // prefix lands. Only the three declaration sites a PROPERTY application can take are
-                // modeled; an annotation class that declares no `@Target` is applicable everywhere and is
-                // left out of the map entirely.
-                let declared_targets = class
-                    .annotations
-                    .iter()
-                    .zip(&class.annotation_args)
-                    .find_map(|(annotation, arguments)| {
-                        table
-                            .resolved_annotation(file_index as u32, annotation)
-                            .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                        let mut targets = crate::types::AnnotationTargets {
-                            value_parameter: false,
-                            property: false,
-                            field: false,
-                        };
-                        for &argument in arguments {
-                            // `@Target` takes a `vararg` of enum entries. The NAMED form spells the
-                            // same list as an array literal or `arrayOf`, so both flatten here.
-                            let entries: Vec<ExprId> = match file.expr(argument) {
-                                Expr::AnnotationArrayLiteral(elements) => elements.clone(),
-                                Expr::Call { args, .. } => args.to_vec(),
-                                _ => vec![argument],
-                            };
-                            for entry in entries {
-                                let Expr::Member { name, .. } = file.expr(entry) else {
-                                    continue;
-                                };
-                                match name.as_str() {
-                                    "VALUE_PARAMETER" => targets.value_parameter = true,
-                                    "PROPERTY" => targets.property = true,
-                                    "FIELD" => targets.field = true,
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Some(targets)
-                    });
-                if let Some(targets) = declared_targets {
-                    table
-                        .annotation_targets
-                        .insert(annotation_identity, targets);
-                }
+                table.annotation_retentions.insert(
+                    annotation_identity,
+                    crate::types::AnnotationRetention::Default,
+                );
             }
         }
     }
@@ -352,6 +306,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     // a member may be waiting on a module property and a module property on a member.
     let mut deferred_properties: Vec<DeferredProperty> = Vec::new();
     let empty_local_context = PassOneLocalClassContext::default();
+    // Members a compiler plugin contributes to a class's companion. Installed after the walk: a
+    // hand-written companion is a later declaration than its owner, so its own signature does not
+    // exist yet while the owner is collected.
+    let mut contributed_companions: Vec<ContributedCompanion> = Vec::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
@@ -941,7 +899,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             flags.has(crate::fir::DeclarationFlags::ENUM)
                         });
                     let classifier_is_value = classifier_declaration_flags
-                        .map_or(c.is_value, |flags| {
+                        .map_or(c.is_value && c.value_modifier_span.is_none(), |flags| {
                             flags.has(crate::fir::DeclarationFlags::VALUE)
                         });
                     let classifier_is_annotation = classifier_declaration_flags.map_or_else(
@@ -1092,6 +1050,24 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             |candidate| source_direct_supertypes.contains_key(&candidate),
                         ),
                     };
+                    let is_nested = match (compact_headers, compact_classifier) {
+                        (Some(headers), Some(classifier)) => headers
+                            .declarations
+                            .anchor(classifier.id)
+                            .and_then(|anchor| anchor.owner)
+                            .and_then(|owner| headers.stub(owner))
+                            .is_some_and(|owner| {
+                                matches!(
+                                    owner.kind,
+                                    crate::fir::DeclarationKind::Classifier
+                                        | crate::fir::DeclarationKind::EnumEntry
+                                )
+                            }),
+                        _ => {
+                            file.hoisted_classifier_owners.contains_key(&d)
+                                || file.enum_entry_nested_classifier_owners.contains_key(&d)
+                        }
+                    };
                     if compact_headers.is_none() {
                         if let Some(owner) = file.local_class_lexical_classifier_owners.get(&d) {
                             let owner = type_name(&class_internal(file, owner));
@@ -1134,12 +1110,20 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let mut referenced_types = std::collections::HashSet::new();
                     if let Some(headers) = compact_headers {
                         let source = crate::fir::SourceFileId::from_raw(i as u32);
-                        for stub in headers.stubs.iter().filter(|stub| {
-                            stub.source == source
-                                && compact_classifier.is_some_and(|classifier| {
+                        let positions = stubs_by_source
+                            .as_ref()
+                            .and_then(|by_source| by_source.get(source.raw() as usize))
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        for stub in positions
+                            .iter()
+                            .map(|&position| &headers.stubs[position])
+                            .filter(|stub| {
+                                compact_classifier.is_some_and(|classifier| {
                                     streamed_declaration_is_within(headers, stub.id, classifier.id)
                                 })
-                        }) {
+                            })
+                        {
                             for root in headers.syntax.declaration_type_roots(stub.id) {
                                 if let Some(reference) = headers
                                     .syntax
@@ -1289,6 +1273,34 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         i as u32,
                         &mut table.resolved_annotations,
                     );
+                    // Decide representation only after this declaration's annotations have been
+                    // bound in its lexical classifier scope. Reading the occurrence table before
+                    // this point misclassifies every `@JvmInline value class` as an unannotated
+                    // full-value declaration.
+                    let has_jvm_inline = c.annotations.iter().any(|annotation| {
+                        table
+                            .resolved_annotation(i as u32, annotation)
+                            .is_some_and(|name| name == type_name("kotlin/jvm/JvmInline"))
+                    });
+                    let value_representation = c.value_modifier_span.map(|value_keyword| {
+                        ValueClassDeclaration {
+                            value_keyword,
+                            parameters: c.primary_constructor_parameters_span,
+                            parameter_count: classifier_header.primary_parameters.len(),
+                            jvm_inline: has_jvm_inline,
+                            final_class: classifier_flags.has(ClassFlags::FINAL),
+                        }
+                        .representation(
+                            target,
+                            file.full_value_classes,
+                            diags,
+                        )
+                    });
+                    let full_value = value_representation == Some(ValueClassRepresentation::Full);
+                    let unboxed_value_class = value_representation
+                        .map_or(classifier_is_value, |r| {
+                            r == ValueClassRepresentation::Inline
+                        });
                     // JVM erasure of every type parameter in scope: the enclosing declarations'
                     // (outer/local) first, then this class's own. A declared reference bound erases to
                     // the bound (`<T : Cargo>` → `Lapp/Cargo;`) — the class counterpart of what the
@@ -1748,6 +1760,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
                             source_decl: d,
+                            is_nested,
                             visibility: classifier_visibility,
                             flags: classifier_flags,
                             methods: declared_methods,
@@ -1808,10 +1821,15 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         {
                             if !table.classes.contains_key(&companion_internal) {
                                 let compact_companion = compact_headers.and_then(|headers| {
-                                    headers.stubs.iter().find(|stub| {
-                                        stub.source.raw() == i as u32
-                                            && stub.range == companion.span
-                                            && stub.kind == crate::fir::DeclarationKind::Classifier
+                                    stubs_by_source.as_ref()?.get(i).and_then(|positions| {
+                                        positions
+                                            .iter()
+                                            .map(|&position| &headers.stubs[position])
+                                            .find(|stub| {
+                                                stub.range == companion.span
+                                                    && stub.kind
+                                                        == crate::fir::DeclarationKind::Classifier
+                                            })
                                     })
                                 });
                                 let companion_header = match compact_headers {
@@ -1892,6 +1910,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                                 .map(|stub| stub.id),
                                             source_file: i as u32,
                                             source_decl: companion_decl,
+                                            is_nested: true,
                                             visibility: compact_companion
                                                 .map(|stub| stub.visibility)
                                                 .unwrap_or(companion.visibility),
@@ -1961,17 +1980,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .expect("a production class must have a stable identity")
                             .id;
                         let mut declarations = headers
-                            .stubs
-                            .iter()
+                            .owned_stubs(owner)
                             .filter(|stub| {
                                 stub.kind == crate::fir::DeclarationKind::Property
                                     && !stub
                                         .flags
                                         .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
-                                    && headers
-                                        .declarations
-                                        .anchor(stub.id)
-                                        .is_some_and(|anchor| anchor.owner == Some(owner))
                             })
                             .filter_map(|stub| {
                                 headers
@@ -2690,7 +2704,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     }
                     // Kotlin's generated object overrides are ordinary declarations with a written
                     // member's stable identity and callable shape; common IR owns their bodies.
-                    if classifier_is_data {
+                    // An abstract or sealed value class does not declare the trio. Advertising a
+                    // final `toString` there would hide the final subclass's own members.
+                    if classifier_is_data || (full_value && classifier_flags.has(ClassFlags::FINAL))
+                    {
                         for (name, params, ret) in [
                             ("toString", Vec::new(), Ty::String),
                             ("hashCode", Vec::new(), Ty::Int),
@@ -2780,7 +2797,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .zip(&ctor_param_shapes)
                             .filter(|((property, _), _)| property.is_property)
                             .collect::<Vec<_>>();
-                        for (i, ((_, ty), (shape, _))) in data_properties.iter().enumerate() {
+                        for (i, ((property, ty), (shape, _))) in data_properties.iter().enumerate()
+                        {
                             let generated_name = format!("component{}", i + 1);
                             declared_callable_order.push(generated_name.clone());
                             methods.insert(
@@ -2818,7 +2836,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     lambda_param_types: Vec::new(),
                                     lambda_recv: Vec::new(),
                                     inline_modifiers: Vec::new(),
-                                    visibility: Visibility::Public,
+                                    visibility: property.visibility,
                                     context_count: 0,
                                     source_decl: None,
                                     stable_declaration: compact_generated_member_declaration(
@@ -3380,8 +3398,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             outer,
                         )
                     });
-                    // A `value class` is represented unboxed as its sole property's type.
-                    let value_field = if classifier_is_value {
+                    // A `@JvmInline` value class is represented unboxed as its sole property's type.
+                    // A boxed `value class` keeps its fields.
+                    let value_field = if unboxed_value_class {
                         props.first().map(|(n, t, _)| (n.clone(), *t))
                     } else {
                         None
@@ -3410,6 +3429,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
                             source_decl: Some(d),
+                            name_span: c.name_span,
+                            is_nested,
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,
                             applied_annotations: Vec::new(),
@@ -3513,89 +3534,19 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             nullable_tparam_props,
                             generic_property_shapes,
                             value_field,
+                            full_value,
                             generic_methods,
                         },
                     );
-                    if let Some(companion_internal) =
+                    if let Some(internal) =
                         companion_internal_ref.filter(|_| !contributed_companion_methods.is_empty())
                     {
-                        if let Some(companion) = table.classes.get_mut(&companion_internal) {
-                            for name in contributed_companion_order {
-                                let signatures =
-                                    contributed_companion_methods.remove(&name).expect(
-                                        "a contributed companion name must retain its overloads",
-                                    );
-                                if !companion.declared_callable_order.contains(&name) {
-                                    companion.declared_callable_order.push(name.clone());
-                                }
-                                companion
-                                    .methods
-                                    .entry(name)
-                                    .or_default()
-                                    .extend(signatures);
-                            }
-                        } else {
-                            table.insert_class_sig(
-                                companion_internal,
-                                ClassSig {
-                                    internal: companion_internal,
-                                    stable_declaration: None,
-                                    source_file: i as u32,
-                                    source_decl: None,
-                                    visibility: Visibility::Public,
-                                    annotations: Vec::new(),
-                                    applied_annotations: Vec::new(),
-                                    annotation_class_arguments: Vec::new(),
-                                    generated_nested_classifiers: Vec::new(),
-                                    props: Vec::new(),
-                                    declared_props: HashMap::new(),
-                                    contextual_props: HashMap::new(),
-                                    constants: HashMap::new(),
-                                    member_ext_props: HashMap::new(),
-                                    member_ext_funs: HashMap::new(),
-                                    has_primary_ctor: true,
-                                    primary_constructor_declaration: None,
-                                    primary_constructor_annotations: Vec::new(),
-                                    ctor_params: Vec::new(),
-                                    ctor_param_shapes: Vec::new(),
-                                    methods: contributed_companion_methods,
-                                    declared_callable_order: contributed_companion_order,
-                                    source_methods: Vec::new(),
-                                    flags: ClassFlags::default().with_final(true).with_object(true),
-                                    inner_of: None,
-                                    companion_internal: None,
-                                    lateinit_props: Default::default(),
-                                    interfaces: Default::default(),
-                                    interface_type_args: Vec::new(),
-                                    delegated_interfaces: Vec::new(),
-                                    callable_signature: None,
-                                    callable_signatures: Vec::new(),
-                                    super_internal: None,
-                                    interfaces_before_superclass: 0,
-                                    super_type_args: Vec::new(),
-                                    super_ctor_params: Vec::new(),
-                                    ctor_param_names: Vec::new(),
-                                    ctor_implicit_integer_coercion: Vec::new(),
-                                    ctor_vararg: None,
-                                    ctor_defaults: Vec::new(),
-                                    secondary_ctors: Vec::new(),
-                                    secondary_ctor_shapes: Vec::new(),
-                                    secondary_ctor_call_sigs: Vec::new(),
-                                    secondary_constructor_declarations: Vec::new(),
-                                    secondary_constructor_annotations: Vec::new(),
-                                    type_parameters: crate::types::TypeParameters::default(),
-                                    type_parameter_extra_bounds: Vec::new(),
-                                    captured_type_parameters: crate::types::TypeParameters::default(
-                                    ),
-                                    metadata_captured_type_parameters: Vec::new(),
-                                    generic_props: HashMap::new(),
-                                    nullable_tparam_props: HashMap::new(),
-                                    generic_property_shapes: HashMap::new(),
-                                    value_field: None,
-                                    generic_methods: HashMap::new(),
-                                },
-                            );
-                        }
+                        contributed_companions.push(ContributedCompanion {
+                            internal,
+                            source_file: i as u32,
+                            order: contributed_companion_order,
+                            methods: contributed_companion_methods,
+                        });
                     }
                 }
                 Decl::Property(p) => {
@@ -4258,6 +4209,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             }
         }
     }
+    install_contributed_companions(&mut table, contributed_companions);
 
     // The engine types a deferred declaration by running the REAL checker over its body, and the
     // checker resolves classifiers and callables through the table's platform. Install it before

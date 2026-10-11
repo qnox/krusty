@@ -86,9 +86,10 @@ mod tests {
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let bs = super::super::splice_unified(&body, "(I)I", 3, &[], 0, &mut cw)
             .expect("branchless splice");
-        // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
-        // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
-        assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
+        // Prologue stores the one arg into slot 3, then the body runs with its trailing return
+        // replaced by the closing-line nop retained by the inliner.
+        // istore_3 ; iload_3 ; iconst_3 ; imul ; nop   (compact slot-3 forms)
+        assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68, 0x00]);
         // A pure branchless body needs no call-site relayout and is appendable at any stack height.
         assert!(!bs.needs_relayout);
         assert!(bs.falls_through);

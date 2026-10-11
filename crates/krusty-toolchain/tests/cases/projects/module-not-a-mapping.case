@@ -1,0 +1,5 @@
+A module file holding a list.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+- product

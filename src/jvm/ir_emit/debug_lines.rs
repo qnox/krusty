@@ -5,15 +5,40 @@
 //! are represented.
 
 use crate::fir::SyntheticOriginKind;
-use crate::ir::{ExprId, IrFile, IrNodeOrigin};
+use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin};
 use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
+
+fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
+    let mut expression = block;
+    loop {
+        let crate::ir::IrExpr::Block { stmts, value } = ir.expr(expression) else {
+            return expression;
+        };
+        let Some(&first) = stmts.first().or(value.as_ref()) else {
+            return expression;
+        };
+        expression = first;
+    }
+}
 
 /// Mark a source statement or block value at the first instruction it emits.
 pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
     if let Some(&line) = ir.expr_lines.get(&expression) {
         code.mark_line(line);
+    }
+}
+
+/// Mark a statement line and keep it when the next mark at this pc names that same line.
+///
+/// An unsigned assignment whose right operand is itself unsigned records the line twice at the
+/// receiver load: once for the assignment, once for the inlined operation.
+pub(super) fn mark_statement_retained(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
+    if let Some(&line) = ir.expr_lines.get(&expression) {
+        if line != 0 {
+            code.mark_line_retained(line);
+        }
     }
 }
 
@@ -40,47 +65,49 @@ pub(super) fn mark_loop_control(loop_line: Option<u32>, code: &mut CodeBuilder) 
     }
 }
 
-/// Mark the line a block's own emission marks first.
-///
-/// A `finally` is emitted twice: inline on the normal path, and again in the catch-all handler. The
-/// handler's entry — the `astore` that parks the in-flight exception — belongs to the finalizer it
-/// introduces, so kotlinc gives it the finalizer's FIRST line rather than the `finally` keyword's.
-/// Marking it before the store puts both copies of the finalizer on the same line, and the copy's
-/// own leading mark then deduplicates.
-pub(super) fn mark_block_entry(ir: &IrFile, block: ExprId, code: &mut CodeBuilder) {
-    let mut expression = block;
-    loop {
-        if let Some(&line) = ir.expr_lines.get(&expression) {
-            if line != 0 {
-                code.mark_line(line);
-            }
-            return;
-        }
-        let crate::ir::IrExpr::Block { stmts, value } = ir.expr(expression) else {
-            return;
-        };
-        let Some(&first) = stmts.first().or(value.as_ref()) else {
-            return;
-        };
-        expression = first;
-    }
-}
-
-/// Mark the `goto` that leaves a `try` after an inlined `finally` copy.
-///
-/// kotlinc gives that jump the `finally` block's CLOSING line: it belongs to the end of the
-/// finalizer, not to whatever statement follows the `try`. Without it the finalizer's own first
-/// line stays in effect all the way into the catch-all handler, whose identical mark then
-/// deduplicates away — so one missing entry costs two.
-pub(super) fn mark_block_exit(ir: &IrFile, block: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir.expr_end_lines.get(&block) {
-        if line != 0 {
-            code.mark_line(line);
-        }
-    }
-}
-
 impl Emitter<'_> {
+    /// Mark the line a catch-all finalizer copy's block emission marks first.
+    ///
+    /// A `finally` is emitted inline on the normal path and again at a handler entry. The exception
+    /// edge resets kotlinc's last-line state, so the handler keeps an entry even when the normal
+    /// copy ended on that same line. Mapping through the first expression's inline provenance also
+    /// gives a copied finalizer the caller line that its body uses, rather than the callee's raw line.
+    pub(super) fn mark_finalizer_handler_entry(
+        &mut self,
+        try_expression: ExprId,
+        block: ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        let mut expression = first_block_expression(self.ir, block);
+        let entry = loop {
+            if let Some(&line) = self.ir.expr_lines.get(&expression) {
+                break (line != 0).then_some((expression, line));
+            }
+            let crate::ir::IrExpr::Block { stmts, value } = self.ir.expr(expression) else {
+                break None;
+            };
+            let Some(&first) = stmts.first().or(value.as_ref()) else {
+                break None;
+            };
+            expression = first;
+        };
+        if let Some((expression, line)) = entry {
+            self.note_inlined_expression(expression, code);
+            let line = self.mapped_expression_line(expression, line);
+            // A handler reopens the finalizer's line after a preceding, different `try` line even
+            // when the normal-path finalizer left that same line in effect. An entirely one-line
+            // `try { ... } finally { ... }` has no line transition at all, and kotlinc keeps only
+            // the entry at pc 0 instead of repeating it at the catch-all handler.
+            if self.ir.expr_source_lines.get(&try_expression).copied()
+                == self.ir.expr_lines.get(&expression).copied()
+            {
+                code.mark_line(line);
+            } else {
+                code.mark_control_entry_line(line);
+            }
+        }
+    }
+
     /// Mark the actual return instruction after any active `finally` blocks have run.
     ///
     /// An implicit expression-body return uses the body's closing line. An explicit return uses
@@ -89,9 +116,11 @@ impl Emitter<'_> {
     /// while this JVM boundary maps it through the enclosing class's source map like every other
     /// copied expression.
     pub(super) fn mark_return(&mut self, returned: ExprId, code: &mut CodeBuilder) {
-        if let Some(line) = self
-            .ir
-            .implicit_return_end_line(returned)
+        let implicit_end = self.ir.implicit_return_end_line(returned).filter(|_| {
+            !matches!(self.ir.expr(returned), IrExpr::Return(Some(value))
+                if super::safe_calls::is_safe_call_result(self.ir, *value))
+        });
+        if let Some(line) = implicit_end
             .or_else(|| self.ir.expr_source_lines.get(&returned).copied())
             .or_else(|| self.ir.expr_lines.get(&returned).copied())
         {
@@ -99,11 +128,13 @@ impl Emitter<'_> {
         }
     }
 
-    /// Mark one expression line, mapping a same-file inline copy through the class's SMAP. Common
-    /// IR supplies the semantic declaration owner and call line; this boundary chooses JVM source
-    /// paths and output line numbers.
+    /// Mark one expression line, mapping a same-module inline copy through the class's SMAP. Common
+    /// IR supplies the semantic declaration owner, the callee's source file, and the call line;
+    /// this boundary chooses JVM source paths and output line numbers.
     pub(super) fn mark_expression_start(&mut self, expression: ExprId, code: &mut CodeBuilder) {
-        if self.ir.callable_scopes.contains(&expression) {
+        if self.ir.callable_scopes.contains(&expression)
+            || self.ir.dispatch_line(expression).is_some()
+        {
             return;
         }
         let Some(&line) = self.ir.expr_source_lines.get(&expression) else {
@@ -112,46 +143,161 @@ impl Emitter<'_> {
         self.mark_expression_line(expression, line, code);
     }
 
+    /// Mark `line`, mapping an inline copy through the class SMAP. Returns the line written into
+    /// the `LineNumberTable` (the mapped output line when a map answers), or `0` when `line` is
+    /// `0` and nothing is marked.
     pub(super) fn mark_expression_line(
         &mut self,
         expression: ExprId,
         line: u32,
         code: &mut CodeBuilder,
-    ) {
+    ) -> u32 {
         if line == 0 {
-            return;
+            return 0;
         }
-        let Some(provenance) = self.ir.inline_copy_provenance(expression) else {
-            code.mark_line(line);
-            return;
+        self.note_inlined_expression(expression, code);
+        let line = self.mapped_expression_line(expression, line);
+        code.mark_line(line);
+        line
+    }
+
+    /// An inline copy sorts its exception table the way kotlinc's inliner does. The flag follows
+    /// the expression, so a mapped line and a finalizer handler that reopens the same line both
+    /// record it.
+    fn note_inlined_expression(&self, expression: ExprId, code: &mut CodeBuilder) {
+        let inlined = self.ir.external_frame_lines.contains_key(&expression)
+            || self.ir.inline_synthetic_lines.contains(&expression)
+            || self
+                .ir
+                .inline_copy_provenance(expression)
+                .is_some_and(|provenance| provenance.iter().any(|frame| frame.call_line.is_some()));
+        if inlined {
+            code.note_inlined_bytecode();
+        }
+    }
+
+    fn mapped_expression_line(&mut self, expression: ExprId, line: u32) -> u32 {
+        // A line of an external inline declaration's own body maps through the class's SMAP under
+        // the call that expanded it (kotlinc's `mapLineNumber` for the inline interval).
+        if let Some(frame) = self.ir.external_frame_lines.get(&expression).cloned() {
+            return self.map_external_frame_line(&frame);
+        }
+        // An `@InlineOnly` expansion's lambda marker separates the call's line from a lambda body
+        // starting on that same line with the target's synthetic inline line (kotlinc's
+        // `mapSyntheticLineNumber(1)`, recorded as `fake.kt`).
+        if self.ir.inline_synthetic_lines.contains(&expression) {
+            let claimable = u16::try_from(self.ir.source_line_count)
+                .unwrap_or(u16::MAX)
+                .max(1);
+            if let Some(synthetic) = self
+                .cw
+                .source_map_for_inlining(claimable)
+                .and_then(|map| map.map_synthetic_line(1))
+            {
+                return u32::from(synthetic);
+            }
+        }
+        // The source line stays the declaration's raw line. A nested same-module expansion has
+        // several semantic frames, but this physical copy is emitted from the outermost body;
+        // kotlinc maps that raw line under the outer call instead of recursively feeding an inner
+        // synthetic output line back into the same source map.
+        let Some(frame) = self
+            .ir
+            .inline_copy_provenance(expression)
+            .and_then(|provenance| {
+                provenance
+                    .iter()
+                    .rev()
+                    .find(|frame| frame.call_line.is_some())
+            })
+            .copied()
+        else {
+            return line;
         };
-        let Some(call_line) = provenance.call_line else {
-            code.mark_line(line);
-            return;
+        let call_line = frame
+            .call_line
+            .expect("an inline frame with a call line was selected");
+        let Some((source_file, path)) =
+            self.copied_inline_file(frame.function, frame.owner, frame.source)
+        else {
+            return line;
         };
-        let Some(source_file) = self.cw.source_file_name() else {
-            code.mark_line(line);
-            return;
-        };
-        let path = provenance.owner.map_or_else(
-            || self.facade.clone(),
-            |owner| crate::jvm::names::classfile_internal_name_of(owner).to_owned(),
-        );
         let claimable = u16::try_from(self.ir.source_line_count)
             .unwrap_or(u16::MAX)
             .max(1);
-        let mapped = self.cw.source_map_for_inlining(claimable).and_then(|map| {
-            map.map_copied_line(
-                &source_file,
-                &path,
-                u16::try_from(line).unwrap_or(u16::MAX),
-                Some(u16::try_from(call_line).unwrap_or(u16::MAX)),
-            )
-        });
-        match mapped {
-            Some(line) => code.mark_line(line.into()),
-            None => code.mark_line(line),
+        self.cw
+            .source_map_for_inlining(claimable)
+            .and_then(|map| {
+                map.map_copied_line(
+                    &source_file,
+                    &path,
+                    u16::try_from(line).unwrap_or(u16::MAX),
+                    Some(u16::try_from(call_line).unwrap_or(u16::MAX)),
+                )
+            })
+            .map_or(line, u32::from)
+    }
+
+    /// The source file and JVM path a copied inline line is mapped under.
+    ///
+    /// A top-level callee uses the exact facade already resolved for its declaration. A member uses
+    /// its semantic classifier. Same-file top-level code uses the current facade.
+    fn copied_inline_file(
+        &self,
+        function: crate::ir::FunId,
+        owner: Option<crate::types::TypeName>,
+        source: crate::fir::SourceFileId,
+    ) -> Option<(String, String)> {
+        let identity = self.ir.source_debug.file(source)?;
+        let path = owner.map_or_else(
+            || {
+                if self.ir.source_debug.is_current(source) {
+                    Some(self.facade.clone())
+                } else {
+                    self.ir.foreign_template_facade(function).map(|facade| {
+                        crate::jvm::names::classfile_internal_name_of(facade).to_owned()
+                    })
+                }
+            },
+            |owner| Some(crate::jvm::names::classfile_internal_name_of(owner).to_owned()),
+        )?;
+        Some((identity.name.to_string(), path))
+    }
+
+    /// Mark the `goto` that leaves a `try` after an inlined `finally` copy, through the class
+    /// SMAP when the finalizer is an inline copy.
+    ///
+    /// kotlinc gives that jump the `finally` block's closing line. Without it the finalizer's own
+    /// first line stays in effect into the catch-all handler, whose identical mark can then
+    /// deduplicate away.
+    pub(super) fn mark_block_exit(&mut self, block: ExprId, code: &mut CodeBuilder) {
+        if let Some(&line) = self.ir.expr_end_lines.get(&block) {
+            if line != 0 {
+                self.mark_expression_line(block, line, code);
+            }
         }
+    }
+
+    /// Map a line of an external inline declaration's body through the class's source map, under
+    /// the call that expanded it; the raw line when no map answers.
+    pub(super) fn map_external_frame_line(
+        &mut self,
+        frame: &crate::ir::IrExternalFrameLine,
+    ) -> u32 {
+        let claimable = u16::try_from(self.ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        self.cw
+            .source_map_for_inlining(claimable)
+            .and_then(|map| {
+                map.map_line(
+                    &frame.file,
+                    &frame.path,
+                    u16::try_from(frame.line).unwrap_or(u16::MAX),
+                    u16::try_from(frame.call_line).unwrap_or(u16::MAX),
+                )
+            })
+            .map_or(frame.line, u32::from)
     }
 
     pub(super) fn has_retained_mapped_inline_unit_line(&self, expression: ExprId) -> bool {
@@ -159,7 +305,7 @@ impl Emitter<'_> {
             && self
                 .ir
                 .inline_copy_provenance(expression)
-                .is_some_and(|provenance| provenance.call_line.is_some())
+                .is_some_and(|provenance| provenance.iter().any(|frame| frame.call_line.is_some()))
             && self.ir.expr_source_lines.contains_key(&expression)
     }
 
@@ -239,7 +385,7 @@ impl Emitter<'_> {
     /// - `IrExpr::InvokeFunction` — a function value's `FunctionN.invoke`;
     /// - `IrExpr::EnumValueOf` — the member `E.valueOf` realization;
     /// - a property read or write whose accessor is a real method, not a field access;
-    /// - the intrinsics whose lowering IS a call: `PrimitiveCompare`'s `Integer.compare`,
+    /// - the intrinsics whose lowering IS a call: `PrimitiveCompare`'s `Intrinsics.compare`,
     ///   `String.get`'s `charAt`.
     ///
     /// Deliberately NOT dispatches: an array read or write, a field read or write, an arithmetic
@@ -256,19 +402,30 @@ impl Emitter<'_> {
     }
 
     /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in
-    /// place (`SyntheticOriginKind::InlinedCall`).
+    /// place (`SyntheticOriginKind::InlinedCall`), and after an external-inline expansion lowered
+    /// from its declaration plan.
     ///
     /// Inside a condition the line in effect is written again at once, for the jump that follows;
     /// anywhere else it is forgotten, so the next mark of any line is written — kotlinc resets its
     /// last line number after an inlined body, which ran under the callee's lines.
     pub(super) fn mark_after_inlined_call(&self, expression: ExprId, code: &mut CodeBuilder) {
-        let Some(IrNodeOrigin::Synthetic {
-            kind: SyntheticOriginKind::InlinedCall,
-            ..
-        }) = self.ir.fir_origins.get(&expression)
-        else {
+        let inlined = self.ir.external_inline_expansions.contains(&expression)
+            || matches!(
+                self.ir.fir_origins.get(&expression),
+                Some(IrNodeOrigin::Synthetic {
+                    kind: SyntheticOriginKind::InlinedCall,
+                    ..
+                })
+            );
+        if !inlined {
             return;
-        };
+        }
+        if self.ir.inline_result_adaptation_restores_caller(expression) {
+            // The real checkcast/unbox instruction already restored the caller line. Leave it in
+            // effect for a following store or conditional jump; writing it again at that consumer
+            // would add a LineNumberTable entry kotlinc does not emit.
+            return;
+        }
         match code.current_line() {
             Some(line) if self.inside_condition => code.inlined_line(line),
             _ => code.forget_line(),

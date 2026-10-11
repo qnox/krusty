@@ -20,6 +20,10 @@ pub enum SyntheticOriginKind {
     /// An implicit context argument a call passes. kotlinc builds it without source offsets, so it
     /// carries no line of its own: the call's line is marked at its dispatch.
     ContextArgument,
+    /// An operand a compiler plugin's expression plan composes from a frontend-selected
+    /// declaration rather than from source syntax, such as the companion accessor call that
+    /// supplies kotlinx's `serializer<T>()`. It belongs to the planned expression's line.
+    PluginOperand,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +64,19 @@ impl OriginStore {
 
     pub fn get(&self, id: OriginId) -> Option<Origin> {
         self.origins.get(id.raw() as usize).copied()
+    }
+
+    /// The source occurrence that ultimately caused `id`.
+    ///
+    /// A synthetic origin can only name an origin already stored by [`Self::synthetic`], so this
+    /// chain is finite by construction and needs no arbitrary traversal limit.
+    pub fn source_span(&self, mut id: OriginId) -> Option<(SourceFileId, Span)> {
+        loop {
+            match self.get(id)? {
+                Origin::Source { file, span } => return Some((file, span)),
+                Origin::Synthetic { cause, .. } => id = cause,
+            }
+        }
     }
 
     pub fn len(&self) -> usize {

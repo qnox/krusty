@@ -1,0 +1,7 @@
+A mapping in the list.
+--- project.yaml
+modules:
+  - a: b
+  - libs/a
+--- libs/a/module.yaml
+product: jvm/lib

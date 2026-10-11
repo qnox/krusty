@@ -9,6 +9,7 @@ use crate::ir::{
     IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
+pub(super) use crate::metadata::declaration_records::{parameter_name as metadata, DESTRUCTURED};
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
 pub(super) fn local_variable(
@@ -48,6 +49,7 @@ pub(super) fn local_variable(
         IrParameterRole::Generated(role) => match role {
             IrGeneratedParameterRole::Positional { .. } => None,
             IrGeneratedParameterRole::Continuation => Some("$completion".to_string()),
+            IrGeneratedParameterRole::ContinuationResult => Some("$result".to_string()),
             IrGeneratedParameterRole::ContinuationDispatchReceiver => Some("this$0".to_string()),
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
             // kotlinc names the parameter like the field it initializes.
@@ -64,6 +66,10 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::FunctionInvokeValue { ordinal } => {
                 Some(format!("p{}", ordinal + 1))
             }
+            IrGeneratedParameterRole::SamAdapterCapture { ordinal } => {
+                Some(format!("$tmp{ordinal}"))
+            }
+            IrGeneratedParameterRole::SamAdapterValue { ordinal } => Some(format!("p{ordinal}")),
             IrGeneratedParameterRole::SuspendLambdaCreateValue => Some("value".to_string()),
             IrGeneratedParameterRole::InterfaceDelegationValue { ordinal } => {
                 Some(format!("p{ordinal}"))
@@ -84,6 +90,17 @@ pub(super) fn reference_invoke_bridge_parameter(ordinal: u16, continuation: bool
         return "$completion".to_string();
     }
     format!("p{}", ordinal + 1)
+}
+
+/// The local created when an inline callable-reference invocation binds one adapter parameter.
+/// Constructing the common identity here keeps the JVM spelling in the one projection boundary.
+pub(super) fn inline_callable_reference_parameter(ordinal: u32) -> String {
+    let identity = IrParameterIdentity::generated(
+        IrGeneratedParameterRole::ReferenceInvokeValue { ordinal },
+        None,
+    );
+    local_variable(&identity, "")
+        .expect("an inline callable-reference parameter has a generated JVM name")
 }
 
 /// `LocalVariableTable` names of a suspend lambda class's generated `member`, formatted from the
@@ -165,6 +182,18 @@ fn anonymous_context_parameters_are_locals() -> bool {
     crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
 }
 
+/// kotlinc's spelling of the extension receiver of a value class's interface entry. The entry is a
+/// fresh member on the box under its own JVM name (`f-<hash>`, `getC`) that keeps its receiver as
+/// an extension receiver, so the receiver is labeled after that name with its non-identifier
+/// characters escaped (`$this$f_u2d<hash>`), never after the source declaration or its property.
+/// Its local-variable row and its `MethodParameters` name agree.
+pub(super) fn value_class_interface_entry_receiver(entry_name: &str) -> String {
+    format!(
+        "$this${}",
+        crate::jvm::debug_local_names::escaped(entry_name)
+    )
+}
+
 /// kotlinc's spelling of a source lambda's extension receiver: `$this$<label>` after the lambda's
 /// label, and `<this>` for a lambda without one.
 pub(super) fn lambda_receiver(origin: &crate::ir::IrLambdaOrigin) -> String {
@@ -191,6 +220,17 @@ fn function_local_variable(
         return Some(name);
     }
     if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
+        if let Some(lambda) = ir.classes.iter().find_map(|class| {
+            class
+                .lambda
+                .as_ref()
+                .filter(|lambda| lambda.invoke == function)
+        }) {
+            return Some(match lambda.extension_receiver_label.as_deref() {
+                Some(label) => format!("$this${}", super::debug_local_names::escaped(label)),
+                None => "<this>".to_string(),
+            });
+        }
         // Only a source lambda's implementation takes an extension receiver among the functions
         // with lambda parameters; a generated adapter passes its receiver as a value.
         if ir.lambda_own_params_from.contains_key(&function) {
@@ -199,6 +239,14 @@ fn function_local_variable(
                 .get(&function)
                 .expect("a lambda's extension receiver belongs to a source lambda");
             return Some(lambda_receiver(origin));
+        }
+        // kotlinc names the receiver after the function's IR name when it writes the method. A
+        // local function has its lifted name by then (`top$wrap`), mangled for a JVM local.
+        if let Some(lifted) = ir.lifted_names.get(&function) {
+            return Some(format!(
+                "$this${}",
+                super::debug_local_names::escaped(lifted)
+            ));
         }
         let source_name = ir
             .fn_source_names
@@ -219,60 +267,6 @@ fn function_local_variable(
         }
     }
     local_variable(identity, "")
-}
-
-/// The name source wrote for a setter's value parameter, which Kotlin metadata records. The final
-/// semantic parameter is the setter value by the accessor contract; its typed IR identity
-/// distinguishes a written name from the compiler-generated implicit setter value.
-pub(super) fn explicit_setter(ir: &IrFile, setter: Option<u32>) -> Option<String> {
-    let identity = ir.function_parameter_identities(setter?)?.last()?;
-    (identity.role == IrParameterRole::Value
-        && identity.provenance == crate::ir::IrParameterProvenance::SourceDeclared)
-        .then(|| metadata(identity).map(str::to_owned))
-        .flatten()
-}
-
-/// Kotlin metadata accepts only a declaration/producer-published semantic name. A lambda's `_`
-/// parameter, which declares no name, is kotlinc's `<unused var>` like an anonymous context
-/// parameter; a destructuring one is `<destruct>`.
-pub(super) fn metadata(identity: &IrParameterIdentity) -> Option<&str> {
-    match identity.role {
-        IrParameterRole::AnonymousContextParameter { .. } | IrParameterRole::UnusedValue => {
-            Some("<unused var>")
-        }
-        IrParameterRole::DestructuredValue => Some(DESTRUCTURED),
-        _ => identity.source_name.as_deref(),
-    }
-}
-
-/// Kotlin metadata name for a parameter. Source names remain borrowed; a compiler-generated
-/// delegation parameter is formatted here, at the JVM boundary, from its recorded semantic role.
-pub(super) fn metadata_owned(identity: &IrParameterIdentity) -> Option<String> {
-    match identity.role {
-        IrParameterRole::Generated(IrGeneratedParameterRole::InterfaceDelegationValue {
-            ordinal,
-        }) => Some(format!("p{ordinal}")),
-        _ => metadata(identity).map(str::to_owned),
-    }
-}
-
-/// Kotlin's special name for a parameter written as a destructuring declaration. A suspend lambda's
-/// body also reads the parameter back into a local of this name.
-pub(super) const DESTRUCTURED: &str = "<destruct>";
-
-pub(super) fn metadata_context_kind(
-    identity: &IrParameterIdentity,
-) -> crate::types::ContextParameterKind {
-    match identity.role {
-        IrParameterRole::ContextValue => crate::types::ContextParameterKind::Named,
-        IrParameterRole::AnonymousContextParameter { .. } => {
-            crate::types::ContextParameterKind::Anonymous
-        }
-        IrParameterRole::ContextReceiver { .. } => {
-            crate::types::ContextParameterKind::LegacyReceiver
-        }
-        _ => panic!("a metadata context prefix must retain its semantic role"),
-    }
 }
 
 /// Name of one Java-reflection `MethodParameters` entry.
@@ -666,6 +660,29 @@ pub(super) fn resolved_local_variable(
     }
 }
 
+/// Local-variable spellings of a bridge. A named overridden parameter keeps that declaration's
+/// spelling. An unnamed parameter — a Java binary declaration publishes none — is kotlinc's
+/// positional `pN` in this table only. The ordinal is the recorded identity, not a descriptor
+/// reconstruction, and it does not become a source or reflection name.
+pub(super) fn bridge_local_variables(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    resolved_local_variables(identities, semantic_types, function_name)
+        .into_iter()
+        .zip(identities)
+        .map(|(name, identity)| {
+            name.or_else(|| match identity {
+                crate::fir::ResolvedParameterIdentity::Unnamed { ordinal } => {
+                    Some(format!("p{ordinal}"))
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
+
 /// Local-variable spellings for a provider-published parameter list. Anonymous context labels are
 /// derived from the declaration's semantic types, never from erased bridge descriptors.
 pub(super) fn resolved_local_variables(
@@ -673,6 +690,11 @@ pub(super) fn resolved_local_variables(
     semantic_types: &[crate::types::Ty],
     function_name: &str,
 ) -> Vec<Option<String>> {
+    assert_eq!(
+        identities.len(),
+        semantic_types.len(),
+        "one semantic type per provider-published parameter identity"
+    );
     let anonymous = if anonymous_context_parameters_are_locals() {
         resolved_anonymous_context_labels(identities, semantic_types)
     } else {
@@ -733,6 +755,14 @@ pub(super) fn dependency_access_bridge_local_variables(
             }
         })
         .collect()
+}
+
+/// Kotlin's generated local name for a specialized inherited-collection delegate parameter.
+///
+/// The bridge plan supplies the metadata declaration's complete arity and records this generated
+/// identity before emission; classfile emission never recovers it from a descriptor.
+pub(super) fn inherited_collection_specialized_local(ordinal: usize) -> String {
+    format!("p{ordinal}")
 }
 
 fn resolved_anonymous_context_labels(
@@ -857,6 +887,7 @@ mod tests {
                 receiver_parameter: None,
                 label: None,
                 form: IrLambdaForm::Literal,
+                explicit_suspend: false,
                 class_provenance: None,
             },
         );
@@ -944,7 +975,6 @@ mod tests {
             Some("p2".to_string())
         );
         assert_eq!(metadata(&generated), None);
-        assert_eq!(metadata_owned(&generated), Some("p2".to_string()));
     }
 
     #[test]
@@ -975,6 +1005,7 @@ mod tests {
             receiver_parameter: Some(0),
             label: label.map(str::to_owned),
             form: crate::ir::IrLambdaForm::Literal,
+            explicit_suspend: false,
             class_provenance: None,
         };
 
@@ -1148,6 +1179,41 @@ mod tests {
                 Some("p2".to_string()),
                 Some("$completion".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn bridge_locals_format_only_an_unnamed_identity_positionally() {
+        use crate::fir::ResolvedParameterIdentity;
+        use crate::types::Ty;
+
+        assert_eq!(
+            bridge_local_variables(
+                &[
+                    ResolvedParameterIdentity::Source("named".into()),
+                    ResolvedParameterIdentity::Unnamed { ordinal: 1 },
+                ],
+                &[Ty::String, Ty::String],
+                "map",
+            ),
+            vec![Some("named".to_string()), Some("p1".to_string())]
+        );
+        assert_eq!(
+            resolved_local_variable(&ResolvedParameterIdentity::Unnamed { ordinal: 1 }, "map"),
+            None,
+            "the generic provider projection remains unnamed"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "one semantic type per provider-published parameter identity")]
+    fn resolved_provider_parameter_names_reject_a_mismatched_semantic_arity() {
+        resolved_local_variables(
+            &[crate::fir::ResolvedParameterIdentity::Source(
+                "value".into(),
+            )],
+            &[],
+            "inspect",
         );
     }
 }

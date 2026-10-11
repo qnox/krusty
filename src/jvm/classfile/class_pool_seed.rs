@@ -6,9 +6,9 @@ use super::*;
 impl ClassWriter {
     /// Pre-intern the primary constructor's HEADER in kotlinc/ASM's visit order: name, descriptor,
     /// generic `Signature`, its own annotations, then its parameter annotations. ASM interns a
-    /// method's header before its body, while krusty builds the body first; the body itself then
-    /// interns naturally, since the constructor is the first method krusty emits. Call BEFORE any
-    /// `add_field`/`add_method` for the class.
+    /// method's header before its body, while krusty builds the body first. Call at the constructor's
+    /// actual method-schedule position: before all methods for ordinary classes, but after the
+    /// declared methods that precede a value class's private constructor.
     pub fn seed_plain_class_pool(
         &mut self,
         ctor_desc: &str,
@@ -82,6 +82,27 @@ impl ClassWriter {
         }
         if let Some(desc) = default_marker_desc {
             self.cp.utf8(desc);
+        }
+        // These strings are the constructor's. Its pool range was closed when the method was
+        // added, before they existed, so the next method's range began here. A rewrite of that
+        // method then owned them, and the layout moved a constructor local to that method's first
+        // remaining use — after `LocalVariableTable` — whenever the rewritten body no longer named
+        // the entry. Extending the constructor's range keeps the locals where this seed put them.
+        self.include_latest_method_pool();
+    }
+
+    /// The method just added owns every constant interned through now.
+    ///
+    /// [`Self::add_method_sig`] records the pool size before a constructor's local-variable strings
+    /// are seeded. The following method must not inherit that gap.
+    fn include_latest_method_pool(&mut self) {
+        let end = self.cp.slot_count();
+        if let Some(source) = self
+            .methods
+            .last_mut()
+            .and_then(|method| method.rewrite_source.as_deref_mut())
+        {
+            source.pool_end = Some(end);
         }
     }
 }

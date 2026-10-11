@@ -1141,7 +1141,7 @@ struct WorkerHost {
 
 impl WorkerHost {
     fn new(mut worker: AnalysisWorker, options: LspOptions) -> Self {
-        worker.set_language_features(options.language_features());
+        worker.set_language_settings(options.language_settings());
         let platform_classpath =
             krusty_lsp::effective_platform_classpath(options.jdk_home(), options.no_jdk());
         Self {
@@ -1240,8 +1240,23 @@ impl WorkerHost {
                 self.workspace_inventory = None;
                 self.truncated_inventory = false;
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
-                let mut language_features = sync.project_language_features();
-                self.options.apply_language_features(&mut language_features);
+                let language =
+                    match sync.project_language_settings(self.options.language_arguments()) {
+                        Ok(language) => language,
+                        Err(error) => {
+                            sync.rollback_snapshot(previous_snapshot);
+                            return ProjectFeedback {
+                                reanalyze: false,
+                                message: Some((
+                                    ProjectMessageKind::Error,
+                                    format!(
+                                    "krusty: the project's language settings are refused: {error}"
+                                ),
+                                )),
+                                logs: Vec::new(),
+                            };
+                        }
+                    };
                 let logs = Self::describe_model(
                     sync.kind(),
                     sync.model().map_or(0, |model| model.modules.len()),
@@ -1274,7 +1289,7 @@ impl WorkerHost {
                     jdk_home.as_deref(),
                     self.options.no_jdk(),
                 );
-                self.worker.set_language_features(language_features);
+                self.worker.set_language_settings(language);
                 ProjectFeedback {
                     reanalyze: true,
                     message: self.jdk_warning(jdk_home.is_some()),

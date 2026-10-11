@@ -73,7 +73,7 @@ pub(super) fn signature_from_resolved_function(function: &FunctionInfo) -> Signa
             .with_is_suspend(function.flags.suspend)
             .with_has_reified_type_params(function.flags.reified)
             .with_requires_splice(function.flags.inline.must_inline()),
-        annotations: function.annotations.clone(),
+        annotations: function.callable.annotations.clone(),
         equality_bound: function.callable.equality_bound,
         vararg_index: function.call_sig.vararg_index,
         required: function.call_sig.required,

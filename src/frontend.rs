@@ -3,6 +3,7 @@
 //! Source analysis: lexing, parsing, signature collection, and checking.
 
 use crate::ast::File;
+use crate::compilation_target::CompilationTarget;
 use crate::diag::{DiagSink, Severity, Span};
 use crate::features::LangFeatures;
 pub use crate::fir::DeclarationId as FrontendDeclarationId;
@@ -18,6 +19,8 @@ pub(crate) use local_class_names::{settle_generated_class_names, SettledGenerate
 mod local_function_names;
 mod no_expect_for_actual;
 mod retained_syntax;
+#[cfg(test)]
+pub(crate) use crate::resolve::collect_signatures;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub(crate) use crate::resolve::DeclaredPropertySig as FrontendDeclaredPropertySig;
@@ -26,9 +29,8 @@ pub(crate) use crate::resolve::Signature;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
-    check_file, check_file_at, check_file_in_source_set, collect_signatures,
-    collect_signatures_with_cp, AnonymousObjectCapture, AnonymousObjectCaptureSource,
-    CompoundAssignmentTarget, SourceConstructorMatcher,
+    AnonymousObjectCapture, AnonymousObjectCaptureSource, CompoundAssignmentTarget,
+    SourceConstructorMatcher,
 };
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
@@ -40,6 +42,8 @@ pub use crate::source::{SourceInput, SourceKind};
 /// returns those vectors empty after inline FIR preparation; Pass 2 reparses through
 /// `reparse_sources` and never observes the Pass-1 arenas.
 pub struct SourceSetAnalysis {
+    /// The platform whose rules the source set was checked under.
+    pub target: CompilationTarget,
     pub files: Vec<File>,
     pub symbols: FrontendSymbols,
     pub types: Vec<Option<FrontendTypeInfo>>,
@@ -54,6 +58,9 @@ pub struct SourceSetAnalysis {
 /// the Pass-1 signature graph.  A successful value owns only the external semantic platform, the
 /// finalized FIR module, and the source text that the driver will sequentially reparse in Pass 2.
 pub struct StreamingSourceSetAnalysis {
+    /// The platform whose rules the source set was checked under; only a backend for the same
+    /// platform may consume it.
+    pub(crate) target: CompilationTarget,
     pub(crate) symbols: crate::resolve::PassTwoSymbols,
     pub(crate) reparse_sources: Vec<ReparseSource>,
     pub(crate) streamed: Option<StreamedPassState>,
@@ -62,6 +69,7 @@ pub struct StreamingSourceSetAnalysis {
 impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
     fn from(analysis: SourceSetAnalysis) -> Self {
         let SourceSetAnalysis {
+            target,
             files,
             symbols,
             types,
@@ -74,6 +82,7 @@ impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
         drop(parse_errors);
         let symbols = symbols.into_pass_two_symbols();
         Self {
+            target,
             symbols,
             reparse_sources,
             streamed,
@@ -131,6 +140,10 @@ impl ReparseSource {
 
     pub(crate) fn is_java(&self) -> bool {
         self.kind == SourceKind::Java
+    }
+
+    pub(crate) fn recursive_type_of(&self) -> bool {
+        self.features.has("JvmSupportRecursiveTypeOf")
     }
 
     /// Run the ordinary checker during Pass 2 when Pass 1 published only a partial semantic index.
@@ -265,40 +278,71 @@ fn actualize_headers_and_collect_inherited_defaults(
     // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
     // where a name-and-arity key cannot.
     let actualized_targets = pairs.iter().map(|pair| pair.actual).collect();
-    let inherited_defaults = pairs
-        .into_iter()
-        .filter_map(|pair| {
-            let source_parameters = match headers.syntax.declaration(pair.expect)?.kind {
-                crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
-                | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
-                _ => return None,
-            };
-            let target_parameters = match headers.syntax.declaration(pair.actual)?.kind {
-                crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
-                | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
-                _ => return None,
-            };
-            let defaults = headers
-                .syntax
-                .parameters(source_parameters)
-                .iter()
-                .map(|parameter| parameter.flags.has_default())
-                .collect::<Vec<_>>();
-            (headers.syntax.parameters(target_parameters).len() == defaults.len()
-                && defaults.iter().any(|default| *default))
-            .then_some((pair, target_parameters, defaults))
-        })
-        .collect::<Vec<_>>();
-    let work = inherited_defaults
-        .iter()
-        .map(|(pair, _, _)| crate::fir::DefaultArgumentProvider {
-            target: pair.actual,
-            provider: pair.expect,
-            relation: crate::fir::DefaultArgumentRelation::ActualizedDeclaration,
-        })
-        .collect::<Vec<_>>();
-    for (_, parameters, defaults) in inherited_defaults {
-        headers.syntax.set_parameter_defaults(parameters, &defaults);
+    let mut work = Vec::new();
+    for pair in pairs {
+        let Some(source_declaration) = headers.syntax.declaration(pair.expect) else {
+            continue;
+        };
+        let source_parameters = match source_declaration.kind {
+            crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
+            | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
+            _ => continue,
+        };
+        let Some(target_declaration) = headers.syntax.declaration(pair.actual) else {
+            continue;
+        };
+        let target_parameters = match target_declaration.kind {
+            crate::fir::HeaderDeclarationKind::Callable { parameters, .. }
+            | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
+            _ => continue,
+        };
+        let expect_defaults = headers
+            .syntax
+            .parameters(source_parameters)
+            .iter()
+            .map(|parameter| parameter.flags.has_default())
+            .collect::<Vec<_>>();
+        let actual_defaults = headers
+            .syntax
+            .parameters(target_parameters)
+            .iter()
+            .map(|parameter| parameter.flags.has_default())
+            .collect::<Vec<_>>();
+        if expect_defaults.len() != actual_defaults.len()
+            || !expect_defaults.iter().any(|default| *default)
+        {
+            continue;
+        }
+        let merged = expect_defaults
+            .iter()
+            .zip(&actual_defaults)
+            .map(|(expect_default, actual_default)| *expect_default || *actual_default)
+            .collect::<Vec<_>>();
+        headers
+            .syntax
+            .set_parameter_defaults(target_parameters, &merged);
+
+        if actual_defaults.iter().any(|default| *default) {
+            work.push(crate::fir::DefaultArgumentProvider {
+                target: pair.actual,
+                provider: pair.actual,
+                relation: crate::fir::DefaultArgumentRelation::SameDeclaration,
+                parameters: actual_defaults.clone().into_boxed_slice(),
+            });
+        }
+        let inherited = expect_defaults
+            .iter()
+            .zip(&actual_defaults)
+            .map(|(expect_default, actual_default)| *expect_default && !*actual_default)
+            .collect::<Vec<_>>();
+        if inherited.iter().any(|default| *default) {
+            work.push(crate::fir::DefaultArgumentProvider {
+                target: pair.actual,
+                provider: pair.expect,
+                relation: crate::fir::DefaultArgumentRelation::ActualizedDeclaration,
+                parameters: inherited.into_boxed_slice(),
+            });
+        }
     }
     // Keep matched expect syntax in the active Pass-1 parser stream. Compact-header exclusion is
     // already authoritative for signature collection, while inherited defaults still need their
@@ -424,20 +468,38 @@ fn signature_default_work(
                 | crate::fir::HeaderDeclarationKind::Constructor { parameters, .. } => parameters,
                 _ => return None,
             };
-            headers
+            let defaults = headers
                 .syntax
                 .parameters(parameters)
                 .iter()
-                .any(|parameter| parameter.flags.has_default())
-                .then_some(crate::fir::DefaultArgumentProvider {
+                .map(|parameter| parameter.flags.has_default())
+                .collect::<Vec<_>>();
+            defaults
+                .iter()
+                .any(|default| *default)
+                .then(|| crate::fir::DefaultArgumentProvider {
                     target: stub.id,
                     provider: stub.id,
                     relation: crate::fir::DefaultArgumentRelation::SameDeclaration,
+                    parameters: defaults.into_boxed_slice(),
                 })
         })
         .collect::<Vec<_>>();
     work.extend_from_slice(inherited);
-    work.sort_by_key(|work| (work.provider, work.target, work.relation));
+    work.sort_by(|left, right| {
+        (
+            left.provider,
+            left.target,
+            left.relation,
+            left.parameters.as_ref(),
+        )
+            .cmp(&(
+                right.provider,
+                right.target,
+                right.relation,
+                right.parameters.as_ref(),
+            ))
+    });
     work.dedup();
     work
 }
@@ -463,10 +525,10 @@ fn inherit_override_default_work(
         .cloned()
         .collect::<Vec<_>>();
     loop {
-        let providers = work
-            .iter()
-            .map(|item| (item.target, item.provider))
-            .collect::<std::collections::HashMap<_, _>>();
+        let mut providers = std::collections::HashMap::<_, Vec<_>>::new();
+        for item in work.iter().cloned() {
+            providers.entry(item.target).or_default().push(item);
+        }
         let mut additions = Vec::new();
         for edge in &overrides {
             let (
@@ -495,24 +557,8 @@ fn inherit_override_default_work(
             else {
                 continue;
             };
-            let Some(provider) = providers.get(&overridden).copied() else {
+            let Some(inherited) = providers.get(&overridden) else {
                 continue;
-            };
-            let defaults = match headers
-                .syntax
-                .declaration(provider)
-                .map(|declaration| declaration.kind)
-            {
-                Some(crate::fir::HeaderDeclarationKind::Callable { parameters, .. })
-                | Some(crate::fir::HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                    headers
-                        .syntax
-                        .parameters(parameters)
-                        .iter()
-                        .map(|parameter| parameter.flags.has_default())
-                        .collect::<Vec<_>>()
-                }
-                _ => continue,
             };
             let target_parameters = match headers
                 .syntax
@@ -525,26 +571,53 @@ fn inherit_override_default_work(
                 }
                 _ => continue,
             };
-            if defaults.len() != headers.syntax.parameters(target_parameters).len()
-                || !defaults.iter().any(|default| *default)
+            let arity = headers.syntax.parameters(target_parameters).len();
+            if inherited
+                .iter()
+                .any(|provider| provider.parameters.len() != arity)
             {
+                continue;
+            }
+            let mut defaults = vec![false; arity];
+            for provider in inherited {
+                for (slot, supplied) in defaults.iter_mut().zip(provider.parameters.iter()) {
+                    *slot |= *supplied;
+                }
+            }
+            if !defaults.iter().any(|default| *default) {
                 continue;
             }
             headers
                 .syntax
                 .set_parameter_defaults(target_parameters, &defaults);
-            additions.push(crate::fir::DefaultArgumentProvider {
-                target,
-                provider,
-                relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
-            });
+            additions.extend(inherited.iter().map(|provider| {
+                crate::fir::DefaultArgumentProvider {
+                    target,
+                    provider: provider.provider,
+                    relation: crate::fir::DefaultArgumentRelation::InheritedOverride,
+                    parameters: provider.parameters.clone(),
+                }
+            }));
         }
         if additions.is_empty() {
             break;
         }
         work.extend(additions);
     }
-    work.sort_by_key(|item| (item.provider, item.target, item.relation));
+    work.sort_by(|left, right| {
+        (
+            left.provider,
+            left.target,
+            left.relation,
+            left.parameters.as_ref(),
+        )
+            .cmp(&(
+                right.provider,
+                right.target,
+                right.relation,
+                right.parameters.as_ref(),
+            ))
+    });
     work.dedup();
 }
 
@@ -643,8 +716,11 @@ pub fn analyze_source_set_with_features(
     )
 }
 
-/// What a source set is analyzed against: the semantic platform and the native compiler plugins the
-/// compilation runs.
+/// What a source set is analyzed against: the compilation target whose rules apply, the semantic
+/// platform that supplies library declarations, and the native compiler plugins the compilation runs.
+///
+/// The target is required: a caller names it when it builds the request, and the backend that
+/// consumes the analysis must be for the same target (see [`crate::compiler::emit_analyzed`]).
 ///
 /// The platform is either fully constructed or a terminal initialization diagnostic. The failed
 /// state does not implement symbol lookup and therefore cannot leak dependency corruption as
@@ -654,11 +730,31 @@ pub fn analyze_source_set_with_features(
 /// (the CLI from kotlinc's `-Xplugin`/`-P` switches): kotlinc synthesizes nothing for a plugin it was
 /// not given, so a `@Serializable` class gets no serializer without the serialization plugin.
 pub struct PlatformProvider {
+    target: CompilationTarget,
     platform: Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
     native_plugins: NativePlugins,
 }
 
 impl PlatformProvider {
+    /// Analyze for `target` against the library declarations of `libraries`.
+    pub fn new(target: CompilationTarget, libraries: impl Into<PlatformLibraries>) -> Self {
+        Self {
+            target,
+            platform: libraries.into().0,
+            native_plugins: NativePlugins::none(),
+        }
+    }
+
+    /// Analyze for the JVM against the library declarations of `libraries`.
+    pub fn jvm(libraries: impl Into<PlatformLibraries>) -> Self {
+        Self::new(CompilationTarget::Jvm, libraries)
+    }
+
+    /// The platform whose rules this analysis checks the source set under.
+    pub fn target(&self) -> CompilationTarget {
+        self.target
+    }
+
     /// Run `native_plugins` in this analysis and in the emission that consumes it.
     pub fn with_native_plugins(self, native_plugins: NativePlugins) -> Self {
         Self {
@@ -668,16 +764,18 @@ impl PlatformProvider {
     }
 }
 
-impl From<Box<dyn SemanticPlatform>> for PlatformProvider {
+/// The library declarations an analysis resolves against, or why they could not be initialized.
+pub struct PlatformLibraries(
+    Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
+);
+
+impl From<Box<dyn SemanticPlatform>> for PlatformLibraries {
     fn from(platform: Box<dyn SemanticPlatform>) -> Self {
-        Self {
-            platform: Ok(platform),
-            native_plugins: NativePlugins::none(),
-        }
+        Self(Ok(platform))
     }
 }
 
-impl<T> From<Box<T>> for PlatformProvider
+impl<T> From<Box<T>> for PlatformLibraries
 where
     T: SemanticPlatform + 'static,
 {
@@ -686,15 +784,12 @@ where
     }
 }
 
-impl<T> From<Result<T, crate::libraries::PlatformInitializationError>> for PlatformProvider
+impl<T> From<Result<T, crate::libraries::PlatformInitializationError>> for PlatformLibraries
 where
     T: SemanticPlatform + 'static,
 {
     fn from(platform: Result<T, crate::libraries::PlatformInitializationError>) -> Self {
-        Self {
-            platform: platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>),
-            native_plugins: NativePlugins::none(),
-        }
+        Self(platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>))
     }
 }
 
@@ -763,6 +858,35 @@ where
         project_features,
         prepare_symbols,
         diags,
+    )
+}
+
+#[cfg(test)]
+/// Run the production source-set pipeline while retaining its parser-coordinate inspection views
+/// for tests that need to seed source symbols before checking. Production emission deliberately
+/// uses the non-retaining entry point above.
+pub(crate) fn analyze_source_set_with_features_and_prepare_retained<F, P>(
+    sources: &[SourceInput<'_>],
+    platform: P,
+    project_features: &LangFeatures,
+    prepare_symbols: F,
+    diags: &mut DiagSink,
+) -> SourceSetAnalysis
+where
+    F: FnOnce(&[File], &mut FrontendSymbols),
+    P: Into<PlatformProvider>,
+{
+    analyze_source_set_impl(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform.into(),
+        project_features,
+        DEFAULT_MODULE_NAME,
+        prepare_symbols,
+        diags,
+        false,
+        true,
     )
 }
 
@@ -965,6 +1089,8 @@ where
             let needs_bounded_pass_one_syntax = multiplatform
                 || has_signature_defaults(&file)
                 || retained_syntax::has_classifier_annotation_arguments(&file)
+                // File annotation policies are resolved once, after every header is collected.
+                || !file.file_annotations.is_empty()
                 || !file.type_annotation_arguments.is_empty()
                 || stubs.iter().any(|stub| {
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
@@ -1035,6 +1161,7 @@ where
         )
         .collect::<Vec<_>>();
     let PlatformProvider {
+        target,
         platform,
         native_plugins,
     } = platform;
@@ -1046,6 +1173,7 @@ where
             diags.collapse_duplicates_from(diagnostics_start);
             let types = files.iter().map(|_| None).collect();
             return SourceSetAnalysis {
+                target,
                 files: if retain_inspection_analysis {
                     files
                 } else {
@@ -1065,6 +1193,7 @@ where
         diags.collapse_duplicates_from(diagnostics_start);
         let types = files.iter().map(|_| None).collect();
         return SourceSetAnalysis {
+            target,
             files: if retain_inspection_analysis {
                 files
             } else {
@@ -1156,6 +1285,7 @@ where
             &files[inferred_count..],
             platform,
             native_plugins.clone(),
+            target,
             &mut dependency_diags,
         );
         dependency_symbols.offset_source_files(inferred_count as u32);
@@ -1182,6 +1312,7 @@ where
         &local_class_contexts[..inferred_end],
         platform,
         native_plugins,
+        target,
         diags,
     );
     if multiplatform {
@@ -1198,6 +1329,7 @@ where
     }
     prepare_symbols(&files, &mut symbols);
     crate::resolve::install_streamed_plugin_declarations(&mut pass1_headers, &mut symbols);
+    crate::resolve::check_module_import_paths(&files[..inferred_end], &symbols, diags);
     let inline_capture_selection = pass1_headers.inline_body_ranges(files.len());
     let has_inline_capture_roots = inline_capture_selection
         .roots
@@ -1291,13 +1423,14 @@ where
             diags,
         );
         crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
+        crate::resolve::publish_file_lexical_policies(&files[..inferred_end], &symbols, &mut index);
         crate::resolve::publish_named_class_constructors(
             &files[..inferred_end],
             &mut index,
             &symbols,
             diags,
         );
-        crate::resolve::publish_override_plans(&mut index, &symbols);
+        crate::resolve::publish_override_plans(&mut index, &mut symbols);
         crate::resolve::function_type_parameters::publish_function_type_parameters(
             &mut index, &symbols,
         );
@@ -1439,6 +1572,7 @@ where
     }
     diags.collapse_duplicates_from(diagnostics_start);
     let analysis = SourceSetAnalysis {
+        target,
         files: if retain_inspection_analysis {
             files
         } else {
@@ -1504,7 +1638,7 @@ fn check_source_set_skipping_with_index(
 /// Analyze a source set using only per-source feature directives.
 pub fn analyze_source_set(
     sources: &[&str],
-    platform: Box<dyn SemanticPlatform>,
+    platform: PlatformProvider,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis {
     let inputs = sources
@@ -1517,7 +1651,7 @@ pub fn analyze_source_set(
 /// Parse a single source and run signature collection plus checking against `platform`.
 pub fn analyze_source(
     src: &str,
-    platform: Box<dyn SemanticPlatform>,
+    platform: PlatformProvider,
     diags: &mut DiagSink,
 ) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
     let mut analysis = analyze_source_set(&[src], platform, diags);
@@ -1533,12 +1667,16 @@ pub fn analyze_source(
     (file, parsed.then_some(analysis.symbols), info)
 }
 
-/// Parse and check a source with no external libraries.
+/// Parse and check a source for the JVM with no external libraries.
 pub fn analyze_source_standalone(
     src: &str,
     diags: &mut DiagSink,
 ) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
-    analyze_source(src, Box::new(EmptySymbolSource), diags)
+    analyze_source(
+        src,
+        PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        diags,
+    )
 }
 
 /// Record local-class source ownership and ordering without choosing a target spelling.

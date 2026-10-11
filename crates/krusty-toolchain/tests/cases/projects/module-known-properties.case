@@ -1,0 +1,16 @@
+Every other module property, with empty values.
+--- project.yaml
+modules: [a]
+--- a/module.yaml
+product: jvm/lib
+layout: maven-like
+apply: []
+repositories: []
+dependencies: []
+test-dependencies: []
+dependencies@jvm: []
+settings: {}
+test-settings: {}
+settings@jvm: {}
+plugins: {}
+tasks: {}

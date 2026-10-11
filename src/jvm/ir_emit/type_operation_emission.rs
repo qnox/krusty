@@ -83,6 +83,10 @@ impl Emitter<'_> {
                 let arg = self.unboxed_reference_source(arg, type_operand);
                 self.emit_type_op_operand(arg, code)
             }
+            IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
+                let arg = self.instance_check_operand(arg);
+                self.emit_type_op_operand(arg, code)
+            }
             _ => self.emit_type_op_operand(arg, code),
         };
         match op {
@@ -407,18 +411,9 @@ impl Emitter<'_> {
     }
 
     /// A cast target as kotlinc's IR renderer spells it in
-    /// `null cannot be cast to non-null type …`.
+    /// `null cannot be cast to non-null type …`, where a class in the root package reads
+    /// `<root>.Token`.
     fn rendered_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, false)
-    }
-
-    /// A reified cast target as kotlinc's inliner spells it in the same message, where a class in
-    /// the root package reads `<root>.Token`.
-    pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, true)
-    }
-
-    fn rendered_cast_type(&self, ty: Ty, qualify_root_classifier: bool) -> String {
         self.ir.rendered_cast_target(
             ty,
             &|function| {
@@ -428,8 +423,13 @@ impl Emitter<'_> {
                         .unwrap_or_else(|| crate::types::type_name(&self.facade)),
                 )
             },
-            qualify_root_classifier,
+            true,
         )
+    }
+
+    /// A reified cast target the inliner substitutes renders through the same IR renderer.
+    pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
+        self.rendered_cast_target(ty)
     }
 
     fn emit_implicit_coercion(
@@ -541,6 +541,29 @@ impl Emitter<'_> {
     /// Emit a type-operation operand and return its physical stack type plus semantic scalar
     /// identity. Value and branch forms of `is`/`!is` share this boundary so unsigned/value-class
     /// boxing cannot drift between the ordinary and fused emitters.
+    /// The value an `instanceof` tests. A compiler-inserted reference narrowing of the operand (a
+    /// smart cast) is kotlinc's implicit cast, which only a consumer needing the narrowed type
+    /// materializes; `instanceof` accepts any reference, so kotlinc tests the value unnarrowed. A
+    /// written `as` keeps its `checkcast`.
+    pub(super) fn instance_check_operand(&self, mut operand: ExprId) -> ExprId {
+        while let IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg,
+            type_operand,
+        } = *self.ir.expr(operand)
+        {
+            let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
+            if !reference_target
+                || self.ir.written_casts.contains(&operand)
+                || self.value_ty(arg).is_jvm_scalar()
+            {
+                break;
+            }
+            operand = arg;
+        }
+        operand
+    }
+
     pub(super) fn emit_type_op_operand(
         &mut self,
         operand: ExprId,

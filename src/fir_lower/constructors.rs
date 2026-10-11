@@ -20,16 +20,12 @@ pub(super) fn predeclare_constructors(
     ir: &mut IrFile,
     allow_deferred_body_local: bool,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let declaration = DeclarationId::from_raw(
-            u32::try_from(raw).expect("too many stable declarations for a packed id"),
-        );
+    for declaration in super::declarations_for_lowering(index, source, inline_payload_declarations)
+    {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
         };
-        if (anchor.source != source && !inline_payload_declarations.contains(&declaration))
-            || anchor.kind != crate::fir::DeclarationKind::Constructor
-        {
+        if anchor.kind != crate::fir::DeclarationKind::Constructor {
             continue;
         }
         if ir.checked_constructor_bodies.contains_key(&declaration) {
@@ -451,8 +447,13 @@ pub(super) fn finalize_constructors(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    for raw in 0..index.declaration_count() {
-        let classifier = DeclarationId::from_raw(raw as u32);
+    let mut classifiers = ir
+        .checked_classifier_classes
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    classifiers.sort_by_key(|declaration| declaration.raw());
+    for classifier in classifiers {
         let Some(anchor) = index.declaration_anchor(classifier) else {
             continue;
         };
@@ -462,17 +463,18 @@ pub(super) fn finalize_constructors(
         let Some(class) = ir.checked_classifier_classes.get(&classifier).copied() else {
             continue;
         };
-        let primary = (0..index.declaration_count()).find_map(|raw| {
-            let declaration = DeclarationId::from_raw(raw as u32);
-            index
-                .declaration_anchor(declaration)
-                .is_some_and(|constructor| {
-                    constructor.kind == crate::fir::DeclarationKind::Constructor
-                        && constructor.owner == Some(classifier)
-                        && constructor.sibling == 0
-                })
-                .then_some(declaration)
-        });
+        let primary = index
+            .owned_declarations(classifier)
+            .iter()
+            .copied()
+            .find(|declaration| {
+                index
+                    .declaration_anchor(*declaration)
+                    .is_some_and(|constructor| {
+                        constructor.kind == crate::fir::DeclarationKind::Constructor
+                            && constructor.sibling == 0
+                    })
+            });
         ir.classes[class as usize].has_primary_ctor = primary.is_some();
         if let Some(visibility) = primary
             .and_then(|declaration| index.declaration_header(declaration))
@@ -683,7 +685,184 @@ pub(super) fn finalize_constructors(
             value: None,
         };
     }
+    push_no_arg_constructors(index, ir);
     Ok(())
+}
+
+/// The message of the `@Deprecated(level = HIDDEN)` kotlinc puts on the no-arg constructor.
+const NO_ARG_CONSTRUCTOR_HIDDEN_MESSAGE: &str = "No-arg constructor is hidden from direct usage";
+
+/// Build the zero-argument constructor of every class the frontend gave one
+/// ([`ResolvedModuleIndex::no_arg_constructor`], kotlinc's no-arg plugin), after the class's
+/// declared constructors. It delegates to the superclass constructor the frontend selected, with
+/// every parameter's default, and runs no initializer, as
+/// kotlinc's `generateNoArgConstructorBody` without `invokeInitializers`. `@Deprecated(HIDDEN)`
+/// keeps Kotlin callers from selecting it; `@java.lang.Deprecated` keeps it a public, non-synthetic
+/// method Java and frameworks can call.
+fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
+    let mut classifiers = ir
+        .checked_classifier_classes
+        .iter()
+        .filter_map(|(declaration, class)| {
+            Some((
+                *declaration,
+                *class,
+                index.no_arg_constructor(*declaration)?.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    classifiers.sort_by_key(|(declaration, _, _)| declaration.raw());
+    for (classifier, class, superclass_constructor) in classifiers {
+        // A selected constructor with parameters defaults every one; kotlinc calls it with all
+        // of them omitted, through its defaults constructor.
+        let (target, target_params, external_target) = match superclass_constructor {
+            crate::fir::NoArgSuperConstructor::Declared(constructor) => (
+                module_constructor_target(index, constructor)
+                    .expect("a selected source constructor has a published header"),
+                index
+                    .signature(constructor)
+                    .expect("a selected source constructor has a published signature")
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>(),
+                None,
+            ),
+            crate::fir::NoArgSuperConstructor::External {
+                declaration,
+                parameters,
+            } => (
+                crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                parameters.iter().map(|parameter| parameter.get()).collect(),
+                Some(crate::ir::IrExternalConstructorTarget::unresolved(
+                    declaration,
+                )),
+            ),
+            crate::fir::NoArgSuperConstructor::Unrestricted => (
+                crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                Vec::new(),
+                None,
+            ),
+        };
+        let delegate_args = target_params
+            .iter()
+            .map(|parameter| {
+                ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
+                    *parameter,
+                )))
+            })
+            .collect::<Vec<_>>();
+        let default_parameters = (0..target_params.len())
+            .map(|parameter| {
+                u32::try_from(parameter).expect("a constructor has fewer than u32::MAX parameters")
+            })
+            .collect::<Vec<_>>();
+        // kotlinc generates it in FIR: after every member the class declares and before the
+        // members lowering generates (a data class's `componentN`, `copy`, …). It takes the last
+        // declared member's place, and the member schedule keeps it after that member.
+        let source_order = index
+            .owned_declarations(classifier)
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                !index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| {
+                        header
+                            .flags
+                            .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                    })
+            })
+            .filter_map(|declaration| index.source_order(declaration))
+            .chain(index.source_order(classifier))
+            .max()
+            .unwrap_or(u32::MAX - 1);
+        let owner = &ir.classes[class as usize];
+        let superclass = owner.superclass;
+        let own = owner.fq_name;
+        // kotlinc maps the delegation to where the class declaration starts (its annotations
+        // included) and the return to the declaration's last line.
+        let (declaration_line, end_line) = (owner.decl_start_line, owner.decl_end_line);
+        let ordinal = u32::try_from(owner.secondary_ctors.len())
+            .expect("a class has fewer than u32::MAX constructors");
+        let deprecated = crate::ir::RetainedAnnotation {
+            retention: crate::types::AnnotationRetention::Runtime,
+            annotation: crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name("kotlin/Deprecated"),
+                values: vec![
+                    (
+                        "message".to_string(),
+                        crate::ir::AnnoValue::Const(crate::ir::IrConst::String(
+                            NO_ARG_CONSTRUCTOR_HIDDEN_MESSAGE.into(),
+                        )),
+                    ),
+                    (
+                        "level".to_string(),
+                        crate::ir::AnnoValue::Enum(
+                            crate::types::type_name("kotlin/DeprecationLevel"),
+                            "HIDDEN".to_string(),
+                        ),
+                    ),
+                ],
+            },
+            facts: crate::types::AnnotationSemanticFacts {
+                deprecated_hidden: true,
+                optional_expectation: false,
+            },
+        };
+        let java_deprecated = crate::ir::RetainedAnnotation {
+            retention: crate::types::AnnotationRetention::Runtime,
+            annotation: crate::ir::AppliedAnnotation {
+                internal: crate::types::type_name("java/lang/Deprecated"),
+                values: Vec::new(),
+            },
+            facts: crate::types::AnnotationSemanticFacts::default(),
+        };
+        ir.classes[class as usize]
+            .secondary_ctors
+            .push(crate::ir::IrSecondaryCtor {
+                annotations: crate::ir::DeclarationAnnotations::new(vec![
+                    deprecated,
+                    java_deprecated,
+                ]),
+                source_order,
+                lines: crate::ir::IrSecondaryCtorLines::default(),
+                prefix_params: Vec::new(),
+                params: Vec::new(),
+                declared_spellings: Default::default(),
+                named_params: Vec::new(),
+                metadata_visibility: Some(crate::types::Visibility::Public),
+                generated_debug:
+                    crate::ir::IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(
+                        declaration_line,
+                        end_line,
+                    ),
+                vararg_index: None,
+                defaults: Vec::new(),
+                delegate_prelude: Vec::new(),
+                delegate_args,
+                default_parameters,
+                body: None,
+                delegate: crate::ir::CtorDelegateTarget::Super {
+                    owner: superclass,
+                    target_params,
+                    target,
+                    default_masks: Vec::new(),
+                },
+                synthetic: false,
+                vc_params: false,
+                param_checks: Vec::new(),
+            });
+        if let Some(external_target) = external_target {
+            ir.external_secondary_super_constructors
+                .insert((own, ordinal), external_target);
+        }
+        ir.record_generated_secondary_constructor(
+            class,
+            crate::ir::IrSecondaryConstructorRole::NoArg,
+            ordinal,
+        );
+    }
 }
 
 struct SecondaryConstructorRealization {
@@ -776,6 +955,10 @@ fn push_secondary_constructor(
                 .unwrap_or_default(),
             prefix_params,
             params: named_params.iter().map(|(_, ty)| *ty).collect(),
+            declared_spellings: index
+                .declaration_spellings(declaration)
+                .cloned()
+                .unwrap_or_default(),
             named_params,
             metadata_visibility: Some(
                 index
@@ -929,6 +1112,7 @@ pub(super) fn finalize_constructor_field_indices(
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     let mut edges = Vec::new();
+    let mut pre_super = Vec::new();
     for (property_id, property) in &ir.checked_properties {
         if !property
             .flags
@@ -978,6 +1162,27 @@ pub(super) fn finalize_constructor_field_indices(
         }
         argument.field_index = Some(field);
         ir.classes[class as usize].fields[field as usize].default = default;
+        // A full value class initializes constructor properties before `super(…)`. A superclass
+        // `init` block and an overridden member it calls (including `toString`) then read the
+        // values the subclass constructor received. Abstract and sealed value classes cannot
+        // declare those properties, so only a class that published `FULL_VALUE` records them.
+        let full_value = index
+            .declaration_anchor(declaration)
+            .and_then(|anchor| anchor.owner)
+            .and_then(|owner| index.declaration_header(owner))
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::FULL_VALUE));
+        if full_value {
+            pre_super.push((class, parameter, field));
+        }
+    }
+    // Property iteration order is not declaration order. Stores still all run before `super`,
+    // but parameter order keeps the constructor layout stable.
+    pre_super.sort();
+    for (class, parameter, field) in pre_super {
+        let slots = &mut ir.classes[class as usize].pre_super_param_fields;
+        if !slots.iter().any(|pair| *pair == (parameter, field)) {
+            slots.push((parameter, field));
+        }
     }
     Ok(())
 }
@@ -1309,10 +1514,11 @@ pub(super) fn accept_constructor_body(
 }
 
 /// The declaration facts of a selected module constructor: its place among its class's constructors, and
-/// who may call it, from its class's modality and its declared visibility. Every source constructor
-/// of a sealed class is restricted, whatever its modifier says: Kotlin makes an unmodified one
-/// `protected` and rejects a public one. `None` when a header is missing, which a checked selection
-/// never leaves.
+/// who may call it, from its class's kind and modality and its declared visibility. Every source
+/// constructor of a sealed class is restricted, whatever its modifier says: Kotlin makes an
+/// unmodified one `protected` and rejects a public one. An enum class's constructors are private,
+/// whatever their modifier says. `None` when a header is missing, which a checked selection never
+/// leaves.
 pub(super) fn module_constructor_target(
     index: &ResolvedModuleIndex,
     constructor: DeclarationId,
@@ -1320,13 +1526,12 @@ pub(super) fn module_constructor_target(
     let ordinal = index.declaration_anchor(constructor)?.sibling;
     let classifier = index.enclosing_classifier(constructor)?;
     let visibility = index.declaration_header(constructor)?.visibility;
-    let sealed = index
-        .declaration_header(classifier.declaration)?
-        .flags
-        .has(crate::fir::DeclarationFlags::SEALED);
-    let access = if sealed {
+    let flags = index.declaration_header(classifier.declaration)?.flags;
+    let access = if flags.has(crate::fir::DeclarationFlags::SEALED) {
         IrConstructorAccess::SealedClass
-    } else if visibility == crate::types::Visibility::Private {
+    } else if flags.has(crate::fir::DeclarationFlags::ENUM)
+        || visibility == crate::types::Visibility::Private
+    {
         IrConstructorAccess::Private
     } else {
         IrConstructorAccess::Unrestricted

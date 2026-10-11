@@ -20,15 +20,19 @@ mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
 mod enclosing_method;
+mod exception_tables;
 mod inline_call_stacks;
 mod inner_classes;
 mod late_fields;
 mod line_numbers;
 mod local_variables;
 mod member_mapping;
+mod method_annotations;
 mod method_parameters;
 mod method_rewrite;
 mod pool_layout;
+mod pool_noting;
+mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
 
@@ -36,7 +40,11 @@ use descriptor_mentions::DescriptorMentionCache;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
-pub(crate) use {copied_class::CopyError, inner_classes::DeclarationPaths};
+pub use inner_classes::{InnerClassDetails, InnerClassResolver, InnerClassSpec};
+pub(crate) use {
+    copied_class::CopyError,
+    inner_classes::{DeclarationPaths, TableOrders},
+};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -131,6 +139,8 @@ struct ConstPool {
     /// once one is interned slots and entries no longer line up; its second slot holds
     /// [`Self::UNUSABLE_SLOT`], which names no entry.
     slot_entries: Vec<u32>,
+    /// See [`pool_noting`].
+    noted: Option<Vec<u16>>,
 }
 
 impl ConstPool {
@@ -144,10 +154,10 @@ impl ConstPool {
     fn intern(&mut self, c: Const) -> u16 {
         if let Const::Utf8(text) = &c {
             if let Some(index) = self.utf8_index.get(text) {
-                return index;
+                return self.noting(index);
             }
         } else if let Some(&index) = self.dedup.get(&c) {
-            return index;
+            return self.noting(index);
         }
         let idx = self.slot_count() + 1; // 1-based
         self.slot_entries.push(self.entries.len() as u32);
@@ -161,7 +171,7 @@ impl ConstPool {
                 self.dedup.insert(other, idx);
             }
         }
-        idx
+        self.noting(idx)
     }
 
     /// Intern the `CONSTANT_Utf8` for a Kotlin string VALUE, keeping its code units.
@@ -268,13 +278,13 @@ impl ConstPool {
                 Const::Utf8(s) => {
                     out.push(1);
                     let b = crate::metadata::encoding::modified_utf8(s);
-                    u2(out, b.len() as u16);
+                    u2(out, utf8_pool::entry_length(&b));
                     out.extend_from_slice(&b);
                 }
                 Const::Utf8Units(units) => {
                     out.push(1);
                     let b = crate::metadata::encoding::modified_utf8_units(units.iter().copied());
-                    u2(out, b.len() as u16);
+                    u2(out, utf8_pool::entry_length(&b));
                     out.extend_from_slice(&b);
                 }
                 Const::Integer(v) => {
@@ -345,29 +355,6 @@ impl ConstPool {
 /// `(name_idx, desc_idx, slot, start, length)` for `LocalVariableTable`.
 type LvtEntry = (u16, u16, u16, Option<u16>, Option<u16>);
 
-/// How many parameters a JVM method descriptor `(…)ret` declares — one per top-level type, an
-/// `L…;` or `[…` counting as one.
-fn descriptor_param_count(descriptor: &str) -> usize {
-    let bytes = descriptor.as_bytes();
-    let Some(end) = descriptor.find(')') else {
-        return 0;
-    };
-    let (mut i, mut count) = (1, 0);
-    while i < end {
-        while i < end && bytes[i] == b'[' {
-            i += 1;
-        }
-        if i < end && bytes[i] == b'L' {
-            while i < end && bytes[i] != b';' {
-                i += 1;
-            }
-        }
-        i += 1;
-        count += 1;
-    }
-    count
-}
-
 struct MethodInfo {
     access: u16,
     name: u16,
@@ -380,6 +367,9 @@ struct MethodInfo {
     /// is producer provenance, not a guess from the final byte stream; explicit returns and throws
     /// leave it absent.
     implicit_void_return_pc: Option<u16>,
+    /// Body emission deliberately left the leading instruction without a source position. This
+    /// suppresses the declared-function fallback that would otherwise fill pc 0.
+    suppress_entry_line: bool,
     /// What kotlinc's bytecode rewrites need to reshape this method when the class is written.
     rewrite_source: Option<Box<method_rewrite::RewriteSource>>,
     /// `Code` exception table: `(start_pc, end_pc, handler_pc, catch_type)` — `catch_type` is a
@@ -477,6 +467,28 @@ pub(crate) fn split_declaration_annotations(
     )
 }
 
+/// What every `@kotlin.Metadata` of one compilation stamps beside its payload: the `mv` version,
+/// and whether `xi` carries kotlinc's pre-release flag (`LanguageVersionSettings.isPreRelease`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetadataStamp {
+    pub version: [i32; 3],
+    pub pre_release: bool,
+}
+
+impl MetadataStamp {
+    /// `JvmAnnotationNames.METADATA_PRE_RELEASE_FLAG`.
+    const PRE_RELEASE_FLAG: i32 = 1 << 1;
+
+    /// The `xi` written for a class whose own flags are `flags`.
+    pub fn xi(self, flags: i32) -> i32 {
+        if self.pre_release {
+            flags | Self::PRE_RELEASE_FLAG
+        } else {
+            flags
+        }
+    }
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     /// Every internal class name mentioned in class-type position by a field/method descriptor, a
@@ -549,25 +561,6 @@ pub struct ClassWriter {
     enclosing_method: Option<(String, String, String)>,
     pub internal_name: String,
 }
-
-/// One candidate `InnerClasses` entry: the nested class, its enclosing class (`None` for an anonymous
-/// local), its simple name (`None` when anonymous), and the entry's access flags.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InnerClassSpec {
-    pub inner: String,
-    pub outer: Option<String>,
-    pub name: Option<String>,
-    pub access: u16,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InnerClassDetails {
-    pub outer: Option<String>,
-    pub name: Option<String>,
-    pub access: u16,
-}
-
-pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
@@ -653,6 +646,23 @@ impl ClassWriter {
             self.source_map = crate::jvm::source_map::SourceMap::new(&source_file, &path, lines);
         }
         Some(&mut self.source_map)
+    }
+
+    /// Start the identity source map kotlinc writes for a class generated inside an `inline`
+    /// function (`visitSMAP(…, intoInline = true)`). The map is kept even when the class inlines
+    /// nothing else. A map an earlier splice already started is left as it is.
+    pub fn start_inline_origin_source_map(&mut self, lines: u16) {
+        if self.source_map.is_unstarted() {
+            let Some(source_file) = self.source_file.clone() else {
+                return;
+            };
+            let path = self.internal_name.clone();
+            self.source_map = crate::jvm::source_map::SourceMap::for_regenerated_class(
+                &source_file,
+                &path,
+                lines,
+            );
+        }
     }
 
     /// The class's own source file, for a synthesized class that belongs to it.
@@ -781,6 +791,7 @@ impl ClassWriter {
             max_locals: 0,
             code: None,
             implicit_void_return_pc: None,
+            suppress_entry_line: false,
             rewrite_source: None,
             exceptions: Vec::new(),
             stackmap: None,
@@ -817,25 +828,6 @@ impl ClassWriter {
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
         });
-    }
-
-    /// Declare a field ahead of every field declared so far (a suspend lambda's spill fields,
-    /// which the coroutine transformer adds after the class's own).
-    pub(super) fn add_leading_field(&mut self, access: u16, name: &str, desc: &str) {
-        let n = self.cp.utf8(name);
-        let d = self.cp.utf8(desc);
-        self.fields.insert(
-            0,
-            FieldInfo {
-                access,
-                name: n,
-                desc: d,
-                signature: None,
-                const_value: None,
-                visible_anns: Vec::new(),
-                invisible_anns: Vec::new(),
-            },
-        );
     }
 
     /// Add a field carrying a `ConstantValue` attribute (`const_idx` = a constant-pool index from
@@ -895,7 +887,7 @@ impl ClassWriter {
     pub fn set_kotlin_metadata(
         &mut self,
         k: i32,
-        mv: &[i32],
+        stamp: MetadataStamp,
         xi: i32,
         d1: &[String],
         d2: &[String],
@@ -914,13 +906,13 @@ impl ClassWriter {
         u2(&mut body, if has_payload { 5 } else { 3 });
         let n_mv = self.cp.utf8("mv");
         u2(&mut body, n_mv);
-        self.ev_int_array(&mut body, mv);
+        self.ev_int_array(&mut body, &stamp.version);
         let n_k = self.cp.utf8("k");
         u2(&mut body, n_k);
         self.ev_int(&mut body, k);
         let n_xi = self.cp.utf8("xi");
         u2(&mut body, n_xi);
-        self.ev_int(&mut body, xi);
+        self.ev_int(&mut body, stamp.xi(xi));
         if has_payload {
             let n_d1 = self.cp.utf8("d1");
             u2(&mut body, n_d1);
@@ -943,8 +935,12 @@ impl ClassWriter {
     }
 
     /// Queue user annotations on a class. Semantic retention chooses the physical class-file
-    /// attribute here, once, for every class kind.
+    /// attribute here, once, for every class kind. `@kotlin.Deprecated` on the classifier also
+    /// stamps the zero-length JVM `Deprecated` attribute; its name interns after `SourceFile`.
     pub fn set_class_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
+        if annotations.deprecated() {
+            self.set_deprecated();
+        }
         let (visible, invisible) = self.encode_declaration_annotations(annotations);
         self.runtime_annotations.extend(visible);
         self.invisible_annotations.extend(invisible);
@@ -1257,7 +1253,10 @@ impl ClassWriter {
                 panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
             })
         });
-        let lvt = if name == "<init>" || name == "<clinit>" {
+        // Constructor locals are reconstructed from the declaration after emission. A static
+        // initializer has no declaration-owned parameter table: any entries it records come from
+        // real initializer code (notably an inlined body's `$i$f$…` frame) and must survive.
+        let lvt = if name == "<init>" {
             Vec::new()
         } else {
             self.local_table(code)
@@ -1270,6 +1269,7 @@ impl ClassWriter {
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
             implicit_void_return_pc: code.implicit_void_return_pc,
+            suppress_entry_line: code.suppress_entry_line,
             // kotlinc's bytecode rewrites run when the class is written: several of this method's
             // tables are attached after it is added, and the rewrite depends on them.
             rewrite_source: (!code.bytes.is_empty())
@@ -1297,84 +1297,6 @@ impl ClassWriter {
         });
         if let Some(computed) = &computed {
             self.intern_frame_classes(&body, computed);
-        }
-    }
-
-    /// Attach kotlinc's non-null annotations to a previously-added method (matched by name+descriptor):
-    /// `@org.jetbrains.annotations.NotNull` / `@Nullable` on the return (a method-level
-    /// `RuntimeInvisibleAnnotations`) and/or on individual parameters (`RuntimeInvisibleParameterAnnotations`).
-    /// `ret` is the return annotation's type descriptor (e.g. `Lorg/jetbrains/annotations/NotNull;`) or
-    /// `None`; `params` gives each parameter's annotation type or `None`, in parameter order. Interning
-    /// the annotation types here fixes their constant-pool position. No-op if the method isn't found.
-    pub fn set_method_nullability(
-        &mut self,
-        name: &str,
-        desc: &str,
-        ret: Option<&str>,
-        params: &[Option<&str>],
-    ) {
-        if !self.nullability_annotations {
-            return;
-        }
-        // Resolve WITHOUT interning first, like `set_method_debug`: describing a method that was never
-        // emitted (the accessors of a `private` property, which are read straight from the field) must
-        // not perturb the constant pool — the name and descriptor would be orphan entries.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
-            return;
-        }
-        // A parameterless annotation is `type_index(u2) + num_element_value_pairs(u2 = 0)`.
-        let empty_ann = |cp: &mut ConstPool, ty: &str| -> Vec<u8> {
-            let ti = cp.utf8(ty);
-            vec![(ti >> 8) as u8, ti as u8, 0, 0]
-        };
-        let invisible_anns: Vec<Vec<u8>> = ret
-            .map(|t| vec![empty_ann(&mut self.cp, t)])
-            .unwrap_or_default();
-        let has_param_ann = params.iter().any(|p| p.is_some());
-        let param_anns: Vec<Vec<Vec<u8>>> = if has_param_ann {
-            params
-                .iter()
-                .map(|p| {
-                    p.map(|t| vec![empty_ann(&mut self.cp, t)])
-                        .unwrap_or_default()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            m.invisible_anns = invisible_anns;
-            m.param_anns = param_anns;
-        }
-    }
-
-    /// Attach USER annotations to a previously-added method (matched by name+descriptor), split by
-    /// retention: RUNTIME → `RuntimeVisibleAnnotations`, BINARY → `RuntimeInvisibleAnnotations` —
-    /// the method analogue of [`Self::set_last_field_annotations`]. Interning the annotation types
-    /// here fixes their constant-pool position. No-op if the method isn't found.
-    pub fn set_method_annotations(
-        &mut self,
-        name: &str,
-        desc: &str,
-        annotations: &crate::ir::DeclarationAnnotations,
-    ) {
-        // Resolve WITHOUT interning first (as `set_method_nullability` does): describing a method
-        // that was never emitted must not leave orphan name/descriptor entries in the pool.
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
-            return;
-        }
-        let (vis, invis) = self.encode_declaration_annotations(annotations);
-        if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
-            m.visible_anns = vis;
-            // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the
-            // return, whichever order the two setters ran in — kotlinc writes the user's first.
-            m.invisible_anns.splice(0..0, invis);
         }
     }
 
@@ -1479,20 +1401,10 @@ impl ClassWriter {
         // The source map is also published as a BINARY-retained annotation, which is how a Kotlin
         // consumer reads it back without parsing the class file's own attribute. kotlinc visits it
         // when the class is done, after the `SourceFile` value and before the method attribute names.
-        let smap_annotation = self.source_map.render().map(|smap| {
-            let mut body = Vec::new();
-            let annotation = self.cp.utf8("Lkotlin/jvm/internal/SourceDebugExtension;");
-            u2(&mut body, annotation);
-            u2(&mut body, 1); // one element pair
-            let name = self.cp.utf8("value");
-            u2(&mut body, name);
-            body.push(b'['); // an array of one string, which is how kotlinc spells it
-            u2(&mut body, 1);
-            body.push(b's');
-            let value = self.cp.utf8(&smap);
-            u2(&mut body, value);
-            body
-        });
+        let smap_annotation = self
+            .source_map
+            .render()
+            .map(|smap| self.cp.source_map_annotation(&smap));
         // Code-related attribute NAMES intern in kotlinc's real first-use order, which is driven by
         // its field-then-method visiting — NOT a fixed order. kotlinc visits fields first, so a field
         // annotation interns `RuntimeInvisibleAnnotations` BEFORE `Code`; then each method, in emit
@@ -2107,15 +2019,25 @@ pub struct CodeBuilder {
     exceptions: Vec<(Label, Label, Label, u16)>,
     /// `LineNumberTable` marks recorded during emission: `(start_pc, line)`. See [`Self::mark_line`].
     line_marks: Vec<(u16, u16)>,
+    /// Marks copied from an inlined body (including its caller-line restoration). Constructors and
+    /// class initializers curate their final table, so they retain this provenance separately from
+    /// ordinary nested-expression marks.
+    inlined_line_marks: Vec<(u16, u16)>,
     /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
     /// same offset: the next one appends after it instead of replacing it. See
     /// [`CodeBuilder::mark_line_retained`].
     retained_line_mark: Option<usize>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
+    /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
+    /// file; it makes table order independent of which lexical scope happens to close first.
+    local_entry_placements: Vec<local_variables::LocalEntryPlacement>,
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
+    /// The leading instruction intentionally has no source position; declared-function debug
+    /// attachment must not synthesize its declaration line at pc 0.
+    suppress_entry_line: bool,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
     /// (`goto`/`athrow`/a `*return`) has been emitted and no label has been bound since. Instructions
     /// appended in that state are dead code the type-checking verifier rejects — it demands a
@@ -2149,6 +2071,10 @@ pub struct CodeBuilder {
     next_bind: u32,
     /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
     pending_lines: line_numbers::PendingLines,
+    /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
+    /// handler pc, then start pc, only after inlining. A method that was not inlined keeps
+    /// emission order (the inner handler of a nested `try` stays ahead of the outer one).
+    inlined_bytecode: bool,
 }
 
 impl CodeBuilder {
@@ -2164,14 +2090,18 @@ impl CodeBuilder {
             switch_fixups: Vec::new(),
             exceptions: Vec::new(),
             line_marks: Vec::new(),
+            inlined_line_marks: Vec::new(),
             retained_line_mark: None,
             local_entries: Vec::new(),
+            local_entry_placements: Vec::new(),
             implicit_void_return_pc: None,
+            suppress_entry_line: false,
             dead: false,
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
             pending_lines: Default::default(),
+            inlined_bytecode: false,
         }
     }
 
@@ -2202,42 +2132,12 @@ impl CodeBuilder {
     ) {
         self.local_entries
             .push((start, length, slot, name.to_string(), desc.to_string()));
+        self.local_entry_placements
+            .push(local_variables::LocalEntryPlacement::Plain);
     }
 
     pub fn local_entries(&self) -> &[(u16, Option<u16>, u16, String, String)] {
         &self.local_entries
-    }
-
-    /// Register a `try` range `[start, end)` guarded by a handler at `handler`, catching `catch_type`
-    /// (a constant-pool class index, or 0 for catch-all).
-    pub fn add_exception(&mut self, start: Label, end: Label, handler: Label, catch_type: u16) {
-        self.exceptions.push((start, end, handler, catch_type));
-    }
-
-    /// Resolve the exception table to byte offsets (call after all labels are bound, e.g. in `link`).
-    /// Drops degenerate ranges where `start >= end` (an empty protected region — e.g. an empty `try`
-    /// body — protects nothing, and an empty range is an illegal `Code` exception-table entry).
-    pub fn resolved_exceptions(&self) -> Vec<(u16, u16, u16, u16)> {
-        self.exceptions
-            .iter()
-            // An UNBOUND label means the region it delimits was dropped as dead code (`bind_at` is a
-            // no-op while dead), so the entry describes bytes that do not exist. Without this the
-            // `usize::MAX as u16` truncation below would fabricate offset 65535.
-            .filter(|&&(s, e, h, _)| {
-                [s, e, h]
-                    .iter()
-                    .all(|&label| self.labels[self.label_index(label)] != usize::MAX)
-            })
-            .map(|&(s, e, h, t)| {
-                (
-                    self.labels[self.label_index(s)] as u16,
-                    self.labels[self.label_index(e)] as u16,
-                    self.labels[self.label_index(h)] as u16,
-                    t,
-                )
-            })
-            .filter(|&(start, end, _, _)| start < end)
-            .collect()
     }
 
     /// The current (linearly tracked) operand-stack height.

@@ -14,11 +14,11 @@ use super::{
     declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
     emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
     jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
-    lambda_class, lambda_class_names, load, method_defaults, native_unsigned_impl_target,
-    parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero, ref_class,
-    signature_formatter::JvmSignatureFormatter, singleton_instance_load, slot_words, try_emission,
-    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
-    LMF_METAFACTORY_DESC,
+    jvm_value_ty, lambda_class, lambda_class_names, load, method_defaults,
+    native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
+    prim_newarray_atype, push_zero, ref_class, signature_formatter::JvmSignatureFormatter,
+    singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
+    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -28,6 +28,43 @@ impl super::Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        // A `Companion` field this class may not read is read through the accessor the plan
+        // placed for it.
+        if let (Some(context), Some(read)) = (
+            self.static_owner,
+            super::companion_field::companion_field_read(self.ir, self.classifiers, node),
+        ) {
+            match super::companion_field::companion_field_accessor(self.ir, context, &read) {
+                Err(error) => {
+                    *self.run.emit_error.borrow_mut() = Some(error);
+                    return;
+                }
+                Ok(Some((owner, accessor))) => {
+                    let planned = self.run.static_accessor_plan.borrow().declares(
+                        crate::jvm::private_static_access::StaticOwner::Class(owner),
+                        accessor,
+                    );
+                    if !planned {
+                        *self.run.emit_error.borrow_mut() = Some(format!(
+                            "{} declares no accessor for companion {}",
+                            owner.render(),
+                            read.companion.render()
+                        ));
+                        return;
+                    }
+                    let (name, descriptor) = super::companion_field::companion_instance_accessor(
+                        owner,
+                        read.holder,
+                        read.companion,
+                        &read.field,
+                    );
+                    let method = self.cw.methodref(&owner.render(), &name, &descriptor);
+                    code.invokestatic(method, 0, 1);
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
         match node {
             IrExpr::BottomValue { producer, .. } => {
                 let baseline = code.stack_height();
@@ -61,19 +98,16 @@ impl super::Emitter<'_> {
                 type_argument,
             } => self.emit_kclass_literal(*classifier, *value, *type_argument, code),
             IrExpr::GetValue(i) => {
-                // A slot that was never allocated means the lowering produced malformed IR (e.g. an
-                // unsupported suspend shape). Don't panic — flag the file unemittable and skip it.
+                if self.stack_resident_value == Some(*i) {
+                    self.stack_resident_value = None;
+                    return;
+                }
                 let Some(&(slot, jt)) = self.slots.get(i) else {
-                    crate::trace_compiler!(
-                        "suspend",
-                        "EMIT_BAIL GetValue unallocated slot i={i} owner={} known={:?}",
+                    panic!(
+                        "malformed IR: value {i} has no allocated JVM slot while emitting {}; known slots: {:?}",
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
-                    self.run.set_emit_error(
-                        "value read references a slot that was never declared".to_string(),
-                    );
-                    return;
                 };
                 self.load_constructor_value(*i, jt, slot, code);
             }
@@ -161,9 +195,9 @@ impl super::Emitter<'_> {
                 // The null comparison itself is built in lowering from the ordinary comparison node,
                 // so the branch/stackmap shape stays the one every other comparison uses.
                 let c = &self.ir.classes[*class as usize];
-                let name = instance_field_jvm_name(self.ir, c, &c.fields[*index as usize]);
+                let name = instance_field_jvm_name(self.ir, self.run, c, *index as usize);
                 let fty = c.fields[*index as usize].ty;
-                let jt = jvm_declared_ty(&fty);
+                let jt = jvm_value_ty(&fty);
                 let owner = c.fq_name();
                 self.emit_value(*receiver, code);
                 let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
@@ -719,8 +753,20 @@ impl super::Emitter<'_> {
                         let parameters =
                             super::super::type_of::TypeParameters::new(self.ir, &self.facade);
                         let mut instructions = Vec::new();
-                        match super::super::type_of::generate(*ty, &parameters, &mut instructions) {
-                            Ok(()) => super::super::type_of::encode(&instructions, code, self.cw),
+                        match super::super::type_of::generate(
+                            *ty,
+                            &parameters,
+                            self.ir.recursive_type_of,
+                            &mut instructions,
+                        ) {
+                            Ok(()) => {
+                                super::super::type_of::encode(
+                                    &instructions,
+                                    code,
+                                    self.cw,
+                                    self.frame.size(),
+                                );
+                            }
                             Err(error) => self.run.set_emit_error(error.to_string()),
                         }
                     }
@@ -751,9 +797,13 @@ impl super::Emitter<'_> {
                         };
                         self.emit_value(receiver, code);
                         self.emit_value(*argument, code);
+                        // kotlinc's `CompareTo` intrinsic: the int category and `long` go through
+                        // `Intrinsics.compare`, `Boolean` and the floating types through their
+                        // wrappers.
                         let (owner, descriptor) = match *operand {
-                            Ty::Int => ("java/lang/Integer", "(II)I"),
-                            Ty::Long => ("java/lang/Long", "(JJ)I"),
+                            Ty::Boolean => ("java/lang/Boolean", "(ZZ)I"),
+                            Ty::Int => ("kotlin/jvm/internal/Intrinsics", "(II)I"),
+                            Ty::Long => ("kotlin/jvm/internal/Intrinsics", "(JJ)I"),
                             Ty::Float => ("java/lang/Float", "(FF)I"),
                             Ty::Double => ("java/lang/Double", "(DD)I"),
                             _ => unreachable!(
@@ -910,6 +960,7 @@ impl super::Emitter<'_> {
                         self.ir,
                         e,
                         &self.facade,
+                        self.ir.recursive_type_of,
                         &|ty| self.rendered_inlined_cast_target(ty),
                     );
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
@@ -934,7 +985,9 @@ impl super::Emitter<'_> {
                         );
                         // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
                         self.frame.drop_to(call_frame);
-                        if spliced {
+                        // A lowering that owned the call, even one that failed, is final: only a
+                        // call no inline lowering applied to is called for real.
+                        if spliced.owns_call() {
                             return;
                         }
                         // The selected declaration already owns fallback legality. `MustInline`
@@ -1356,7 +1409,7 @@ impl super::Emitter<'_> {
                     _ => code.ineg(),
                 }
             }
-            IrExpr::StringConcat(parts) => self.emit_string_concat(parts, code),
+            IrExpr::StringConcat(parts) => self.emit_string_concat(e, parts, code),
             IrExpr::EnumEntry { classifier, name } => {
                 let fq_name = classifier.render();
                 let desc = format!("L{fq_name};");
@@ -1370,11 +1423,10 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::SingletonValue { classifier } => {
-                let Some(published) = singleton_instance_load::published_singleton(
-                    self.ir,
-                    *classifier,
-                    self.bodies.singleton_storage(*classifier),
-                ) else {
+                let dependency = crate::jvm::singleton_storage::of(self.classifiers, *classifier);
+                let Some(published) =
+                    singleton_instance_load::published_singleton(self.ir, *classifier, dependency)
+                else {
                     *self.run.emit_error.borrow_mut() = Some(format!(
                         "missing JVM storage for singleton {}",
                         classifier.render()
@@ -1532,6 +1584,7 @@ impl super::Emitter<'_> {
                     .ir
                     .runtime_reified_lambda_implementations
                     .contains(impl_fn)
+                    || self.ir.inline_anonymous_lambdas.contains(impl_fn)
                 {
                     lambda_mode = LambdaMode::Class;
                 }
@@ -1637,7 +1690,7 @@ impl super::Emitter<'_> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
-                    let (internal, identity) = lambda_class_names::class_name(
+                    let (internal, identity) = lambda_class_names::emitted_class_name(
                         self.ir,
                         *impl_fn,
                         &impl_name,
@@ -1651,11 +1704,19 @@ impl super::Emitter<'_> {
                             self.classifiers,
                             self.run,
                         );
-                        match class_lambda_reflection::reflect(self.ir, e, *impl_fn, &formatter) {
+                        let invoke = class_lambda_reflection::ClassLambdaInvoke {
+                            own: lam_tys,
+                            result: impl_ret,
+                        };
+                        match class_lambda_reflection::reflect(
+                            self.ir, e, *impl_fn, invoke, &formatter,
+                        ) {
                             Ok(reflection) => reflection,
                             Err(error) => {
+                                // The class is discarded; a placeholder keeps the frames
+                                // computable.
                                 self.run.set_emit_error(error);
-                                return;
+                                return code.aconst_null();
                             }
                         }
                     } else {
@@ -1698,36 +1759,43 @@ impl super::Emitter<'_> {
                     }
                     return;
                 }
-                // kotlinc interns the BOOTSTRAP ARGUMENTS first (erased SAM MethodType, the impl
-                // MethodHandle with its `$lambda$N` refs, the instantiated MethodType), and the
-                // LambdaMetafactory handle only after them — pool order follows that visit.
-                let sam_mt = self.cw.method_type(&sam_desc);
-                let impl_ref = if impl_owner_is_interface {
-                    self.cw
-                        .interface_methodref(&impl_owner, &impl_name, &impl_desc)
-                } else {
-                    self.cw.methodref(&impl_owner, &impl_name, &impl_desc)
-                };
-                let impl_mh = self.cw.method_handle_ref(6, impl_ref);
-                let inst_mt = self.cw.method_type(&inst_desc);
-                let meta = self.cw.method_handle_static(
-                    "java/lang/invoke/LambdaMetafactory",
-                    "metafactory",
-                    LMF_METAFACTORY_DESC,
-                );
-                let bsm = self.cw.add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
                 // The `invokedynamic` takes the captured values and yields the interface instance.
+                // Emit those values first: a capture can itself be a lambda, and kotlinc registers
+                // that nested call site's bootstrap before the outer call site it feeds. At the
+                // instruction boundary, bootstrap arguments precede the LambdaMetafactory handle
+                // in the pool, matching kotlinc's visit order.
                 let cap_descs: String = cap_tys.iter().map(|t| type_descriptor(*t)).collect();
-                let indy =
-                    self.cw
-                        .invoke_dynamic(bsm, &sam_method, &format!("({cap_descs})L{iface};"));
+                let indy_desc = format!("({cap_descs})L{iface};");
                 let cap_words: i32 = cap_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 self.emit_indy_lambda(
                     code,
-                    indy,
                     cap_words,
                     captures,
+                    cap_tys,
                     sam.as_ref().is_some_and(|target| target.nullable),
+                    |emitter| {
+                        let sam_mt = emitter.cw.method_type(&sam_desc);
+                        let impl_ref = if impl_owner_is_interface {
+                            emitter
+                                .cw
+                                .interface_methodref(&impl_owner, &impl_name, &impl_desc)
+                        } else {
+                            emitter.cw.methodref(&impl_owner, &impl_name, &impl_desc)
+                        };
+                        let impl_mh = emitter.cw.method_handle_ref(6, impl_ref);
+                        let inst_mt = emitter.cw.method_type(&inst_desc);
+                        let meta = emitter.cw.method_handle_static(
+                            "java/lang/invoke/LambdaMetafactory",
+                            "metafactory",
+                            LMF_METAFACTORY_DESC,
+                        );
+                        let bootstrap = emitter
+                            .cw
+                            .add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
+                        emitter
+                            .cw
+                            .invoke_dynamic(bootstrap, &sam_method, &indy_desc)
+                    },
                 );
             }
             IrExpr::UnitInstance => {
@@ -1845,20 +1913,7 @@ impl super::Emitter<'_> {
             }
             IrExpr::RefNew { elem, init } => self.emit_shared_cell(*elem, *init, code),
             IrExpr::RefGet { holder, elem } => {
-                self.emit_value(*holder, code);
-                let (cls, fdesc) = ref_class(elem);
-                let f = self.cw.fieldref(cls, "element", fdesc);
-                let ejvm = ir_ty_to_jvm(elem);
-                code.getfield(f, slot_words(ejvm) as i32);
-                // An `ObjectRef.element` is typed `Object`; narrow to the boxed value's reference type.
-                if ejvm.is_reference()
-                    && crate::jvm::names::instanceof_internal_name(ejvm) != "java/lang/Object"
-                {
-                    let cc = self
-                        .cw
-                        .class_ref(&crate::jvm::names::instanceof_internal_name(ejvm));
-                    code.checkcast(cc);
-                }
+                self.emit_shared_cell_read(*holder, *elem, true, code);
             }
             IrExpr::RefSet {
                 holder,
@@ -1867,6 +1922,13 @@ impl super::Emitter<'_> {
             } => {
                 // A value that cannot carry the operand stack (`msg = try {…} finally {}`) can't
                 // run with the holder on it. Spill it first (as `RefNew` does).
+                let unsigned = self.completes_unsigned_bitwise_value(*value);
+                let saved_assignment = self.unsigned_assignment_line;
+                if unsigned {
+                    // A local assignment keeps the line on the receiver and writes it again at
+                    // the store. A captured local is the same assignment once the holder is gone.
+                    self.unsigned_assignment_line = true;
+                }
                 if self.spills_operand_prefix(*value) {
                     let temps = self.spill_to_temps(&[*value], code);
                     self.emit_value(*holder, code);
@@ -1876,7 +1938,13 @@ impl super::Emitter<'_> {
                     self.release_operand_spills(&temps);
                 } else {
                     self.emit_value(*holder, code);
-                    self.emit_value(*value, code);
+                    self.emit_element_value(*elem, *value, code);
+                }
+                self.unsigned_assignment_line = saved_assignment;
+                if unsigned {
+                    self.mark_expression_start(e, code);
+                    code.forget_line();
+                    super::debug_lines::mark_statement(self.ir, e, code);
                 }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);
@@ -1889,11 +1957,7 @@ impl super::Emitter<'_> {
                 ret,
             } => {
                 self.emit_function_invocation(e, *func, args, params, code);
-                // A transformed suspension materializes its declared result when the point
-                // closes. Narrowing here would checkcast the erased `Object` first.
-                if self.transformed_result(e).is_none() && !self.erased_invocations.remove(&e) {
-                    self.narrow_invocation_result(*ret, code);
-                }
+                self.finish_function_invocation_result(e, *ret, code);
             }
             _ => {}
         }

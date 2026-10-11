@@ -65,6 +65,17 @@ impl NativeTarget {
         super::target_contract::triple(self.arch, self.os)
     }
 
+    /// The dynamic loader a program that imports from shared libraries names as its interpreter:
+    /// the GNU C library's, at the path the psABI supplement of each architecture fixes for it.
+    /// A program that imports nothing is static and names none.
+    pub fn dynamic_loader(self) -> &'static str {
+        match (self.os, self.arch) {
+            (Os::Linux, Arch::X86_64) => "/lib64/ld-linux-x86-64.so.2",
+            (Os::Linux, Arch::Aarch64) => "/lib/ld-linux-aarch64.so.1",
+            (Os::Linux, Arch::Riscv64) => "/lib/ld-linux-riscv64-lp64d.so.1",
+        }
+    }
+
     /// The conventional short name, as a user would write it.
     pub fn name(self) -> String {
         format!("{}-{}", self.os.triple_name(), self.arch.triple_name())

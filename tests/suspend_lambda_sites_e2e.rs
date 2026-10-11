@@ -15,7 +15,7 @@ fun builder(c: suspend () -> Unit) {\n\
 }\n";
 
 fn expect_invoke_suspend_matches(name: &str, src: &str, class: &str) {
-    match common::method_code_diff_against_kotlinc(
+    match common::class_bytes_diff_against_kotlinc(
         name,
         &[],
         src,
@@ -107,7 +107,7 @@ fun use() {\n\
 
 #[test]
 fn a_suspend_lambda_with_a_unit_receiver_matches_kotlinc() {
-    match common::method_code_diff_against_kotlinc(
+    match common::class_bytes_diff_against_kotlinc(
         "UnitReceiver",
         &[],
         UNIT_RECEIVER,

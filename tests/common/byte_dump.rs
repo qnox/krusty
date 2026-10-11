@@ -30,13 +30,23 @@
 //! their logical distribution path. An explicit selected JDK image uses its kind, exact content
 //! identity, and `release` label. Other classpath entries contribute their bytes.
 //!
+//! An archive recorded before those toolchain rows is still replayed. Its index may name an open
+//! range (`2.4.20..`); that line is the recording's own release, not a license for a later
+//! compiler to reuse the bytes. A miss on the current fingerprint tries the earlier classpath
+//! identity, which hashed each explicit entry and did not add a selected-installation row. A file
+//! that does not parse is replaced when this process publishes, instead of being left in place for
+//! every later run to miss.
+//!
 //! The archive is read at runtime and is not compiled into the test binary.
 
 mod fingerprint;
 
 pub use fingerprint::class_dump_inputs;
 pub(crate) use fingerprint::fingerprint_parts;
-use fingerprint::{basename, classpath_content_fingerprint, fnv64, normalize_invocation_flag};
+use fingerprint::{
+    basename, classpath_content_fingerprint, fnv64, legacy_classpath_fingerprint,
+    normalize_invocation_flag,
+};
 #[cfg(test)]
 use fingerprint::{
     class_dump_inputs_with_platform, classpath_content_fingerprint_with_platform, hash_tree,
@@ -161,6 +171,7 @@ pub fn kotlinc_class_dumps(
     jvm_target: &str,
     variant: &str,
     fingerprint: u128,
+    legacy_fingerprint: u128,
     classes: &[&str],
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<Vec<Vec<u8>>> {
@@ -173,6 +184,7 @@ pub fn kotlinc_class_dumps(
             key: &entry_key(&case, stem, jvm_target, variant, &suffix),
             compiler: compiler_dump_version(),
             fingerprint,
+            legacy_fingerprint,
             force: record_forced(),
             compile_missing: compile_missing_allowed(),
             write: ci_allows_write(),
@@ -196,6 +208,7 @@ pub fn kotlinc_class_tree(
     jvm_target: &str,
     variant: &str,
     fingerprint: u128,
+    legacy_fingerprint: u128,
     compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
 ) -> Option<BTreeMap<String, Vec<u8>>> {
     let (module, case) = running_test();
@@ -206,6 +219,7 @@ pub fn kotlinc_class_tree(
             key: &entry_key(&case, stem, jvm_target, variant, "#tree"),
             compiler: compiler_dump_version(),
             fingerprint,
+            legacy_fingerprint,
             force: record_forced(),
             compile_missing: compile_missing_allowed(),
             write: ci_allows_write(),
@@ -259,6 +273,31 @@ pub fn store_shared_files(slot: &str, fingerprint: u128, files: &BTreeMap<String
     store_files(&dumps_root(), "_libs", slot, compiler, fingerprint, files);
 }
 
+/// Arbitrary reference artifacts recorded under the same exact-version, binary GHA cache contract
+/// as kotlinc class dumps. A release/RC cache miss fails locally and compiles only when CI enables
+/// `KRUSTY_CLASS_DUMP_COMPILE_MISSING`; master alone may publish the resulting bytes.
+pub fn reference_files(
+    slot: &str,
+    fingerprint: u128,
+    compile: impl FnOnce() -> Option<BTreeMap<String, Vec<u8>>>,
+) -> Option<BTreeMap<String, Vec<u8>>> {
+    recall(
+        Recall {
+            root: &dumps_root(),
+            module: "_references",
+            key: slot,
+            compiler: compiler_dump_version(),
+            fingerprint,
+            legacy_fingerprint: fingerprint,
+            force: record_forced(),
+            compile_missing: compile_missing_allowed(),
+            write: ci_allows_write(),
+        },
+        |_| true,
+        compile,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Channel {
     Release,
@@ -296,6 +335,8 @@ struct Recall<'a> {
     key: &'a str,
     compiler: Option<DumpVersion>,
     fingerprint: u128,
+    /// Tried only after `fingerprint` misses. Equal to `fingerprint` when there is no earlier key.
+    legacy_fingerprint: u128,
     force: bool,
     compile_missing: bool,
     write: bool,
@@ -310,16 +351,14 @@ fn recall(
         return compile();
     };
     if !query.force {
-        if let Some(hit) = load_files(
-            query.root,
-            query.module,
-            query.key,
-            compiler,
-            query.fingerprint,
-        )
-        .filter(|hit| accept(hit))
-        {
+        if let Some(hit) = load_fingerprint(&query, compiler, query.fingerprint, &accept) {
             return Some(hit);
+        }
+        if query.legacy_fingerprint != query.fingerprint {
+            if let Some(hit) = load_fingerprint(&query, compiler, query.legacy_fingerprint, &accept)
+            {
+                return Some(hit);
+            }
         }
         if !query.compile_missing {
             refuse_missing_dump(&format!(
@@ -340,6 +379,15 @@ fn recall(
         );
     }
     Some(produced)
+}
+
+fn load_fingerprint(
+    query: &Recall<'_>,
+    compiler: DumpVersion,
+    fingerprint: u128,
+    accept: &impl Fn(&BTreeMap<String, Vec<u8>>) -> bool,
+) -> Option<BTreeMap<String, Vec<u8>>> {
+    load_files(query.root, query.module, query.key, compiler, fingerprint).filter(|hit| accept(hit))
 }
 
 fn refuse_missing_dump(detail: &str) -> ! {
@@ -704,19 +752,55 @@ fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<Rec
         if parts.next().is_some() {
             return None;
         }
-        let (channel, version) = parse_bound(version)?;
+        let parsed = if version.contains("..") {
+            legacy_range_entries(version, fingerprint, blob)?
+        } else {
+            let (channel, version) = parse_bound(version)?;
+            vec![RecordedEntry {
+                version,
+                channel,
+                fingerprint,
+                blob,
+            }]
+        };
         let recordings = module
             .as_ref()
             .zip(key.as_ref())
             .and_then(|(module, key)| modules.get_mut(module)?.get_mut(key))?;
-        recordings.push(RecordedEntry {
-            version,
-            channel,
-            fingerprint,
-            blob,
-        });
+        recordings.extend(parsed);
     }
     Some(modules)
+}
+
+/// `2.4.20..` is the release that was current when the line was written. A closed range
+/// (`2.4.0..2.4.10`) names only the supported releases inside it. Neither form extends to a
+/// compiler the recording did not name.
+fn legacy_range_entries(token: &str, fingerprint: u128, blob: u128) -> Option<Vec<RecordedEntry>> {
+    let (lo_token, hi_token) = token.split_once("..")?;
+    let (channel, lo) = parse_bound(lo_token)?;
+    let versions = if hi_token.is_empty() {
+        vec![lo]
+    } else {
+        let (hi_channel, hi) = parse_bound(hi_token)?;
+        if hi_channel != channel || hi < lo {
+            return None;
+        }
+        KotlinVersion::supported()
+            .into_iter()
+            .filter(|version| *version >= lo && *version <= hi)
+            .collect()
+    };
+    Some(
+        versions
+            .into_iter()
+            .map(|version| RecordedEntry {
+                version,
+                channel,
+                fingerprint,
+                blob,
+            })
+            .collect(),
+    )
 }
 
 fn cached_archive<'a>(
@@ -798,8 +882,12 @@ fn reconcile_with(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>, mode: Re
         }
         (_, Some(stamp)) => {
             let Some(archive) = read_archive(path) else {
-                // Do not overwrite an archive that another process replaced with unreadable or
-                // corrupt data. Drop the stale snapshot and its pending publication instead.
+                // The file is not a recording this process can merge. Publication holds the
+                // directory lock, so this is not a partial rename. Keep the in-memory recordings;
+                // the caller replaces the file instead of leaving every later lookup to miss.
+                if !slot.pending.is_empty() {
+                    cache.insert(path.to_path_buf(), slot);
+                }
                 return;
             };
             (Some(stamp), archive)
@@ -890,6 +978,15 @@ fn flush_dirty_archives() {
             flush_archive(root);
         }
     }
+}
+
+/// Publish every class-dump recording made by this test process.
+///
+/// The scored corpus runner flushes before returning from the test so the GHA cache contains the
+/// complete recording, and so a publication failure remains an ordinary test diagnostic instead
+/// of being swallowed by the best-effort process-exit hook.
+pub fn flush_recorded_class_dumps() {
+    flush_dirty_archives();
 }
 
 fn flush_archive(root: &Path) {
@@ -1129,7 +1226,9 @@ pub(crate) struct ReplayedClasses {
 
 struct Invocation {
     out: PathBuf,
+    sources: Vec<String>,
     fingerprint: u128,
+    legacy_fingerprint: u128,
     label: String,
 }
 
@@ -1168,30 +1267,41 @@ fn replay_class_dump_with_policy(
         ),
         Err(err) => refuse_missing_dump(&err),
     };
-    let key = hex128(invocation.fingerprint);
-    if let Some(files) = load_files(
-        root,
-        INVOCATION_MODULE,
-        &key,
-        compiler,
-        invocation.fingerprint,
-    ) {
-        let replayed = split_replay(files);
-        if diagnostics_required() && !replayed.status {
-            if compile_missing {
-                return None;
+    let mut saw_incomplete = false;
+    for fingerprint in [invocation.fingerprint, invocation.legacy_fingerprint] {
+        let key = hex128(fingerprint);
+        let Some(files) = load_files(root, INVOCATION_MODULE, &key, compiler, fingerprint) else {
+            if fingerprint == invocation.legacy_fingerprint {
+                break;
             }
-            refuse_missing_dump(&format!(
-                "sources {} fingerprint {} (class files are recorded, but not the exit code and diagnostics)",
-                invocation.label, key
-            ));
+            continue;
+        };
+        let mut replayed = split_replay(files);
+        if diagnostics_required() && !replayed.status {
+            saw_incomplete = true;
+            if fingerprint == invocation.legacy_fingerprint {
+                break;
+            }
+            continue;
         }
+        replayed.stderr = materialize_diagnostic_sources(&replayed.stderr, &invocation.sources);
         return Some(replayed);
     }
-    if compile_missing {
+    if saw_incomplete && !compile_missing {
+        refuse_missing_dump(&format!(
+            "sources {} fingerprint {} (class files are recorded, but not the exit code and diagnostics)",
+            invocation.label,
+            hex128(invocation.fingerprint)
+        ));
+    }
+    if compile_missing || saw_incomplete {
         return None;
     }
-    refuse_missing_dump(&format!("sources {} fingerprint {}", invocation.label, key));
+    refuse_missing_dump(&format!(
+        "sources {} fingerprint {}",
+        invocation.label,
+        hex128(invocation.fingerprint)
+    ));
 }
 
 /// Write a replayed dump into the invocation's `-d` path.
@@ -1273,6 +1383,69 @@ fn split_replay(mut files: BTreeMap<String, Vec<u8>>) -> ReplayedClasses {
     }
 }
 
+/// Replace a recorded located-diagnostic path with the current invocation's source spelling.
+///
+/// Invocation fingerprints deliberately identify scratch sources by basename and bytes, so a dump
+/// recorded in one process may replay in another directory. Diagnostics are part of that dump and
+/// must follow the same location-independent identity instead of leaking the recorder's path.
+fn materialize_diagnostic_sources(stderr: &str, sources: &[String]) -> String {
+    let mut by_basename = BTreeMap::<String, Option<&str>>::new();
+    for source in sources {
+        let entry = by_basename.entry(basename(source));
+        match entry {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(source));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_some_and(|existing| existing != source) {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+
+    let mut materialized = String::with_capacity(stderr.len());
+    for line in stderr.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        let replacement = located_diagnostic_source(body).and_then(|recorded| {
+            by_basename
+                .get(&basename(recorded))
+                .and_then(|source| *source)
+                .map(|source| (recorded.len(), source))
+        });
+        if let Some((prefix_len, source)) = replacement {
+            materialized.push_str(source);
+            materialized.push_str(&body[prefix_len..]);
+        } else {
+            materialized.push_str(body);
+        }
+        materialized.push_str(newline);
+    }
+    materialized
+}
+
+fn located_diagnostic_source(line: &str) -> Option<&str> {
+    for (prefix_len, _) in line.match_indices(':') {
+        let after_path = &line[prefix_len + 1..];
+        let Some((line_number, after_line)) = after_path.split_once(':') else {
+            continue;
+        };
+        let Some((column, _message)) = after_line.split_once(':') else {
+            continue;
+        };
+        if !line_number.is_empty()
+            && line_number.bytes().all(|byte| byte.is_ascii_digit())
+            && !column.is_empty()
+            && column.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Some(&line[..prefix_len]);
+        }
+    }
+    None
+}
+
 fn exit_code(bytes: &[u8]) -> i32 {
     let Ok(bytes) = <[u8; 4]>::try_from(bytes) else {
         refuse_missing_dump("a kotlinc exit code that is not four bytes");
@@ -1282,6 +1455,7 @@ fn exit_code(bytes: &[u8]) -> i32 {
 
 fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
     let mut out = None;
+    let mut source_args = Vec::new();
     let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
     let mut classpath = Vec::new();
     let mut flags = Vec::new();
@@ -1312,6 +1486,7 @@ fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
             let bytes = std::fs::read(arg)
                 .map_err(|err| format!("unreadable source {}: {err}", Path::new(arg).display()))?;
             let name = basename(arg);
+            source_args.push(arg.clone());
             sources.push((name, bytes));
             index += 1;
             continue;
@@ -1336,11 +1511,17 @@ fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
         blob.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
         blob.extend_from_slice(bytes);
     }
+    let legacy_classpath = legacy_classpath_fingerprint(&classpath)?;
     let classpath = classpath_content_fingerprint(&classpath)?;
     let flags = flags.join("\n");
+    let fingerprint_of = |classpath: &str| {
+        fingerprint_parts(&[blob.as_slice(), flags.as_bytes(), classpath.as_bytes()])
+    };
     Ok(Some(Invocation {
         out,
-        fingerprint: fingerprint_parts(&[blob.as_slice(), flags.as_bytes(), classpath.as_bytes()]),
+        sources: source_args,
+        fingerprint: fingerprint_of(&classpath),
+        legacy_fingerprint: fingerprint_of(&legacy_classpath),
         label,
     }))
 }
@@ -1401,6 +1582,165 @@ fn write_output(out: &Path, files: &BTreeMap<String, Vec<u8>>) {
 fn ci_allows_write() -> bool {
     std::env::var_os("CI").is_none()
         || std::env::var_os("KRUSTY_CLASS_DUMP_WRITE").is_some_and(|flag| flag == "1")
+}
+
+/// Why `kotlinc_compile` ran the real compiler instead of replaying a dump.
+fn classify_live_kotlinc(cached_compiler: bool, force: bool) -> &'static str {
+    if !cached_compiler {
+        "uncached-compiler"
+    } else if force {
+        "record"
+    } else {
+        "cache-miss"
+    }
+}
+
+/// One greppable stderr line for a live kotlinc invocation.
+///
+/// libtest captures `eprintln!` and hides it when the test passes, so the line is written to file
+/// descriptor 2 directly. A process-exit summary repeats each test's count.
+fn format_live_kotlinc_line(reason: &str, test: &str, sources: &str, fingerprint: &str) -> String {
+    format!(
+        "class-dump: live kotlinc {reason} test={test} sources={sources} fingerprint={fingerprint}\n"
+    )
+}
+
+struct LiveKotlincUse {
+    reason: &'static str,
+    test: String,
+}
+
+struct LiveKotlincLog {
+    uses: Mutex<Vec<LiveKotlincUse>>,
+}
+
+fn summarize_live_kotlinc(uses: &[LiveKotlincUse]) -> String {
+    let mut counts: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+    for use_ in uses {
+        *counts.entry((use_.test.clone(), use_.reason)).or_default() += 1;
+    }
+    let mut summary = format!(
+        "class-dump: live kotlinc summary invocations={} tests={}\n",
+        uses.len(),
+        counts.len()
+    );
+    for ((test, reason), count) in counts {
+        summary.push_str(&format!(
+            "class-dump: live kotlinc summary {reason} test={test} invocations={count}\n"
+        ));
+    }
+    summary
+}
+
+impl Drop for LiveKotlincLog {
+    fn drop(&mut self) {
+        let uses = std::mem::take(self.uses.get_mut().unwrap_or_else(|err| err.into_inner()));
+        if !uses.is_empty() {
+            write_process_stderr(&summarize_live_kotlinc(&uses));
+        }
+    }
+}
+
+/// libtest ends the process with `exit`, which skips Rust destructors. This still runs.
+extern "C" fn print_live_kotlinc_summary() {
+    let Some(log) = LIVE_KOTLINC_LOG.get() else {
+        return;
+    };
+    let uses = std::mem::take(&mut *log.uses.lock().unwrap_or_else(|err| err.into_inner()));
+    if !uses.is_empty() {
+        write_process_stderr(&summarize_live_kotlinc(&uses));
+    }
+}
+
+fn install_live_kotlinc_summary() {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        // SAFETY: the handler is `extern "C"`, reads only this process's log, and runs when the
+        // process is exiting, after test threads have finished.
+        unsafe {
+            libc::atexit(print_live_kotlinc_summary);
+        }
+    });
+}
+
+static LIVE_KOTLINC_LOG: std::sync::OnceLock<LiveKotlincLog> = std::sync::OnceLock::new();
+
+fn live_kotlinc_log() -> &'static LiveKotlincLog {
+    LIVE_KOTLINC_LOG.get_or_init(|| LiveKotlincLog {
+        uses: Mutex::new(Vec::new()),
+    })
+}
+
+fn write_process_stderr(text: &str) {
+    let bytes = text.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        // SAFETY: `bytes` is live for this call, and fd 2 is the process stderr.
+        let written =
+            unsafe { libc::write(2, bytes[offset..].as_ptr().cast(), bytes.len() - offset) };
+        if written < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if written == 0 {
+            return;
+        }
+        offset += written as usize;
+    }
+}
+
+/// Report that this test just ran kotlinc instead of replaying recorded class files.
+pub(crate) fn report_live_kotlinc(args: &[String]) {
+    log_live_kotlinc(
+        classify_live_kotlinc(compiler_dump_version().is_some(), record_forced()),
+        args,
+    );
+}
+
+/// Report a live compile for a caller that bypasses the archive and keeps its own cache.
+///
+/// That cache follows the archive's release/RC rule but ignores a forced re-record, so its compile
+/// is a `cache-miss` or `uncached-compiler`, never `record`.
+pub(crate) fn report_unrecorded_kotlinc(args: &[String]) {
+    log_live_kotlinc(
+        classify_live_kotlinc(compiler_dump_version().is_some(), false),
+        args,
+    );
+}
+
+fn log_live_kotlinc(reason: &'static str, args: &[String]) {
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("unknown")
+        .to_string();
+    let (sources, fingerprint) = match parse_invocation(args) {
+        Ok(Some(invocation)) => (invocation.label, hex128(invocation.fingerprint)),
+        Ok(None) => ("(no sources)".to_string(), "-".to_string()),
+        Err(_) => ("(unreadable sources)".to_string(), "-".to_string()),
+    };
+    let line = format_live_kotlinc_line(reason, &test, &sources, &fingerprint);
+    write_process_stderr(&line);
+    install_live_kotlinc_summary();
+    live_kotlinc_log()
+        .uses
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(LiveKotlincUse { reason, test });
+}
+
+/// The reasons logged so far for `test`'s live kotlinc invocations, in invocation order.
+#[cfg(test)]
+pub(crate) fn live_kotlinc_reasons(test: &str) -> Vec<&'static str> {
+    live_kotlinc_log()
+        .uses
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .filter(|use_| use_.test == test)
+        .map(|use_| use_.reason)
+        .collect()
 }
 
 fn running_test() -> (String, String) {

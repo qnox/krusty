@@ -16,6 +16,16 @@ impl CodeBuilder {
         self.op_u1(CODEGEN_MARKER_OP, marker as u8, 0);
     }
 
+    /// An opening marker for which the emitter has reserved the stack spill's local words before
+    /// allocating the inline lambda's frame marker. FixStack fills that exact reservation.
+    pub fn inline_call_marker_with_reserved_locals(&mut self) {
+        self.op_u1(
+            CODEGEN_MARKER_OP,
+            CodegenMarker::BeforeInlineCallWithReservedLocals as u8,
+            0,
+        );
+    }
+
     /// `InlineMarker.mark(id)`: the id as an ordinary constant, then the call that takes it.
     pub fn suspend_marker(&mut self, id: i32, cw: &mut ClassWriter) {
         self.push_int(id, cw);

@@ -2,7 +2,8 @@
 
 use super::*;
 
-/// Add one public abstract declaration and apply its generic signature and source annotations.
+/// Add one abstract declaration with the member's own visibility and apply its generic signature
+/// and source annotations.
 pub(super) fn add_abstract(
     ir: &IrFile,
     cw: &mut ClassWriter,
@@ -14,7 +15,7 @@ pub(super) fn add_abstract(
     let declaration = &ir.functions[function as usize];
     let descriptor = declared_method_desc(ir, override_results, function);
     cw.add_abstract_method_sig(
-        0x0001 | 0x0400 | method_access::varargs_access(ir, function),
+        method_access::abstract_method_access(ir, function),
         &declaration.name,
         &descriptor,
         declared_method_signature(formatter, ir, override_results, function).as_deref(),
@@ -51,14 +52,35 @@ pub(super) fn emit_recorded(
     name: &str,
     descriptor: &str,
 ) {
-    let Some(annotations) = ir.function_annotations.get(&function) else {
-        return;
-    };
+    if let Some(annotations) = ir.function_annotations.get(&function) {
+        emit_declared(cw, annotations, name, descriptor);
+    }
+}
+
+/// Write a method's declared annotations, with the attributes `@Deprecated` implies.
+pub(super) fn emit_declared(
+    cw: &mut ClassWriter,
+    annotations: &crate::ir::DeclarationAnnotations,
+    name: &str,
+    descriptor: &str,
+) {
     cw.set_method_annotations(name, descriptor, annotations);
     if annotations.deprecated() {
         cw.mark_method_deprecated(name, descriptor);
     }
-    if annotations.deprecated_hidden() {
+    if hidden_realization_is_synthetic(annotations) {
         cw.set_method_synthetic(name, descriptor);
     }
+}
+
+/// kotlinc emits a `@Deprecated(level = HIDDEN)` declaration `ACC_SYNTHETIC`, so Java cannot call
+/// it either, unless it also carries `@java.lang.Deprecated`: that annotation keeps the method
+/// visible to Java (KT-80649), which kotlinc's no-arg plugin relies on for its constructor.
+pub(super) fn hidden_realization_is_synthetic(
+    annotations: &crate::ir::DeclarationAnnotations,
+) -> bool {
+    annotations.deprecated_hidden()
+        && !annotations
+            .applications()
+            .any(|annotation| annotation.internal.matches("java/lang/Deprecated"))
 }

@@ -131,15 +131,34 @@ fn map_recovery(
     }))
 }
 
+/// Keep an extension receiver only when it is a type parameter. Its bound is what the expansion
+/// stores; an ordinary classifier receiver is already the slot type. A nullable occurrence
+/// (`T?` where `T : Closeable?`) is still that parameter.
+pub(super) fn type_parameter_receiver(
+    receiver: Option<crate::types::Ty>,
+) -> Option<crate::types::Ty> {
+    receiver.filter(|receiver| receiver.non_null().is_ty_param())
+}
+
+/// The unsubstituted receiver an inline plan stores, when the declaration receiver is a type
+/// parameter. Specialization replaces the call-site slot; this signature node does not.
+pub(super) fn signature_type_parameter_receiver(
+    signature: Option<&crate::libraries::GenericSig>,
+) -> Option<crate::types::Ty> {
+    type_parameter_receiver(signature.and_then(|signature| signature.receiver))
+}
+
 pub(super) fn publish(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
+    declared_receiver: Option<crate::types::Ty>,
 ) -> Result<Option<Box<crate::fir::FirInlineBodyPlan>>, MappingFailure> {
     let Some(plan) = plan else {
         return Ok(None);
     };
     Ok(Some(Box::new(match plan {
         crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame,
             lambda_parameter,
             arguments,
             prologue,
@@ -159,6 +178,7 @@ pub(super) fn publish(
                 return Err(MappingFailure::UnsupportedPlan);
             }
             crate::fir::FirInlineBodyPlan::InvokeLambda {
+                frame: frame.into(),
                 lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
                 arguments: arguments
                     .iter()
@@ -202,6 +222,11 @@ pub(super) fn publish(
                 result: result
                     .map(|value| map_value(value, receiver_parameter))
                     .transpose()?,
+                declared_receiver: declared_receiver
+                    .filter(|receiver| receiver.non_null().is_ty_param())
+                    .map(crate::fir::ResolvedTy::new)
+                    .transpose()
+                    .map_err(|_| MappingFailure::UnsupportedPlan)?,
             }
         }
         crate::libraries::InlineBodyPlan::Iteration { .. } => {
@@ -216,6 +241,7 @@ pub(super) fn publish(
 }
 
 pub(super) struct PublishedIteration {
+    pub(super) frame: crate::fir::FirInlineBodyFrame,
     pub(super) lambda_parameter: u32,
     pub(super) index: Option<crate::fir::FirInlineIterationIndex>,
     pub(super) traversal: crate::fir::FirInlineIterationTraversal,
@@ -240,6 +266,8 @@ fn publish_iteration_member(
             .map_err(|_| MappingFailure::UnsupportedPlan)?
             .into_boxed_slice(),
         result: crate::fir::ResolvedTy::new(member.ret)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+        physical_result: crate::fir::ResolvedTy::new(member.physical_ret)
             .map_err(|_| MappingFailure::UnsupportedPlan)?,
     })
 }
@@ -312,6 +340,7 @@ pub(super) fn publish_iteration(
     element: crate::types::Ty,
 ) -> Result<PublishedIteration, MappingFailure> {
     let crate::libraries::InlineBodyPlan::Iteration {
+        frame,
         lambda_parameter,
         index,
         traversal,
@@ -343,6 +372,7 @@ pub(super) fn publish_iteration(
         .transpose()?;
     let traversal = publish_traversal(traversal, receiver, element)?;
     Ok(PublishedIteration {
+        frame: frame.into(),
         lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
         index,
         traversal,
@@ -389,6 +419,7 @@ pub(super) fn publish_extension_iteration(
         return Err(MappingFailure::UnsupportedPlan);
     }
     Ok(crate::fir::FirInlineBodyPlan::Iteration {
+        frame: published.frame,
         lambda_parameter: published.lambda_parameter,
         element: crate::fir::ResolvedTy::new(element)
             .map_err(|_| MappingFailure::UnsupportedPlan)?,
@@ -548,13 +579,13 @@ pub(super) fn publish_extension_collection_transform(
         factory_classifier,
         factory_parameters,
         capacity,
-        append,
+        append: Box::new(append),
         accumulator: crate::fir::ResolvedTy::new(accumulator_ty)
             .map_err(|_| MappingFailure::UnsupportedPlan)?,
     })
 }
 
-/// Commit applicability while both the complete checked call and a literal's checked body are
+/// Commit applicability while both the complete checked call and its selected function value are
 /// available. `None` after this operation is an ordinary selected dependency call, not a lowering
 /// fallback. A present plan is therefore an unconditional obligation for common lowering.
 pub(super) fn finalize(
@@ -578,6 +609,7 @@ pub(super) fn finalize(
             lambda_parameter, ..
         } => *lambda_parameter,
     };
+    let invokes_function_value = matches!(plan, crate::fir::FirInlineBodyPlan::InvokeLambda { .. });
     let collection_transform = matches!(
         plan,
         crate::fir::FirInlineBodyPlan::CollectionTransform { .. }
@@ -601,11 +633,21 @@ pub(super) fn finalize(
         }
     }
     let value = selected_value.ok_or(MappingFailure::UnsupportedPlan)?;
-    let literal_body = body.expr(value).and_then(|argument| match &argument.kind {
+    let selected = body.expr(value);
+    let literal_body = selected.and_then(|argument| match &argument.kind {
         crate::fir::FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
         _ => None,
     });
-    if !literal_body.is_some_and(|body| !collection_transform || body.direct_suspension) {
+    let supported = if invokes_function_value {
+        // The call checker has already established that this argument has the selected function
+        // parameter's type. `InvokeLambda` evaluates that expression once and either splices a
+        // literal template or invokes the resulting function value. Its FIR representation is not
+        // part of the provider plan's applicability contract.
+        selected.is_some()
+    } else {
+        literal_body.is_some_and(|body| !collection_transform || body.direct_suspension)
+    };
+    if !supported {
         *inline_plan = None;
     }
     Ok(())
@@ -613,10 +655,110 @@ pub(super) fn finalize(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{checked_function_body_with_platform, jvm_stdlib_semantics};
+    use super::super::test_support::{
+        checked_function_body_with_platform, jvm_stdlib_semantics, root_expression,
+    };
     use super::*;
     use crate::fir::{FirCallTarget, FirExprId, FirExprKind, FirInlineBodyPlan};
     use crate::types::Ty;
+
+    #[test]
+    fn function_value_keeps_the_selected_external_call_and_provider_plan() {
+        let (body, _) = checked_function_body_with_platform(
+            "fun read(block: (String) -> Int): Int = \"value\".let(block)\n",
+            "read",
+            jvm_stdlib_semantics(),
+        );
+        let root = body.expr(root_expression(&body)).expect("root call");
+        let FirExprKind::Call(call) = &root.kind else {
+            panic!("let must remain a checked call")
+        };
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
+            panic!("stdlib let must retain its selected external identity")
+        };
+        let FirInlineBodyPlan::InvokeLambda {
+            frame,
+            lambda_parameter,
+            arguments,
+            prologue,
+            cleanup,
+            cause,
+            recovery,
+            defaults,
+            result,
+            ..
+        } = plan.as_ref()
+        else {
+            panic!("stdlib let must retain its provider-owned invocation plan")
+        };
+        assert_eq!(frame.callee.as_ref(), "let");
+        assert_eq!(*lambda_parameter, 0);
+        assert_eq!(arguments.as_ref(), [crate::fir::FirInlineValue::Receiver]);
+        assert!(prologue.is_empty());
+        assert!(cleanup.is_empty());
+        assert_eq!(*cause, None);
+        assert!(recovery.is_none());
+        assert!(defaults.is_empty());
+        assert_eq!(*result, None);
+    }
+
+    #[test]
+    fn callable_reference_keeps_the_selected_external_call_and_provider_plan() {
+        let (body, _) = checked_function_body_with_platform(
+            "fun id(value: String): Int = value.length\n\
+             fun read(): Int = \"value\".let(::id)\n",
+            "read",
+            jvm_stdlib_semantics(),
+        );
+        let root = body.expr(root_expression(&body)).expect("root call");
+        let FirExprKind::Call(call) = &root.kind else {
+            panic!("let must remain a checked call")
+        };
+        let FirCallTarget::External {
+            inline_plan: Some(plan),
+            ..
+        } = &call.target
+        else {
+            panic!("stdlib let must retain its selected external identity")
+        };
+        assert!(matches!(
+            plan.as_ref(),
+            FirInlineBodyPlan::InvokeLambda {
+                lambda_parameter: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn every_checked_function_expression_keeps_the_invoke_plan() {
+        for source in [
+            "class Holder(val block: (String) -> Int)\n\
+             fun read(holder: Holder): Int = \"value\".let(holder.block)\n",
+            "fun read(flag: Boolean, first: (String) -> Int, second: (String) -> Int): Int =\n\
+             \x20   \"value\".let(if (flag) first else second)\n",
+            "fun make(): (String) -> Int = { it.length }\n\
+             fun read(): Int = \"value\".let(make())\n",
+        ] {
+            let (body, _) =
+                checked_function_body_with_platform(source, "read", jvm_stdlib_semantics());
+            let root = body.expr(root_expression(&body)).expect("root call");
+            let FirExprKind::Call(call) = &root.kind else {
+                panic!("let must remain a checked call")
+            };
+            assert!(matches!(
+                &call.target,
+                FirCallTarget::External {
+                    inline_plan: Some(_),
+                    ..
+                }
+            ));
+        }
+    }
 
     #[test]
     fn safe_iteration_call_retains_one_guarded_receiver_and_exact_plan() {
@@ -730,6 +872,44 @@ mod tests {
     }
 
     #[test]
+    fn invoke_plan_survives_an_ordinary_function_value_argument() {
+        let (body, _) = checked_function_body_with_platform(
+            "class PlanSubject\n\
+             fun retain(\n\
+             \x20   subject: PlanSubject,\n\
+             \x20   block: PlanSubject.() -> Unit,\n\
+             ): PlanSubject = subject.apply(block)\n",
+            "retain",
+            jvm_stdlib_semantics(),
+        );
+        let plan = (0..body.expression_count()).find_map(|raw| {
+            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
+                return None;
+            };
+            let FirCallTarget::External {
+                inline_plan: Some(plan),
+                ..
+            } = &call.target
+            else {
+                return None;
+            };
+            Some(plan.as_ref())
+        });
+        let Some(FirInlineBodyPlan::InvokeLambda {
+            lambda_parameter,
+            arguments,
+            result,
+            ..
+        }) = plan
+        else {
+            panic!("apply must retain its provider plan for a function-valued parameter")
+        };
+        assert_eq!(*lambda_parameter, 0);
+        assert_eq!(arguments.as_ref(), [crate::fir::FirInlineValue::Receiver]);
+        assert_eq!(*result, Some(crate::fir::FirInlineValue::Receiver));
+    }
+
+    #[test]
     fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
         assert!(
@@ -777,6 +957,7 @@ mod tests {
             recovery: None,
             defaults,
             result,
+            ..
         }) = plan
         else {
             panic!("withLock must publish its selected structural plan in checked FIR")
@@ -851,10 +1032,22 @@ mod tests {
             recovery: None,
             defaults,
             result,
+            declared_receiver,
+            ..
         }) = plan
         else {
             panic!("Closeable.use must publish its complete plan in checked FIR")
         };
+        let declared = declared_receiver
+            .expect("Closeable.use stores its type-parameter receiver")
+            .get()
+            .non_null();
+        assert!(declared.is_ty_param(), "{declared:?}");
+        assert_eq!(
+            declared.ty_param_bound().map(Ty::non_null),
+            Some(Ty::obj("java/io/Closeable")),
+            "{declared:?}"
+        );
         assert_eq!(*lambda_parameter, 0);
         assert_eq!(arguments.as_ref(), [crate::fir::FirInlineValue::Receiver]);
         assert!(prologue.is_empty());
@@ -897,6 +1090,11 @@ mod tests {
         )
         .callable;
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: "enter".into(),
+                inline_only: true,
+                source: None,
+            },
             lambda_parameter: 0,
             arguments: Vec::new(),
             prologue: vec![crate::libraries::InlineBodyCall {
@@ -911,9 +1109,9 @@ mod tests {
             result: None,
         };
 
-        assert_eq!(publish(None, None), Ok(None));
+        assert_eq!(publish(None, None, None), Ok(None));
         assert_eq!(
-            publish(Some(&plan), None),
+            publish(Some(&plan), None, None),
             Err(MappingFailure::UnsupportedPlan),
             "a present plan without stable member identities is a publication error",
         );
@@ -932,6 +1130,11 @@ mod tests {
         );
         cleanup.external_identity = Some(crate::fir::ExternalCallableId::from_raw(7));
         let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: "cleanup".into(),
+                inline_only: true,
+                source: None,
+            },
             lambda_parameter: 1,
             arguments: vec![crate::libraries::InlineBodyValue::Parameter(0)],
             prologue: Vec::new(),
@@ -947,7 +1150,7 @@ mod tests {
             defaults: Vec::new(),
             result: None,
         };
-        let Some(plan) = publish(Some(&plan), Some(0)).expect("valid checked plan") else {
+        let Some(plan) = publish(Some(&plan), Some(0), None).expect("valid checked plan") else {
             panic!("present provider plan must remain present")
         };
         let FirInlineBodyPlan::InvokeLambda { cause, cleanup, .. } = plan.as_ref() else {

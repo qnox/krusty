@@ -79,6 +79,100 @@ fn compare_with_kotlinc_plugin_full(
     jvm_target: &str,
     kotlinc_extra: &[String],
 ) -> Option<ReferenceComparison> {
+    compare_with_kotlinc_plugin_request(ComparisonRequest {
+        name,
+        src,
+        class,
+        cp_jars,
+        krusty_cp_jars,
+        jvm_target,
+        kotlinc_extra,
+        language_settings: None,
+    })
+}
+
+/// [`compare_with_kotlinc_plugin`] under one explicit public language/API configuration supplied
+/// to both compilers. The JDK modules sit beside the stdlib on the krusty side only (see
+/// [`compare_with_kotlinc_plugin_jdk`]); the reference kotlinc always has its own JDK, so the
+/// recorded dump keeps the requested classpath.
+pub fn compare_with_kotlinc_plugin_language_settings(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    jvm_target: &str,
+    language_settings: &krusty::language_settings::LanguageSettings,
+) -> Option<ReferenceComparison> {
+    let kotlinc_extra = kotlinc_language_options(language_settings);
+    let mut krusty_cp = cp_jars.to_vec();
+    krusty_cp.push(super::common_core::jdk_modules());
+    compare_with_kotlinc_plugin_request(ComparisonRequest {
+        name,
+        src,
+        class,
+        cp_jars,
+        krusty_cp_jars: &krusty_cp,
+        jvm_target,
+        kotlinc_extra: &kotlinc_extra,
+        language_settings: Some(language_settings),
+    })
+}
+
+fn kotlinc_language_options(
+    language_settings: &krusty::language_settings::LanguageSettings,
+) -> Vec<String> {
+    let mut options = vec![
+        "-language-version".to_owned(),
+        language_settings.language_version.to_string(),
+        "-api-version".to_owned(),
+        language_settings.api_version.to_string(),
+    ];
+    let baseline = krusty::features::LangFeatures::for_versions(
+        language_settings.language_version,
+        language_settings.api_version,
+    );
+    let feature_names = baseline
+        .iter()
+        .chain(language_settings.features.iter())
+        .collect::<std::collections::BTreeSet<_>>();
+    for feature in feature_names {
+        let enabled = language_settings.features.has(feature);
+        if enabled != baseline.has(feature) {
+            options.push(format!(
+                "-XXLanguage:{}{feature}",
+                if enabled { '+' } else { '-' }
+            ));
+        }
+    }
+    options
+}
+
+/// One class compared against the reference compiler: what to build, the classpaths each side
+/// sees, and the public language/API settings both compiler invocations take.
+struct ComparisonRequest<'a> {
+    name: &'a str,
+    src: &'a str,
+    class: &'a str,
+    cp_jars: &'a [PathBuf],
+    krusty_cp_jars: &'a [PathBuf],
+    jvm_target: &'a str,
+    kotlinc_extra: &'a [String],
+    language_settings: Option<&'a krusty::language_settings::LanguageSettings>,
+}
+
+fn compare_with_kotlinc_plugin_request(
+    request: ComparisonRequest<'_>,
+) -> Option<ReferenceComparison> {
+    let ComparisonRequest {
+        name,
+        src,
+        class,
+        cp_jars,
+        krusty_cp_jars,
+        jvm_target,
+        kotlinc_extra,
+        language_settings,
+    } = request;
     let inputs =
         super::common_core::byte_dump::class_dump_inputs(src, jvm_target, kotlinc_extra, cp_jars);
     let reference_bytes = super::common_core::byte_dump::kotlinc_class_dumps(
@@ -86,6 +180,7 @@ fn compare_with_kotlinc_plugin_full(
         jvm_target,
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         &[class],
         || {
             let dir = super::common_core::scratch_dir()?;
@@ -144,13 +239,25 @@ fn compare_with_kotlinc_plugin_full(
             .map(|target| target + 44)
             .unwrap_or_else(|| panic!("unknown -jvm-target {other}")),
     };
-    let classes = super::common_core::compile_in_process_metadata_cp_module_target(
-        src,
-        name,
-        krusty_cp_jars,
-        "main",
-        Some(class_major),
-    )
+    let jdk = super::common_core::jdk_modules();
+    let jdk = (!krusty_cp_jars.contains(&jdk)).then_some(jdk);
+    let classes = match language_settings {
+        Some(language_settings) => super::common_core::source_set_compile::compile(
+            &[(name, src)],
+            krusty_cp_jars,
+            jdk.as_deref(),
+            Some(class_major),
+            Some(language_settings.language_version.metadata_version()),
+            language_settings,
+        ),
+        None => super::common_core::compile_in_process_metadata_cp_module_target(
+            src,
+            name,
+            krusty_cp_jars,
+            "main",
+            Some(class_major),
+        ),
+    }
     .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
@@ -288,6 +395,176 @@ pub struct ClassSets {
     pub krusty: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
+/// A `javap -v -p` listing with its constant-pool indices erased to `#`, and nothing else changed,
+/// read line by line. javap prints a pool index in two positions only: as a whole token (an
+/// operand `#12,`, a `BootstrapMethods` argument `#30`, an `InnerClasses` row `#10= #2 of #4;`),
+/// and inside an encoded annotation row (`0: #72()`, `1: #154(#155=[I#156])`,
+/// `default_value: I#12`), whose grammar holds only pool indices. The decoded annotation javap
+/// prints beneath an encoded row, indented deeper (`Ticket(value="ticket #123")`), is compared
+/// exactly, as is every other token.
+#[derive(Default)]
+pub struct ListingPoolIndices {
+    /// The indentation of the encoded annotation row whose decoded block is being read.
+    decoded_below: Option<usize>,
+}
+
+impl ListingPoolIndices {
+    pub fn erase(&mut self, line: &str) -> String {
+        let indentation = line.len() - line.trim_start().len();
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        if self
+            .decoded_below
+            .is_some_and(|encoded| indentation > encoded && !tokens.is_empty())
+        {
+            return tokens.join(" ");
+        }
+        self.decoded_below = None;
+        let kind = match tokens.as_slice() {
+            ["default_value:", ..] => Some(EncodedRowKind::ElementValue),
+            [position, ..] if position.strip_suffix(':').is_some_and(is_decimal) => {
+                Some(EncodedRowKind::Annotation)
+            }
+            _ => None,
+        };
+        let mut erased = tokens
+            .iter()
+            .map(|token| erase_pool_reference(token).unwrap_or_else(|| (*token).to_owned()))
+            .collect::<Vec<_>>();
+        if let (Some(kind), Some(token)) = (kind, tokens.get(1)) {
+            if let Some(encoded) = EncodedAnnotation::erase(token, kind) {
+                erased[1] = encoded;
+                self.decoded_below = Some(indentation);
+            }
+        }
+        erased.join(" ")
+    }
+}
+
+fn is_decimal(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// A token that is exactly one pool index, with the punctuation javap writes after it.
+fn erase_pool_reference(token: &str) -> Option<String> {
+    let index = token.strip_prefix('#')?;
+    let digits = index.trim_end_matches([',', ':', ';', '=']);
+    (is_decimal(digits) && index.len() - digits.len() <= 1)
+        .then(|| format!("#{}", &index[digits.len()..]))
+}
+
+/// What an encoded annotation row holds: an annotation (`0: #72()`), or an `AnnotationDefault`
+/// element value (`default_value: I#12`).
+#[derive(Clone, Copy)]
+enum EncodedRowKind {
+    Annotation,
+    ElementValue,
+}
+
+/// A recursive-descent reader of javap's encoded annotation grammar, writing it back with every
+/// pool index erased. A token that is not exactly that grammar is left alone.
+struct EncodedAnnotation<'a> {
+    rest: &'a str,
+    erased: String,
+}
+
+impl<'a> EncodedAnnotation<'a> {
+    fn erase(token: &'a str, kind: EncodedRowKind) -> Option<String> {
+        let mut reader = Self {
+            rest: token,
+            erased: String::with_capacity(token.len()),
+        };
+        match kind {
+            EncodedRowKind::Annotation => reader.annotation()?,
+            EncodedRowKind::ElementValue => reader.element_value()?,
+        }
+        // A type annotation's row continues after a colon (`0: #24(): FIELD`).
+        if matches!(kind, EncodedRowKind::Annotation) {
+            reader.optional(':');
+        }
+        reader.rest.is_empty().then_some(reader.erased)
+    }
+
+    fn optional(&mut self, expected: char) -> bool {
+        match self.rest.strip_prefix(expected) {
+            Some(rest) => {
+                self.rest = rest;
+                self.erased.push(expected);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn expect(&mut self, expected: char) -> Option<()> {
+        self.optional(expected).then_some(())
+    }
+
+    fn pool_index(&mut self) -> Option<()> {
+        let index = self.rest.strip_prefix('#')?;
+        let digits = index.len() - index.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            return None;
+        }
+        self.rest = &index[digits..];
+        self.erased.push('#');
+        Some(())
+    }
+
+    /// `#type(#name=value,...)`
+    fn annotation(&mut self) -> Option<()> {
+        self.pool_index()?;
+        self.expect('(')?;
+        if !self.optional(')') {
+            loop {
+                self.pool_index()?;
+                self.expect('=')?;
+                self.element_value()?;
+                if self.optional(')') {
+                    break;
+                }
+                self.expect(',')?;
+            }
+        }
+        Some(())
+    }
+
+    /// A constant (`I#12`, `s#158`), an enum (`e#12.#13`), a class (`c#14`), a nested annotation
+    /// (`@#72()`) or an array (`[I#156,I#157]`).
+    fn element_value(&mut self) -> Option<()> {
+        let tag = self.rest.chars().next()?;
+        match tag {
+            'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' | 'c' => {
+                self.expect(tag)?;
+                self.pool_index()
+            }
+            'e' => {
+                self.expect('e')?;
+                self.pool_index()?;
+                self.expect('.')?;
+                self.pool_index()
+            }
+            '@' => {
+                self.expect('@')?;
+                self.annotation()
+            }
+            '[' => {
+                self.expect('[')?;
+                if !self.optional(']') {
+                    loop {
+                        self.element_value()?;
+                        if self.optional(']') {
+                            break;
+                        }
+                        self.expect(',')?;
+                    }
+                }
+                Some(())
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Complete output inventory from both compilers for one checked multi-file module.
 pub fn classes_against_kotlinc_module(sources: &[(&str, &str)]) -> ClassSets {
     classes_against_kotlinc_source_set(sources, 0)
@@ -399,6 +676,7 @@ impl ClassSets {
             let disassembly = disassemble_with(class, bytes, &["-v", "-p"]);
             assert!(!disassembly.is_empty(), "javap disassembles {class}");
             let mut lines = Vec::new();
+            let mut pool_indices = ListingPoolIndices::default();
             let mut in_pool = false;
             for line in disassembly.lines() {
                 if line.starts_with("Constant pool:") {
@@ -418,19 +696,7 @@ impl ClassSets {
                 if in_pool || file_detail {
                     continue;
                 }
-                lines.push(
-                    line.split_whitespace()
-                        .map(|token| match token.strip_prefix('#') {
-                            Some(rest)
-                                if rest.trim_end_matches([',', ':']).parse::<u32>().is_ok() =>
-                            {
-                                "#"
-                            }
-                            _ => token,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                );
+                lines.push(pool_indices.erase(line));
             }
             lines.join("\n")
         };
@@ -505,7 +771,44 @@ pub fn classes_against_kotlinc_lib_target(
     src: &str,
     jvm_target: Option<u16>,
 ) -> Option<ClassSets> {
-    let library = super::common_core::kotlinc_lib_out(lib)?;
+    classes_against_kotlinc_lib_request(name, lib, &[], src, jvm_target, None)
+}
+
+/// [`classes_against_kotlinc_lib`] with the library compiled under `-java-parameters`, so its
+/// methods carry `MethodParameters`; the consumer is compiled without it.
+pub fn classes_against_kotlinc_java_parameters_lib(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+) -> Option<ClassSets> {
+    let library_options = ["-java-parameters".to_string()];
+    classes_against_kotlinc_lib_request(name, lib, &library_options, src, None, None)
+}
+
+/// [`classes_against_kotlinc_lib`] with the dependency and consumer compiled under the same
+/// explicit public language/API configuration on both compilers.
+pub fn classes_against_kotlinc_lib_language_settings(
+    name: &str,
+    lib: &[(&str, &str)],
+    src: &str,
+    language_settings: &krusty::language_settings::LanguageSettings,
+) -> Option<ClassSets> {
+    classes_against_kotlinc_lib_request(name, lib, &[], src, None, Some(language_settings))
+}
+
+fn classes_against_kotlinc_lib_request(
+    name: &str,
+    lib: &[(&str, &str)],
+    library_options: &[String],
+    src: &str,
+    jvm_target: Option<u16>,
+    language_settings: Option<&krusty::language_settings::LanguageSettings>,
+) -> Option<ClassSets> {
+    let kotlinc_extra = language_settings
+        .map(kotlinc_language_options)
+        .unwrap_or_default();
+    let library_arguments = [kotlinc_extra.as_slice(), library_options].concat();
+    let library = super::common_core::kotlinc_lib::kotlinc_lib_out_with(lib, &library_arguments)?;
     let target = jvm_target
         .map(super::common_core::kotlinc_jvm_target_argument)
         .unwrap_or_else(|| "default".to_string());
@@ -520,6 +823,7 @@ pub fn classes_against_kotlinc_lib_target(
         &target,
         &inputs.variant,
         inputs.fingerprint,
+        inputs.legacy_fingerprint,
         || {
             let dir = super::common_core::scratch_dir()?;
             let reference_dir = dir.join("ref");
@@ -536,6 +840,7 @@ pub fn classes_against_kotlinc_lib_target(
                 arguments.push("-jvm-target".to_string());
                 arguments.push(target.clone());
             }
+            arguments.extend(kotlinc_extra.iter().cloned());
             arguments.push(source.to_string_lossy().into_owned());
             let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
             assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
@@ -546,15 +851,27 @@ pub fn classes_against_kotlinc_lib_target(
         },
     )?;
     let classpath = [library, super::common_core::stdlib_jar()];
-    let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
-        src,
-        name,
-        &classpath,
-        "main",
-        jvm_target.map(|target| target + 44),
-    )
+    let class_major = jvm_target.map(|target| target + 44);
+    let krusty = match language_settings {
+        Some(language_settings) => super::common_core::source_set_compile::compile(
+            &[(name, src)],
+            &classpath,
+            None,
+            class_major,
+            Some(language_settings.language_version.metadata_version()),
+            language_settings,
+        ),
+        None => super::common_core::compile_in_process_metadata_cp_module_target(
+            src,
+            name,
+            &classpath,
+            "main",
+            class_major,
+        ),
+    }
     .unwrap_or_else(|| panic!("{name}: krusty failed to compile"))
     .into_iter()
+    .filter(|(name, _)| !name.ends_with(".kotlin_module"))
     .collect();
     Some(ClassSets { reference, krusty })
 }
@@ -746,6 +1063,36 @@ pub fn assert_classes_identical_to_kotlinc_against(
     classes: &[&str],
     libraries: &[std::path::PathBuf],
 ) {
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, false);
+}
+
+/// [`assert_classes_identical_to_kotlinc_against`] with the JDK modules on krusty's classpath.
+/// Dependency fixtures that expose an inline body using a JDK classifier need both inputs: the
+/// repository-built dependency and the platform declarations its copied body resolves against.
+pub fn assert_classes_identical_to_kotlinc_against_jdk(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    libraries: &[std::path::PathBuf],
+) {
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, true);
+}
+
+/// [`assert_classes_identical_to_kotlinc`] with the JDK modules beside the stdlib on the KRUSTY
+/// side only, as [`compare_with_kotlinc_plugin_jdk`] arranges: a fixture naming a JDK-hierarchy
+/// type (the `StringBuilder` typealias) does not resolve for krusty without them, while the
+/// reference kotlinc always has its own JDK.
+pub fn assert_classes_identical_to_kotlinc_jdk(stem: &str, src: &str, classes: &[&str]) {
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, &[], true);
+}
+
+fn assert_classes_identical_to_kotlinc_full(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    libraries: &[std::path::PathBuf],
+    jdk_modules: bool,
+) {
     let dir = super::common_core::scratch_dir().expect("scratch directory");
     let reference_dir = dir.join("ref");
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
@@ -766,6 +1113,9 @@ pub fn assert_classes_identical_to_kotlinc_against(
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     let mut classpath = vec![super::common_core::stdlib_jar()];
     classpath.extend_from_slice(libraries);
+    if jdk_modules {
+        classpath.push(super::common_core::jdk_modules());
+    }
     let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
         src, stem, &classpath, "main", None,
     )
@@ -794,7 +1144,22 @@ pub fn assert_classes_identical_to_kotlinc_against(
 /// The semantic surfaces behind an exact class-byte mismatch. Constant-pool ordering remains part
 /// of the enclosing assertion, but this report names the header, member, code/debug, and metadata
 /// difference that must be corrected instead of reducing the failure to a class name.
-fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String {
+pub fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String {
+    let first_raw_difference = reference
+        .iter()
+        .zip(ours)
+        .position(|(reference, ours)| reference != ours)
+        .map(|offset| {
+            let start = offset.saturating_sub(8);
+            let reference_end = (offset + 9).min(reference.len());
+            let ours_end = (offset + 9).min(ours.len());
+            format!(
+                "offset {offset}: kotlinc {:02x?}, krusty {:02x?}",
+                &reference[start..reference_end],
+                &ours[start..ours_end]
+            )
+        })
+        .unwrap_or_else(|| format!("shared prefix of {} bytes", reference.len().min(ours.len())));
     let header = |bytes: &[u8]| {
         let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
         (
@@ -808,7 +1173,7 @@ fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String 
     let reference_disassembly = disassemble(class, reference);
     let ours_disassembly = disassemble(class, ours);
     format!(
-        "{class} differs (kotlinc {} bytes, krusty {} bytes)\n\
+        "{class} differs (kotlinc {} bytes, krusty {} bytes; {first_raw_difference})\n\
          headers:\n  kotlinc: {:?}\n  krusty:  {:?}\n\
          member tables:\n  kotlinc: {:#?}\n  krusty:  {:#?}\n\
          members/code/debug:\n--- kotlinc ---\n{}\n--- krusty ---\n{}\n\
@@ -824,4 +1189,92 @@ fn exact_class_difference(class: &str, reference: &[u8], ours: &[u8]) -> String 
         super::common_core::raw_kotlin_metadata(reference),
         super::common_core::raw_kotlin_metadata(ours),
     )
+}
+
+#[cfg(test)]
+mod pool_index_tests {
+    use super::ListingPoolIndices;
+
+    fn erase(listing: &[&str]) -> Vec<String> {
+        let mut indices = ListingPoolIndices::default();
+        listing.iter().map(|line| indices.erase(line)).collect()
+    }
+
+    #[test]
+    fn literal_hash_digits_in_an_annotation_stay_exact() {
+        assert_eq!(
+            erase(&[
+                "RuntimeVisibleAnnotations:",
+                "  0: #72(#73=s#74,#75=[s#76])",
+                r##"    Ticket("#123", "a #123 b")"##,
+                "    Ticket(",
+                r##"      value="ticket#123""##,
+                r##"      ids=["#7"]"##,
+                "    )",
+                "  1: #154(#155=[I#156])",
+                "    Ids(",
+                "      ids=[123]",
+                "    )",
+                "Signature: #12                          // TT;",
+            ]),
+            [
+                "RuntimeVisibleAnnotations:",
+                "0: #(#=s#,#=[s#])",
+                r##"Ticket("#123", "a #123 b")"##,
+                "Ticket(",
+                r##"value="ticket#123""##,
+                r##"ids=["#7"]"##,
+                ")",
+                "1: #(#=[I#])",
+                "Ids(",
+                "ids=[123]",
+                ")",
+                "Signature: # // TT;",
+            ]
+        );
+    }
+
+    #[test]
+    fn encoded_annotation_rows_erase_every_pool_index() {
+        assert_eq!(
+            erase(&[
+                "  0: #72()",
+                "  1: #154(#155=[I#156])",
+                "  2: #9(#10=e#11.#12,#13=@#14(#15=s#16),#17=c#18,#19=[])",
+                "  0: #24(): FIELD",
+                "  default_value: I#12"
+            ],),
+            [
+                "0: #()",
+                "1: #(#=[I#])",
+                "2: #(#=e#.#,#=@#(#=s#),#=c#,#=[])",
+                "0: #(): FIELD",
+                "default_value: I#",
+            ]
+        );
+    }
+
+    #[test]
+    fn operand_and_attribute_indices_erase() {
+        assert_eq!(
+            erase(&[
+                "   3: invokestatic  #12                 // Method f:()V",
+                "   6: invokedynamic #43,  0",
+                "  public static final #10= #2 of #4;",
+            ]),
+            [
+                "3: invokestatic # // Method f:()V",
+                "6: invokedynamic #, 0",
+                "public static final #= # of #;",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_outside_the_encoded_grammar_is_left_alone() {
+        assert_eq!(
+            erase(&[r##"  0: #72(value="ticket#123")"##, r##"    "ticket#123""##]),
+            [r##"0: #72(value="ticket#123")"##, r##""ticket#123""##]
+        );
+    }
 }

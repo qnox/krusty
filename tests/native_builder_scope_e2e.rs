@@ -37,6 +37,30 @@ fn build_string_answers_a_copy_of_what_the_block_appended() {
     expect_native_box(source, "BuildStringScope", "OK");
 }
 
+/// The list builder. The block fills the subject in place, and what the call answers is that same
+/// list — the read-only type it is declared with is a static claim, not a runtime one.
+#[test]
+fn build_list_answers_the_list_the_block_filled() {
+    let source = "fun box(): String {\n\
+         \x20   val xs = buildList {\n\
+         \x20       add(\"a\")\n\
+         \x20       add(\"b\")\n\
+         \x20       add(\"c\")\n\
+         \x20   }\n\
+         \x20   if (xs.size != 3) return \"fail size: \" + xs.size\n\
+         \x20   if (xs[0] != \"a\" || xs[2] != \"c\") return \"fail elements: \" + xs\n\
+         \x20   val sized = buildList(4) { add(1); add(2) }\n\
+         \x20   if (sized.size != 2 || sized[1] != 2) return \"fail sized: \" + sized\n\
+         \x20   if (buildList<Int> { }.size != 0) return \"fail empty\"\n\
+         \x20   var total = 0\n\
+         \x20   for (x in xs) total += x.length\n\
+         \x20   if (total != 3) return \"fail iterated: \" + total\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "BuildListScope");
+    expect_native_box(source, "BuildListScope", "OK");
+}
+
 /// The block is an ordinary closure: it captures, and it runs exactly once, when the subject
 /// already exists and before the answer is taken.
 #[test]

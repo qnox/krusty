@@ -1,0 +1,9 @@
+Coordinates declared in a module file that would leave a Maven repository are refused where they
+are written.
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - org.example:../evil:1.0
+  - org.example:a:..

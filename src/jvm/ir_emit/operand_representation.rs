@@ -25,6 +25,40 @@ pub(super) enum ReferenceCoercion {
 }
 
 impl Emitter<'_> {
+    /// Read a boxed mutable local at either its declared value type or its holder field type.
+    ///
+    /// Ordinary consumers need the `ObjectRef.element` value narrowed to the checked reference
+    /// type. A reference comparison accepts the `Object` slot directly, exactly as `if_acmp*` does,
+    /// and must not introduce a checkcast that cannot affect reference identity.
+    pub(super) fn emit_shared_cell_read(
+        &mut self,
+        holder: crate::ir::ExprId,
+        elem: Ty,
+        materialize: bool,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        self.emit_value(holder, code);
+        let (class, descriptor) = ref_class(&elem);
+        let field = self.cw.fieldref(class, "element", descriptor);
+        let slot = ty_from_field_descriptor(descriptor);
+        code.getfield(field, slot_words(slot) as i32);
+        let value = ir_ty_to_jvm(&elem);
+        if materialize
+            && value.is_reference()
+            && crate::jvm::names::instanceof_internal_name(value) != "java/lang/Object"
+        {
+            let target = self
+                .cw
+                .class_ref(&crate::jvm::names::instanceof_internal_name(value));
+            code.checkcast(target);
+        }
+        if materialize {
+            value
+        } else {
+            slot
+        }
+    }
+
     /// Emit `expression` and materialize it at the consumer's declared type.
     pub(super) fn emit_value_as(
         &mut self,
@@ -32,8 +66,20 @@ impl Emitter<'_> {
         expected: Ty,
         code: &mut CodeBuilder,
     ) {
-        self.emit_value(expression, code);
-        let source = self.value_ty(expression);
+        // A checked implicit coercion can name the call-site substitution even though the value
+        // still occupies the declaration's erased bound. Let this consumer choose whether that
+        // bound needs narrowing; eagerly emitting the coercion can cast `Comparable` to `String`
+        // and then back to `Comparable` for a function that returns the bound itself.
+        let source = if matches!(
+            self.erased_reference_result(expression),
+            Some(ErasedResult::Coerced { slot, .. })
+                if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
+        ) {
+            self.emit_consumed_operand(expression, code)
+        } else {
+            self.emit_value(expression, code);
+            self.value_ty(expression)
+        };
         let target = ir_ty_to_jvm(&expected);
         // A type-parameter local kept in its erased reference slot is read here as the
         // primitive the caller returns. The store boxed into that slot; this is the unbox.
@@ -57,6 +103,22 @@ impl Emitter<'_> {
         expression: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) -> Ty {
+        if let IrExpr::Vararg {
+            array_type,
+            elements,
+            spreads,
+        } = self.ir.expr(expression).clone()
+        {
+            if let Some(physical) = super::vararg::emit_consumed_reference_copy(
+                self,
+                &array_type,
+                &elements,
+                &spreads,
+                code,
+            ) {
+                return physical;
+            }
+        }
         match self.erased_reference_result(expression) {
             Some(ErasedResult::Coerced { call, slot }) => {
                 self.emit_value(call, code);
@@ -99,11 +161,35 @@ impl Emitter<'_> {
                 arg,
                 type_operand,
             } => {
-                // Only a slot erased to `Object`: a bounded type parameter's slot (`T : Base`) is
-                // already a class a receiver or argument adapter takes as the value's own type.
-                let slot = *self.ir.physical_types.get(arg)?;
-                (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && narrows(slot, *type_operand))
-                    .then_some(ErasedResult::Coerced { call: *arg, slot })
+                // Keep the declaration-side erasure until the consumer chooses its physical type.
+                // This is not limited to `Object`: `T : Comparable<T>` arrives as `Comparable`.
+                // A String-only consumer casts that slot once to `String`; a consumer of the bound
+                // itself uses it unchanged instead of casting to `String` and back to `Comparable`.
+                // A real call records its descriptor result in `physical_types`; only its erased
+                // top is this generic-result contract. A call recorded as inline can instead
+                // retain its declaration's non-top erased bound while the JVM splicer replaces
+                // it. Once inlining has removed the producer, `value_ty` reads that same active
+                // body-local slot.
+                let inline_producer = matches!(
+                    self.ir.expr(*arg),
+                    IrExpr::Call {
+                        callee: crate::ir::Callee::Static { inline, .. },
+                        ..
+                    } if inline.can_inline()
+                );
+                // Without a recorded result the producer's own value type is the slot. Only an
+                // erased top is the generic-result contract; a narrower slot is a smart cast
+                // (`p.type` proven `Ref.Cls`), which this coercion itself checks.
+                let slot = self
+                    .ir
+                    .physical_types
+                    .get(arg)
+                    .copied()
+                    .unwrap_or_else(|| self.value_ty(*arg));
+                if !jvm_is_erased_top(ir_ty_to_jvm(&slot)) && !inline_producer {
+                    return None;
+                }
+                narrows(slot, *type_operand).then_some(ErasedResult::Coerced { call: *arg, slot })
             }
             crate::ir::IrExpr::InvokeFunction { ret, .. } => {
                 (!matches!(ret, Ty::Unit | Ty::Nothing)
@@ -128,9 +214,57 @@ impl Emitter<'_> {
         else {
             return None;
         };
+        // The coroutine transformer closes a suspension point at its declared result before the
+        // comparison consumes it. A primitive result is therefore already unboxed here even
+        // though the call's original descriptor returned `Object`; preserving that erased slot
+        // would make `areEqual(Object, Object)` consume a scalar.
+        if self.transformed_result(*arg).is_some() {
+            return None;
+        }
         let slot = *self.ir.physical_types.get(arg)?;
         (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && ir_ty_to_jvm(type_operand).is_jvm_scalar())
             .then_some((*arg, slot))
+    }
+
+    /// Whether checked primitive equality consumes an ordinary JVM wrapper retained by an exact
+    /// value-class underlying-property read. The frontend's equality mode remains authoritative;
+    /// this is only the JVM representation choice for those already-selected operands. An
+    /// ordinary generic call result and an unsigned/value-class box must be unboxed instead, even
+    /// though all three producers have an erased `Object` descriptor.
+    pub(super) fn primitive_equality_uses_erased_wrapper(
+        &self,
+        mode: Option<crate::ir::EqualityMode>,
+        lhs: crate::ir::ExprId,
+        rhs: crate::ir::ExprId,
+    ) -> bool {
+        mode == Some(crate::ir::EqualityMode::Primitive)
+            && [lhs, rhs].into_iter().any(|operand| {
+                self.erased_scalar_result(operand).is_some()
+                    && self.erased_wrapper_property_coercion(operand)
+            })
+    }
+
+    /// Whether an implicit-coercion chain contains the exact generic-property read that retained
+    /// an ordinary JVM wrapper. Checked lowering can add one coercion and value-class realization
+    /// another; neither changes which recorded producer occupies the erased slot.
+    fn erased_wrapper_property_coercion(&self, mut expression: crate::ir::ExprId) -> bool {
+        loop {
+            if self
+                .ir
+                .jvm_erased_primitive_wrapper_values
+                .contains(&expression)
+            {
+                return true;
+            }
+            match self.ir.expr(expression) {
+                crate::ir::IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => expression = *arg,
+                _ => return false,
+            }
+        }
     }
 
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.

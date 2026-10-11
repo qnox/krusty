@@ -27,7 +27,7 @@ const SRC: &str = "import lib.*\n\
 /// `name` is the source file's stem, so the functions live in the facade `{name}Kt`.
 fn assert_same_method(name: &str, method: &str) {
     let facade = format!("{name}Kt");
-    match common::method_code_diff_against_kotlinc(name, &[("Lib.kt", LIB)], SRC, &facade, method) {
+    match common::class_bytes_diff_against_kotlinc(name, &[("Lib.kt", LIB)], SRC, &facade, method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("{name}: reference toolchain unavailable"),

@@ -14,6 +14,7 @@ use crate::features::LangFeatures;
 use crate::source::{SourceInput, SourceKind};
 use crate::types::Visibility;
 
+mod annotation_class_literals;
 mod annotation_strings;
 mod executable_owners;
 mod flags;
@@ -21,6 +22,7 @@ mod nested_classifiers;
 mod type_use_annotations;
 mod visibility_suppressions;
 
+use annotation_class_literals::annotation_class_literals;
 use annotation_strings::HeaderAnnotationStringArena;
 use executable_owners::local_executable_owner;
 pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags};
@@ -220,6 +222,9 @@ pub enum HeaderDeclarationKind {
         /// The one superclass constructor target, kept distinct from interfaces so later semantic
         /// graph construction never recovers class-vs-interface ownership from source spelling.
         base: Option<HeaderTypeId>,
+        /// The callee name of the superclass constructor call (`Base` in `: pkg.Base(args)`).
+        /// The call names its classifier apart from `base`, and kotlinc checks its access there.
+        base_callee: Option<crate::diag::Span>,
         /// Class context parameters in source order. They are shared by every constructor and are
         /// implicit receivers of instance bodies.
         context_parameters: HeaderParameterRange,
@@ -368,7 +373,7 @@ impl HeaderSyntaxArena {
 
     pub(crate) fn add_type(&mut self, ty: &TypeRef, names: &mut LookupNames) -> HeaderTypeId {
         let flags = HeaderTypeFlags::from_type_ref(ty);
-        let kind = if ty.name == "<fun>" {
+        let kind = if ty.is_function_type_syntax() {
             let parameters = ty
                 .fun_params
                 .iter()
@@ -914,6 +919,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::OPERATOR, function.is_operator())
                 .with(DeclarationFlags::INFIX, function.is_infix())
                 .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    function.has_visibility_modifier(),
+                )
+                .with(
                     DeclarationFlags::COMPANION,
                     function.is_companion_extension(),
                 )
@@ -1036,9 +1045,14 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::EXPECT, property.is_expect)
                 .with(DeclarationFlags::CONST, property.is_const)
                 .with(DeclarationFlags::OPEN, property.is_open)
+                .with(DeclarationFlags::FINAL_MODIFIER, property.is_final)
                 .with(DeclarationFlags::OVERRIDE, property.is_override)
                 .with(DeclarationFlags::ABSTRACT, property.is_abstract)
                 .with(DeclarationFlags::MUTABLE, property.is_var)
+                .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    property.has_visibility_modifier,
+                )
                 .with(DeclarationFlags::LATEINIT, property.is_lateinit)
                 .with(DeclarationFlags::DELEGATED, property.delegate.is_some())
                 .with(
@@ -1161,13 +1175,21 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::INTERFACE, class.is_interface())
                 .with(DeclarationFlags::SINGLETON, class.is_singleton())
                 .with(DeclarationFlags::DATA, class.is_data)
-                .with(DeclarationFlags::VALUE, class.is_value)
+                .with(
+                    DeclarationFlags::VALUE,
+                    class.is_value && class.value_modifier_span.is_none(),
+                )
+                .with(
+                    DeclarationFlags::VALUE_KEYWORD,
+                    class.value_modifier_span.is_some(),
+                )
                 .with(DeclarationFlags::ENUM, class.is_enum())
                 .with(DeclarationFlags::FUN_INTERFACE, class.is_fun_interface)
                 .with(DeclarationFlags::OPEN, class.is_open())
                 .with(DeclarationFlags::ABSTRACT, class.is_abstract())
                 .with(DeclarationFlags::SEALED, class.is_sealed())
                 .with(DeclarationFlags::FINAL, class.is_final())
+                .with(DeclarationFlags::FINAL_MODIFIER, class.final_modifier)
                 .with(DeclarationFlags::ANNOTATION_CLASS, class.is_annotation())
                 .with(DeclarationFlags::INNER, class.inner_of.is_some())
                 .with(DeclarationFlags::COMPANION, is_companion)
@@ -1237,7 +1259,12 @@ fn extract_file_stub_inventory(
                     .with(DeclarationFlags::PROPERTY_PARAMETER, true)
                     .with(DeclarationFlags::MUTABLE, property.is_var)
                     .with(DeclarationFlags::OPEN, property.is_open)
-                    .with(DeclarationFlags::OVERRIDE, property.is_override),
+                    .with(DeclarationFlags::FINAL_MODIFIER, property.is_final)
+                    .with(DeclarationFlags::OVERRIDE, property.is_override)
+                    .with(
+                        DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                        property.has_visibility_modifier,
+                    ),
             });
         }
         // Data-class component/copy callables participate in ordinary overload selection during
@@ -1245,12 +1272,12 @@ fn extract_file_stub_inventory(
         // declaration or body locator: their signatures come from the resolved primary-constructor
         // properties and their common-IR bodies are synthesized after function predeclaration.
         if class.is_data && !class.is_singleton() {
-            let data_property_count = class
+            for (ordinal, property) in class
                 .props
                 .iter()
                 .filter(|property| property.is_property)
-                .count();
-            for ordinal in 0..data_property_count {
+                .enumerate()
+            {
                 let sibling = u32::MAX
                     .checked_sub(ordinal as u32)
                     .expect("too many generated data-class components");
@@ -1265,7 +1292,7 @@ fn extract_file_stub_inventory(
                     DeclarationFlags::default()
                         .with(DeclarationFlags::OPERATOR, true)
                         .with(DeclarationFlags::FINAL, true),
-                    Visibility::Public,
+                    property.visibility,
                 ));
             }
             out.push(generated_function_stub(
@@ -1284,7 +1311,11 @@ fn extract_file_stub_inventory(
                 },
             ));
         }
-        if class.is_data {
+        // A final `value class` gets the same structural trio as a data class. `componentN`/`copy`
+        // stay data-only. An abstract or sealed value class has no constructor properties and does
+        // not generate the trio, so a regular subclass keeps `Any`'s identity members. `@JvmInline`
+        // later suppresses these stubs and unboxes the class instead.
+        if class.is_data || (class.value_modifier_span.is_some() && class.is_final()) {
             for (ordinal, (name, parameter_count)) in
                 [("toString", 0), ("hashCode", 0), ("equals", 1)]
                     .into_iter()
@@ -1309,6 +1340,7 @@ fn extract_file_stub_inventory(
                     DeclarationFlags::default()
                         .with(DeclarationFlags::OVERRIDE, true)
                         .with(DeclarationFlags::OPERATOR, name == "equals")
+                        .with(DeclarationFlags::GENERATED_STRUCTURAL_MEMBER, true)
                         .with(DeclarationFlags::FINAL, true),
                     Visibility::Public,
                 ));
@@ -1906,65 +1938,6 @@ pub fn extract_file_header_syntax(
         })
     }
 
-    /// The class literals written as the FIRST argument of each annotation in `annotation_args`, as
-    /// dotted source paths keyed by annotation ordinal.
-    ///
-    /// `@Serializable(with = pkg.Type::class)` is a semantic fact a later pass must be able to read, and
-    /// the annotation's argument expressions do not survive the source AST. Declaration and value-
-    /// parameter annotations are extracted by this one function so the two cannot disagree about which
-    /// written shapes count.
-    fn annotation_class_literals(
-        file: &File,
-        annotation_args: &[Vec<crate::ast::ExprId>],
-    ) -> Vec<(u32, String)> {
-        fn qualifier_segments(
-            file: &File,
-            expression: crate::ast::ExprId,
-            out: &mut Vec<String>,
-        ) -> bool {
-            match file.expr(expression) {
-                Expr::Name(name) => {
-                    out.push(name.clone());
-                    true
-                }
-                Expr::Member { receiver, name } => {
-                    if !qualifier_segments(file, *receiver, out) {
-                        return false;
-                    }
-                    out.push(name.clone());
-                    true
-                }
-                _ => false,
-            }
-        }
-
-        let mut literals = Vec::new();
-        for (annotation_ordinal, arguments) in annotation_args.iter().enumerate() {
-            let Some(&argument) = arguments.first() else {
-                continue;
-            };
-            let Expr::CallableRef {
-                receiver: Some(receiver),
-                name,
-            } = file.expr(argument)
-            else {
-                continue;
-            };
-            if name != "class" {
-                continue;
-            }
-            let mut segments = Vec::new();
-            if !qualifier_segments(file, *receiver, &mut segments) || segments.is_empty() {
-                continue;
-            }
-            literals.push((
-                u32::try_from(annotation_ordinal).expect("too many annotations on one declaration"),
-                segments.join("."),
-            ));
-        }
-        literals
-    }
-
     fn parameters(
         file: &File,
         headers: &mut HeaderSyntaxArena,
@@ -2383,6 +2356,9 @@ pub fn extract_file_header_syntax(
                 bounds,
                 supertypes,
                 base,
+                base_callee: class
+                    .base_class_span
+                    .and_then(|span| file.base_class_callee_spans.get(&span.lo).copied()),
                 context_parameters,
                 primary_parameters,
                 delegations,
@@ -2638,7 +2614,6 @@ pub struct StreamedHeaderModule {
     /// survives the active source parse.
     pub(super) detached_types: Vec<(SourceFileId, HeaderTypeId)>,
     annotation_strings: HeaderAnnotationStringArena,
-    annotation_policies: HeaderAnnotationPolicyArena,
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     type_use_annotations: HeaderTypeUseAnnotationArena,
     /// Read freely; append through [`StreamedHeaderModule::push_stub`] so the identity index below
@@ -2881,7 +2856,6 @@ impl StreamedHeaderModule {
             + self.syntax.storage_payload_bytes()
             + self.detached_types.len() * std::mem::size_of::<(SourceFileId, HeaderTypeId)>()
             + self.annotation_strings.storage_payload_bytes()
-            + self.annotation_policies.storage_payload_bytes()
             + self.visibility_suppressions.storage_payload_bytes()
             + self.type_use_annotations.storage_payload_bytes()
             + self.stubs.len() * std::mem::size_of::<DeclarationStub>()
@@ -2896,13 +2870,6 @@ impl StreamedHeaderModule {
             + self.excluded.len() * std::mem::size_of::<DeclarationId>()
     }
 
-    pub(crate) fn annotation_policy_applications(
-        &self,
-        declaration: DeclarationId,
-    ) -> &[HeaderAnnotationPolicyApplication] {
-        self.annotation_policies.applications(declaration)
-    }
-
     /// Constant string arguments attached to one declaration annotation. Pass 1 copies the values
     /// while the bounded expression arena is live; signature consumers resolve the annotation at
     /// the same declaration-local ordinal before interpreting them. No parser `ExprId` or source
@@ -2914,13 +2881,6 @@ impl StreamedHeaderModule {
     ) -> &[Box<str>] {
         self.annotation_strings
             .arguments(declaration, annotation_ordinal)
-    }
-
-    pub(crate) fn annotation_policy_arguments(
-        &self,
-        range: HeaderAnnotationArgumentRange,
-    ) -> &[LookupNameId] {
-        self.annotation_policies.arguments(range)
     }
 
     pub(crate) fn file_visibility_suppressions(
@@ -2975,6 +2935,15 @@ impl StreamedHeaderModule {
         self.type_use_annotations.occurrences(source)
     }
 
+    /// Each named function-type parameter of `source`: its type's start offset and its name, which
+    /// `@Metadata` records as a `@ParameterName` annotation on that type.
+    pub(crate) fn function_type_parameter_names(
+        &self,
+        source: SourceFileId,
+    ) -> impl Iterator<Item = (u32, &str)> + '_ {
+        self.type_use_annotations.parameter_names(source)
+    }
+
     pub(crate) fn detached_type_roots(
         &self,
         source: SourceFileId,
@@ -2983,88 +2952,6 @@ impl StreamedHeaderModule {
             .iter()
             .filter(move |(candidate, _)| *candidate == source)
             .map(|(_, ty)| *ty)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct HeaderAnnotationArgumentRange {
-    start: u32,
-    len: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HeaderAnnotationPolicyApplication {
-    pub annotation: Span,
-    pub arguments: HeaderAnnotationArgumentRange,
-}
-
-/// Bounded declaration metadata needed to interpret an annotation class's own `@Retention` and
-/// `@Target` applications after its expression arena is gone. Only terminal enum-entry spellings
-/// are copied; arbitrary annotation expressions remain ordinary checked body work.
-#[derive(Default)]
-struct HeaderAnnotationPolicyArena {
-    applications: std::collections::HashMap<DeclarationId, Vec<HeaderAnnotationPolicyApplication>>,
-    arguments: Vec<LookupNameId>,
-}
-
-impl HeaderAnnotationPolicyArena {
-    fn add_class(
-        &mut self,
-        declaration: DeclarationId,
-        class: &ClassDecl,
-        file: &File,
-        names: &mut LookupNames,
-    ) {
-        let mut applications = Vec::with_capacity(class.annotations.len());
-        for (annotation, source_arguments) in class.annotations.iter().zip(&class.annotation_args) {
-            let start = next_id(self.arguments.len(), "annotation policy arguments");
-            for &source_argument in source_arguments {
-                let entries = match file.expr(source_argument) {
-                    Expr::AnnotationArrayLiteral(elements) => elements.as_slice(),
-                    Expr::Call { args, .. } => args.as_slice(),
-                    _ => std::slice::from_ref(&source_argument),
-                };
-                for &entry in entries {
-                    if let Expr::Member { name, .. } = file.expr(entry) {
-                        self.arguments.push(names.intern(name));
-                    }
-                }
-            }
-            let end = next_id(self.arguments.len(), "annotation policy arguments");
-            applications.push(HeaderAnnotationPolicyApplication {
-                annotation: annotation.span,
-                arguments: HeaderAnnotationArgumentRange {
-                    start,
-                    len: end - start,
-                },
-            });
-        }
-        if !applications.is_empty() {
-            self.applications.insert(declaration, applications);
-        }
-    }
-
-    fn applications(&self, declaration: DeclarationId) -> &[HeaderAnnotationPolicyApplication] {
-        self.applications
-            .get(&declaration)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    fn arguments(&self, range: HeaderAnnotationArgumentRange) -> &[LookupNameId] {
-        let start = range.start as usize;
-        &self.arguments[start..start + range.len as usize]
-    }
-
-    fn storage_payload_bytes(&self) -> usize {
-        self.arguments.len() * std::mem::size_of::<LookupNameId>()
-            + self
-                .applications
-                .values()
-                .map(|applications| {
-                    applications.len() * std::mem::size_of::<HeaderAnnotationPolicyApplication>()
-                })
-                .sum::<usize>()
     }
 }
 
@@ -3132,7 +3019,6 @@ pub struct HeaderInventoryBuilder {
     syntax: HeaderSyntaxArena,
     detached_types: Vec<(SourceFileId, HeaderTypeId)>,
     annotation_strings: HeaderAnnotationStringArena,
-    annotation_policies: HeaderAnnotationPolicyArena,
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     type_use_annotations: HeaderTypeUseAnnotationArena,
     stubs: Vec<DeclarationStub>,
@@ -3264,8 +3150,6 @@ impl HeaderInventoryBuilder {
                         &class.annotations,
                         &class.annotation_args,
                     );
-                    self.annotation_policies
-                        .add_class(stable, class, file, &mut self.lookup_names);
                 }
                 Decl::Property(property) => {
                     self.annotation_strings.add(
@@ -3296,7 +3180,6 @@ impl HeaderInventoryBuilder {
             syntax: self.syntax,
             detached_types: self.detached_types,
             annotation_strings: self.annotation_strings,
-            annotation_policies: self.annotation_policies,
             visibility_suppressions: self.visibility_suppressions,
             type_use_annotations: self.type_use_annotations,
             stubs: self.stubs,

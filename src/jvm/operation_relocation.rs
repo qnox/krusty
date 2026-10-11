@@ -20,6 +20,9 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     copy_fact!(physical_types);
     copy_fact!(logical_types);
     copy_fact!(property_declaration_types);
+    if ir.jvm_erased_primitive_wrapper_values.contains(&source) {
+        ir.jvm_erased_primitive_wrapper_values.insert(target);
+    }
 
     macro_rules! move_fact {
         ($field:ident) => {

@@ -8,48 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-const COROUTINE_HELPERS: &str = r#"package helpers
-import kotlin.coroutines.*
-import kotlin.coroutines.intrinsics.*
-
-fun <T> runBlocking(block: suspend () -> T): T {
-    var res: Result<T>? = null
-    block.startCoroutine(Continuation(EmptyCoroutineContext) {
-        res = it
-    })
-    return res!!.getOrThrow()
-}
-
-fun <T> handleResultContinuation(x: (T) -> Unit): Continuation<T> = object: Continuation<T> {
-    override val context = EmptyCoroutineContext
-    override fun resumeWith(result: Result<T>) {
-       x(result.getOrThrow())
-    }
-}
-
-fun handleExceptionContinuation(x: (Throwable) -> Unit): Continuation<Any?> = object: Continuation<Any?> {
-    override val context = EmptyCoroutineContext
-    override fun resumeWith(result: Result<Any?>) {
-       result.exceptionOrNull()?.let(x)
-    }
-}
-
-open class EmptyContinuation(override val context: CoroutineContext = EmptyCoroutineContext) : Continuation<Any?> {
-    companion object : EmptyContinuation()
-    override fun resumeWith(result: Result<Any?>) {
-       result.getOrThrow()
-    }
-}
-
-class ResultContinuation : Continuation<Any?> {
-    override val context = EmptyCoroutineContext
-    override fun resumeWith(result: Result<Any?>) {
-       this.result = result.getOrThrow()
-    }
-
-    var result: Any? = null
-}
-"#;
+const COROUTINE_HELPERS: &str = krusty::conformance::COROUTINE_HELPERS;
 
 // Declaration-compatible frontend twin of the Kotlin codegen test runner's
 // `TailCallOptimizationChecker`. The real helper inspects generated stack frames at runtime; a
@@ -173,7 +132,7 @@ fn frontend_census_error(
     let platform = JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         features,
         &mut diagnostics,
     );
@@ -243,7 +202,7 @@ fn common_lowering_error(
         .collect::<Vec<_>>();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        JvmLibraries::new(cp.clone()),
+        krusty::frontend::PlatformProvider::jvm(JvmLibraries::new(cp.clone())),
         features,
         &mut diagnostics,
     );
@@ -301,7 +260,7 @@ fn emit_frontend_dependency(
     let platform = JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        platform,
+        krusty::frontend::PlatformProvider::jvm(platform),
         features,
         &mut diagnostics,
     );
@@ -652,7 +611,8 @@ fn survey_parse_file(file: &Path) -> ParseSurveyOutcome {
             }
         }
     };
-    let source = krusty::conformance::prepare_test_source(&raw);
+    let source =
+        krusty::conformance::prepare_test_source(&raw, krusty::conformance::TestTarget::Jvm);
     let fallback = file
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -760,7 +720,7 @@ fn survey_file(
             ))
         }
     };
-    let src = krusty::conformance::prepare_test_source(&src);
+    let src = krusty::conformance::prepare_test_source(&src, krusty::conformance::TestTarget::Jvm);
     // An `IGNORE_BACKEND` mute is a statement about EMISSION, so it cannot excuse a frontend
     // refusal: a frontend census scores those cases exactly as the parse-only gate does. A
     // `TARGET_BACKEND` and `METADATA_TARGET_PLATFORMS` delimit the platform source universe.

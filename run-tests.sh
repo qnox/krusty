@@ -55,10 +55,14 @@ if [ "${1:-}" = "--survey" ]; then
   exit $?
 fi
 
+# A focused run whose tests read no box or CLI corpus (the KLIB semantics lane) sets
+# KRUSTY_PROVISION_BOX_CORPUS=0 so it does not fetch or cache inputs it never consumes.
 if command -v just >/dev/null 2>&1; then
   v="$(just max-version)"
   just kotlinc "$v" >/dev/null
-  just box-corpus "$v" >/dev/null
+  if [ "${KRUSTY_PROVISION_BOX_CORPUS:-1}" != 0 ]; then
+    just box-corpus "$v" >/dev/null
+  fi
 fi
 
 # Default to the fast-iteration `gate` profile (unoptimized → seconds-long rebuilds, but with
@@ -75,6 +79,15 @@ for a in "$@"; do
     --profile|--profile=*) profile_arg=""; profile_overridden=1 ;;
   esac
 done
+
+# Nightly libtest can print each test's duration. Stable libtest rejects the flag, so a stable run
+# keeps the binary timing table and does not invent per-test numbers.
+KRUSTY_LIBTEST_TIME_ARGS=""
+rustc_release="$(rustc -vV 2>/dev/null | awk -F': ' '/^release:/ { print $2; exit }' || true)"
+case "$rustc_release" in
+  *nightly*) KRUSTY_LIBTEST_TIME_ARGS="-Z unstable-options --report-time --color never" ;;
+esac
+export KRUSTY_LIBTEST_TIME_ARGS
 
 # Filtered/profile-specific runs are single-purpose. They still receive the global deadline: these are
 # exactly the runs used while diagnosing a resolver loop, so letting the focused path hang would make
@@ -106,13 +119,40 @@ if [ "$#" -ne 0 ] || [ "$profile_overridden" -ne 0 ]; then
   # executable lookup, so the deadline now measures the behavior it is intended to bound.
   echo "run-tests.sh: building focused test: cargo test $profile_arg --no-run $*" >&2
   cargo test $profile_arg --no-run "$@"
-  echo "run-tests.sh: focused test execution timeout=${focused_timeout}s: cargo test $profile_arg $*" >&2
-  focused_log="$(mktemp)"
-  trap 'rm -f "$focused_log"' EXIT
+  focused_run_args=("$@")
+  if [ -n "$KRUSTY_LIBTEST_TIME_ARGS" ]; then
+    case " ${focused_run_args[*]} " in
+      *" --report-time "*) ;;
+      *)
+        focused_rebuilt=()
+        focused_has_dd=0
+        for focused_arg in "${focused_run_args[@]}"; do
+          focused_rebuilt+=("$focused_arg")
+          if [ "$focused_arg" = "--" ]; then
+            focused_has_dd=1
+            # shellcheck disable=SC2206
+            focused_rebuilt+=($KRUSTY_LIBTEST_TIME_ARGS)
+          fi
+        done
+        if [ "$focused_has_dd" -eq 0 ]; then
+          # shellcheck disable=SC2206
+          focused_rebuilt+=(-- $KRUSTY_LIBTEST_TIME_ARGS)
+        fi
+        focused_run_args=("${focused_rebuilt[@]}")
+        ;;
+    esac
+  fi
+  echo "run-tests.sh: focused test execution timeout=${focused_timeout}s: cargo test $profile_arg ${focused_run_args[*]}" >&2
+  focused_dir="$(mktemp -d)"
+  focused_log="$focused_dir/focused.log"
+  trap 'rm -rf "$focused_dir"' EXIT
   set +e
-  run_with_deadline "$focused_timeout" cargo test $profile_arg "$@" 2>&1 | tee "$focused_log"
+  run_with_deadline "$focused_timeout" cargo test $profile_arg "${focused_run_args[@]}" 2>&1 | tee "$focused_log"
   focused_status="${PIPESTATUS[0]}"
   set -e
+  if [ -n "$KRUSTY_LIBTEST_TIME_ARGS" ]; then
+    libtest_print_slow_tests "$focused_log"
+  fi
   if [ "$focused_status" -ne 0 ]; then
     exit "$focused_status"
   fi
@@ -243,10 +283,10 @@ epoch_ms() {
 export -f epoch_ms
 
 # A run's identity must include its filter, not just the binary. The conformance split below runs the
-# SAME binary twice with different filters; keying the log on `basename` alone let pass 2 overwrite
-# pass 1's log, so a pass-1 failure was reported with pass 2's (passing) output and the real failure was
-# invisible. Slugify the filter args — dropping `--test-threads=N`, which is scheduling noise, not
-# identity — so each pass owns a distinct log and TIMINGS row.
+# SAME binary multiple times with different filters; keying the log on `basename` alone once let a
+# later passing run overwrite an earlier failure and made the real output invisible. Slugify the
+# filter args — dropping `--test-threads=N`, which is scheduling noise, not identity — so each pass
+# owns a distinct log and TIMINGS row.
 run_label() {
   printf '%s' "$1" \
     | sed -E 's/--test-threads=[0-9]+//g' \
@@ -257,7 +297,7 @@ export -f run_label
 
 run_one() {
   local b="${2%%::*}" extra="" name slug status=0
-  local explicit_label="${3:-}" expected_tests="${4:-}" description
+  local explicit_label="${3:-}" description
   if [ "$2" != "$b" ]; then extra="${2#*::}"; fi
   name="$(basename "$b")"
   if [ -n "$explicit_label" ]; then
@@ -279,19 +319,10 @@ run_one() {
   name="$uniq"
   local start end ms
   start="$(epoch_ms)"
-  if run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$b" $extra >"$1/$name.log" 2>&1; then
+  if run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$b" $extra $KRUSTY_LIBTEST_TIME_ARGS >"$1/$name.log" 2>&1; then
     :
   else
     status=$?
-  fi
-  if [ "$status" -eq 0 ] && [ -n "$expected_tests" ]; then
-    local selected_tests
-    selected_tests="$(libtest_selected_tests "$1/$name.log")" || status=125
-    if [ "$status" -eq 0 ] && [ "$selected_tests" -ne "$expected_tests" ]; then
-      printf 'test shard selected %s tests; plan assigned %s\n' \
-        "$selected_tests" "$expected_tests" >>"$1/$name.log"
-      status=125
-    fi
   fi
   if [ "$status" -ne 0 ]; then
     # Log name first so the report reads the failing pass's own output; the description carries the
@@ -317,31 +348,45 @@ ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
 # The conformance binary contains external corpus/reference-toolchain suites. Run it alone before
 # the product test binary to avoid core contention and to keep fast/coverage exclusion binary-scoped.
-# The Kotlin codegen corpus test is memory-heavy, so run it in its own process, then run every other
-# conformance test in a fresh process. This still executes the full conformance binary's test set; it
-# just avoids carrying earlier external-suite state into the large corpus pass on small CI machines.
-# Pass 1 is a single #[test] that parallelizes internally (rayon). Partition its sorted corpus across
-# fresh processes so every process receives the same 120-second deadline as the rest of the gate;
-# each shard retains the conformance floor and the stable modulo partition covers every case once.
-# Pass 2 is ~40 independent JVM-backed tests, so give it real threads (bounded: each can hold a
-# kotlinc-server or runner JVM, so `ncpu` capped at 4 keeps the JVM count sane on big hosts).
+# The JVM and Native Kotlin codegen corpus tests are memory-heavy, so run each in its own process,
+# then run every other conformance test in a fresh process. This still executes the full conformance
+# binary's test set; it just avoids carrying earlier external-suite state between the large corpus
+# passes on small machines. The JVM test parallelizes internally (rayon) and runs once under its
+# suite-wide deadline. Native also runs once under its larger dedicated deadline. The remaining ~40 independent
+# JVM-backed tests get real threads (bounded: each can hold a compiler-server/runner JVM, so `ncpu`
+# capped at 4 keeps the JVM count sane on big hosts).
 conf_threads="$ncpu"; [ "$conf_threads" -gt 4 ] && conf_threads=4
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
-  conformance_shards="$KRUSTY_CONFORMANCE_SHARDS"
-  libtest_require_positive_shard_count \
-    "$conformance_shards" "run-tests.sh: KRUSTY_CONFORMANCE_SHARDS"
-  for ((shard = 0; shard < conformance_shards; shard++)); do
-    label="box-shard-$((shard + 1))-of-$conformance_shards"
-    echo "run-tests.sh: conformance $label" >&2
-    KRUSTY_CONFORMANCE_SHARD_INDEX="$shard" \
-      KRUSTY_CONFORMANCE_SHARD_COUNT="$conformance_shards" \
-      KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+  echo "run-tests.sh: conformance jvm-box" >&2
+  KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+    run_one \
+      "$logdir" "$gate::--exact kotlin_codegen_box_conformance::kotlin_codegen_box_conformance --test-threads=1" \
+      "jvm-box"
+  # The native box lane compiles, links and runs every accepted case in one process under its own
+  # suite-wide deadline. It reads the same committed platform/version expectations locally and in
+  # CI; KRUSTY_BLESS_BOX_EXPECTATIONS=1 is the explicit local update path.
+  echo "run-tests.sh: conformance native-box" >&2
+  KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1 \
+    KRUSTY_TEST_THREADS="$conf_threads" \
+    KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS" \
+    run_one \
+      "$logdir" \
+      "$gate::--exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1" \
+      "native-box"
+  # The two Wasm lanes run every accepted case under Node.js. Locally they skip with a notice when
+  # no Node.js 22+ is installed; CI requires them through scripts/box-lane-run.sh.
+  for lane in wasm_js wasm_wasi; do
+    echo "run-tests.sh: conformance ${lane//_/-}-box" >&2
+    KRUSTY_TEST_THREADS="$conf_threads" \
+      KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS" \
       run_one \
-        "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
+        "$logdir" \
+        "$gate::--exact kotlin_box_wasm_conformance::kotlin_codegen_box_${lane}_conformance --test-threads=1" \
+        "${lane//_/-}-box"
   done
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=$conf_threads"
+    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --skip kotlin_codegen_box_wasm --test-threads=$conf_threads"
 fi
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
 # Per-binary test threads for the SMALL binaries run in the cross-binary xargs pool: keep 1 so `-P jobs`
@@ -354,47 +399,18 @@ while IFS= read -r b; do
   rest+=("$b")
 done < <(printf '%s\n' "${bins[@]}" | grep -v '/conformance-')
 
-# The e2e binary joins ~4,000 formerly-separate e2e tests, many of which drive the real kotlinc plus
-# a persistent JVM box runner. Run it DEDICATED and SEQUENTIALLY — after conformance, before the
-# small-binary pool — with `--test-threads=$ncpu` so its tests parallelize INTERNALLY across all cores,
-# and size the per-process box-runner pool to match so `ncpu` in-flight `box()` calls don't queue on too
-# few runners. The whole binary can exceed the five-minute per-process ceiling on smaller hosts, so
-# greedily balance whole top-level test modules into bounded shards. Each shard skips the other modules
-# and must report exactly its planned test count; a lossy libtest skip filter therefore fails visibly
-# instead of silently reducing coverage. Running the shards alone (outside the `-P jobs` fan-out) keeps
-# them from over-subscribing while they own the cores.
+# The e2e binary joins the product e2e tests, many of which drive the real kotlinc plus a persistent
+# JVM box runner. Run it once — after conformance, before the small-binary pool — with
+# `--test-threads=$ncpu` so its tests parallelize internally, and size the per-process box-runner pool
+# to match so in-flight `box()` calls do not queue on too few runners. The suite is one process under
+# KRUSTY_E2E_TIMEOUT_SECONDS. Do not split it to stay under the ordinary two-minute ceiling.
 e2e_bin="$(printf '%s\n' "${rest[@]}" | grep '/e2e-' | head -1 || true)"
 pool="${KRUSTY_BOX_RUNNER_POOL:-$ncpu}"
 if [ -n "$e2e_bin" ]; then
-  e2e_shards="$KRUSTY_E2E_SHARDS"
-  libtest_require_positive_shard_count "$e2e_shards" "run-tests.sh: KRUSTY_E2E_SHARDS"
-  e2e_listing="$logdir/e2e-tests.list"
-  e2e_plan="$logdir/e2e-shards.plan"
-  e2e_timeout="$KRUSTY_E2E_TIMEOUT_SECONDS"
-  libtest_write_shard_plan \
-    "$e2e_bin" "$e2e_shards" "$e2e_listing" "$e2e_plan" "$e2e_timeout"
-  for ((shard = 0; shard < e2e_shards; shard++)); do
-    skip_args=()
-    skip_file="$logdir/e2e-shard-$shard.skips"
-    expected_tests="$(libtest_shard_expected_tests "$e2e_plan" "$shard")"
-    if [ "$expected_tests" -eq 0 ]; then
-      echo "run-tests.sh: e2e shard $((shard + 1))/$e2e_shards was assigned no tests" >&2
-      exit 1
-    fi
-    if ! libtest_shard_skip_patterns \
-      "$e2e_plan" "$e2e_listing" "$shard" >"$skip_file"; then
-      echo "run-tests.sh: could not build safe filters for e2e shard $((shard + 1))/$e2e_shards" >&2
-      exit 1
-    fi
-    while IFS= read -r pattern; do
-      skip_args+=(--skip "$pattern")
-    done <"$skip_file"
-    label="shard-$((shard + 1))-of-$e2e_shards"
-    echo "run-tests.sh: e2e $label: $expected_tests tests" >&2
-    KRUSTY_TEST_TIMEOUT_SECONDS="$e2e_timeout" \
-      KRUSTY_BOX_RUNNER_POOL="$pool" run_one \
-        "$logdir" "$e2e_bin::${skip_args[*]} --test-threads=$ncpu" "$label" "$expected_tests"
-  done
+  echo "run-tests.sh: e2e (timeout=${KRUSTY_E2E_TIMEOUT_SECONDS}s)" >&2
+  KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_E2E_TIMEOUT_SECONDS" \
+    KRUSTY_BOX_RUNNER_POOL="$pool" \
+    run_one "$logdir" "$e2e_bin::--test-threads=$ncpu"
 fi
 
 # Everything except conformance and e2e — small suites parallelized across binaries.
@@ -406,6 +422,14 @@ done < <(printf '%s\n' "${rest[@]}" | grep -v '/e2e-')
 if [ "${#pool_bins[@]}" -gt 0 ]; then
   printf '%s\n' "${pool_bins[@]}" \
     | xargs -P "$jobs" -I{} bash -c 'run_one "$0" "$1::--test-threads='"$threads"'"' "$logdir" {}
+fi
+
+if [ -n "$KRUSTY_LIBTEST_TIME_ARGS" ]; then
+  slow_logs=()
+  while IFS= read -r slow_log; do
+    slow_logs+=("$slow_log")
+  done < <(find "$logdir" -name '*.log' -type f | LC_ALL=C sort)
+  libtest_print_slow_tests "${slow_logs[@]}"
 fi
 
 if [ -f "$logdir/FAILED" ]; then

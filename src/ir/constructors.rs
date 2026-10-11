@@ -70,6 +70,10 @@ pub struct IrSecondaryCtor {
     /// body value slots before `params`, but are absent from Kotlin source metadata and default masks.
     pub prefix_params: Vec<Ty>,
     pub params: Vec<Ty>,
+    /// Source type spellings for this exact constructor declaration, recorded before syntax is
+    /// discarded so metadata emission never has to recover aliases from an owner or parameter
+    /// type.
+    pub declared_spellings: crate::spelling::DeclaredSpellings,
     /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
     /// which loses fun-type shapes and generic arguments). This is metadata payload, not a
@@ -145,19 +149,17 @@ impl super::IrClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum IrSecondaryConstructorRole {
     SerializationDeserialization,
+    /// kotlinc's no-arg plugin's zero-argument constructor.
+    NoArg,
 }
 
-/// Semantic declaration metadata retained when the JVM value-class pass replaces a secondary
-/// constructor with a static `constructor-impl` realization. The backend owns the physical handle;
-/// Kotlin metadata must still describe the original source parameters/defaults and link them to that
-/// exact handle for downstream frontend resolution.
+/// The static `constructor-impl` the JVM value-class pass realizes a published secondary
+/// constructor as. The class's declaration record describes the source constructor; this links it,
+/// by its ordinal among the class's secondary constructors, to that exact physical handle for
+/// downstream frontend resolution.
 #[derive(Clone, Debug)]
 pub struct IrJvmValueClassSecondaryCtor {
-    pub params: Vec<(String, Ty)>,
-    pub param_defaults: Vec<bool>,
-    pub vararg_index: Option<usize>,
-    pub annotations: DeclarationAnnotations,
-    pub metadata_visibility: crate::types::Visibility,
+    pub ordinal: usize,
     pub descriptor: String,
 }
 
@@ -302,5 +304,41 @@ pub struct IrCustomSerializerConstruction {
     pub parameters: Box<[Ty]>,
     /// The accessor's operand ordinal passed to each constructor parameter, in parameter order.
     pub operands: Box<[u32]>,
-    pub target: IrConstructorTarget,
+    pub target: IrCustomSerializerConstructorTarget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IrCustomSerializerConstructorTarget {
+    Module(IrConstructorTarget),
+    External(super::IrExternalConstructorTarget),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IrCheckedConstructorTarget {
+    Module(crate::fir::CallableId),
+    External {
+        declaration: crate::fir::ExternalCallableId,
+        classifier: TypeName,
+        parameters: Vec<Ty>,
+    },
+}
+
+/// Exact dependency constructor selected by checked FIR, with an optional backend realization.
+///
+/// `declaration` is provider-neutral and survives common lowering. A target backend fills
+/// `descriptor` from that identity before emission; common lowering never derives a physical ABI
+/// from the call site's specialized semantic parameter types.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrExternalConstructorTarget {
+    pub declaration: crate::fir::ExternalCallableId,
+    pub descriptor: Option<String>,
+}
+
+impl IrExternalConstructorTarget {
+    pub fn unresolved(declaration: crate::fir::ExternalCallableId) -> Self {
+        Self {
+            declaration,
+            descriptor: None,
+        }
+    }
 }

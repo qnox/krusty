@@ -404,10 +404,29 @@ impl<'a> JvmSignatureFormatter<'a> {
             } else {
                 signature.ret
             };
+            if matches!(result.non_null(), Ty::Nothing | Ty::Null) {
+                return Some("Lkotlin/jvm/functions/FunctionN;".to_string());
+            }
             return Some(format!(
                 "Lkotlin/jvm/functions/FunctionN<{}>;",
                 self.type_argument(TypeVariance::Out, result, wildcards)?
             ));
+        }
+        // kotlinc's `hasNothingInNonContravariantPosition` writes the type raw when a value
+        // parameter is `Nothing?` or the result is `Nothing`/`Nothing?`: the value parameters are
+        // `in` (a non-null `Nothing` there is the star `type_argument` writes), the result is
+        // `out`. The same rule the lambda-class supertype follows (`IrLambdaClass.raw_supertype`).
+        fn is_nothing(ty: Ty) -> bool {
+            matches!(ty.non_null(), Ty::Nothing | Ty::Null)
+        }
+        if signature
+            .params
+            .iter()
+            .copied()
+            .any(|ty| is_nothing(ty) && ty.admits_null())
+            || is_nothing(signature.ret)
+        {
+            return Some(format!("Lkotlin/jvm/functions/Function{arity};"));
         }
         let mut rendered = format!("Lkotlin/jvm/functions/Function{arity}<");
         for parameter in &signature.params {
@@ -557,6 +576,21 @@ impl<'a> JvmSignatureFormatter<'a> {
                 Some(format!(
                     "[{}",
                     self.ty_at(&element, wildcards.for_argument(variance))?
+                ))
+            }
+            // `KFunctionN` and `KSuspendFunctionN` have no JVM class of their own: they are carried
+            // as `kotlin.reflect.KFunction<out R>`, whose one parameter is the result. kotlinc
+            // writes that application, so the parameter types are not part of the signature.
+            Ty::Obj(owner, arguments)
+                if crate::libraries::function_classifiers::is_reflective_function_classifier(
+                    owner,
+                ) =>
+            {
+                let result = arguments.last()?;
+                Some(format!(
+                    "L{}<{}>;",
+                    crate::types::KFUNCTION_INTERNAL,
+                    self.type_argument(TypeVariance::Out, *result, wildcards)?
                 ))
             }
             Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(

@@ -79,28 +79,21 @@ fn every_route_runs_like_the_reference_compiler() {
     assert_eq!(output, "OK");
 }
 
-/// The methods whose lambdas the port owns: each is kotlinc's instruction for instruction, over the
-/// same slots and locals. Two methods are left out for gaps outside the route: kotlinc returns
-/// from a `Unit` lambda (`greeting`) on its closing line, which common lowering does not record for
-/// a lambda yet, and it keeps `failing`'s try result in its local because the catch variable's range
-/// ends between the store and the load, where the temporaries pass folds them.
+/// The complete facade containing every route is byte-identical to kotlinc, including code, pool,
+/// debug tables, metadata, and attribute order. The member label is diagnostic context only; the
+/// comparison deliberately does not normalize or select a method.
 #[test]
 fn a_lambda_the_port_owns_is_inlined_like_the_reference_compiler() {
-    for method in [
-        "public static final int total()",
-        "public static final int evens(java.util.List<java.lang.Integer>)",
-    ] {
-        match common::method_code_diff_against_kotlinc(
-            "InlineLambdaRoute",
-            &[("Lib.kt", LIB)],
-            MAIN,
-            "InlineLambdaRouteKt",
-            method,
-        )
-        .expect("reference kotlinc is provisioned")
-        {
-            Ok(()) => {}
-            Err(difference) => panic!("{difference}"),
-        }
+    match common::class_bytes_diff_against_kotlinc(
+        "InlineLambdaRoute",
+        &[("Lib.kt", LIB)],
+        MAIN,
+        "InlineLambdaRouteKt",
+        "complete facade",
+    )
+    .expect("reference kotlinc is provisioned")
+    {
+        Ok(()) => {}
+        Err(difference) => panic!("{difference}"),
     }
 }

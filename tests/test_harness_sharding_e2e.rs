@@ -1,154 +1,31 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-fn planner_arg(input: &str, shards: &str) -> std::process::Output {
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("libtest-shard-plan.sh");
-    let mut child = Command::new("bash")
-        .arg(script)
-        .arg(shards)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn libtest shard planner");
-    child
-        .stdin
-        .take()
-        .expect("planner stdin")
-        .write_all(input.as_bytes())
-        .expect("write planner input");
-    child.wait_with_output().expect("wait for shard planner")
-}
-
-fn planner(input: &str, shards: usize) -> std::process::Output {
-    planner_arg(input, &shards.to_string())
-}
-
-fn compact_skip_patterns(plan: &Path, listing: &Path, shard: usize) -> std::process::Output {
-    let helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("libtest-shards.sh");
-    Command::new("bash")
-        .args([
-            "-c",
-            "source \"$1\"; libtest_shard_skip_patterns \"$2\" \"$3\" \"$4\"",
-            "shard-pattern-test",
-        ])
-        .arg(helper)
-        .arg(plan)
-        .arg(listing)
-        .arg(shard.to_string())
-        .output()
-        .expect("generate compact shard skip patterns")
-}
-
-fn parse_plan(output: &[u8]) -> Vec<(usize, usize, String)> {
-    String::from_utf8(output.to_vec())
-        .expect("planner output is UTF-8")
-        .lines()
-        .map(|line| {
-            let mut fields = line.split('\t');
-            let shard = fields.next().expect("shard field").parse().unwrap();
-            let tests = fields.next().expect("test-count field").parse().unwrap();
-            let module = fields.next().expect("module field").to_owned();
-            assert!(fields.next().is_none(), "unexpected planner field: {line}");
-            (shard, tests, module)
-        })
-        .collect()
-}
-
-const LISTING: &str = "\
-gamma::one: test
-alpha::one: test
-epsilon::one: test
-beta::one: test
-alpha::two: test
-delta::one: test
-gamma::two: test
-alpha::three: test
-beta::two: test
-
-9 tests, 0 benchmarks
-";
-
-#[test]
-fn shard_planner_balances_whole_modules_and_covers_every_test_once() {
-    let output = planner(LISTING, 2);
-    assert!(
-        output.status.success(),
-        "planner failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let plan = parse_plan(&output.stdout);
-
-    let expected = BTreeMap::from([
-        ("alpha".to_owned(), 3usize),
-        ("beta".to_owned(), 2),
-        ("delta".to_owned(), 1),
-        ("epsilon".to_owned(), 1),
-        ("gamma".to_owned(), 2),
-    ]);
-    let actual = plan
-        .iter()
-        .map(|(_, tests, module)| (module.clone(), *tests))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(actual, expected);
-    assert_eq!(plan.len(), expected.len(), "a module was assigned twice");
-
-    let mut loads = [0usize; 2];
-    for (shard, tests, _) in &plan {
-        assert!(*shard < loads.len());
-        loads[*shard] += tests;
+fn without_phase_timing(stderr: &str) -> String {
+    let mut kept = String::new();
+    for line in stderr.lines() {
+        if line.contains(": phase") {
+            continue;
+        }
+        kept.push_str(line);
+        kept.push('\n');
     }
-    assert_eq!(loads.iter().sum::<usize>(), 9);
-    assert!(loads[0].abs_diff(loads[1]) <= 3);
+    kept
 }
 
 #[test]
-fn shard_plan_is_stable_when_libtest_listing_order_changes() {
-    let forward = planner(LISTING, 3);
-    assert!(forward.status.success());
-
-    let reversed = LISTING.lines().rev().collect::<Vec<_>>().join("\n");
-    let reverse = planner(&reversed, 3);
-    assert!(reverse.status.success());
-    assert_eq!(forward.stdout, reverse.stdout);
-
-    let assigned = parse_plan(&forward.stdout)
-        .into_iter()
-        .map(|(_, _, module)| module)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(assigned.len(), 5);
-}
-
-#[test]
-fn shard_planner_rejects_noncanonical_or_nonpositive_counts() {
-    for invalid in ["", "0", "00", "01", "-1", "two"] {
-        let output = planner_arg(LISTING, invalid);
-        assert!(
-            !output.status.success(),
-            "planner accepted invalid shard count {invalid:?}"
-        );
-    }
-}
-
-#[test]
-fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
+fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("scripts")
         .join("test-gate-defaults.sh");
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_E2E_SHARDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'conformance shard settings must stay retired' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -164,7 +41,7 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 120, 4, 22]);
+    assert_eq!(values, [120, 120, 1800, 600, 1800]);
 }
 
 #[cfg(unix)]
@@ -191,6 +68,8 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
         .env("KRUSTY_KOTLINC", "/bin/true")
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "1")
+        // The retired scored-only deadline must not lengthen the canonical one.
+        .env("KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS", "300")
         .output()
         .expect("run delayed conformance fixture");
     let elapsed = started.elapsed();
@@ -198,8 +77,8 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
     assert_eq!(output.status.code(), Some(124));
     assert_eq!(output.stdout, b"");
     assert_eq!(
-        String::from_utf8(output.stderr).expect("deadline stderr is UTF-8"),
-        "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/4\n"
+        without_phase_timing(&String::from_utf8(output.stderr).expect("deadline stderr is UTF-8")),
+        "conformance-run: timed out after 1s: Kotlin 2.4.10\n"
     );
     assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
     fs::remove_dir_all(temp).expect("remove conformance deadline test directory");
@@ -218,7 +97,7 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
     let binary = temp.join("conformance-bin");
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s|%s/%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" \"$KRUSTY_CONFORMANCE_SHARD_COUNT\" >&2\nprintf '62.5 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n",
+        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" >&2\nprintf '62.5 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '25.0 1 4\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\n",
     )
     .expect("write reporting conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
@@ -235,14 +114,13 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .expect("run reporting conformance fixture");
 
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"62.5 20 32\n");
+    assert_eq!(output.stdout, b"62.5 5 8\n");
+    let stderr = String::from_utf8(output.stderr).expect("report stderr is UTF-8");
     assert_eq!(
-        String::from_utf8(output.stderr).expect("report stderr is UTF-8"),
+        without_phase_timing(&stderr),
         format!(
-            "2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|0/4\n\
-             2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|1/4\n\
-             2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|2/4\n\
-             2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|3/4\n",
+            "2.4.10|/bin/reference-kotlinc|{}|kotlin_codegen_box_conformance|--nocapture\n\
+             conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 25.0 1 4\n",
             temp.display(),
         )
     );
@@ -251,23 +129,22 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
 
 #[cfg(unix)]
 #[test]
-fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
+fn prebuilt_conformance_runner_preserves_reports_from_a_failing_process() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runner = root.join("scripts").join("conformance-run.sh");
     let temp = std::env::temp_dir().join(format!(
-        "krusty-conformance-run-failing-shard-{}",
+        "krusty-conformance-run-failing-process-{}",
         std::process::id()
     ));
-    fs::create_dir_all(&temp).expect("create failing-shard test directory");
+    fs::create_dir_all(&temp).expect("create failing-process test directory");
     let binary = temp.join("conformance-bin");
-    // Every shard reports; the second one then fails its expected-failure check.
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\nprintf 'shard %s\\n' \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" >&2\nprintf '50.0 1 2\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n[ \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" != 1 ] || exit 101\n",
+        "#!/usr/bin/env bash\nprintf 'fixture failed after writing reports\\n' >&2\nprintf '50.0 1 2\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\nprintf '10.0 1 10\\n' >\"$KRUSTY_JVM_BYTE_REPORT\"\nexit 101\n",
     )
-    .expect("write failing-shard conformance fixture");
+    .expect("write failing-process conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
-        .expect("make failing-shard conformance fixture executable");
+        .expect("make failing-process conformance fixture executable");
 
     let output = Command::new("bash")
         .arg(runner)
@@ -277,142 +154,17 @@ fn prebuilt_conformance_runner_finishes_every_shard_after_a_failing_one() {
         .env("KRUSTY_KOTLIN_BOX_DIR", &temp)
         .env("KRUSTY_CONFORMANCE_TIMEOUT_SECONDS", "3")
         .output()
-        .expect("run failing-shard conformance fixture");
+        .expect("run failing-process conformance fixture");
 
     assert_eq!(output.status.code(), Some(101));
-    assert_eq!(output.stdout, b"50.0 4 8\n");
+    assert_eq!(output.stdout, b"50.0 1 2\n");
+    let stderr = String::from_utf8(output.stderr).expect("failing-process stderr is UTF-8");
     assert_eq!(
-        String::from_utf8(output.stderr).expect("failing-shard stderr is UTF-8"),
-        "shard 0\nshard 1\nshard 2\nshard 3\n"
+        without_phase_timing(&stderr),
+        "fixture failed after writing reports\n\
+         conformance-run: Kotlin 2.4.10 JVM byte equality (matched/total .class bytes): 10.0 1 10\n"
     );
-    fs::remove_dir_all(temp).expect("remove failing-shard test directory");
-}
-
-#[test]
-fn shard_listing_runs_through_the_deadline_helper() {
-    let executable = std::env::current_exe().expect("current e2e test executable");
-    let helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("libtest-shards.sh");
-    let temp = std::env::temp_dir().join(format!(
-        "krusty-libtest-list-deadline-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp).expect("create deadline test directory");
-    let listing = temp.join("e2e.list");
-    let plan = temp.join("e2e.plan");
-    let marker = temp.join("deadline.marker");
-    let output = Command::new("bash")
-        .args([
-            "-c",
-            "source \"$1\"; MARKER=\"$2\"; run_with_deadline() { printf '%s\\n' \"$1\" >\"$MARKER\"; shift; \"$@\"; }; libtest_write_shard_plan \"$3\" 2 \"$4\" \"$5\" 17",
-            "shard-deadline-test",
-        ])
-        .arg(helper)
-        .arg(&marker)
-        .arg(&executable)
-        .arg(&listing)
-        .arg(&plan)
-        .output()
-        .expect("run shard planner with deadline probe");
-    assert!(
-        output.status.success(),
-        "deadline probe failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read_to_string(&marker).unwrap(), "17\n");
-    assert!(!fs::read_to_string(&plan).unwrap().is_empty());
-    fs::remove_dir_all(temp).expect("remove deadline test directory");
-}
-
-#[test]
-fn real_e2e_libtest_filters_select_exactly_the_planned_shards() {
-    const SHARDS: usize = 22;
-    let executable = std::env::current_exe().expect("current e2e test executable");
-    let listing = Command::new(&executable)
-        .args(["--list", "--format", "terse"])
-        .output()
-        .expect("list e2e tests");
-    assert!(listing.status.success());
-    let listing = String::from_utf8(listing.stdout).expect("libtest listing is UTF-8");
-
-    let planned = planner(&listing, SHARDS);
-    assert!(
-        planned.status.success(),
-        "planner failed: {}",
-        String::from_utf8_lossy(&planned.stderr)
-    );
-    let plan = parse_plan(&planned.stdout);
-    let expected_tests = listing
-        .lines()
-        .filter_map(|line| line.strip_suffix(": test"))
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    let mut selected_tests = BTreeSet::new();
-    let temp = std::env::temp_dir().join(format!(
-        "krusty-libtest-shards-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("unnamed")
-    ));
-    fs::create_dir_all(&temp).expect("create shard test directory");
-    let listing_path = temp.join("e2e.list");
-    let plan_path = temp.join("e2e.plan");
-    fs::write(&listing_path, &listing).expect("write libtest listing");
-    fs::write(&plan_path, &planned.stdout).expect("write shard plan");
-
-    for shard in 0..SHARDS {
-        let expected = plan
-            .iter()
-            .filter(|(assigned, _, _)| *assigned == shard)
-            .map(|(_, tests, _)| tests)
-            .sum::<usize>();
-        let patterns = compact_skip_patterns(&plan_path, &listing_path, shard);
-        assert!(
-            patterns.status.success(),
-            "skip-pattern helper failed for shard {shard}: {}",
-            String::from_utf8_lossy(&patterns.stderr)
-        );
-        let patterns = String::from_utf8(patterns.stdout).expect("skip patterns are UTF-8");
-        let patterns = patterns.lines().collect::<Vec<_>>();
-        let argument_bytes = patterns
-            .iter()
-            .map(|pattern| pattern.len() + 8)
-            .sum::<usize>();
-        assert!(
-            argument_bytes < 64 * 1024,
-            "shard {shard} skip arguments use {argument_bytes} bytes"
-        );
-
-        let mut command = Command::new(&executable);
-        command.args(["--list", "--format", "terse"]);
-        for pattern in patterns {
-            command.args(["--skip", pattern]);
-        }
-        let selected = command.output().expect("list one planned shard");
-        assert!(selected.status.success());
-        let selected = String::from_utf8(selected.stdout).expect("shard listing is UTF-8");
-        let selected = selected
-            .lines()
-            .filter_map(|line| line.strip_suffix(": test"))
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            selected.len(),
-            expected,
-            "libtest selection drift in shard {shard}"
-        );
-        for test in selected {
-            assert!(
-                selected_tests.insert(test.clone()),
-                "test selected by more than one shard: {test}"
-            );
-        }
-    }
-    assert_eq!(
-        selected_tests, expected_tests,
-        "shard union changed the test set"
-    );
-    fs::remove_dir_all(temp).expect("remove shard test directory");
+    fs::remove_dir_all(temp).expect("remove failing-process test directory");
 }
 
 fn target_hygiene(function: &str, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
@@ -594,7 +346,32 @@ fn regression_threads() -> String {
 
 #[cfg(unix)]
 #[test]
-fn prebuilt_conformance_regressions_skip_the_box_suite() {
+fn native_runner_rejects_a_missing_report_and_truncates_the_callers_copy() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture("native-missing-report", "#!/bin/sh\nexit 0\n");
+    let report = temp.join("native-pct.txt");
+    fs::write(&report, "100.0 9 9\n").expect("write stale Native report");
+
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("native-conformance-run.sh"))
+        .arg(&binary)
+        .arg(&report)
+        .env("KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .output()
+        .expect("run Native conformance fixture without a report");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(fs::read(&report).expect("read truncated report"), b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("native stderr is UTF-8"),
+        "native-conformance-run: test did not write a valid \"<pct> <passed> <applicable>\" report\n"
+    );
+    fs::remove_dir_all(temp).expect("remove Native missing-report fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn prebuilt_conformance_regressions_skip_the_box_suites() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (temp, binary) = regression_fixture(
         "skip",
@@ -630,9 +407,12 @@ fn prebuilt_conformance_regressions_skip_the_box_suite() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
         ),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -677,9 +457,12 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--test-threads\n{}\n",
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
         ),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -710,7 +493,7 @@ fn prebuilt_conformance_regressions_keep_an_explicit_cli() {
         .output()
         .expect("run conformance regressions");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"bin=/opt/krusty\n");
+    assert_eq!(output.stdout, b"bin=/opt/krusty\nbin=/opt/krusty\n");
     fs::remove_dir_all(temp).expect("remove regressions fixture");
 }
 
@@ -766,7 +549,7 @@ fn prebuilt_conformance_regressions_enforce_the_deadline() {
 }
 
 #[test]
-fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
+fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
@@ -777,25 +560,47 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         workflow.contains("version: ${{ fromJson(needs.versions.outputs.matrix) }}"),
         "conformance job must expand every supported Kotlin version"
     );
+    assert!(
+        workflow.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
+            && workflow.contains("target: [jvm, native, wasm]"),
+        "each exact Kotlin version must expose independent JVM, Native and Wasm matrix rows"
+    );
     let box_run = workflow[matrix..]
         .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
         .map(|offset| matrix + offset)
-        .expect("each version lane runs the box suite");
+        .expect("each version's JVM row runs the box suite");
+    let native_box_run = workflow[matrix..]
+        .find("just native-conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
+        .map(|offset| matrix + offset)
+        .expect("each version's Native row runs the native box suite");
     let regressions = workflow[matrix..]
         .find("just conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
         .map(|offset| matrix + offset)
-        .expect("each version lane runs every non-box conformance test");
+        .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]",
+            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
         );
     assert!(
-        matrix < box_run && box_run < regressions && regressions < release,
-        "one matrix lane runs box then non-box tests before release"
+        matrix < box_run
+            && box_run < native_box_run
+            && native_box_run < regressions
+            && regressions < release
     );
+    for needle in [
+        "- name: run box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
+        "- name: run native box conformance ${{ matrix.version }}\n        if: matrix.target == 'native'",
+        "- name: run wasm box conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
+        "- name: run non-box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
+    ] {
+        assert!(
+            workflow.contains(needle),
+            "target ownership must be explicit in the matrix ({needle})"
+        );
+    }
     assert!(
         workflow.contains("target/cache/ser-corpus/${{ matrix.version }}"),
         "each version lane caches its matching serialization corpus"
@@ -805,13 +610,80 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         "the expanded corpus cache must not reuse the immutable box-only key"
     );
     assert!(
-        workflow.contains("box-corpus-mock-jdk-${{ matrix.version }}-"),
-        "the box corpus cache must not reuse an immutable key from before its mock JDK input"
+        workflow.contains("kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-")
+            && workflow.contains("if: matrix.target != 'jvm'"),
+        "a Native or Wasm row must not race to publish the JVM row's broader immutable cache"
+    );
+    for key in [
+        "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
+        "key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
+    ] {
+        assert!(
+            workflow.contains(key),
+            "every box corpus cache must use the key versioned for its mock JDK and CLI corpus inputs ({key})"
+        );
+    }
+    assert!(
+        !workflow.contains("box-corpus-mock-jdk-"),
+        "no box corpus cache may restore an immutable entry from before the CLI corpus input"
+    );
+    assert_eq!(
+        workflow.matches("path: target/cache/box-corpus").count(),
+        2,
+        "only the coverage and conformance lanes read the box and CLI corpus; the KLIB lane caches none"
+    );
+    let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
+    let klib_recipe = justfile
+        .split("\nklib-semantics ")
+        .nth(1)
+        .and_then(|recipe| recipe.split("\n\n").next())
+        .expect("justfile has a klib-semantics recipe");
+    assert!(
+        klib_recipe.contains("KRUSTY_PROVISION_BOX_CORPUS=0 "),
+        "the KLIB lane caches no corpus, so its harness run must not provision one"
+    );
+    assert_eq!(
+        workflow
+            .matches("if: steps.box-corpus.outputs.cache-hit == 'true'\n        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> \"$GITHUB_ENV\"")
+            .count(),
+        2,
+        "a restored box corpus must be complete, so every lane forbids fetching after a hit"
     );
     assert!(
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
         "recorded kotlinc bytes must be isolated by matrix version"
     );
+    let box_step = &workflow[workflow
+        .find("      - name: run box conformance ${{ matrix.version }}\n")
+        .expect("workflow has a JVM box conformance step")
+        ..native_box_run];
+    for needle in [
+        "KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: \"1800\"",
+        "KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps",
+        "KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}",
+        "KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}",
+    ] {
+        assert!(
+            box_step.contains(needle),
+            "a cold JVM box lane must have time to populate its selected byte cache ({needle})"
+        );
+    }
+    assert!(
+        !workflow.contains("recorded-native-outcomes-")
+            && !workflow.contains("KRUSTY_NATIVE_OUTCOME_CACHE"),
+        "Native expectations are committed text, not an opaque GHA cache"
+    );
+    for directory in [
+        "tests/box_expected_failures/native",
+        "tests/box_expected_not_applicable/native",
+    ] {
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(directory)
+                .is_dir(),
+            "Native expectations must be committed under the shared platform/version layout: {directory}"
+        );
+    }
     assert!(
         !workflow.contains("\n  conformance-regressions:\n"),
         "non-box conformance must not remain a max-version-only job"
@@ -827,6 +699,35 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
             .count(),
         1,
         "the matrix reuses one CLI build"
+    );
+    assert_eq!(
+        workflow.matches("bin=$(just krusty-build-tests)").count(),
+        1,
+        "Gradle lanes reuse one krusty-build test binary"
+    );
+    assert!(
+        !workflow.contains("cargo test --profile gate -p krusty-build"),
+        "a Gradle lane must not compile krusty"
+    );
+    assert!(
+        workflow.contains("./krusty-build-tests --ignored"),
+        "a Gradle lane runs the prebuilt krusty-build tests"
+    );
+    assert!(
+        workflow.contains("needs: [build-shared-bins, versions]")
+            && workflow.contains("needs: [build-shared-bins, build-gradle-plugin]"),
+        "conformance and Gradle both wait on the shared binaries"
+    );
+    assert!(
+        !workflow.contains("build-conformance-bin"),
+        "the shared binary job is not named for conformance alone"
+    );
+    assert!(
+        workflow.contains("phase_log_prefix=shared-bins")
+            && workflow.contains("phase_begin conformance-test-binary")
+            && workflow.contains("phase_begin krusty-cli")
+            && workflow.contains("phase_begin krusty-build-tests"),
+        "the shared binary job must time each compile"
     );
     assert!(
         workflow.contains(
@@ -968,4 +869,342 @@ fn a_panicking_caller_releases_its_server_claim() {
         .expect("released server");
     assert_eq!(reused, 0);
     assert_eq!(next_id.load(Ordering::Relaxed), 1);
+}
+
+fn slow_test_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("libtest-shards.sh")
+}
+
+fn run_slow_tests(log: &Path, threshold: &str) -> std::process::Output {
+    Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; libtest_slow_tests \"$2\" \"$3\"",
+            "slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(log)
+        .arg(threshold)
+        .output()
+        .expect("list slow tests")
+}
+
+#[test]
+fn slow_tests_are_those_over_the_threshold() {
+    let dir = std::env::temp_dir().join(format!("krusty-slow-tests-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("slow-test fixture dir");
+    let log = dir.join("sample.log");
+    fs::write(
+        &log,
+        "\
+running 5 tests
+test fast::one ... ok <0.001s>
+test boundary::exact ... ok <0.200s>
+test boundary::over ... ok <0.201s>
+test slow::fails ... FAILED <1.500s>
+test slow::skipped ... ignored
+test result: FAILED. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.70s
+",
+    )
+    .expect("write sample log");
+
+    let listed = run_slow_tests(&log, "200");
+    assert!(
+        listed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(listed.stdout).expect("utf-8"),
+        "1500\tslow::fails\n201\tboundary::over\n"
+    );
+
+    let shard = dir.join("shard-1-of-2.log");
+    fs::write(&shard, "test other::case ... ok <0.250s>\n").expect("write shard log");
+    let printed = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; KRUSTY_SLOW_TEST_MS=200 libtest_print_slow_tests \"$2\" \"$3\"",
+            "print-slow-tests",
+        ])
+        .arg(slow_test_script())
+        .arg(&log)
+        .arg(&shard)
+        .output()
+        .expect("print slow tests");
+    assert!(
+        printed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(printed.stdout).expect("utf-8"),
+        "\
+slow-test: summary count=3 threshold=200ms
+slow-test: 1500ms bin=sample test=slow::fails
+slow-test: 250ms bin=shard-1-of-2 test=other::case
+slow-test: 201ms bin=sample test=boundary::over
+"
+    );
+
+    let invalid = run_slow_tests(&log, "200ms");
+    assert_eq!(invalid.status.code(), Some(2));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_timing_records_start_duration_and_summary() {
+    let helper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("phase-timing.sh");
+    let temp = std::env::temp_dir().join(format!("krusty-phase-timing-{}", std::process::id()));
+    fs::create_dir_all(&temp).expect("create phase timing directory");
+    let log = temp.join("phases.tsv");
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; phase_log_prefix=coverage; PHASE_TIMING_LOG=\"$2\"; phase_begin provision; phase_end provision; phase_begin build-cli; phase_end build-cli; phase_report",
+            "phase-timing-test",
+        ])
+        .arg(&helper)
+        .arg(&log)
+        .output()
+        .expect("run phase timing helper");
+    assert!(
+        output.status.success(),
+        "phase timing failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "phase timing writes durations to stderr"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("phase timing stderr is UTF-8");
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "coverage: phase start provision",
+            "coverage: phase provision 0s",
+            "coverage: phase start build-cli",
+            "coverage: phase build-cli 0s",
+            "coverage: phases",
+            "coverage: phase provision 0s",
+            "coverage: phase build-cli 0s",
+            "coverage: phase total 0s",
+        ],
+        "phase timing lines: {stderr}"
+    );
+    fs::remove_dir_all(temp).expect("remove phase timing directory");
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_timing_coverage_run_prints_every_phase() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp = std::env::temp_dir().join(format!("krusty-coverage-phases-{}", std::process::id()));
+    fs::create_dir_all(&temp).expect("create coverage phase directory");
+    let bin_dir = temp.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create stub directory");
+    let e2e_bin = temp.join("e2e");
+    let unit_bin = temp.join("lsp-unit");
+    let target = temp.join("target");
+    let summary = temp.join("summary.json");
+    let compiler_json = temp.join("compiler.json");
+    let lsp_json = temp.join("lsp.json");
+    fs::write(
+        &e2e_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("write e2e stub");
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("write unit stub");
+    fs::write(bin_dir.join("just"), "#!/bin/sh\nexit 0\n").expect("write just stub");
+    fs::write(
+        bin_dir.join("nproc"),
+        "#!/bin/sh\n[ \"${STUB_CPU_SOURCE:-}\" = nproc ] || exit 1\nprintf '%s\\n' 7\n",
+    )
+    .expect("write nproc stub");
+    fs::write(
+        bin_dir.join("sysctl"),
+        "#!/bin/sh\n[ \"${STUB_CPU_SOURCE:-}\" = sysctl ] || exit 1\n[ \"$*\" = '-n hw.ncpu' ] || exit 2\nprintf '%s\\n' 5\n",
+    )
+    .expect("write sysctl stub");
+    let build_log = temp.join("builds.txt");
+    fs::write(
+        bin_dir.join("cargo"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == +* ]]; then shift; fi\ncmd=\"${1:-}\"; shift || true\ncase \"$cmd\" in\n  llvm-cov)\n    sub=\"${1:-}\"; shift || true\n    case \"$sub\" in\n      --version) exit 0 ;;\n      show-env) printf '%s\\n' true ;;\n      report)\n        out=\"\"\n        while [ $# -gt 0 ]; do\n          if [ \"$1\" = --output-path ]; then out=\"$2\"; shift 2; else shift; fi\n        done\n        mkdir -p \"$(dirname \"$out\")\"\n        printf '%s\\n' '{\"data\":[{\"totals\":{\"regions\":{\"covered\":1,\"count\":2},\"functions\":{\"covered\":1,\"count\":2},\"lines\":{\"covered\":1,\"count\":2},\"branches\":{\"covered\":1,\"count\":2}}}]}' >\"$out\"\n        ;;\n      *) echo \"unexpected llvm-cov $sub\" >&2; exit 2 ;;\n    esac\n    ;;\n  build)\n    printf '%s\\n' \"$*\" >>\"$STUB_BUILD_LOG\"\n    echo \"cargo-rustflags:${RUSTFLAGS-}\" >&2\n    echo \"cargo: visible stderr $*\" >&2\n    for need in \" -p krusty \" \" -p krusty-cli \" \" -p krusty-lsp \" \" --lib \" \" --bins \" \" --tests \"; do\n      case \" $* \" in\n        *\"$need\"*) ;;\n        *) echo \"unexpected build $*\" >&2; exit 2 ;;\n      esac\n    done\n    mkdir -p \"$CARGO_TARGET_DIR/coverage\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty\"\n    printf '%s\\n' '#!/bin/sh' 'exit 0' >\"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    chmod +x \"$CARGO_TARGET_DIR/coverage/krusty\" \"$CARGO_TARGET_DIR/coverage/krusty-lsp\"\n    if [[ \" $* \" == *\" --message-format=json \"* ]]; then\n      printf '%s\\n' \"{\\\"reason\\\":\\\"compiler-artifact\\\",\\\"package_id\\\":\\\"path+file:///workspace#krusty@0.0.1\\\",\\\"profile\\\":{\\\"test\\\":true},\\\"target\\\":{\\\"name\\\":\\\"e2e\\\",\\\"kind\\\":[\\\"test\\\"]},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n      printf '%s\\n' \"{\\\"reason\\\":\\\"compiler-artifact\\\",\\\"package_id\\\":\\\"path+file:///workspace/crates/krusty-lsp#0.0.1\\\",\\\"profile\\\":{\\\"test\\\":true},\\\"target\\\":{\\\"name\\\":\\\"lsp-unit\\\",\\\"kind\\\":[\\\"lib\\\"]},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  test)\n    echo \"cargo: visible stderr $*\" >&2\n    if [[ \" $* \" == *\" --test e2e \"* ]]; then\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$E2E_BIN\\\"}\"\n    else\n      printf '%s\\n' \"{\\\"profile\\\":{\\\"test\\\":true},\\\"executable\\\":\\\"$UNIT_BIN\\\"}\"\n    fi\n    ;;\n  *) echo \"unexpected cargo $cmd $*\" >&2; exit 2 ;;\nesac\n",
+    )
+    .expect("write cargo stub");
+    for name in ["e2e", "lsp-unit", "just", "cargo", "nproc", "sysctl"] {
+        let path = if matches!(name, "just" | "cargo" | "nproc" | "sysctl") {
+            bin_dir.join(name)
+        } else if name == "e2e" {
+            e2e_bin.clone()
+        } else {
+            unit_bin.clone()
+        };
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("make stub executable");
+    }
+
+    let run_coverage = |cpu_source: &str| {
+        Command::new("bash")
+            .arg(root.join("scripts").join("coverage.sh"))
+            .arg(&summary)
+            .env("HOME", &temp)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .env("CARGO_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
+            .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
+            .env("KRUSTY_COVERAGE_LSP_JSON", &lsp_json)
+            .env("KRUSTY_TEST_JOBS", "1")
+            .env("KRUSTY_TEST_THREADS", "1")
+            .env("RUSTFLAGS", "-Z threads=4")
+            .env("E2E_BIN", &e2e_bin)
+            .env("UNIT_BIN", &unit_bin)
+            .env("STUB_BUILD_LOG", &build_log)
+            .env("STUB_CPU_SOURCE", cpu_source)
+            .output()
+            .expect("run coverage with stubbed toolchain")
+    };
+    let output = run_coverage("nproc");
+    let stderr = String::from_utf8(output.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        output.status.success(),
+        "coverage stub run failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("cargo: visible stderr"),
+        "compiler test build hid cargo stderr: {stderr}"
+    );
+    let builds = fs::read_to_string(&build_log).unwrap_or_default();
+    assert_eq!(
+        builds.lines().count(),
+        1,
+        "coverage must compile and discover its executables in one cargo invocation: {builds}"
+    );
+    assert_eq!(
+        stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo-rustflags:"))
+            .collect::<Vec<_>>(),
+        ["-Z threads=4 -Z threads=7"],
+        "nproc frontend threads were not appended: {stderr}"
+    );
+    fs::write(&build_log, "").expect("reset build log");
+    let fallback_output = run_coverage("sysctl");
+    let fallback_stderr =
+        String::from_utf8(fallback_output.stderr).expect("fallback coverage stderr is UTF-8");
+    assert!(
+        fallback_output.status.success(),
+        "coverage sysctl fallback run failed: {fallback_stderr}"
+    );
+    assert_eq!(
+        fallback_stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("cargo-rustflags:"))
+            .collect::<Vec<_>>(),
+        ["-Z threads=4 -Z threads=5"],
+        "sysctl frontend threads were not appended: {fallback_stderr}"
+    );
+    let starts = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("coverage: phase start "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        [
+            "provision",
+            "instrument",
+            "build-compiler",
+            "test-lsp-unit",
+            "test-e2e",
+            "report-compiler",
+            "report-lsp",
+        ],
+        "phase starts: {stderr}"
+    );
+    for name in starts {
+        assert!(
+            stderr.contains(&format!("coverage: phase {name} "))
+                && stderr
+                    .lines()
+                    .any(|line| line.starts_with(&format!("coverage: phase {name} "))
+                        && line.rsplit_once(' ').is_some_and(|(_, seconds)| {
+                            seconds.ends_with('s')
+                                && seconds[..seconds.len() - 1]
+                                    .chars()
+                                    .all(|ch| ch.is_ascii_digit())
+                        })),
+            "missing duration for {name}: {stderr}"
+        );
+    }
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("coverage: phase total ")
+                && line
+                    .rsplit_once(' ')
+                    .is_some_and(|(_, seconds)| seconds.ends_with('s'))),
+        "missing phase total: {stderr}"
+    );
+    assert!(summary.is_file(), "coverage summary was not written");
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 7\n",
+    )
+    .expect("write failing unit stub");
+    let failed_unit = run_coverage("nproc");
+    assert_eq!(failed_unit.status.code(), Some(1));
+    let failed_unit_stderr =
+        String::from_utf8(failed_unit.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_unit_stderr.contains("coverage: lsp-unit exited with status 7"),
+        "coverage hid unit failure: {failed_unit_stderr}"
+    );
+
+    fs::write(
+        &unit_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\n",
+    )
+    .expect("restore unit stub");
+    fs::write(
+        &e2e_bin,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'\nexit 9\n",
+    )
+    .expect("write failing e2e stub");
+    let failed_e2e = run_coverage("nproc");
+    assert_eq!(failed_e2e.status.code(), Some(1));
+    let failed_e2e_stderr = String::from_utf8(failed_e2e.stderr).expect("coverage stderr is UTF-8");
+    assert!(
+        failed_e2e_stderr.contains("coverage: e2e exited with status 9"),
+        "coverage hid e2e failure: {failed_e2e_stderr}"
+    );
+    fs::remove_dir_all(temp).expect("remove coverage phase directory");
+}
+
+#[test]
+fn coverage_profile_disables_intra_crate_thin_lto() {
+    let manifest = include_str!("../Cargo.toml");
+    let coverage = manifest
+        .split_once("[profile.coverage]")
+        .expect("coverage profile")
+        .1;
+    let body = coverage
+        .split_once("\n[")
+        .map(|(body, _)| body)
+        .unwrap_or(coverage);
+    assert!(
+        body.lines().any(|line| line.trim() == "lto = \"off\""),
+        "the coverage profile must set lto = \"off\" so Cargo passes -C lto=off and rustc skips intra-crate ThinLTO"
+    );
 }

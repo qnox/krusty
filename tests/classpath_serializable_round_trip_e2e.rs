@@ -145,8 +145,9 @@ fun box(): String {\n\
 \x20   if (back.size != 7) return \"FAIL: size \" + back.size\n\
 \x20   return \"OK\"\n\
 }\n";
-    let out = common::compile_and_run_box_files(&[("Main.kt", MAIN)], &cp, None)
-        .expect("a classpath @Serializable type must encode and decode");
+    let out =
+        common::compile_and_run_box_files(&[("Main.kt", MAIN)], &cp, Some(&common::jdk_modules()))
+            .expect("a classpath @Serializable type must encode and decode");
     assert_eq!(out, "OK");
 }
 
@@ -167,8 +168,12 @@ fun box(): String {\n\
 \x20   val back = json.decodeFromString<Local>(json.encodeToString(Local(\"a\")))\n\
 \x20   return if (back.name == \"a\") \"OK\" else \"FAIL: \" + back.name\n\
 }\n";
-    let out = common::compile_and_run_box_files(&[("Main.kt", SAME_FILE)], &runtime, None)
-        .expect("a same-file @Serializable type must round-trip");
+    let out = common::compile_and_run_box_files(
+        &[("Main.kt", SAME_FILE)],
+        &runtime,
+        Some(&common::jdk_modules()),
+    )
+    .expect("a same-file @Serializable type must round-trip");
     assert_eq!(out, "OK", "same file");
 
     const SIBLING: &str = "import kotlinx.serialization.Serializable\n\
@@ -185,7 +190,7 @@ fun box(): String {\n\
     let out = common::compile_and_run_box_files(
         &[("Sibling.kt", SIBLING), ("Main.kt", USER)],
         &runtime,
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("a sibling-file @Serializable type must round-trip");
     assert_eq!(out, "OK", "sibling file");

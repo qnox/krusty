@@ -84,7 +84,7 @@ impl BodyFirChecker<'_> {
                 .transpose()?
                 .unwrap_or(component_ty);
             let conversion = self.selected_type_conversion(component_ty, binding_ty, origin);
-            let target = self.bind_local(name, binding_ty);
+            let target = self.bind_variable(name, binding_ty, entry.mutable, false);
             checked.push(FirDestructureEntry::Binding {
                 origin,
                 target,
@@ -174,11 +174,19 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: member.member.semantic_role,
+                        overridden_declarations: member.member.overridden_declarations.clone(),
                         suspend: member.member.suspend(),
                         can_inline: member.member.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
                             member.member.inline_body_plan.as_deref(),
                             None,
+                            super::inline_body_plan::type_parameter_receiver(
+                                member
+                                    .member
+                                    .generic_sig
+                                    .as_ref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -233,11 +241,18 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: callable.semantic_role,
+                        overridden_declarations: callable.overridden_declarations.clone(),
                         suspend: callable.suspend,
                         can_inline: callable.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
                             callable.inline_body_plan.as_deref(),
                             Some(0),
+                            super::inline_body_plan::type_parameter_receiver(
+                                callable
+                                    .generic_sig
+                                    .as_deref()
+                                    .and_then(|signature| signature.receiver),
+                            ),
                         )
                         .map_err(|_| {
                             self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
@@ -312,10 +327,12 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: None,
+                        overridden_declarations: Box::new([]),
                         suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
                             inline_body_plan.as_deref(),
+                            None,
                             None,
                         )
                         .map_err(|_| {

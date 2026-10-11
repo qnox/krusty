@@ -57,7 +57,13 @@ pub trait SymbolSource {
     /// the implementation lives here solely while call sites migrate to reading the record directly.
     fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         let (namespace, name) = SymbolNamespace::classifier_key(internal);
-        self.symbols(namespace, name).classifier.clone()
+        let record = self.symbols(namespace, name);
+        // A typealias occupies this source key but names its expanded classifier. Asking for the
+        // alias declaration's synthetic-looking child identity must not turn that spelling into a
+        // real classifier: callers of this identity API have already resolved the declaration.
+        (record.classifier_name == Some(internal))
+            .then(|| record.classifier.clone())
+            .flatten()
     }
 
     /// Whether `name` is a package directly inside `parent` in this source.
@@ -125,6 +131,13 @@ pub trait SymbolSource {
         None
     }
 
+    /// The annotations kotlinc's sam-with-receiver plugin is configured with: an interface carrying
+    /// one directly converts a lambda with its abstract method's first parameter as the receiver.
+    /// A compilation fact, published by the current-module provider.
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Whether `companion` declares the exact serialization-plugin accessor shape. This reads a
     /// normalized callable record; consumers never infer the method merely from the owner's kind.
     fn has_serialization_serializer_accessor(
@@ -188,6 +201,14 @@ impl SymbolSource for CompositeSource<'_> {
             .find_map(|child| child.generated_serializer_singleton(classifier))
     }
 
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        self.children
+            .iter()
+            .map(|child| child.sam_with_receiver_annotations())
+            .find(|annotations| !annotations.is_empty())
+            .unwrap_or_default()
+    }
+
     /// Only the child that assigned `identity` answers for it; the module's own declarations
     /// assign none.
     fn external_callable(
@@ -197,6 +218,16 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.external_callable(identity))
+    }
+
+    /// As for callables, only the child that assigned the opaque identity answers for it.
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.children
+            .iter()
+            .find_map(|child| child.external_property(identity))
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
@@ -319,6 +350,20 @@ impl SymbolSource for CachedCompositeSource<'_> {
         self.source.api_withheld_callable(owner, name)
     }
 
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.source.external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.source.external_property(identity)
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         if let Some(symbols) = self
             .cache
@@ -345,6 +390,10 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.source.generated_serializer_singleton(classifier)
+    }
+
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        self.source.sam_with_receiver_annotations()
     }
 }
 
@@ -387,6 +436,49 @@ mod tests {
 
         assert!(std::rc::Rc::ptr_eq(&first, &second));
         assert_eq!(source.queries.get(), 1);
+    }
+
+    struct PropertyRealizationSource;
+
+    impl SymbolSource for PropertyRealizationSource {
+        fn external_property(
+            &self,
+            identity: crate::fir::ExternalPropertyId,
+        ) -> Option<crate::libraries::ExternalPropertyRealization> {
+            (identity == crate::fir::ExternalPropertyId::from_raw(7)).then(|| {
+                crate::libraries::ExternalPropertyRealization {
+                    name: "answer".to_owned(),
+                    getter: crate::fir::ExternalCallableId::from_raw(11),
+                    setter: None,
+                    declares_value_class_storage: false,
+                    compile_time_constant: None,
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn composite_wrappers_forward_an_external_property_to_its_provider() {
+        let provider = PropertyRealizationSource;
+        let identity = crate::fir::ExternalPropertyId::from_raw(7);
+        let direct = CompositeSource::new(vec![&provider]);
+        assert_eq!(
+            direct
+                .external_property(identity)
+                .expect("the assigning provider answers through a composite")
+                .name,
+            "answer"
+        );
+
+        let cache = SymbolQueryCache::default();
+        let cached = CachedCompositeSource::new(vec![&provider], &cache);
+        assert_eq!(
+            cached
+                .external_property(identity)
+                .expect("the assigning provider answers through a cached composite")
+                .getter,
+            crate::fir::ExternalCallableId::from_raw(11)
+        );
     }
 
     /// A minimal source: one top-level overload of a chosen name, one type shape.
@@ -443,6 +535,7 @@ mod tests {
                                     is_const: false,
                                     implicit_integer_coercion: false,
                                     compile_time_constant: None,
+                                    metadata_constant_read: false,
                                     visibility: Visibility::Public,
                                     owner: self.owner.as_str().into(),
                                     receiver_rank: 0,

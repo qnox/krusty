@@ -42,6 +42,10 @@ fn evaluates_without_local_writes(
             arg,
             ..
         } => evaluates_without_local_writes(ir, *arg, plain_construction),
+        // An empty vararg is `iconst_0; anewarray` (or `newarray`). Nothing is stored, so an
+        // `@InlineOnly` body that loads the parameter twice can duplicate the array on the stack.
+        // An element makes the builder store the array, and that call keeps its parameter slots.
+        IrExpr::Vararg { elements, .. } if elements.is_empty() => true,
         _ => false,
     }
 }

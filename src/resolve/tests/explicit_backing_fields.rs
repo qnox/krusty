@@ -34,7 +34,7 @@ fn explicit_backing_field_type_must_refine_property_type() {
 fn explicit_backing_field_accepts_semantic_value_class_type() {
     let errors = check_with_annotation_fixtures(
         "// LANGUAGE: +ExplicitBackingFields\n\
-         @JvmInline value class Label(val text: String)\n\
+         @kotlin.jvm.JvmInline value class Label(val text: String)\n\
          class Holder {\n\
              val value: Any field: Label = Label(\"value\")\n\
          }",

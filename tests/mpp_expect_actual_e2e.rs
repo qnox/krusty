@@ -123,8 +123,9 @@ fun box(): String = if (C2().k == "K") "OK" else "FAIL"
 "#);
 }
 
-/// Parameter defaults live on the `expect` (kotlinc forbids them on the actual). Stable
-/// actualization retains that declaration as the Pass-2 expression provider for the actual ABI.
+/// Parameter defaults live on the `expect` when the actual leaves them bare (kotlinc forbids an
+/// actual default unless that diagnostic is suppressed). Stable actualization retains the expect
+/// declaration as the Pass-2 expression provider for the actual ABI.
 #[test]
 fn expect_defaults_are_realized_by_actual() {
     run(r#"// LANGUAGE: +MultiPlatformProjects
@@ -133,6 +134,125 @@ expect fun foo(a: String, b: String = "K"): String
 actual fun foo(a: String, b: String): String = a + b
 
 fun box(): String = foo("O")
+"#);
+}
+
+/// An actual that writes its own defaults (the suppressed `ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS`
+/// form) is the expression provider. The expect values are not substituted back in.
+#[test]
+fn actual_defaults_replace_expect_defaults() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect fun pick(a: Int = 1, b: Int = 2): Int
+
+@Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+actual fun pick(a: Int = 10, b: Int = 20): Int = a + b
+
+expect fun <T> Array<out T>.copyInto(
+    destination: Array<T>, destinationOffset: Int = 0, startIndex: Int = 0, endIndex: Int = size
+): Array<T>
+
+@Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+actual fun <T> Array<out T>.copyInto(
+    destination: Array<T>, destinationOffset: Int = 42, startIndex: Int = 43, endIndex: Int = size + 44
+): Array<T> {
+    destination as Array<Int>
+    destination[0] = destinationOffset
+    destination[1] = startIndex
+    destination[2] = endIndex
+    return destination
+}
+
+fun box(): String {
+    val copied = arrayOf(0, 1, 2).copyInto(arrayOf(0, 1, 2))
+    return if (pick() == 30 && copied[0] == 42 && copied[1] == 43 && copied[2] == 47) "OK"
+        else "FAIL ${pick()} ${copied[0]} ${copied[1]} ${copied[2]}"
+}
+"#);
+}
+
+/// Default-expression ownership is per parameter. The actual owns every default it writes, while
+/// an omitted actual default is inherited from the matching expect declaration. An override keeps
+/// that merged provider set instead of collapsing it back to either declaration.
+#[test]
+fn mixed_actual_and_expect_defaults_reach_direct_and_override_calls() {
+    const COMMON: &str = r#"// LANGUAGE: +MultiPlatformProjects
+expect fun choose(a: Int = 1, b: Int = 2): Int
+
+expect open class Base() {
+    open fun text(a: String = "expect-a", b: String = "expect-b"): String
+}
+"#;
+    const PLATFORM: &str = r#"// LANGUAGE: +MultiPlatformProjects
+@Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+actual fun choose(a: Int = 10, b: Int): Int = a + b
+
+actual open class Base {
+    @Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+    actual open fun text(a: String = "actual-a", b: String): String = a + ":" + b
+}
+
+class Derived : Base() {
+    override fun text(a: String, b: String): String = a + ":" + b
+}
+
+fun box(): String {
+    if (choose() != 12) return "top:" + choose()
+    if (Base().text() != "actual-a:expect-b") return "base:" + Base().text()
+    if (Derived().text() != "actual-a:expect-b") return "derived:" + Derived().text()
+    return "OK"
+}
+"#;
+    let classes = common::classes_against_kotlinc_source_set(
+        &[("Common.kt", COMMON), ("Platform.kt", PLATFORM)],
+        1,
+    );
+    let stdlib = common::stdlib_jar();
+    for (compiler, output) in [("kotlinc", &classes.reference), ("krusty", &classes.krusty)] {
+        let output = output
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect::<Vec<_>>();
+        let box_class =
+            common::find_box_class(&output).unwrap_or_else(|| panic!("{compiler} emitted no box"));
+        assert_eq!(
+            common::run_box(&output, &box_class, std::slice::from_ref(&stdlib))
+                .unwrap_or_else(|| panic!("{compiler} box did not run")),
+            "OK",
+            "{compiler} used the wrong per-parameter default provider"
+        );
+    }
+}
+
+/// An interface actual's default is what an override's call site inserts. The expect string is not.
+#[test]
+fn actual_interface_default_reaches_an_override() {
+    run(r#"// LANGUAGE: +MultiPlatformProjects
+expect interface I {
+    fun test(source: String = "expect")
+}
+
+expect interface J : I
+
+@Suppress("NO_ACTUAL_CLASS_MEMBER_FOR_EXPECTED_CLASS")
+actual interface I {
+    @Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+    actual fun test(source: String = "actual")
+}
+
+actual interface J : I
+
+interface K : J {
+    override fun test(source: String) {
+        if (source != "actual") throw AssertionError(source)
+    }
+}
+
+class L : K
+
+fun box(): String {
+    L().test()
+    return "OK"
+}
 "#);
 }
 

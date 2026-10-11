@@ -3,7 +3,7 @@
 //! re-enters the function with the continuation.
 
 use super::spill_layout::SpillLayout;
-use super::value_class_results::unboxed_carrier;
+use super::value_class_results::completion_box;
 use super::{continuation_ty, int_ty, object_ty, zero_value, CONTINUATION_IMPL, I32_MIN};
 use super::{SuspendedResultReturn, SuspendedResultReturns};
 use crate::ir::{
@@ -158,9 +158,7 @@ pub(super) fn build_continuation_class(
     let ret = ir.add_expr(IrExpr::Return(Some(call_outer)));
     // The function returns a value class's carrier where kotlinc's value-class ABI says so; its
     // completion takes the value as `Any?`, so the carrier goes on as its box.
-    if let Some((classifier, carrier)) =
-        unboxed_carrier(ir.value_class_suspend_returns.get(&outer_fid).copied())
-    {
+    if let Some((classifier, carrier)) = completion_box(ir, outer_fid) {
         suspended_result_returns.insert(
             ret,
             SuspendedResultReturn::ValueClassBox {
@@ -182,6 +180,13 @@ pub(super) fn build_continuation_class(
         dispatch_receiver: Some(type_name(internal)),
         param_checks: vec![None],
     });
+    ir.fn_params.insert(
+        inv_fid,
+        crate::ir::FnParamInfo::identities(vec![crate::ir::IrParameterIdentity::generated(
+            crate::ir::IrGeneratedParameterRole::ContinuationResult,
+            None,
+        )]),
+    );
 
     // State-machine fields: `result`/`label`/`L$i` are mutable and non-private (read/written
     // cross-class by the resume machinery).
@@ -253,6 +258,7 @@ pub(super) fn build_continuation_class(
     let class = IrClass {
         fq_name: crate::types::type_name(internal),
         is_source_declared: false,
+        is_compiler_generated: false,
         is_anonymous_object: false,
         enclosure: None,
         is_inner_class: false,
@@ -294,7 +300,7 @@ pub(super) fn build_continuation_class(
         super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
         is_enum: false,
         enum_entries: vec![],
-        enum_entry_of: None,
+        is_enum_entry: false,
         prop_ref: None,
         func_ref: None,
         lambda: None,

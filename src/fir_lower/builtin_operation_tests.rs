@@ -93,7 +93,6 @@ fn consuming_lowering_materializes_common_ir_roots() {
             named: true
         }
     ));
-    assert!(ir.folded_constants.is_empty());
     assert_eq!(ir.fir_origins.len(), ir.exprs.len());
     assert_eq!(ir.fir_origins.get(&5), Some(&IrNodeOrigin::Fir(origin)));
 }
@@ -143,7 +142,6 @@ fn an_operation_over_constants_lowers_to_its_value() {
     // `1 + 2` is an operation over constants, which folds to its value before its operands lower.
     assert_eq!(lowered.roots.as_ref(), &[1]);
     assert!(matches!(ir.expr(0), IrExpr::Const(IrConst::Int(3))));
-    assert!(ir.folded_constants.contains(&0));
     assert!(matches!(
         ir.expr(1),
         IrExpr::Variable {

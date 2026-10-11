@@ -1,14 +1,16 @@
 //! Kotlin's arithmetic, comparison and numeric-representation rules, lowered.
 //!
-//! What lives here is every decision about a NUMBER: how a value moves between machine carriers,
-//! which operand type an operation is performed in, and what the answer's type is. Kotlin's rules
-//! differ from C's at almost every one of those points, and the differences are observable:
+//! What lives here is every machine decision about a NUMBER: how a value moves between carriers,
+//! which width an operation is performed at, and how its answer reaches the type the selected
+//! operator declares. That type itself is not decided here: common lowering records the selected
+//! operator's result (`Int.plus(Long): Long`, `Char.plus(Int): Char`, `Char.minus(Char): Int`)
+//! on every arithmetic node. Kotlin's rules differ from C's at almost every one of these points,
+//! and the differences are observable:
 //!
 //! - `+`, `-`, `*` and unary `-` WRAP; `/` and `%` go through the runtime so division by zero is
 //!   Kotlin's `ArithmeticException` rather than a machine trap; shifts mask their count.
-//! - Arithmetic on the narrow integer types IS `Int` arithmetic — Kotlin has no
-//!   `Byte.plus(Byte): Byte` — and `Char` is the exception that makes the rest a rule, since
-//!   `Char.plus(Int)` is declared to return `Char` and only `Char.minus(Char)` returns `Int`.
+//! - Arithmetic on the narrow integer types runs at `Int` width, and an answer the selected
+//!   operator declares narrower (`Char.plus(Int): Char`) is narrowed back to it.
 //! - `compareTo` on floating point is a TOTAL order, not C's `<`/`>`: every `NaN` above every
 //!   other value including itself, `-0.0` below `0.0`. The same operation reached through `<`
 //!   keeps IEEE semantics, so the two spellings genuinely differ.
@@ -76,18 +78,32 @@ impl BodyLowering<'_, '_, '_> {
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Value>, Unsupported> {
-        let lhs_ty = self.type_of(lhs);
-        let rhs_ty = self.type_of(rhs);
+        let lhs_physical = self.type_of(lhs);
+        let rhs_physical = self.type_of(rhs);
+        // EqualityMode::Primitive is a checked semantic decision. A generic member may still hand
+        // its value back through a reference slot (`Pair<Int, _>.first: T`), while the selected
+        // call's logical result records that the value is an Int. Keep both facts: the physical
+        // type says whether to unbox, and the logical type says which scalar is inside. Treating
+        // the physical slot as the semantic type either declines here or compares two pointers.
+        let lhs_scalar = self.scalar_operand_type(lhs, lhs_physical);
+        let rhs_scalar = self.scalar_operand_type(rhs, rhs_physical);
         let Some(left) = self.expression(lhs)? else {
-            return Err("a `Unit` primitive-equality operand".to_string());
+            return Err("a `Unit` primitive-equality operand".into());
         };
         let Some(right) = self.expression(rhs)? else {
-            return Err("a `Unit` primitive-equality operand".to_string());
+            return Err("a `Unit` primitive-equality operand".into());
         };
         if self.terminated {
             return Ok(None);
         }
-        let (left, right, ty, signed) = self.unify(left, lhs_ty, right, rhs_ty)?;
+        let (left, right, ty, signed) = self.unify_scalars(
+            left,
+            lhs_physical,
+            lhs_scalar,
+            right,
+            rhs_physical,
+            rhs_scalar,
+        )?;
         Ok(Some(if ty.is_float() {
             let condition = float_comparison(op).expect("primitive equality");
             self.builder.ins().fcmp(condition, left, right)
@@ -151,15 +167,30 @@ impl BodyLowering<'_, '_, '_> {
 
     /// An operator's operand as the primitive it is: a reference-carried one is a box, opened to
     /// the type its own bound names.
-    fn unboxed_operand(&mut self, value: Value, ty: Option<Ty>) -> Result<Value, Unsupported> {
-        let Some(ty) = ty else {
+    fn scalar_operand_type(&self, id: u32, physical: Option<Ty>) -> Option<Ty> {
+        self.file
+            .ir
+            .logical_types
+            .get(&id)
+            .copied()
+            .and_then(scalar_bound)
+            .or_else(|| physical.and_then(scalar_bound))
+    }
+
+    fn unboxed_operand(
+        &mut self,
+        value: Value,
+        physical: Option<Ty>,
+        scalar: Option<Ty>,
+    ) -> Result<Value, Unsupported> {
+        let Some(physical) = physical else {
             return Ok(value);
         };
-        if carrier(ty) != Carrier::Ref {
+        if self.carrier(physical) != Carrier::Ref {
             return Ok(value);
         }
-        let Some(scalar) = scalar_bound(ty) else {
-            return Err("an operator on a reference operand".to_string());
+        let Some(scalar) = scalar else {
+            return Err("an operator on a reference operand".into());
         };
         Ok(self
             .convert(value, Some(any()), scalar)?
@@ -175,18 +206,32 @@ impl BodyLowering<'_, '_, '_> {
         rhs: Value,
         rhs_ty: Option<Ty>,
     ) -> Result<(Value, Value, Type, bool), Unsupported> {
+        let lhs_scalar = lhs_ty.and_then(scalar_bound);
+        let rhs_scalar = rhs_ty.and_then(scalar_bound);
+        self.unify_scalars(lhs, lhs_ty, lhs_scalar, rhs, rhs_ty, rhs_scalar)
+    }
+
+    fn unify_scalars(
+        &mut self,
+        lhs: Value,
+        lhs_physical: Option<Ty>,
+        lhs_scalar: Option<Ty>,
+        rhs: Value,
+        rhs_physical: Option<Ty>,
+        rhs_scalar: Option<Ty>,
+    ) -> Result<(Value, Value, Type, bool), Unsupported> {
         // Kotlin's arithmetic and comparison operators are the PRIMITIVE ones, so an operand whose
         // type carries as a reference here is a boxed primitive: a value of a generic type whose
         // bound is a number, which the JVM boxes for the same reason. It has to be unboxed before
         // either side's machine type means anything — this function unifies by machine type, and a
         // pointer and an `Int` unify into pointer arithmetic that reads like an answer and is not
         // one.
-        let lhs = self.unboxed_operand(lhs, lhs_ty)?;
-        let rhs = self.unboxed_operand(rhs, rhs_ty)?;
+        let lhs = self.unboxed_operand(lhs, lhs_physical, lhs_scalar)?;
+        let rhs = self.unboxed_operand(rhs, rhs_physical, rhs_scalar)?;
         let left = self.builder.func.dfg.value_type(lhs);
         let right = self.builder.func.dfg.value_type(rhs);
         if left.is_float() != right.is_float() {
-            return Err("an operator mixing integer and floating-point operands".to_string());
+            return Err("an operator mixing integer and floating-point operands".into());
         }
         // `Char` and the four unsigned integers widen by zero-extension; everything else by sign.
         let signed_of = |ty: Option<Ty>| {
@@ -197,15 +242,16 @@ impl BodyLowering<'_, '_, '_> {
         } else {
             right
         };
-        let lhs = self.resize(lhs, left, signed_of(lhs_ty), width);
-        let rhs = self.resize(rhs, right, signed_of(rhs_ty), width);
+        let lhs = self.resize(lhs, left, signed_of(lhs_scalar), width);
+        let rhs = self.resize(rhs, right, signed_of(rhs_scalar), width);
         // `Char` compares unsigned only against another `Char`: widened to `Int` it is a
         // non-negative `Int` and a signed comparison is the same thing. An UNSIGNED integer
         // compares unsigned at its own width, where the difference is the whole point — the top bit
         // is a value there and a sign everywhere else.
         let unsigned = |ty: Option<Ty>| ty.is_some_and(|ty| ty.non_null().is_unsigned());
-        let both_chars = matches!(lhs_ty, Some(Ty::Char)) && matches!(rhs_ty, Some(Ty::Char));
-        let signed = !(both_chars || unsigned(lhs_ty) || unsigned(rhs_ty));
+        let both_chars =
+            matches!(lhs_scalar, Some(Ty::Char)) && matches!(rhs_scalar, Some(Ty::Char));
+        let signed = !(both_chars || unsigned(lhs_scalar) || unsigned(rhs_scalar));
         Ok((lhs, rhs, width, signed))
     }
 
@@ -231,21 +277,28 @@ impl BodyLowering<'_, '_, '_> {
         // The type each side unboxes to, which the guard has already established is a
         // floating-point one. Kotlin does not compare a `Double` with a `Float` through `==`, so
         // two different widths here are a shape this has no rule for rather than a conversion.
-        let (Some(left_ty), Some(right_ty)) =
-            (lhs_ty.and_then(scalar_bound), rhs_ty.and_then(scalar_bound))
-        else {
-            return Err(
-                "an IEEE comparison whose operand names no floating-point type".to_string(),
-            );
+        let left_physical = self.type_of(lhs);
+        let right_physical = self.type_of(rhs);
+        let left_semantic = self.file.ir.logical_types.get(&lhs).copied().or(lhs_ty);
+        let right_semantic = self.file.ir.logical_types.get(&rhs).copied().or(rhs_ty);
+        let (Some(left_ty), Some(right_ty)) = (
+            left_semantic
+                .and_then(scalar_bound)
+                .or_else(|| left_physical.and_then(scalar_bound)),
+            right_semantic
+                .and_then(scalar_bound)
+                .or_else(|| right_physical.and_then(scalar_bound)),
+        ) else {
+            return Err("an IEEE comparison whose operand names no floating-point type".into());
         };
         if left_ty != right_ty {
-            return Err("an IEEE comparison between two floating-point widths".to_string());
+            return Err("an IEEE comparison between two floating-point widths".into());
         }
         let Some(left) = self.expression(lhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         let Some(right) = self.expression(rhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         if self.terminated {
             return Ok(None);
@@ -256,8 +309,8 @@ impl BodyLowering<'_, '_, '_> {
         let compare = self.builder.create_block();
         let absent = self.builder.create_block();
 
-        let left_null = self.is_null_operand(left, lhs_ty);
-        let right_null = self.is_null_operand(right, rhs_ty);
+        let left_null = self.is_null_operand(left, left_physical);
+        let right_null = self.is_null_operand(right, right_physical);
         let either = self.builder.ins().bor(left_null, right_null);
         self.builder.ins().brif(either, absent, &[], compare, &[]);
 
@@ -269,10 +322,10 @@ impl BodyLowering<'_, '_, '_> {
         self.continue_in(compare);
         self.builder.seal_block(compare);
         let left = self
-            .convert(left, lhs_ty, left_ty)?
+            .convert(left, left_physical, left_ty)?
             .expect("a floating-point target yields a value");
         let right = self
-            .convert(right, rhs_ty, right_ty)?
+            .convert(right, right_physical, right_ty)?
             .expect("a floating-point target yields a value");
         let equal = self.builder.ins().fcmp(FloatCC::Equal, left, right);
         self.builder.ins().jump(merge, &[BlockArg::Value(equal)]);
@@ -291,7 +344,7 @@ impl BodyLowering<'_, '_, '_> {
     /// Whether an operand is `null`, as a `Boolean`. A scalar one never is, and says so with a
     /// constant rather than a comparison against a pointer it is not.
     fn is_null_operand(&mut self, value: Value, ty: Option<Ty>) -> Value {
-        if ty.map(carrier) != Some(Carrier::Ref) {
+        if ty.map(|ty| self.carrier(ty)) != Some(Carrier::Ref) {
             return self.builder.ins().iconst(types::I8, 0);
         }
         let zero = self.builder.ins().iconst(types::I64, 0);
@@ -301,6 +354,7 @@ impl BodyLowering<'_, '_, '_> {
     /// A built-in binary operator, with Kotlin's semantics where the machine's differ.
     pub(super) fn binary(
         &mut self,
+        id: u32,
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
@@ -309,15 +363,54 @@ impl BodyLowering<'_, '_, '_> {
         let rhs_ty = self.type_of(rhs);
 
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
+            // Two occurrences of one value class, both carried as the value: Kotlin's `==` on
+            // them is the class's `equals`, which compares the values by THEIR type's `equals` —
+            // so `NaN` equals itself and the two zeroes differ, as they do in a box.
+            let unboxed = |ty: Option<Ty>| {
+                ty.filter(|ty| !ty.is_nullable())
+                    .and_then(|ty| self.file.values.unboxed(ty))
+            };
+            if let (Some(left), Some(right)) = (unboxed(lhs_ty), unboxed(rhs_ty)) {
+                // A class that declares its own `equals` answers by it, through its box below.
+                if left == right && !self.declares_its_own_equals(left) {
+                    let class = Ty::Obj(left, &[]);
+                    let Some(lhs) = self.coerce(lhs, class)? else {
+                        return Ok(None);
+                    };
+                    let Some(rhs) = self.coerce(rhs, class)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let equal = self.values_equal(lhs, rhs, class)?;
+                    return Ok(Some(if op == IrBinOp::Ne {
+                        let one = self.builder.ins().iconst(types::I8, 1);
+                        self.builder.ins().bxor(equal, one)
+                    } else {
+                        equal
+                    }));
+                }
+            }
             let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
             // `Unit` counts as a reference here: it is a VALUE in Kotlin, the runtime owns the one
             // instance of it, and `reference` materializes that singleton for an operand that
             // produces no machine value. `println("x") == Unit` is true, and comparing the two
             // through the ordinary reference path is what says so.
-            let reference_operand =
-                |ty: Option<Ty>| matches!(ty.map(carrier), Some(Carrier::Ref | Carrier::Void));
-            let on_references = reference_operand(lhs_ty) || reference_operand(rhs_ty);
+            let reference_operand = |ty: Option<Ty>| {
+                matches!(
+                    ty.map(|ty| self.carrier(ty)),
+                    Some(Carrier::Ref | Carrier::Void)
+                )
+            };
+            // A value class answering `equals` itself is asked through its box, whatever it holds.
+            let own_equals = [lhs_ty, rhs_ty]
+                .into_iter()
+                .filter_map(|ty| ty.and_then(|ty| self.file.values.unboxed(ty)))
+                .any(|class| self.declares_its_own_equals(class));
+            let on_references =
+                reference_operand(lhs_ty) || reference_operand(rhs_ty) || own_equals;
             if against_null {
                 // `x == null` is `x === null` in Kotlin: no `equals` is ever called.
                 let left = self.reference(lhs)?;
@@ -376,7 +469,7 @@ impl BodyLowering<'_, '_, '_> {
             }
             if lhs_ty.is_none() && rhs_ty.is_none() {
                 // Neither a known scalar nor a known reference: either equality would be a guess.
-                return Err("an equality on an undetermined operand type".to_string());
+                return Err("an equality on an undetermined operand type".into());
             }
         }
         if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) {
@@ -384,14 +477,15 @@ impl BodyLowering<'_, '_, '_> {
             // equality on primitives is `==`, with a deprecation warning); boxing each side and
             // comparing the boxes' addresses would say `0L !== 0L`. Floating-point identity has
             // its own rules (`-0.0`, `NaN`) that nothing here implements yet, so it is declined.
-            let both_scalars = matches!(lhs_ty.map(carrier), Some(Carrier::Scalar(..)))
-                && matches!(rhs_ty.map(carrier), Some(Carrier::Scalar(..)));
+            let both_scalars =
+                matches!(lhs_ty.map(|ty| self.carrier(ty)), Some(Carrier::Scalar(..)))
+                    && matches!(rhs_ty.map(|ty| self.carrier(ty)), Some(Carrier::Scalar(..)));
             if both_scalars {
                 let Some(left) = self.expression(lhs)? else {
-                    return Err("a `Unit` operand".to_string());
+                    return Err("a `Unit` operand".into());
                 };
                 let Some(right) = self.expression(rhs)? else {
-                    return Err("a `Unit` operand".to_string());
+                    return Err("a `Unit` operand".into());
                 };
                 if self.terminated {
                     return Ok(None);
@@ -420,10 +514,10 @@ impl BodyLowering<'_, '_, '_> {
         }
 
         let Some(left) = self.expression(lhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         let Some(right) = self.expression(rhs)? else {
-            return Err("a `Unit` operand".to_string());
+            return Err("a `Unit` operand".into());
         };
         if self.terminated {
             return Ok(None);
@@ -433,7 +527,7 @@ impl BodyLowering<'_, '_, '_> {
         // to the operand width, which is exactly Kotlin's rule (`1 shl 32 == 1`).
         if matches!(op, IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr) {
             if self.builder.func.dfg.value_type(left).is_float() {
-                return Err("a shift of a floating-point operand".to_string());
+                return Err("a shift of a floating-point operand".into());
             }
             let left = self.widen_narrow_integer(left, lhs_ty);
             return Ok(Some(match op {
@@ -466,7 +560,7 @@ impl BodyLowering<'_, '_, '_> {
                         &[left, right],
                     )?
                     else {
-                        return Err("a `%` on floating point that yields no value".to_string());
+                        return Err("a `%` on floating point that yields no value".into());
                     };
                     value
                 }
@@ -479,7 +573,7 @@ impl BodyLowering<'_, '_, '_> {
                     let condition = float_comparison(op).expect("comparison");
                     self.builder.ins().fcmp(condition, left, right)
                 }
-                other => return Err(format!("`{other:?}` on floating-point operands")),
+                other => return Err(declined!("`{other:?}` on floating-point operands")),
             }));
         }
 
@@ -505,12 +599,14 @@ impl BodyLowering<'_, '_, '_> {
             (left, right, ty)
         };
 
-        // `Char + Int` is `Char`, and the arithmetic above ran at `Int` width, so the result is
-        // narrowed back — the same `i2c` kotlinc emits after the `iadd`. Everything else keeps the
-        // width it was computed at.
-        let narrow_to_char =
-            arithmetic_result(op, lhs_ty.map_or(Ty::Int, |ty| ty.non_null()), rhs_ty) == Ty::Char
-                && lhs_ty.map(Ty::non_null) == Some(Ty::Char);
+        // The selected operator's result can be narrower than the width the arithmetic ran at:
+        // `Char.plus(Int): Char` is computed at `Int` and narrowed back, the same `i2c` kotlinc
+        // emits after the `iadd`. Everything else keeps the width it was computed at.
+        let narrow_to = if arithmetic {
+            self.narrower_result(id, ty)?
+        } else {
+            None
+        };
 
         let value = match op {
             // `iadd`/`isub`/`imul` wrap, which is Kotlin's rule; there is nothing to guard.
@@ -545,11 +641,23 @@ impl BodyLowering<'_, '_, '_> {
                 unreachable!("handled above")
             }
         };
-        Ok(Some(if narrow_to_char {
-            self.builder.ins().ireduce(types::I16, value)
-        } else {
-            value
+        Ok(Some(match narrow_to {
+            Some(result) => self.builder.ins().ireduce(result, value),
+            None => value,
         }))
+    }
+
+    /// The machine type of an arithmetic operator's recorded result, when it is narrower than the
+    /// integer width `computed` the operation ran at. The result type is the selected operator's,
+    /// which common lowering records for every arithmetic node; this only chooses the narrowing.
+    fn narrower_result(&self, id: u32, computed: Type) -> Result<Option<Type>, Unsupported> {
+        let Some(result) = self.file.ir.checked_type(id) else {
+            return Err("an arithmetic operator without its selected result type".into());
+        };
+        Ok(self
+            .carrier(result.non_null())
+            .clif()
+            .filter(|clif| !clif.is_float() && clif.bits() < computed.bits()))
     }
 
     /// `Byte`/`Short`/`Char` operands of arithmetic become `Int`, as Kotlin's operators declare.
@@ -564,16 +672,18 @@ impl BodyLowering<'_, '_, '_> {
     /// Unary minus. `-Int.MIN_VALUE` is `Int.MIN_VALUE` in Kotlin, and `ineg` wraps the same way.
     pub(super) fn negate(&mut self, operand: u32, ty: Ty) -> Result<Option<Value>, Unsupported> {
         let Some(value) = self.coerce(operand, ty)? else {
-            return Err("a negation of `Unit`".to_string());
+            return Err("a negation of `Unit`".into());
         };
         if self.terminated {
             return Ok(None);
         }
-        Ok(Some(if carrier(ty).clif().is_some_and(Type::is_float) {
-            self.builder.ins().fneg(value)
-        } else {
-            self.builder.ins().ineg(value)
-        }))
+        Ok(Some(
+            if self.carrier(ty).clif().is_some_and(Type::is_float) {
+                self.builder.ins().fneg(value)
+            } else {
+                self.builder.ins().ineg(value)
+            },
+        ))
     }
 
     /// `isNaN`, `isInfinite`, `isFinite` — each one comparison on the unboxed value.
@@ -590,10 +700,10 @@ impl BodyLowering<'_, '_, '_> {
         let ty = match self.type_of(receiver).map(Ty::non_null) {
             Some(Ty::Double) => Ty::Double,
             Some(Ty::Float) => Ty::Float,
-            _ => return Err("a floating-point question about a value of another type".to_string()),
+            _ => return Err("a floating-point question about a value of another type".into()),
         };
         let Some(value) = self.coerce(receiver, ty)? else {
-            return Err("a floating-point question about `Unit`".to_string());
+            return Err("a floating-point question about `Unit`".into());
         };
         if self.terminated {
             return Ok(None);
@@ -618,10 +728,28 @@ impl BodyLowering<'_, '_, '_> {
     }
 }
 
+impl BodyLowering<'_, '_, '_> {
+    /// Whether a value class of this file declares its own `equals`, which its box's first vtable
+    /// entry records: the synthesized answer by the value is there only where it does not.
+    fn declares_its_own_equals(&self, classifier: TypeName) -> bool {
+        self.file
+            .ir
+            .class_id_by_name(classifier)
+            .is_some_and(|class| {
+                !matches!(
+                    self.file.model.layout(class).vtable.first(),
+                    Some(model::Slot::ValueMember { .. })
+                )
+            })
+    }
+}
+
 pub(super) fn scalar_bound(ty: Ty) -> Option<Ty> {
     let mut at = ty.non_null();
     for _ in 0..16 {
-        if carrier(at) != Carrier::Ref {
+        // The MACHINE rule, not the projected one: a value class is no operand of a built-in
+        // operator, whatever it wraps.
+        if machine_carrier(at) != Carrier::Ref {
             return Some(at);
         }
         match at {
@@ -697,20 +825,20 @@ impl BodyLowering<'_, '_, '_> {
         use super::super::super::intrinsics::BitwiseOp;
         let operand = ret.non_null();
         if !matches!(operand, Ty::Byte | Ty::Short) {
-            return Err(format!(
+            return Err(declined!(
                 "a `kotlin.experimental` bit operation answering `{operand:?}`"
             ));
         }
         let Some(left) = self.coerce(receiver, operand)? else {
-            return Err("a `Unit` receiver for a bit operation".to_string());
+            return Err("a `Unit` receiver for a bit operation".into());
         };
         let right = match args {
             [] => None,
             [argument] => match self.coerce(*argument, operand)? {
                 Some(value) => Some(value),
-                None => return Err("a `Unit` operand for a bit operation".to_string()),
+                None => return Err("a `Unit` operand for a bit operation".into()),
             },
-            _ => return Err("a bit operation with more than one operand".to_string()),
+            _ => return Err("a bit operation with more than one operand".into()),
         };
         if self.terminated {
             return Ok(None);
@@ -720,19 +848,9 @@ impl BodyLowering<'_, '_, '_> {
             (BitwiseOp::Or, Some(right)) => self.builder.ins().bor(left, right),
             (BitwiseOp::Xor, Some(right)) => self.builder.ins().bxor(left, right),
             (BitwiseOp::Inv, None) => self.builder.ins().bnot(left),
-            _ => return Err("a bit operation of the wrong arity".to_string()),
+            _ => return Err("a bit operation of the wrong arity".into()),
         };
         self.convert(produced, Some(operand), ret)
-    }
-}
-
-/// The type Kotlin performs an operation IN, which is not always either operand's.
-pub(super) fn arithmetic_result(op: IrBinOp, lhs: Ty, rhs: Option<Ty>) -> Ty {
-    match (lhs, op) {
-        (Ty::Char, IrBinOp::Add) => Ty::Char,
-        (Ty::Char, IrBinOp::Sub) if rhs.map(Ty::non_null) != Some(Ty::Char) => Ty::Char,
-        (Ty::Byte | Ty::Short | Ty::Char, _) => Ty::Int,
-        (other, _) => other,
     }
 }
 
@@ -744,7 +862,7 @@ impl BodyLowering<'_, '_, '_> {
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let Some(value) = self.coerce(receiver, Ty::Boolean)? else {
-            return Err("a `Unit` operand of `Boolean.not`".to_string());
+            return Err("a `Unit` operand of `Boolean.not`".into());
         };
         if self.terminated {
             return Ok(None);

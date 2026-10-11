@@ -36,6 +36,18 @@ pub(crate) enum IrDebugLocalProvenance {
     InlineLambdaReceiver {
         implementation: FunId,
     },
+    /// A value parameter of a source lambda spliced at an inline call site, bound from the call's
+    /// operand. kotlinc keeps the parameter's source spelling (`it` stays `it` — the `$iv` suffix
+    /// is for the inlined callable's OWN locals); `depth` counts the enclosing expansions the
+    /// splice was cloned into, each of which adds one suffix, as a lambda frame marker's does.
+    InlineLambdaParameter {
+        depth: u32,
+    },
+    /// Invocation parameter of a callable reference consumed directly by an inline call. The
+    /// ordinal is semantic provenance; each backend owns the physical `pN`-style spelling.
+    InlineCallableReferenceParameter {
+        ordinal: u32,
+    },
     /// The inline-depth marker an inline function's expansion opens with, after its operands are
     /// bound. The retained source name is the expanded callable's. It never grows with nesting: a
     /// debugger reads it as the name of the frame it opens, wherever that frame was cloned to.
@@ -69,7 +81,12 @@ impl IrDebugLocalProvenance {
                 implementation,
                 depth: depth.saturating_add(1),
             },
-            Self::InlineLambdaReceiver { .. } | Self::FunctionFrameMarker => self,
+            Self::InlineLambdaParameter { depth } => Self::InlineLambdaParameter {
+                depth: depth.saturating_add(1),
+            },
+            Self::InlineLambdaReceiver { .. }
+            | Self::InlineCallableReferenceParameter { .. }
+            | Self::FunctionFrameMarker => self,
         }
     }
 
@@ -127,10 +144,24 @@ pub struct IrLambdaOrigin {
     pub label: Option<String>,
     /// Which source form the implementation was written in.
     pub form: IrLambdaForm,
+    /// Whether the source expression carried the `suspend` modifier. This is distinct from the
+    /// inferred function type: Kotlin metadata marks an explicit `suspend { ... }` function and
+    /// leaves a lambda merely coerced to a suspend function type unmarked.
+    pub explicit_suspend: bool,
     /// The naming walk's position for the class the lambda would compile to. A lambda spliced into
     /// an inline call writes no class, but a target spells its inline-depth marker from this
     /// provenance. The realized spelling stays in that target's own state.
     pub(crate) class_provenance: Option<super::IrLocalClassNameProvenance>,
+}
+
+impl IrFile {
+    /// Whether `function` implements a lambda literal, rather than an anonymous function or a
+    /// declaration.
+    pub fn is_lambda_literal(&self, function: u32) -> bool {
+        self.lambda_origins
+            .get(&function)
+            .is_some_and(|origin| origin.form == IrLambdaForm::Literal)
+    }
 }
 
 /// The source form of a lowered function literal.

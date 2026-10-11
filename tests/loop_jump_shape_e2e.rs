@@ -76,9 +76,12 @@ fn fused_guards_still_run_correctly() {
                \x20   }\n\
                \x20   return \"$odd $upto\"\n\
                }\n";
-    let Some(actual) =
-        common::compile_and_run_box(src, "fused_guards", &[common::stdlib_jar()], None)
-    else {
+    let Some(actual) = common::compile_and_run_box(
+        src,
+        "fused_guards",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    ) else {
         eprintln!("skipping: JVM runner unavailable");
         return;
     };
@@ -113,9 +116,12 @@ fn constant_fused_guards_preserve_reachability() {
                \x20   }\n\
                \x20   return \"$continued $unreachable $fellThrough $broke\"\n\
                }\n";
-    let Some(actual) =
-        common::compile_and_run_box(src, "constant_fused_guards", &[common::stdlib_jar()], None)
-    else {
+    let Some(actual) = common::compile_and_run_box(
+        src,
+        "constant_fused_guards",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    ) else {
         eprintln!("skipping: JVM runner unavailable");
         return;
     };

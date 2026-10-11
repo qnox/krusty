@@ -44,14 +44,10 @@ pub(crate) fn spelling_of_ref_with(
     spellings: crate::spelling::SourceSpellings<'_>,
     resolve_argument: &mut dyn FnMut(&TypeRef) -> Ty,
 ) -> Spelled {
-    // Two ways a reference can name an alias, and they are mutually exclusive:
-    //
-    //  * a SAME-FILE alias was already rewritten to its target by the parse seam, which parked the
-    //    original spelling in `File::alias_spellings` — `r.name` now names the target;
-    //  * an alias declared in a sibling file or on the classpath is never rewritten, so `r.name`
-    //    still spells it and only name resolution can say so.
-    //
-    // An import path names a declaration rather than using the type, and gets no abbreviation.
+    // A source use stays written until name resolution selects its alias. A spelling parked in
+    // `File::alias_spellings` comes only from a later declaration-template rewrite and preserves
+    // that template's original abbreviation. An import path names a declaration rather than using
+    // the type, and gets no abbreviation.
     let spelled = spellings.aliases.get(&r.span).unwrap_or(r);
     let annotations = spellings.annotations.at(r.span.lo).to_vec();
     // A type parameter shadows any same-named alias, and is never itself one.
@@ -65,18 +61,23 @@ pub(crate) fn spelling_of_ref_with(
     // Arrow syntax (`(A) -> B`) spells a function type structurally, so the NODE itself names no
     // alias — but its components can (`(Cargo) -> Cargo`). The metadata arguments of a function
     // type are synthesized as `params… + ret`, so the component spellings are laid out in that
-    // order for the encoder to consume positionally. A SUSPEND function type's tail is the CPS
+    // order for the encoder to consume positionally; a named parameter's spelling carries its name.
+    // A SUSPEND function type's tail is the CPS
     // `Continuation`/`Any?` pair instead of the return, so its return spelling has no slot.
     //
-    // This is tested on the SPELLED node, not the resolved one: `typealias Handler<T> = (T) ->
-    // String` leaves an arrow type behind after the parse seam expands it, and the alias the
-    // source actually wrote is exactly what must survive that.
+    // This is tested on the SPELLED node, not the resolved one: an alias right-hand side and a
+    // written function type use arrow syntax, while a use of `typealias Handler<T> = (T) -> String`
+    // still spells `Handler` and takes the alias path below.
     if !spelled.fun_params.is_empty() || spelled.name == "<fun>" {
         let mut args: Vec<Spelled> = spelled
             .fun_params
             .iter()
-            .map(|parameter| {
-                spelling_of_ref_with(
+            .map(|parameter| Spelled {
+                parameter_name: spellings
+                    .annotations
+                    .parameter_name_at(parameter.span.lo)
+                    .map(Into::into),
+                ..spelling_of_ref_with(
                     parameter,
                     classes,
                     tparams,
@@ -190,6 +191,7 @@ pub(crate) fn spelling_of_ref_with(
         args: expansion_args,
         annotations,
         expansion_annotations,
+        parameter_name: None,
     }
 }
 
@@ -208,12 +210,11 @@ pub(super) fn expansion_arg_spellings(
         .zip(use_site.iter().map(|(ty, _)| *ty))
         .collect::<crate::symbol_resolver::GSigBinds>();
     let applied = crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
-    expansion
-        .type_args()
-        .iter()
-        .zip(applied.type_args())
+    spelled_arguments(expansion)
+        .into_iter()
+        .zip(spelled_arguments(applied))
         .enumerate()
-        .map(|(index, (&template, &applied))| {
+        .map(|(index, (template, applied))| {
             substitute_expansion_spelling(
                 rhs.arg(index),
                 template,
@@ -224,6 +225,49 @@ pub(super) fn expansion_arg_spellings(
             )
         })
         .collect()
+}
+
+/// The spelling of an alias parameter's occurrence once the use site's argument replaced it. The
+/// argument keeps its own spelling (its alias, its annotations), and the occurrence keeps what the
+/// right-hand side wrote there: its annotations, which the expanded type records ahead of the
+/// argument's (`typealias Tagged<T> = (@Kept T) -> Unit` used as `Tagged<@Mark Item>` records
+/// `@Kept @Mark Item`), and a function-type parameter's name.
+fn substituted_parameter_spelling(occurrence: &Spelled, argument: Spelled) -> Spelled {
+    let inherited = occurrence
+        .expansion_annotations
+        .iter()
+        .chain(&occurrence.annotations)
+        .cloned();
+    let mut spelling = argument;
+    // An aliased argument's own annotations belong to its abbreviation as well; the inherited ones
+    // go only on the expanded type, as an alias's right-hand-side annotations do.
+    let expanded = if spelling.alias.is_some() {
+        &mut spelling.expansion_annotations
+    } else {
+        &mut spelling.annotations
+    };
+    *expanded = inherited.chain(std::mem::take(expanded)).collect();
+    spelling.definitely_non_null |= occurrence.definitely_non_null;
+    if occurrence.parameter_name.is_some() {
+        spelling.parameter_name = occurrence.parameter_name.clone();
+    }
+    spelling
+}
+
+/// The types a spelling's [`Spelled::args`] describe, position for position: a classifier's type
+/// arguments, or a function type's parameters followed by its return, which a suspend function
+/// type's spelling has no slot for (see [`spelling_of_ref_with`]).
+fn spelled_arguments(ty: Ty) -> Vec<Ty> {
+    match ty.non_null() {
+        Ty::Fun(signature) => {
+            let mut arguments = signature.params.to_vec();
+            if !signature.suspend {
+                arguments.push(signature.ret);
+            }
+            arguments
+        }
+        _ => ty.type_args().to_vec(),
+    }
 }
 
 /// Apply alias use-site arguments to the spelling tree of its expanded right-hand side. Semantic
@@ -241,10 +285,11 @@ fn substitute_expansion_spelling(
     let template_inner = template.projection_inner().unwrap_or(template);
     if let Ty::TyParam(name, _) = template_inner {
         if let Some(index) = formals.iter().position(|formal| formal == name) {
-            return use_site
+            let argument = use_site
                 .get(index)
                 .map(|(_, spelling)| spelling.clone())
                 .unwrap_or_default();
+            return substituted_parameter_spelling(spelling, argument);
         }
     }
 
@@ -267,12 +312,11 @@ fn substitute_expansion_spelling(
             )
         })
         .collect();
-    let args = template
-        .type_args()
-        .iter()
-        .zip(applied.type_args())
+    let args = spelled_arguments(template)
+        .into_iter()
+        .zip(spelled_arguments(applied))
         .enumerate()
-        .map(|(index, (&template, &applied))| {
+        .map(|(index, (template, applied))| {
             substitute_expansion_spelling(
                 spelling.arg(index),
                 template,
@@ -290,5 +334,6 @@ fn substitute_expansion_spelling(
         args,
         annotations: spelling.annotations.clone(),
         expansion_annotations: spelling.expansion_annotations.clone(),
+        parameter_name: spelling.parameter_name.clone(),
     }
 }

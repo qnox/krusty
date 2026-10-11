@@ -93,6 +93,14 @@ fun t(): Int = 0
 fun conditionalArgument(c: Boolean): Int =
     takesNonNull(if (c) System.getenv("KRUSTY_ABSENT_19") else "x")
 
+fun defaulted(value: String = System.getenv("KRUSTY_ABSENT_20")): Int = value.length
+
+fun nullableDefault(value: String? = System.getenv("KRUSTY_ABSENT_21")): Int = value?.length ?: 0
+
+class DefaultedMember(val value: String = System.getenv("KRUSTY_ABSENT_22"))
+
+fun pathDefault(root: java.nio.file.Path = java.nio.file.Paths.get("/")): String = root.toString()
+
 fun box(): String = "OK"
 "#;
 
@@ -125,6 +133,8 @@ fun assignment(): Int {
     return v.length
 }
 
+fun defaulted(value: String = System.getenv("KRUSTY_ABSENT_DEFAULT")): Int = value.length
+
 fun probe(position: Int): String = try {
     when (position) {
         0 -> returned().length
@@ -132,6 +142,7 @@ fun probe(position: Int): String = try {
         2 -> argument()
         3 -> lambdaParameter()
         4 -> assignment()
+        5 -> defaulted()
         else -> Member().memberProperty.length
     }
     "no assertion emitted"
@@ -141,7 +152,7 @@ fun probe(position: Int): String = try {
 
 fun box(): String {
     var position = 0
-    while (position < 6) {
+    while (position < 7) {
         val message = probe(position)
         if (message != "getenv(...) must not be null") {
             return "position " + position + ": " + message
@@ -434,12 +445,152 @@ fn property_and_index_guards_name_the_producing_callable() {
     );
 }
 
+/// A Java enum constant is not-null. Returning or storing the repository-owned `E.A` emits no
+/// `checkNotNullExpressionValue`. A repository-owned static field of the same enum type that is not
+/// an enum constant still does.
+#[test]
+fn java_enum_constant_is_not_a_platform_value() {
+    let java = [
+        ("E.java".to_string(), "public enum E { A, B }\n".to_string()),
+        (
+            "Holder.java".to_string(),
+            "public class Holder {\n\
+                 public static final E NOT_ENTRY = E.A;\n\
+                 public static E mutable = E.A;\n\
+             }\n"
+            .to_string(),
+        ),
+    ];
+    let (library, _) =
+        common::javac_compile(&java, &[]).expect("javac must build the enum-constant fixture");
+    let src = "fun explicit(): E = E.A\n\
+         val stored: E = E.A\n\
+         fun viaLocal(): E {\n\
+             val x = E.A\n\
+             return x\n\
+         }\n\
+         fun entryIsNull(): Boolean = E.A == null\n\
+         fun ordinaryFinalIsNull(): Boolean = Holder.NOT_ENTRY == null\n\
+         fun ordinaryMutableIsNull(): Boolean = Holder.mutable == null\n\
+         fun alias(): E = Holder.NOT_ENTRY\n\
+         fun mutable(): E = Holder.mutable\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [library.clone(), stdlib.clone(), jdk.clone()];
+    let krusty =
+        common::expect_compile_in_process(src, "EnumNull", &classpath, Some(jdk.as_path()));
+    let work = common::scratch_dir().expect("allocate kotlinc enum-null fixture");
+    let file = work.join("EnumNull.kt");
+    let output = work.join("out");
+    std::fs::create_dir_all(&output).expect("create kotlinc output");
+    std::fs::write(&file, src).expect("write enum-null fixture");
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let cp = format!("{}{sep}{}", library.display(), stdlib.display());
+    let args = vec![
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+        "-classpath".to_string(),
+        cp,
+        file.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc rejected the fixture: {stderr}");
+    let mut reference = Vec::new();
+    collect_classes(&output, &output, &mut reference);
+    let _ = std::fs::remove_dir_all(&work);
+    let mut krusty_files = krusty;
+    krusty_files.sort_by(|left, right| left.0.cmp(&right.0));
+    reference.sort_by(|left, right| left.0.cmp(&right.0));
+    let krusty_names: Vec<&str> = krusty_files.iter().map(|(name, _)| name.as_str()).collect();
+    let reference_names: Vec<&str> = reference.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(krusty_names, reference_names, "class set");
+    for ((name, krusty_bytes), (_, reference_bytes)) in krusty_files.iter().zip(&reference) {
+        assert_eq!(
+            krusty_bytes,
+            reference_bytes,
+            "{name} must match kotlinc (krusty {} B, kotlinc {} B)",
+            krusty_bytes.len(),
+            reference_bytes.len()
+        );
+    }
+}
+
+/// `this(...)` and `super(...)` are value arguments. A platform result committed to a declared
+/// non-null parameter is guarded; a type parameter that admits null is not, including after the
+/// superclass applies that parameter as a non-null type.
+const CONSTRUCTOR_DELEGATION: &str = r#"
+class Named(val text: String) {
+    constructor(key: String, marker: Int) : this(System.getenv(key))
+}
+
+class Entry(val path: java.nio.file.Path) {
+    constructor(parent: java.nio.file.Path, child: String) : this(parent.resolve(child))
+}
+
+open class Base(val path: java.nio.file.Path)
+class Child : Base {
+    constructor(parent: java.nio.file.Path, child: String) : super(parent.resolve(child))
+}
+
+class Box<T>(val value: T) {
+    constructor(items: java.util.List<T>) : this(items.get(0))
+}
+
+open class GenericBase<T>(val value: T)
+class GenericChild : GenericBase<String> {
+    constructor(items: java.util.List<String>) : super(items.get(0))
+}
+
+fun box(): String {
+    try {
+        Named("KRUSTY_ABSENT_CTOR", 0)
+        return "missing"
+    } catch (e: NullPointerException) {
+        val message = e.message
+        return if (message == "getenv(...) must not be null") "OK" else message ?: "null"
+    }
+}
+"#;
+
+#[test]
+fn constructor_delegation_guards_a_platform_argument() {
+    let krusty = common::expect_classes_with_stdlib(CONSTRUCTOR_DELEGATION, "CtorDelegation");
+    let reference = compile_reference(CONSTRUCTOR_DELEGATION, "CtorDelegation");
+    let class_bytes = |classes: &[(String, Vec<u8>)]| {
+        classes
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        class_bytes(&krusty),
+        class_bytes(&reference),
+        "every emitted constructor-delegation class must be byte-identical to kotlinc"
+    );
+    assert_eq!(
+        assertion_sites(&krusty, "krusty"),
+        assertion_sites(&reference, "kotlinc"),
+        "constructor delegation must guard the same platform arguments as kotlinc"
+    );
+    assert_eq!(
+        run(&krusty),
+        run(&reference),
+        "a null platform value must fail at the delegation, with kotlinc's message"
+    );
+}
+
 #[test]
 fn every_guarded_message_is_derived_from_the_checked_call() {
     let sites = assertion_sites(&positions().krusty, "krusty");
     assert!(!sites.is_empty(), "the fixture emitted no guard at all");
     assert!(
-        sites.iter().all(|(_, message)| message == "getenv(...)"),
-        "every guarded site in the fixture checks a `System.getenv` result: {sites:?}"
+        sites
+            .iter()
+            .all(|(_, message)| message == "getenv(...)" || message == "get(...)"),
+        "every guarded site in the fixture checks a named platform call: {sites:?}"
+    );
+    assert!(
+        sites.iter().any(|(_, message)| message == "get(...)"),
+        "a Paths.get default must name the call: {sites:?}"
     );
 }

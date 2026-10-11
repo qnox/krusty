@@ -1,0 +1,12 @@
+`@jvm` settings beat unqualified ones; test settings are not the main fragment's.
+--- module.yaml
+product: jvm/app
+settings:
+  jvm:
+    release: 21
+settings@jvm:
+  jvm:
+    release: 22
+test-settings:
+  jvm:
+    release: 23

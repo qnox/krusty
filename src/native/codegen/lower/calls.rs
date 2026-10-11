@@ -7,6 +7,52 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// A top-level function defined in another file of this module: an import of the symbol
+    /// `module_function_symbol` and a direct call. The defining file exports that same symbol.
+    fn module_call(
+        &mut self,
+        target: crate::fir::CallableId,
+        params: &[Ty],
+        ret: Ty,
+        dispatch_receiver: Option<u32>,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let symbol = super::super::super::symbols::module_function_symbol(target);
+        if dispatch_receiver.is_some() {
+            return Err(declined!("a cross-file call with a receiver (`{symbol}`)"));
+        }
+        let id = self.file.import(&symbol, params, ret)?;
+        let arguments = self.arguments(args, params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        // Kotlin evaluates every operand before the invocation itself triggers initialization of
+        // the declaring file. Running the initializer before `arguments` would reverse observable
+        // side effects (and exception priority) between an argument and a top-level initializer.
+        self.initialize_defining_file(target)?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// Run the defining file's top-level initializers before using anything it exports.
+    pub(super) fn initialize_defining_file(
+        &mut self,
+        target: crate::fir::CallableId,
+    ) -> Result<(), Unsupported> {
+        let Some(record) = self.file.ir.referenced_module_callables.get(&target) else {
+            return Err("a cross-file call with no recorded source file".into());
+        };
+        let init = super::super::super::symbols::file_init_symbol(record.source.source);
+        let id = self.file.import(&init, &[], Ty::Unit)?;
+        if self.terminated {
+            return Ok(());
+        }
+        let func_ref = self.func_ref(id);
+        self.emit_call(func_ref, &[])?;
+        Ok(())
+    }
+
     pub(super) fn call(
         &mut self,
         site: u32,
@@ -18,13 +64,26 @@ impl BodyLowering<'_, '_, '_> {
             Callee::LocalWithDefaults { function, defaults }
             | Callee::ClassStaticWithDefaults {
                 function, defaults, ..
-            } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
+            } => self.defaulted_call(*function, defaults, dispatch_receiver, args, site),
+            // A top-level function in another file: that file exports the entry that fills the
+            // omitted arguments, because only it holds their defaults.
+            Callee::ModuleWithDefaults {
+                target,
+                default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
+                params,
+                ret,
+                defaults,
+                dispatch_receiver_ty: None,
+                ..
+            } if provider == target && dispatch_receiver.is_none() => {
+                self.module_defaulted_call(*target, params, *ret, defaults, args)
+            }
             Callee::ModuleWithDefaults { defaults, .. } => {
                 match self.file.inherited_default_provider(callee) {
                     Some(provider) => {
-                        self.defaulted_call(provider, defaults, dispatch_receiver, args)
+                        self.defaulted_call(provider, defaults, dispatch_receiver, args, site)
                     }
-                    None => Err(format!("a {} call", callee_kind(callee))),
+                    None => Err(declined!("a {} call", callee_kind(callee))),
                 }
             }
             // A static method owned by a class is, to this generator, a function with a symbol —
@@ -33,7 +92,7 @@ impl BodyLowering<'_, '_, '_> {
             // arrives this way.
             Callee::Local(function) | Callee::ClassStatic { function, .. } => {
                 if dispatch_receiver.is_some() {
-                    return Err("a static call with a receiver".to_string());
+                    return Err("a static call with a receiver".into());
                 }
                 let params =
                     super::super::super::captures::carried_parameters(self.file.ir, *function);
@@ -42,7 +101,7 @@ impl BodyLowering<'_, '_, '_> {
                     return Ok(None);
                 }
                 let Some(id) = self.file.functions[*function as usize] else {
-                    return Err(format!(
+                    return Err(declined!(
                         "a call to `{}`, which has no body",
                         self.file.ir.functions[*function as usize].name
                     ));
@@ -59,7 +118,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
-                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                    return Err(declined!("a `super` call without a receiver (`{name}`)"));
                 };
                 let target = objects::SuperTarget {
                     owner: *owner,
@@ -76,7 +135,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
-                    return Err(format!("a virtual call without a receiver (`{name}`)"));
+                    return Err(declined!("a virtual call without a receiver (`{name}`)"));
                 };
                 self.virtual_call(*owner, name, params.as_ref(), receiver, args)
             }
@@ -87,7 +146,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
-                    return Err(format!("a `super` call without a receiver (`{name}`)"));
+                    return Err(declined!("a `super` call without a receiver (`{name}`)"));
                 };
                 // A diamond `super.f()` to a superinterface's DEFAULT METHOD. `Callee::Special`
                 // carries no accessor kind because it never names one.
@@ -109,7 +168,7 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(realization) = self.file.callables.callable(*target) else {
-                    return Err("an unresolvable dependency call".to_string());
+                    return Err("an unresolvable dependency call".into());
                 };
                 // A callable reference reaches this ordinary dependency-call path, while retaining
                 // the exact compiler intrinsic the source-form operation uses.
@@ -123,7 +182,7 @@ impl BodyLowering<'_, '_, '_> {
                 }
                 let owner = super::super::super::intrinsics::DeclarationOwner::callable(
                     realization.physical_owner,
-                    realization.declaration_package,
+                    realization.declaration_owner,
                 );
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
@@ -135,17 +194,45 @@ impl BodyLowering<'_, '_, '_> {
                     .reflection_name
                     .clone()
                     .unwrap_or_else(|| realization.name.clone());
-                let semantic_role = self
-                    .file
-                    .ir
-                    .semantic_call_roles
-                    .get(&site)
-                    .copied()
-                    .or(realization.semantic_role);
-                let runtime_member_role = compiler_intrinsics::runtime_member_role(
-                    realization.compiler_intrinsic,
-                    semantic_role,
-                );
+                // Intrinsic identity is the declaration's signature, not the types produced by
+                // call-site substitution. `compareTo<String>(...)`, for example, still names the
+                // declaration whose parameter is `T`; using the specialized `params`/`ret` here
+                // would make one declaration acquire a different intrinsic key at every call.
+                let generic_signature = realization.generic_sig.as_deref();
+                let declared_receiver = generic_signature
+                    .and_then(|signature| signature.receiver)
+                    .or(realization.source_receiver);
+                let declared_params = if let Some(signature) = generic_signature {
+                    std::borrow::Cow::Borrowed(signature.params.as_slice())
+                } else {
+                    let parameters = realization
+                        .declared_params
+                        .as_deref()
+                        .unwrap_or(&realization.params);
+                    if matches!(
+                        realization.kind,
+                        crate::libraries::ExternalCallableKind::Extension
+                    ) && parameters.len() > realization.context_count
+                    {
+                        let mut parameters = parameters.to_vec();
+                        parameters.remove(realization.context_count);
+                        std::borrow::Cow::Owned(parameters)
+                    } else {
+                        std::borrow::Cow::Borrowed(parameters)
+                    }
+                };
+                let declared_ret = generic_signature
+                    .map(|signature| signature.ret)
+                    .or(realization.declared_ret)
+                    .unwrap_or(realization.ret);
+                let signature = super::super::super::intrinsics::FunctionSignature::new(
+                    owner,
+                    &name,
+                    declared_params.as_ref(),
+                    declared_ret,
+                )
+                .with_receiver(declared_receiver)
+                .with_overridden(&realization.overridden_declarations);
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
@@ -161,18 +248,37 @@ impl BodyLowering<'_, '_, '_> {
                             .and_then(|ty| ty.obj_internal())
                         {
                             if self.file.implements_dependency(internal)
-                                && runtime_member_role.is_none()
+                                && !super::super::super::intrinsics::is_any_runtime_member(
+                                    signature,
+                                )
                             {
-                                return Err(format!(
+                                if let Some(realized) = self.implemented_member(
+                                    internal, *target, signature, receiver, args, *ret,
+                                ) {
+                                    return realized;
+                                }
+                                if let Some(realized) =
+                                    self.iteration_member(signature, receiver, args, *ret)
+                                {
+                                    return realized;
+                                }
+                                if let Some(realized) = self
+                                    .collection_algorithm_member(signature, receiver, args, *ret)
+                                {
+                                    return realized;
+                                }
+                                if super::classifier_shapes::is_read_only_property(internal) {
+                                    if let Some(realized) = self.read_only_property_member(
+                                        internal, *target, signature, receiver, args, *ret,
+                                    ) {
+                                        return realized;
+                                    }
+                                }
+                                return Err(declined!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")
                                 ));
                             }
-                        }
-                        if let Some(realized) =
-                            self.scope_function(owner, &name, receiver, args, *ret)
-                        {
-                            return realized;
                         }
                         // `x.isNaN()` and its two siblings are one comparison each. Realizing them
                         // here rather than in the runtime keeps the operand unboxed — the member
@@ -182,6 +288,15 @@ impl BodyLowering<'_, '_, '_> {
                             super::super::super::intrinsics::float_predicate(owner, &name)
                         {
                             return self.float_predicate(predicate, receiver);
+                        }
+                        if let Some(realized) = self.range_member(
+                            signature,
+                            realization.compiler_intrinsic,
+                            receiver,
+                            args,
+                            *ret,
+                        ) {
+                            return realized;
                         }
                         // The unsigned integers: a value class the erasure made look like the
                         // signed number sharing its bits, so every member where that difference
@@ -201,6 +316,31 @@ impl BodyLowering<'_, '_, '_> {
                         if let Some(realized) =
                             self.reference_delegate(realization.semantic_role, receiver, args, *ret)
                         {
+                            return realized;
+                        }
+                        if let Some(realized) =
+                            self.iteration_member(signature, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) =
+                            self.collection_algorithm_member(signature, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) = self.list_member_declared(
+                            signature,
+                            receiver,
+                            args,
+                            *ret,
+                            &realization.physical_params,
+                        ) {
+                            return realized;
+                        }
+                        if let Some(realized) = self.map_member(signature, receiver, args, *ret) {
+                            return realized;
+                        }
+                        if let Some(realized) = self.pair_construction(signature, receiver, args) {
                             return realized;
                         }
                         // `x++` where `x` is an `Int?`: the member is the primitive's, and so is
@@ -253,13 +393,13 @@ impl BodyLowering<'_, '_, '_> {
                             )
                         }) {
                             let [argument] = args else {
-                                return Err("a `mod` with more than one operand".to_string());
+                                return Err("a `mod` with more than one operand".into());
                             };
                             let Some(left) = self.coerce(receiver, operand)? else {
-                                return Err("a `Unit` receiver for `mod`".to_string());
+                                return Err("a `Unit` receiver for `mod`".into());
                             };
                             let Some(right) = self.coerce(*argument, operand)? else {
-                                return Err("a `Unit` operand for `mod`".to_string());
+                                return Err("a `Unit` operand for `mod`".into());
                             };
                             if self.terminated {
                                 return Ok(None);
@@ -284,6 +424,29 @@ impl BodyLowering<'_, '_, '_> {
                             owner, &name, params,
                         ) {
                             return self.experimental_bitwise(op, receiver, args, *ret);
+                        }
+                        if let Some((symbol, carried, answer)) =
+                            super::super::super::intrinsics::array_member(owner, &name, params)
+                        {
+                            if self
+                                .type_of(receiver)
+                                .map(Ty::non_null)
+                                .is_some_and(Ty::is_array)
+                            {
+                                let mut operands = vec![self.reference(receiver)?];
+                                for argument in args {
+                                    operands.push(self.reference(*argument)?);
+                                }
+                                if self.terminated {
+                                    return Ok(None);
+                                }
+                                let produced =
+                                    self.runtime_call(symbol, &carried, answer, &operands)?;
+                                let Some(produced) = produced else {
+                                    return Ok(None);
+                                };
+                                return self.convert(produced, Some(answer), *ret);
+                            }
                         }
                         // `s.startsWith(t)`, `s.endsWith(t)` and `t in s`, whose last parameter
                         // is Kotlin's `ignoreCase`. The default reaches here as a CONSTANT
@@ -382,10 +545,7 @@ impl BodyLowering<'_, '_, '_> {
                         // by UTF-16 unit. A file that declares a `Comparable` of its own keeps
                         // declining: an object of the program's could stand behind that type and
                         // the runtime has no order for it.
-                        if realization.semantic_role
-                            == Some(
-                                crate::backend::BackendSemanticCallRole::KotlinComparableCompareTo,
-                            )
+                        if super::super::super::intrinsics::is_comparable_compare_to(signature)
                             && !self.file.declares_its_own_comparable
                         {
                             let operands =
@@ -460,13 +620,10 @@ impl BodyLowering<'_, '_, '_> {
                             };
                             return self.convert(produced, Some(any()), *ret);
                         }
-                        let Some(symbol) = super::super::super::intrinsics::runtime_member(
-                            owner,
-                            &name,
-                            params,
-                            runtime_member_role,
-                        ) else {
-                            return Err(format!(
+                        let Some(symbol) =
+                            super::super::super::intrinsics::runtime_member(signature)
+                        else {
+                            return Err(declined!(
                                 "the member `{}.{name}`",
                                 realization.physical_owner.render().replace('/', ".")
                             ));
@@ -482,13 +639,30 @@ impl BodyLowering<'_, '_, '_> {
                         self.runtime_call(symbol, &signature, *ret, &arguments)
                     }
                     None => {
+                        let packs_a_vararg = realization
+                            .physical_params
+                            .first()
+                            .is_some_and(|ty| ty.non_null().is_reference_array());
+                        if let Some(realized) =
+                            self.list_construction(signature, packs_a_vararg, args)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) =
+                            self.map_construction(signature, packs_a_vararg, args)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) = self.lazy_construction(signature, args) {
+                            return realized;
+                        }
                         if let Some(operation) =
                             compiler_intrinsics::console_intrinsic(realization.compiler_intrinsic)
                         {
                             let Some(symbol) = super::super::super::intrinsics::console_intrinsic(
                                 operation, params,
                             ) else {
-                                return Err(format!("a malformed `{operation:?}` call"));
+                                return Err(declined!("a malformed `{operation:?}` call"));
                             };
                             let arguments = self.arguments(args, params)?;
                             if self.terminated {
@@ -510,11 +684,6 @@ impl BodyLowering<'_, '_, '_> {
                         ) {
                             return self.assert_fails_with(args, params, *ret);
                         }
-                        if let Some(realized) =
-                            self.top_level_scope_function(owner, &name, args, params, *ret)
-                        {
-                            return realized;
-                        }
                         if let Some(builder) =
                             super::super::super::intrinsics::builder_scope(owner, &name, params)
                         {
@@ -528,12 +697,26 @@ impl BodyLowering<'_, '_, '_> {
                         {
                             return self.precondition(precondition, args, *ret);
                         }
+                        if let Some(symbol) =
+                            super::super::super::intrinsics::progression_last_element(signature)
+                        {
+                            let arguments = self.arguments(args, params)?;
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            return self.runtime_call(symbol, params, *ret, &arguments);
+                        }
                         let Some(symbol) =
-                            super::super::super::intrinsics::runtime_function(owner, &name, params)
+                            super::super::super::intrinsics::runtime_function(signature)
                         else {
-                            return Err(format!(
-                                "the declaration `{}.{name}`",
-                                realization.physical_owner.render().replace('/', ".")
+                            return Err(declined!(
+                                "the declaration `{}.{name}` ({}; receiver {:?}; parameters {:?}; \
+                                 result {:?})",
+                                realization.physical_owner.render().replace('/', "."),
+                                signature.owner.diagnostic_name(),
+                                signature.receiver,
+                                signature.params,
+                                signature.ret,
                             ));
                         };
                         let arguments = self.arguments(args, params)?;
@@ -544,7 +727,22 @@ impl BodyLowering<'_, '_, '_> {
                     }
                 }
             }
-            other => Err(format!("a {} call", callee_kind(other))),
+            Callee::Module {
+                target,
+                params,
+                ret,
+                ..
+            } => self.module_call(*target, params, *ret, dispatch_receiver, args),
+            // A JVM realization may already have rewritten the same edge. The callable id is still
+            // the symbol; the facade name is not.
+            Callee::CrossFile {
+                module_target: Some(target),
+                params,
+                ret,
+                module_default_call: false,
+                ..
+            } => self.module_call(*target, params, *ret, dispatch_receiver, args),
+            other => Err(declined!("a {} call", callee_kind(other))),
         }
     }
 }

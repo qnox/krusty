@@ -57,8 +57,10 @@ mod local_delegates;
 #[cfg(test)]
 mod local_property_reference_tests;
 mod local_property_references;
+mod local_type_parameters;
 mod loops;
 mod member_dispatch;
+mod metadata_constants;
 mod module_declarations;
 mod package_declarations;
 mod properties;
@@ -134,6 +136,31 @@ pub(super) fn resolved_parameter_identity(
     identity: &crate::fir::ResolvedParameterIdentity,
 ) -> crate::ir::IrParameterIdentity {
     crate::ir::IrParameterIdentity::resolved(identity)
+}
+
+/// Declarations a per-file lowering pass must visit: this source's anchors, in declaration-id
+/// order, plus inline-payload declarations copied in from another source. Scanning the whole
+/// module for each file was quadratic.
+pub(super) fn declarations_for_lowering(
+    index: &ResolvedModuleIndex,
+    source: crate::fir::SourceFileId,
+    inline_payload: &std::collections::HashSet<crate::fir::DeclarationId>,
+) -> Vec<crate::fir::DeclarationId> {
+    let mut ids = index.declarations_in_source(source).to_vec();
+    if inline_payload.is_empty() {
+        return ids;
+    }
+    for &declaration in inline_payload {
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            continue;
+        };
+        if anchor.source != source {
+            ids.push(declaration);
+        }
+    }
+    ids.sort_by_key(|declaration| declaration.raw());
+    ids.dedup();
+    ids
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +369,10 @@ struct BodyLowering<'a> {
     /// The call each `{ val t = operand…; call(t…) }` block this body built evaluates once its
     /// stored operands are bound, recorded when the block is created.
     operand_bound_calls: HashMap<ExprId, ExprId>,
+    /// The lambda literal about to be lowered for a functional interface whose method returns
+    /// `Unit`: its implementation returns nothing, as the interface method does, rather than the
+    /// `Unit` value a function type's `invoke` returns.
+    unit_method_lambda: Option<FirExprId>,
 }
 
 /// The block a body's executable root evaluates, through the implicit conversions checking put on
@@ -452,6 +483,8 @@ pub(crate) struct LocalCallableRealization {
     implicit_receiver_captures: Vec<crate::fir::FirImplicitReceiverCapture>,
     context_parameter_count: u32,
     has_extension_receiver: bool,
+    /// The type parameters the callable's closure captures (see `local_type_parameters`).
+    captured_type_parameters: Box<[crate::types::Ty]>,
 }
 
 impl LocalCallableRealization {
@@ -561,6 +594,7 @@ impl<'a> BodyLowering<'a> {
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::new(),
+            unit_method_lambda: None,
         }
     }
 
@@ -659,9 +693,15 @@ impl<'a> BodyLowering<'a> {
         reference_result: crate::types::Ty,
     ) -> ExprId {
         let mut statements = Vec::with_capacity(2);
+        // A `Unit` function type discards the selected result, but the invocation still runs.
+        // Publish that call as an effect of the returned value: the splice emits only this value,
+        // so a bare `Unit` singleton would drop the call.
         let result = if reference_result == crate::types::Ty::Unit {
-            statements.push(value);
-            self.ir.add_expr(crate::ir::IrExpr::UnitInstance)
+            let unit = self.ir.add_expr(crate::ir::IrExpr::UnitInstance);
+            self.ir.add_expr(crate::ir::IrExpr::Block {
+                stmts: vec![value],
+                value: Some(unit),
+            })
         } else if selected_result == reference_result {
             value
         } else {
@@ -672,10 +712,14 @@ impl<'a> BodyLowering<'a> {
             })
         };
         statements.push(self.ir.add_expr(crate::ir::IrExpr::Return(Some(result))));
-        self.ir.add_expr(crate::ir::IrExpr::Block {
+        let body = self.ir.add_expr(crate::ir::IrExpr::Block {
             stmts: statements,
             value: None,
-        })
+        });
+        self.ir
+            .callable_reference_adapter_results
+            .insert(body, result);
+        body
     }
 
     fn value_slot(&self, value: crate::fir::LocalValueId) -> u32 {
@@ -694,6 +738,17 @@ impl<'a> BodyLowering<'a> {
     }
 
     fn implicit_receiver_slot(&self, current: bool, depth: u32) -> Option<u32> {
+        let mut receivers = self.receiver_slots();
+        if current {
+            receivers.next()
+        } else {
+            receivers.nth(depth as usize)
+        }
+    }
+
+    /// The slots of this body's own implicit receivers, innermost first: the extension receiver,
+    /// the context receivers, then the dispatch receiver.
+    fn receiver_slots(&self) -> impl Iterator<Item = u32> + '_ {
         let context_start = self.capture_count
             + u32::from(self.has_dispatch_receiver)
             + self.class_constructor_capture_count
@@ -702,20 +757,15 @@ impl<'a> BodyLowering<'a> {
             .has_extension_receiver
             .then_some(context_start + self.context_parameter_count);
         let dispatch = self.has_dispatch_receiver.then_some(self.capture_count);
-        let receivers = extension
+        extension
             .into_iter()
             .chain(
                 (0..self.context_parameter_count)
                     .filter(|ordinal| !self.context_value_ordinals.contains(ordinal))
                     .rev()
-                    .map(|ordinal| context_start + ordinal),
+                    .map(move |ordinal| context_start + ordinal),
             )
-            .chain(dispatch);
-        if current {
-            receivers.into_iter().next()
-        } else {
-            receivers.into_iter().nth(depth as usize)
-        }
+            .chain(dispatch)
     }
 
     fn implicit_receiver_capture_slot(
@@ -920,15 +970,23 @@ fn finish_callable_body(
         let return_value = ir.add_expr(crate::ir::IrExpr::Return(Some(value)));
         // A block's value is what returns: a lambda body's block ends at its closing `}`, which
         // kotlinc does not mark for the value it returns. The innermost value that records an end
-        // line gives it.
+        // line gives it. A same-module inline expansion is different: its outer region carries the
+        // call expression's end, while its nested values retain declaration/lambda ends for SMAP.
+        // The caller's generated return belongs to that call expression, so keep the region's end.
         let mut end = ir.expr_end_lines.get(&value).copied();
+        let inline_call_end = ir.inline_regions.contains(&value);
         let mut returned = value;
         while let crate::ir::IrExpr::Block {
             value: Some(inner), ..
         } = ir.expr(returned)
         {
             returned = *inner;
-            end = ir.expr_end_lines.get(&returned).copied().or(end);
+            let inner_end = ir.expr_end_lines.get(&returned).copied();
+            end = if inline_call_end {
+                end.or(inner_end)
+            } else {
+                inner_end.or(end)
+            };
         }
         if let Some(end) = end {
             ir.mark_implicit_return_end_line(return_value, end);
@@ -991,6 +1049,13 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
             stmts,
             value: Some(value),
         } if matches!(ir.expr(*value), crate::ir::IrExpr::UnitInstance) => {
+            // A same-file inline expansion's terminal Unit can be semantically discarded while
+            // still owning the inlined function frame's closing source point. Keep its block
+            // intact: flattening it would also flatten its lexical scope and extend the inlined
+            // locals through the caller's return.
+            if ir.retains_inline_unit_line(*value) {
+                return;
+            }
             let effects = stmts.clone();
             if effects.is_empty() {
                 roots.pop();

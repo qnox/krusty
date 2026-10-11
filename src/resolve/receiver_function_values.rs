@@ -147,19 +147,77 @@ impl Checker<'_> {
     pub(super) fn receiver_function_member_call_params(
         &self,
         scope: &CheckerScope<'_>,
+        call: ExprId,
         receiver_ty: Ty,
         name: &str,
-        argument_count: usize,
+        arguments: &[ExprId],
+        partial_argument_types: &[Option<Ty>],
     ) -> Option<Vec<Ty>> {
         let (signature, _) = self.receiver_function_value(scope, name)?;
         let parts = Self::receiver_function_parts(signature)?;
+        if !self.receiver_function_value_applicable(
+            scope,
+            call,
+            arguments,
+            partial_argument_types,
+            receiver_ty,
+            signature,
+        ) {
+            return None;
+        }
+        Some(parts.values.to_vec())
+    }
+
+    /// Read-only applicability of one receiver-function value at its tower level. A fixed function
+    /// value has no callable type parameters, defaults, vararg, or source-callable parameter names;
+    /// the ordinary candidate scorer still owns mapping and type compatibility, including postponed
+    /// lambdas. Only the selected candidate is contextually rechecked and recorded.
+    pub(super) fn receiver_function_value_applicable(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        arguments: &[ExprId],
+        partial_argument_types: &[Option<Ty>],
+        receiver_ty: Ty,
+        signature: &'static crate::types::FnSig,
+    ) -> bool {
+        // A function-type value has neither callable type parameters nor stable source parameter
+        // names. Reject those two source forms before feeding its positional shape to the common
+        // scorer; another callable at the same tower spelling may still accept the call.
+        if self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+            || self
+                .file
+                .call_arg_names
+                .get(&call.0)
+                .is_some_and(|names| names.iter().any(Option::is_some))
+        {
+            return false;
+        }
+        let Some(parts) = Self::receiver_function_parts(signature) else {
+            return false;
+        };
         if !self.receiver_is_assignable(receiver_ty, parts.receiver)
             || !self.receiver_function_context_available(scope, &parts)
         {
-            return None;
+            return false;
         }
-        let params = parts.values.to_vec();
-        (params.len() == argument_count).then_some(params)
+        let call_sig = CallSig::metadata_plain(parts.values.len());
+        self.call_candidate_score(
+            scope,
+            parts.values,
+            &call_sig,
+            ArgSlots {
+                args: arguments,
+                partial_arg_tys: partial_argument_types,
+                arg_names: self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
+                trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+            },
+        )
+        .is_some()
     }
 
     pub(super) fn receiver_function_implicit_receiver(
@@ -208,7 +266,10 @@ impl Checker<'_> {
         };
         let implicit_receiver = match explicit_receiver {
             Some(actual) => {
-                if !self.receiver_is_assignable(actual, expected_receiver) {
+                let partial = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+                if !self.receiver_function_value_applicable(
+                    scope, call, args, &partial, actual, signature,
+                ) {
                     return None;
                 }
                 None

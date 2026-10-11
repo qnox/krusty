@@ -243,8 +243,12 @@ impl BodyFirChecker<'_> {
         } else {
             self.expression_type(source)?
         };
+        let constant = matches!(kind, FirExprKind::Constant(_));
         let expression = self.body.add_expr(FirExpr { origin, ty, kind });
         self.record_generated_class_provenance(source, expression);
+        if constant && self.info.resolved_constants.contains_key(&source) {
+            self.body.record_constant_read(expression);
+        }
         Ok(expression)
     }
 
@@ -257,8 +261,12 @@ impl BodyFirChecker<'_> {
         self.record_expression_suspension(source);
         self.finalize_inline_plan(source, &mut kind)?;
         let origin = self.expression_origin(source)?;
+        let constant = matches!(kind, FirExprKind::Constant(_));
         let expression = self.body.add_expr(FirExpr { origin, ty, kind });
         self.record_generated_class_provenance(source, expression);
+        if constant && self.info.resolved_constants.contains_key(&source) {
+            self.body.record_constant_read(expression);
+        }
         Ok(expression)
     }
 

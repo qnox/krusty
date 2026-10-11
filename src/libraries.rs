@@ -7,6 +7,7 @@ pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod call_realization;
 mod call_sig;
+mod callable_scope_rung;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -14,9 +15,11 @@ mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
 mod default_value;
+mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
@@ -27,14 +30,16 @@ pub use annotation_application::{
 };
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, NonvirtualCallRealization, OverriddenCallKind,
-    OverriddenCallRealization,
+    ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
+    NonvirtualCallRealization, OverriddenCallKind, OverriddenCallRealization,
 };
+pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use default_value::DefaultValue;
+pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
@@ -44,15 +49,26 @@ pub use result_nullability::{ResultEnhancement, ReturnInfo};
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
-use crate::types::{SemanticCallRole, Ty, TypeName, TypeNameList};
+use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
-    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan, InlineBodyRecovery,
-    InlineBodyValue, InlineCollectionAppend, InlineCollectionCapacity, InlineCollectionLocalNames,
-    InlineIterationIndex, InlineIterationTraversal,
+    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyFrame, InlineBodyPlan,
+    InlineBodyRecovery, InlineBodySource, InlineBodyValue, InlineCollectionAppend,
+    InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
+    InlineIterationTraversal,
+};
+pub(crate) use metadata_normalization::{
+    associated_function_parameter_identities, associated_property_parameter_identities,
+    classifier_shape, constructor_parameter_identities, constructor_parameter_list,
+    declared_constructor, declared_function, declared_property, declared_retention,
+    declared_targets, declared_type_alias, enum_entries_getter, enum_value_of, enum_values,
+    function_generic_sig, function_parameter_identities, member_record, only_input_type_formals,
+    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
+    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
+    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -139,6 +155,10 @@ impl LmFlags {
     /// to the delegate. Providers decide this at their boundary; see
     /// [`LibraryMember::inherited_by_delegation`].
     const INHERITED_BY_DELEGATION: u16 = 1 << 8;
+    /// This constructor is the classifier's primary declaration. Providers retain the metadata
+    /// bit so plugin-generated constructions can select that declaration without assuming list
+    /// order or accepting a same-shaped secondary constructor.
+    const IS_PRIMARY_CONSTRUCTOR: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -190,6 +210,10 @@ impl LmFlags {
     pub const fn with_inherited_by_delegation(self, on: bool) -> Self {
         self.with(Self::INHERITED_BY_DELEGATION, on)
     }
+    #[inline]
+    pub const fn with_is_primary_constructor(self, on: bool) -> Self {
+        self.with(Self::IS_PRIMARY_CONSTRUCTOR, on)
+    }
 }
 
 /// Provider-owned physical realization of a semantic member. Resolution carries this opaque handle
@@ -237,6 +261,8 @@ pub struct LibraryMember {
     /// Exact language-level role retained from the selected declaration. Providers assign this at
     /// their boundary; checked FIR carries it without re-identifying the member from its spelling.
     pub semantic_role: Option<SemanticCallRole>,
+    /// See [`LibraryCallable::overridden_declarations`].
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// Exact singleton instance that dispatches this selected object member. This is a semantic
     /// call-shape fact: checked FIR materializes the value as its dispatch receiver, while lowering
     /// only consumes that receiver and the already-selected callable identity.
@@ -322,6 +348,8 @@ pub struct LibraryMember {
     pub declared_ret: Option<Ty>,
     /// See [`LibraryCallable::overridden_results`].
     pub overridden_results: Box<[Ty]>,
+    /// See [`LibraryCallable::enhanced_result`].
+    pub enhanced_result: EnhancedResult,
     /// Language-defined classifier callable synthesized for this declaration (`None` for an ordinary
     /// one): a semantic identity, each backend deciding how the selected operation is realized.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
@@ -577,6 +605,21 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         false
     }
 
+    /// The Kotlin package that declares library top-level callable `callable`, whose `owner` may
+    /// be the platform container realizing it rather than the package itself.
+    fn top_level_callable_package(&self, callable: &LibraryCallable) -> TypeName {
+        callable.owner
+    }
+
+    /// The contract-DSL member the selected declaration `callable` is, by its complete signature:
+    /// a description's call means an effect only when it selected one of these declarations.
+    fn contract_dsl_member(
+        &self,
+        _callable: &crate::contracts::SelectedDslCallable<'_>,
+    ) -> Option<crate::contracts::DslMember> {
+        None
+    }
+
     /// Primitive represented by a platform wrapper type.
     fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
         None
@@ -635,19 +678,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         &[]
     }
 
-    /// Platform spellings for physical zero-arg getters when declaration metadata is unavailable.
-    /// Common resolution asks for a semantic property name; the target returns every physical spelling
-    /// as one provider result because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
-    /// The candidates are most-conventional first
-    /// (`id` → `getId`, `getID`; `urlPath` → `getUrlPath`, `getURLPath`) — the inverse of
-    /// Kotlin's decapitalize-smart getter-to-property mapping.
-    fn physical_property_getter_names(&self, _property: &str) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Project accessor methods inherited through a foreign classifier into semantic Kotlin
     /// properties. Core supplies the federated declaration source so a provider can pair methods
-    /// across module/library boundaries; the returned values are ordinary [`PropertyInfo`] records.
+    /// across module/library boundaries; the provider derives each property from the methods the
+    /// hierarchy declares, and the returned values are ordinary [`PropertyInfo`] records.
     /// Targets without accessor-property interop return an empty set.
     fn inherited_accessor_properties(
         &self,
@@ -688,6 +722,7 @@ impl LibraryMember {
             external_default_provider: None,
             external_property_identity: None,
             semantic_role: None,
+            overridden_declarations: Box::new([]),
             singleton_dispatch: None,
             name,
             owner: None,
@@ -718,6 +753,7 @@ impl LibraryMember {
             nonvirtual_realization: None,
             declared_ret: None,
             overridden_results: Box::new([]),
+            enhanced_result: EnhancedResult::NONE,
             implicit_classifier_callable: None,
             associated_classifier: None,
             associated_access_owner: None,
@@ -752,8 +788,16 @@ impl LibraryMember {
         self.flags.has(LmFlags::IS_EXTENSION)
     }
     #[inline]
+    pub fn is_primary_constructor(&self) -> bool {
+        self.flags.has(LmFlags::IS_PRIMARY_CONSTRUCTOR)
+    }
+    #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
+    }
+    #[inline]
+    pub fn set_is_primary_constructor(&mut self, on: bool) {
+        self.flags = self.flags.with_is_primary_constructor(on);
     }
     #[inline]
     pub fn set_is_interface(&mut self, on: bool) {
@@ -795,14 +839,6 @@ impl LibraryMember {
     pub fn owner_name(&self) -> Option<String> {
         self.owner.map(TypeName::render)
     }
-
-    pub fn owner_name_or(&self, fallback: &str) -> String {
-        self.owner_name().unwrap_or_else(|| fallback.to_string())
-    }
-
-    pub fn owner_type_or(&self, fallback: TypeName) -> TypeName {
-        self.owner.unwrap_or(fallback)
-    }
 }
 
 /// Which source a resolved callable came from — set by the source that resolves it, read by the
@@ -816,29 +852,6 @@ pub enum Origin {
     Module {
         facade: TypeName,
     },
-}
-
-/// The source-name scope rung through which an unqualified callable became visible.
-///
-/// This is call-site selection data, not declaration provenance: compiling the same declaration
-/// into the current module or a dependency must not change whether it participates as a current-
-/// package declaration or an import. Receiver-call lookup stamps this value onto its cloned
-/// candidates before overload selection.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CallableScopeRung {
-    /// The callable was obtained outside an import-scoped lookup (members and direct provider
-    /// queries use this value).
-    #[default]
-    Unscoped,
-    ExplicitImport,
-    CurrentPackage,
-    Import,
-}
-
-impl CallableScopeRung {
-    pub fn is_import(self) -> bool {
-        matches!(self, Self::ExplicitImport | Self::Import)
-    }
 }
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
@@ -857,6 +870,11 @@ pub struct LibraryCallable {
     /// a Kotlin property. Explicit calls still use `external_identity`; property reads/writes carry
     /// this distinct identity so the target backend alone chooses field versus accessor realization.
     pub external_property_identity: Option<crate::fir::ExternalPropertyId>,
+    /// Exact semantic namespace that declares this callable. This is provider-owned identity, not
+    /// the physical JVM facade/class in [`Self::owner`]. Keeping it on the normalized declaration
+    /// lets cached inline-body dependencies be re-interned in another classpath without recovering
+    /// semantics from their physical target spelling.
+    pub declaration_owner: Option<SemanticCallableOwner>,
     pub owner: TypeName,
     /// Kotlin/source name used for selection.
     pub name: String,
@@ -874,6 +892,10 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// Exact identities of the declarations this callable overrides, as the core member hierarchy
+    /// proved them while normalizing the selected family; empty for a declaration that overrides
+    /// nothing or was not reached through a hierarchy walk.
+    pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
     /// JVM collection barrier role of this exact decoded builtin declaration.
     pub collection_barrier: Option<CollectionBarrierOutcome>,
     pub plugin_expression: Option<PluginExpressionDeclaration>,
@@ -954,6 +976,9 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// Annotation class identities declared on this callable. Consumers decide which annotations
+    /// affect resolution/emission; the library layer only records their qualified identities.
+    pub annotations: Vec<crate::types::TypeName>,
     /// The callee's DECLARED (un-erased, pre-substitution) parameter types in physical source order:
     /// leading contexts, then an extension receiver when present, then value parameters. An ordinary
     /// member's dispatch receiver is not included. This is the parameter analogue of
@@ -984,6 +1009,9 @@ pub struct LibraryCallable {
     /// hierarchy found them, nearest first; empty for a non-suspend one. A backend decides from them
     /// how the callable's own result crosses its continuation boundary.
     pub overridden_results: Box<[Ty]>,
+    /// Where the declared result carries kotlinc's `EnhancedNullability`: the positions a Java
+    /// result's overridden declarations fix not-null, with the result they were read from.
+    pub enhanced_result: EnhancedResult,
     /// Number of LEADING context parameters (`context(a: A) fun f()`) in `params` — supplied
     /// implicitly by the caller, not positionally, so arity checks and argument mapping skip them.
     pub context_count: usize,
@@ -1626,9 +1654,6 @@ pub struct FunctionInfo {
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
     pub bound_inner_constructor: Option<BoundInnerConstructor>,
-    /// Annotation class identities declared on this callable. Consumers decide which annotations affect
-    /// resolution/emission; the library layer only records their qualified identities.
-    pub annotations: Vec<crate::types::TypeName>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1851,7 +1876,6 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             bound_inner_constructor: None,
-            annotations: Vec::new(),
         }
     }
 
@@ -1885,6 +1909,7 @@ impl FunctionInfo {
         // the operator-invoke path included, would unbox a real carrier as though it were a box.
         member.declared_ret = self.callable.declared_ret;
         member.overridden_results = self.callable.overridden_results.clone();
+        member.enhanced_result = self.callable.enhanced_result.clone();
         member.signature = self.callable.signature.clone();
         member.default_values = self.default_values.clone();
         member.default_realization = self.callable.default_realization.clone();
@@ -1894,7 +1919,7 @@ impl FunctionInfo {
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;
         member.reified = self.flags.reified;
-        member.annotations = self.annotations.clone();
+        member.annotations = self.callable.annotations.clone();
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);
@@ -1921,6 +1946,7 @@ impl FunctionInfo {
         member.external_identity = self.callable.external_identity;
         member.external_property_identity = self.callable.external_property_identity;
         member.semantic_role = self.callable.semantic_role;
+        member.overridden_declarations = self.callable.overridden_declarations.clone();
         member.singleton_dispatch = self.callable.singleton_dispatch.clone();
         member.stable_declaration = self.stable_declaration;
         member.source_member = self.source_member;
@@ -2142,6 +2168,10 @@ pub struct PropertyInfo {
     /// Declaration-owned compile-time payload. Providers normalize source/classfile storage into
     /// this common semantic fact; a selected read consumes it without another field/classpath query.
     pub compile_time_constant: Option<LibraryConst>,
+    /// Whether a read of this declaration is a constant-value expression for Kotlin metadata.
+    /// Providers publish the semantic fact at their boundary; consumers must not rediscover it
+    /// from an origin, owner, field shape, or spelling.
+    pub metadata_constant_read: bool,
     /// The property's Kotlin visibility.
     pub visibility: Visibility,
     /// The declaring type's internal name — for the resolver's access check (`protected`/`private`).
@@ -2176,29 +2206,6 @@ pub struct PropertyInfo {
 #[derive(Clone, Default)]
 pub struct PropertySet {
     pub overloads: Vec<PropertyInfo>,
-}
-
-impl PropertyInfo {
-    pub fn owner_name(&self) -> String {
-        self.owner.render()
-    }
-
-    pub fn owner_name_or(&self, fallback: &str) -> String {
-        let rendered = self.owner.render();
-        if rendered.is_empty() {
-            fallback.to_string()
-        } else {
-            rendered
-        }
-    }
-
-    pub fn owner_type_or(&self, fallback: TypeName) -> TypeName {
-        if self.owner.matches("") {
-            fallback
-        } else {
-            self.owner
-        }
-    }
 }
 
 /// The callable half of a [`ResolvedSymbols`].

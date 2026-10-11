@@ -3,12 +3,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use krusty::features::LangFeatures;
+use krusty::language_settings::LanguageSettings;
 
 use super::fingerprint::{fingerprint_files, Fingerprint};
 use super::model::{CanonicalPathCache, ProjectModel, ProviderKind, SourceModuleGraph};
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::CommandRunner;
+use crate::worker::language_settings_of;
 
 const DEBOUNCE_MS: u64 = 750;
 
@@ -209,22 +210,25 @@ impl ProjectSync {
             .find_map(|module| module.jvm_target.as_deref())
     }
 
-    /// The union of language features enabled by any module.
-    ///
-    /// Default worker features for analyses without a modeled module.
-    pub fn project_language_features(&self) -> LangFeatures {
-        let mut project_features = LangFeatures::new();
+    /// The default language settings for analyses without a modeled module: the server's own
+    /// `server_arguments`, with every feature any module enables. Each module's settings are its
+    /// kotlinc arguments followed by `server_arguments`, read as the command line reads them; a
+    /// module whose arguments the command line refuses is an error, not skipped.
+    pub fn project_language_settings(
+        &self,
+        server_arguments: &[String],
+    ) -> std::io::Result<LanguageSettings> {
+        let mut project = language_settings_of(server_arguments)?;
         let Some(model) = self.model() else {
-            return project_features;
+            return Ok(project);
         };
         for module in &model.modules {
-            let mut module_features = LangFeatures::new();
-            for argument in &module.kotlinc_args {
-                module_features.apply_cli_arg(argument);
-            }
-            project_features.extend(&module_features);
+            let mut arguments = module.kotlinc_args.clone();
+            arguments.extend_from_slice(server_arguments);
+            let module_settings = language_settings_of(&arguments)?;
+            project.features.extend(&module_settings.features);
         }
-        project_features
+        Ok(project)
     }
 
     /// Glob patterns to register with the editor's file watcher.
@@ -359,14 +363,14 @@ mod tests {
     }
 
     #[test]
-    fn project_language_features_union_recognized_module_arguments() {
+    fn project_language_settings_union_module_features() {
         let mut first = Module::new(ModuleId::new(":first", "main"), "/p/first");
         first.kotlinc_args = vec![
-            "-Xname-based-destructuring=complete".to_string(),
+            "-Xname-based-destructuring=only-syntax".to_string(),
             "-Xunmodeled-option".to_string(),
         ];
         let mut second = Module::new(ModuleId::new(":second", "main"), "/p/second");
-        second.kotlinc_args = vec!["-XXLanguage:+AnotherFeature".to_string()];
+        second.kotlinc_args = vec!["-XXLanguage:+FullValueClasses".to_string()];
         let model = ProjectModel::new("/p", ProviderKind::Gradle).with_modules(vec![first, second]);
         let mut sync =
             ProjectSync::new(Box::new(ScriptedProvider::new(Vec::new(), vec![Ok(model)])));
@@ -375,9 +379,9 @@ mod tests {
             sync.refresh(&FakeRunner::default()),
             RefreshOutcome::Updated
         );
-        let features = sync.project_language_features();
+        let features = sync.project_language_settings(&[]).unwrap().features;
         assert!(features.has("NameBasedDestructuring"));
-        assert!(features.has("AnotherFeature"));
+        assert!(features.has("FullValueClasses"));
     }
 
     #[test]

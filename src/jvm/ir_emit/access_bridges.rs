@@ -31,6 +31,10 @@ pub(super) fn emit_function_reference_access_bridge(
     cw.reserve_method_name(&name);
     cw.reserve_descriptor(&bridge_descriptor);
     let mut code = CodeBuilder::new(bridge_parameters.iter().map(|ty| slot_words(*ty)).sum());
+    let suspend = ir.suspend_funs.contains(&fid);
+    if suspend && line != 0 {
+        code.mark_line(line);
+    }
     let mut slot = 0u16;
     if !function.is_static {
         code.aload(0);
@@ -47,7 +51,7 @@ pub(super) fn emit_function_reference_access_bridge(
         cw.methodref(owner, &function.name, &descriptor)
     };
     let argument_words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
-    if line != 0 {
+    if !suspend && line != 0 {
         code.mark_line(line);
     }
     if function.is_static {
@@ -111,6 +115,82 @@ fn set_bridge_locals(
         slot += slot_words(parameter);
     }
     cw.set_method_debug(name, descriptor, None, &locals);
+}
+
+/// The member shape carried through an `access$<name>$jd` bridge. The vararg and suspend bits are
+/// recorded declaration facts, not inferred from a descriptor or generated spelling.
+pub(super) struct JdAccessBridgeMember<'a> {
+    pub(super) name: &'a str,
+    pub(super) param_tys: &'a [Ty],
+    pub(super) parameter_names: &'a [Option<String>],
+    pub(super) ret: Ty,
+    pub(super) varargs: u16,
+    pub(super) suspend: bool,
+}
+
+/// Emit the `access$<name>$jd` bridge for an `enable`-mode interface default method. An ordinary
+/// bridge marks the non-virtual call; coroutine lowering gives a suspend bridge's whole generated
+/// body the interface declaration line.
+pub(super) fn emit_jd_access_bridge(
+    cw: &mut ClassWriter,
+    interface: crate::types::TypeName,
+    decl_line: u32,
+    member: JdAccessBridgeMember<'_>,
+) {
+    let JdAccessBridgeMember {
+        name: member_name,
+        param_tys,
+        parameter_names,
+        ret,
+        varargs,
+        suspend,
+    } = member;
+    assert_eq!(
+        parameter_names.len(),
+        param_tys.len(),
+        "an access bridge needs every declaration parameter identity"
+    );
+    let fq = interface.render();
+    let member_desc = method_descriptor(param_tys, ret);
+    let mut with_receiver = vec![Ty::obj_name(interface)];
+    with_receiver.extend_from_slice(param_tys);
+    let bridge_desc = method_descriptor(&with_receiver, ret);
+    let name = format!("access${member_name}$jd");
+    cw.reserve_method_name(&name);
+    cw.reserve_descriptor(&bridge_desc);
+    let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
+    let mut code = CodeBuilder::new(argument_words);
+    if suspend && decl_line != 0 {
+        code.mark_line(decl_line);
+    }
+    code.aload(0);
+    let mut slot = 1u16;
+    for ty in param_tys {
+        load(*ty, slot, &mut code);
+        slot += slot_words(*ty);
+    }
+    if !suspend && decl_line != 0 {
+        code.mark_line(decl_line);
+    }
+    let target = cw.interface_methodref(&fq, member_name, &member_desc);
+    code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
+    emit_return(ret, &mut code);
+    code.ensure_locals(argument_words);
+    code.link();
+    cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
+    let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
+    let mut slot = 1u16;
+    for (index, parameter) in param_tys.iter().enumerate() {
+        if let Some(parameter_name) = &parameter_names[index] {
+            locals.push((
+                parameter_name.clone(),
+                local_variable_desc(*parameter),
+                slot,
+            ));
+        }
+        slot += slot_words(*parameter);
+    }
+    cw.set_method_debug(&name, &bridge_desc, None, &locals);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -221,7 +301,7 @@ fn enclosing_protected_subclass(
 /// Every exact classifier edge out of `class`'s lexical enclosure. A function can be attached to
 /// several specialized class copies, so this returns the recorded set instead of choosing one by
 /// whether it happens to inherit the protected target.
-fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<crate::ir::ClassId> {
+pub(super) fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<crate::ir::ClassId> {
     let Some(enclosure) = ir
         .classes
         .get(class as usize)
@@ -314,6 +394,7 @@ pub(super) fn cross_owner_member_calls(
     contexts: &[static_accessors::EmissionContext],
     private_interface_bodies_are_members: bool,
 ) -> MemberAccessBridges {
+    let exporting = static_accessors::inline_functions_exporting_private_access(ir);
     let mut private = std::collections::HashSet::new();
     let mut protected = std::collections::HashMap::new();
     let mut scan = |owner: &str,
@@ -682,7 +763,7 @@ pub(super) fn cross_owner_member_calls(
                 &owner,
                 context.class.map(|class| class as crate::ir::ClassId),
                 vec![root],
-                static_accessors::non_private_inline_body(ir, root),
+                static_accessors::body_exports_private_access(ir, &exporting, root),
             );
         }
     }

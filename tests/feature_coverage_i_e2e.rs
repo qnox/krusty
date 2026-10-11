@@ -362,7 +362,8 @@ fun box(): String {\n\
 
 #[test]
 fn uint_array() {
-    let src = "fun box(): String {\n\
+    let src = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
+fun box(): String {\n\
     val arr = UIntArray(3)\n\
     arr[0] = 10u\n\
     arr[1] = 20u\n\

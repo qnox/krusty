@@ -136,14 +136,17 @@ impl Parser<'_> {
                 };
                 if let Some(negated) = in_negated {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let membership_start = self.tok().span.lo;
                     if negated {
                         self.bump(); // '!'
                     }
+                    let membership = Span::new(membership_start, self.tok().span.hi);
                     self.bump(); // 'in'
                     self.skip_newlines();
                     self.relabel_left_operand(label_mark, None);
                     // the range start binds tighter than `in` (and `..`)
                     let rstart = self.with_lambda_label(None, |parser| parser.parse_bp(9));
+                    let range_token = self.tok().span;
                     let kind = if self.eat(TokenKind::DotDot) {
                         Some(RangeKind::Through)
                     } else if self.eat(TokenKind::DotDotLt) {
@@ -171,6 +174,7 @@ impl Parser<'_> {
                                 },
                                 Span::new(lspan.lo, end.hi),
                             );
+                            self.file.operator_token_spans.insert(lhs.0, range_token);
                         }
                         None => {
                             // `value in container` → `container.contains(value)`.
@@ -190,13 +194,17 @@ impl Parser<'_> {
                                 Span::new(lspan.lo, cspan.hi),
                             );
                             lhs = if negated {
-                                self.file.add_expr(
+                                let negation = self.file.add_expr(
                                     Expr::Unary {
                                         op: UnOp::Not,
                                         operand: call,
                                     },
                                     Span::new(lspan.lo, cspan.hi),
-                                )
+                                );
+                                self.file
+                                    .operator_token_spans
+                                    .insert(negation.0, membership);
+                                negation
                             } else {
                                 call
                             };
@@ -220,6 +228,7 @@ impl Parser<'_> {
                 };
                 if let Some(kind) = rkind {
                     let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let operator = self.tok().span;
                     self.bump(); // '..' / '..<'
                     self.skip_newlines();
                     self.relabel_left_operand(label_mark, None);
@@ -229,6 +238,7 @@ impl Parser<'_> {
                         Expr::RangeTo { lo: lhs, hi, kind },
                         Span::new(lspan.lo, rspan.hi),
                     );
+                    self.file.operator_token_spans.insert(lhs.0, operator);
                     continue;
                 }
             }
@@ -245,6 +255,7 @@ impl Parser<'_> {
                 if !is_soft_kw && next_starts_expr {
                     let name = name.to_string();
                     let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let name_span = self.tok().span;
                     self.bump(); // infix function name
                     self.skip_newlines();
                     self.relabel_left_operand(label_mark, Some(&name));
@@ -259,6 +270,9 @@ impl Parser<'_> {
                         },
                         Span::new(lspan.lo, rspan.hi),
                     );
+                    self.file
+                        .exact_member_name_spans
+                        .insert(callee.0, name_span);
                     lhs = self.file.add_expr(
                         Expr::Call {
                             callee,
@@ -335,11 +349,26 @@ impl Parser<'_> {
         // ordinary annotation grammar, then continue with the same prefix-expression parser so
         // annotations compose with labels, unary operators, and anonymous functions.
         if self.at(TokenKind::At) {
+            let mut annotations = Vec::new();
             while self.at(TokenKind::At) {
-                self.parse_annotation();
+                let (annotation, arguments) = self.parse_annotation();
+                if let Some(annotation) = annotation {
+                    annotations.push(UseSiteAnnotation {
+                        annotation,
+                        arguments,
+                    });
+                }
                 self.skip_newlines();
             }
-            return self.parse_prefix();
+            let expression = self.parse_prefix();
+            if !annotations.is_empty() {
+                self.file
+                    .expression_annotations
+                    .entry(expression)
+                    .or_default()
+                    .extend(annotations);
+            }
+            return expression;
         }
         // A jump operand is a full expression, including an elvis chain.
         if self.at(TokenKind::Ident) && self.keyword_text("throw") {
@@ -1206,15 +1235,22 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_if(&mut self) -> ExprId {
-        let start = self.tok().span;
-        self.bump(); // 'if'
+    /// The parenthesized condition of an `if`, `while` or `do`-`while`. Inside the parentheses a
+    /// newline is insignificant, so the condition may start and end on a line of its own:
+    /// `while (\n    true\n)`.
+    pub(super) fn parse_parenthesized_condition(&mut self) -> ExprId {
         self.expect(TokenKind::LParen, "'('");
-        // The condition may start (and end) on a fresh line: `if(\n  a && b\n)`. Skip newlines around it.
         self.skip_newlines();
         let cond = self.parse_expr();
         self.skip_newlines();
         self.expect(TokenKind::RParen, "')'");
+        cond
+    }
+
+    fn parse_if(&mut self) -> ExprId {
+        let start = self.tok().span;
+        self.bump(); // 'if'
+        let cond = self.parse_parenthesized_condition();
         self.skip_newlines();
         let then_branch = self.parse_branch(true);
         // optional else (may be on the next line)
@@ -1545,9 +1581,11 @@ impl Parser<'_> {
             if negated {
                 self.bump(); // '!'
             }
+            let membership = Span::new(start.lo, self.tok().span.hi);
             self.bump(); // 'in'
             self.skip_newlines();
             let rstart = self.parse_bp(9);
+            let range_token = self.tok().span;
             let kind = if self.eat(TokenKind::DotDot) {
                 Some(RangeKind::Through)
             } else if self.eat(TokenKind::DotDotLt) {
@@ -1565,7 +1603,7 @@ impl Parser<'_> {
                 Some(kind) => {
                     let rend = self.parse_bp(9);
                     let end = self.file.expr_spans[rend.0 as usize];
-                    self.file.add_expr(
+                    let membership = self.file.add_expr(
                         Expr::InRange {
                             value: subj,
                             start: rstart,
@@ -1574,7 +1612,11 @@ impl Parser<'_> {
                             negated,
                         },
                         Span::new(start.lo, end.hi),
-                    )
+                    );
+                    self.file
+                        .operator_token_spans
+                        .insert(membership.0, range_token);
+                    membership
                 }
                 None => {
                     let cspan = self.file.expr_spans[rstart.0 as usize];
@@ -1593,13 +1635,17 @@ impl Parser<'_> {
                         Span::new(start.lo, cspan.hi),
                     );
                     if negated {
-                        self.file.add_expr(
+                        let negation = self.file.add_expr(
                             Expr::Unary {
                                 op: UnOp::Not,
                                 operand: call,
                             },
                             Span::new(start.lo, cspan.hi),
-                        )
+                        );
+                        self.file
+                            .operator_token_spans
+                            .insert(negation.0, membership);
+                        negation
                     } else {
                         call
                     }

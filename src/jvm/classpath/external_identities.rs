@@ -1,14 +1,15 @@
 //! Stable dependency declaration identities and their provider-owned JVM realizations.
 //!
-//! Classpath queries can discover a physical declaration through a partial spelling index before
-//! its complete classifier metadata is materialized. This registry interns the physical identity
-//! once and monotonically enriches that same record; consumers never repeat lookup by spelling.
+//! Classpath queries can discover a target declaration through a partial spelling index before its
+//! complete classifier metadata is materialized. This registry interns the joined physical
+//! realization and semantic declaration owner, then monotonically enriches that record; consumers
+//! never repeat lookup by spelling.
 
 use super::{
     Classpath, ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
 };
 use crate::libraries::LibraryCallable;
-use crate::types::{Ty, TypeName};
+use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ExternalPropertyKey {
@@ -25,16 +26,18 @@ pub(super) struct ExternalCallableKey {
     physical_ret: Ty,
     default_call: bool,
     kind: ExternalCallableKind,
+    declaration_owner: Option<SemanticCallableOwner>,
 }
 
 impl Classpath {
     /// Intern one provider-normalized callable and return the stable identity passed through FIR.
-    /// The key is the exact physical declaration, never a source lookup key.
+    /// The key joins the exact physical realization with the semantic declaration owner; neither
+    /// component is a source lookup key. One JVM method can realize distinct Kotlin declarations.
     pub(crate) fn intern_external_callable(
         &self,
         callable: &LibraryCallable,
         kind: ExternalCallableKind,
-        declaration_package: Option<TypeName>,
+        declaration_owner: Option<SemanticCallableOwner>,
     ) -> crate::fir::ExternalCallableId {
         let key = ExternalCallableKey {
             owner: callable.owner,
@@ -44,15 +47,13 @@ impl Classpath {
             physical_ret: callable.physical_ret,
             default_call: callable.default_call,
             kind,
+            declaration_owner,
         };
         if let Some(identity) = self.external_callable_ids.borrow().get(&key).copied() {
             // The same physical declaration can reach this boundary first through a partial
             // spelling-indexed view and later through its complete classifier declaration. Keep
             // the stable identity, but merge the later declaration facets before returning it.
             self.enrich_external_callable(identity, callable);
-            if let Some(package) = declaration_package {
-                self.publish_external_callable_declaration_package(identity, package);
-            }
             return identity;
         }
         let mut callables = self.external_callables.borrow_mut();
@@ -65,8 +66,9 @@ impl Classpath {
         callables.push(ExternalCallableRealization {
             callable: stored,
             kind,
-            declaration_package,
+            declaration_owner,
             parameter_identities: Box::new([]),
+            declaration_signature: None,
         });
         self.external_callable_ids
             .borrow_mut()
@@ -174,6 +176,9 @@ impl Classpath {
         if stored.callable.declared_ret.is_none() {
             stored.callable.declared_ret = callable.declared_ret;
         }
+        if stored.callable.generic_sig.is_none() {
+            stored.callable.generic_sig = callable.generic_sig.clone();
+        }
         if stored.callable.declared_params.is_none() {
             stored.callable.declared_params = callable.declared_params.clone();
         }
@@ -222,26 +227,6 @@ impl Classpath {
                 stored.parameter_identities, identities,
                 "one external callable identity cannot publish conflicting parameter identities"
             );
-        }
-    }
-
-    /// Publish the semantic package from the package namespace that supplied this declaration.
-    /// The physical callable owner may be a JVM file facade and is deliberately not an input.
-    pub(crate) fn publish_external_callable_declaration_package(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-        package: TypeName,
-    ) {
-        let mut callables = self.external_callables.borrow_mut();
-        let stored = callables
-            .get_mut(identity.raw() as usize)
-            .expect("a declaration package names an interned external callable");
-        match stored.declaration_package {
-            Some(existing) => assert_eq!(
-                existing, package,
-                "one external callable identity cannot have conflicting declaration packages"
-            ),
-            None => stored.declaration_package = Some(package),
         }
     }
 }
@@ -307,8 +292,48 @@ mod tests {
         );
     }
 
+    /// A member reached first through a partial view has no generic signature yet. Its declaration
+    /// supplies one later, and the backend names a reified argument by that signature's formals.
     #[test]
-    fn declaration_package_is_independent_of_the_physical_realization_kind() {
+    fn reinterning_a_physical_callable_takes_the_later_generic_signature() {
+        let cp = Classpath::new(vec![]);
+        let partial = LibraryCallable::library(
+            type_name("review/Holder"),
+            "name",
+            vec![],
+            Ty::String,
+            Ty::String,
+            "()Ljava/lang/String;",
+        );
+        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
+
+        let mut declared = partial.clone();
+        let signature = crate::libraries::GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: Vec::new(),
+            ret: Ty::String,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        };
+        declared.generic_sig = Some(Box::new(signature.clone()));
+
+        assert_eq!(
+            cp.intern_external_callable(&declared, ExternalCallableKind::Member, None),
+            identity
+        );
+        assert_eq!(
+            cp.external_callable(identity)
+                .expect("the enriched callable")
+                .callable
+                .generic_sig
+                .as_deref(),
+            Some(&signature)
+        );
+    }
+
+    #[test]
+    fn declaration_owner_is_independent_of_the_physical_realization_kind() {
         let cp = Classpath::new(vec![]);
         let callable = LibraryCallable::library(
             type_name("fixture/physical/FacadeKt"),
@@ -318,19 +343,19 @@ mod tests {
             Ty::Unit,
             "()V",
         );
-        let package = type_name("fixture/semantic");
+        let owner = SemanticCallableOwner::Package(type_name("fixture/semantic"));
 
         // A package property or mapped builtin can reuse a storage/member realization. The
         // declaration namespace remains semantic and must not be inferred from that physical kind.
         let identity = cp.intern_external_callable(
             &callable,
             ExternalCallableKind::StaticFieldRead,
-            Some(package),
+            Some(owner),
         );
 
         assert_eq!(
-            cp.external_callable(identity).unwrap().declaration_package,
-            Some(package)
+            cp.external_callable(identity).unwrap().declaration_owner,
+            Some(owner)
         );
     }
 }

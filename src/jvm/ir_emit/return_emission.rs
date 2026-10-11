@@ -31,7 +31,7 @@ impl Emitter<'_> {
         // every region nested in it that the transfer has left. Close their open segments ahead of
         // it; the caller reopens once the whole transfer is emitted.
         self.close_left_regions(finalizer, code);
-        self.emit(finalizer, code);
+        self.emit_finalizer_copy(finalizer, code);
         let survives = if self.discarding_diverges(finalizer) {
             // kotlinc still inlines the outer finalizers behind a diverging one, as dead code its
             // optimizer then deletes. The regions those copies split stay split, at the offset the
@@ -165,6 +165,9 @@ impl Emitter<'_> {
         let words = slot_words(ret);
         if self.return_finalizers.is_empty() || words == 0 {
             if self.emit_return_finalizers(code) {
+                if self.completes_unsigned_bitwise_value(value) {
+                    code.forget_line();
+                }
                 self.mark_return(returned, code);
                 emit_return(ret, code);
             }
@@ -190,6 +193,9 @@ impl Emitter<'_> {
         }
         self.release_temporary(parked);
         if survives {
+            if self.completes_unsigned_bitwise_value(value) {
+                code.forget_line();
+            }
             self.mark_return(returned, code);
             emit_return(ret, code);
         }

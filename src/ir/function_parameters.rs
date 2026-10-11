@@ -67,6 +67,8 @@ pub enum IrGeneratedParameterRole {
         ordinal: u32,
     },
     Continuation,
+    /// The resume value passed to a generated continuation class's `invokeSuspend`.
+    ContinuationResult,
     /// The dispatch receiver stored by a generated continuation class.
     ContinuationDispatchReceiver,
     HolderReceiver,
@@ -87,6 +89,14 @@ pub enum IrGeneratedParameterRole {
     /// in the interface's parameter list. A suspend function type's continuation is one of them:
     /// it is the interface's last parameter, not a declared completion.
     FunctionInvokeValue {
+        ordinal: u32,
+    },
+    /// The function value captured by a generated semantic SAM adapter.
+    SamAdapterCapture {
+        ordinal: u32,
+    },
+    /// One logical input forwarded by a generated semantic SAM adapter.
+    SamAdapterValue {
         ordinal: u32,
     },
     /// The value a suspend lambda's `create` receives for the lambda's one parameter, ahead of the

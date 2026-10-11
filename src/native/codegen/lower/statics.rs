@@ -11,9 +11,8 @@
 //! **Where the initializers run.** On the JVM they run in `<clinit>`, when the facade class is
 //! first touched. A program touches the facade by calling its `main`, so running them at process
 //! start — in declaration order, before the entry function — is observationally the same thing for
-//! a program whose entry lives in the file that declares them. That is every program the generator
-//! accepts today, because a cross-file call is still declined; when files start calling each other,
-//! this becomes a real initialization-order question and is answered then, not guessed at now.
+//! a program whose entry lives in the file that declares them, and when another file first calls
+//! into this one. Both go through `kt_fileinit_<source>`, which runs the initializers at most once.
 //!
 //! **The collector has to be told.** A freestanding program cannot find its own data section, so a
 //! reference-typed slot is registered with `kt_gc_add_global_root` — and registered BEFORE the
@@ -72,14 +71,14 @@ impl<'a> FileLowering<'a> {
             // guess at the order.
             if let Some(owner) = declaration.owner {
                 if !self.order_independent(declaration) {
-                    return Err(format!(
+                    return Err(declined!(
                         "a non-`const` property stored on `{}`",
                         owner.render()
                     ));
                 }
             }
-            if carrier(declaration.ty) == Carrier::Void {
-                return Err(format!(
+            if self.carrier(declaration.ty) == Carrier::Void {
+                return Err(declined!(
                     "a `Unit`-typed top-level property (`{}`)",
                     declaration.name
                 ));
@@ -119,7 +118,7 @@ impl<'a> FileLowering<'a> {
 
         self.emit_function(id, signature, Ty::Unit, &symbol, &mut |body, _| {
             for (slot, ty, _) in &declarations {
-                if carrier(*ty) != Carrier::Ref {
+                if body.carrier(*ty) != Carrier::Ref {
                     continue;
                 }
                 let address = body.data_address(*slot);
@@ -134,7 +133,7 @@ impl<'a> FileLowering<'a> {
                     return Ok(());
                 }
                 let Some(value) = value else {
-                    return Err("a top-level property initialized from a `Unit` value".to_string());
+                    return Err("a top-level property initialized from a `Unit` value".into());
                 };
                 let address = body.data_address(*slot);
                 body.builder.ins().store(trusted(), value, address, 0);
@@ -142,6 +141,74 @@ impl<'a> FileLowering<'a> {
             Ok(())
         })?;
         Ok(Some(id))
+    }
+
+    /// `kt_fileinit_<source>`: this file's top-level initializers, run at most once.
+    ///
+    /// The entry calls it before `main` or `box`. A call into this file from another file calls it
+    /// first, so a property defined here has its value even when this file is not the entry. The
+    /// flag is set before the initializers run: a property initializer that reaches back into this
+    /// file sees the default, which is what Kotlin does, and does not recurse.
+    pub(super) fn define_file_init(
+        &mut self,
+        source: crate::fir::SourceFileId,
+        statics: Option<FuncId>,
+    ) -> Result<FuncId, Unsupported> {
+        let void = Signature::new(CallConv::SystemV);
+        let symbol = super::super::super::symbols::file_init_symbol(source);
+        let id = self
+            .module
+            .declare_function(&symbol, Linkage::Hidden, &void)
+            .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
+        let flag_name = format!("kt_fileinit_done_{}", source.raw());
+        let flag = self
+            .module
+            .declare_data(&flag_name, Linkage::Local, true, false)
+            .map_err(|error| format!("declaring `{flag_name}` ({error})"))?;
+        let mut description = DataDescription::new();
+        description.define(Box::new([0u8]));
+        description.set_align(1);
+        self.module
+            .define_data(flag, &description)
+            .map_err(|error| format!("defining `{flag_name}` ({error})"))?;
+
+        let frontend_config = self.module.target_config();
+        let mut context = self.module.make_context();
+        context.func.signature = void;
+        let mut builder_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let head = builder.create_block();
+            let run = builder.create_block();
+            let done = builder.create_block();
+            builder.switch_to_block(head);
+            let global = self.module.declare_data_in_func(flag, builder.func);
+            // A Cranelift value belongs to the block that defines it. The flag's address is a
+            // global, so each block that touches the flag recomputes the pointer.
+            let pointer = builder.ins().symbol_value(types::I64, global);
+            let state = builder.ins().load(types::I8, trusted(), pointer, 0);
+            let already = builder.ins().icmp_imm_u(IntCC::NotEqual, state, 0);
+            builder.ins().brif(already, done, &[], run, &[]);
+            builder.seal_block(head);
+            builder.switch_to_block(run);
+            let pointer = builder.ins().symbol_value(types::I64, global);
+            let one = builder.ins().iconst(types::I8, 1);
+            builder.ins().store(trusted(), one, pointer, 0);
+            if let Some(statics) = statics {
+                let statics_ref = self.module.declare_func_in_func(statics, builder.func);
+                builder.ins().call(statics_ref, &[]);
+            }
+            builder.ins().jump(done, &[]);
+            builder.seal_block(run);
+            builder.switch_to_block(done);
+            builder.ins().return_(&[]);
+            builder.seal_block(done);
+            builder.finalize(frontend_config);
+        }
+        self.module
+            .define_function(id, &mut context)
+            .map_err(|error| format!("defining `{symbol}` ({error})"))?;
+        Ok(id)
     }
 }
 
@@ -194,8 +261,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Some(
                 IrLocalPropertyLayout::Member { .. }
                 | IrLocalPropertyLayout::MemberExtension { .. },
-            ) => Err("a member property reached top-level realization".to_string()),
-            None => Err("a top-level property with no recorded realization".to_string()),
+            ) => Err("a member property reached top-level realization".into()),
+            None => Err("a top-level property with no recorded realization".into()),
         }
     }
 
@@ -216,19 +283,32 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &mut self,
         target: &crate::fir::PropertyId,
     ) -> Result<Option<Value>, Unsupported> {
+        Ok(self.top_level_read_typed(target)?.map(|(value, _)| value))
+    }
+
+    /// [`Self::top_level_read`], with the type the produced value is carried at: the slot's
+    /// storage type, or the accessor's result.
+    pub(super) fn top_level_read_typed(
+        &mut self,
+        target: &crate::fir::PropertyId,
+    ) -> Result<Option<(Value, Ty)>, Unsupported> {
         match self.top_level(target, false)? {
             TopLevel::Slot(index) => {
                 let declaration = &self.file.ir.statics[index as usize];
                 let guarded = declaration.is_lateinit;
                 let name = declaration.name.clone();
+                let ty = declaration.ty;
                 let value = self.static_read(index)?;
                 if guarded {
                     let value = value.expect("a `lateinit` property has a reference carrier");
                     self.lateinit_guard(value, &name)?;
                 }
-                Ok(value)
+                Ok(value.map(|value| (value, ty)))
             }
-            TopLevel::Accessor(function) => self.accessor_call(function, &[]),
+            TopLevel::Accessor(function) => {
+                let ty = self.file.ir.functions[function as usize].ret;
+                Ok(self.accessor_call(function, &[])?.map(|value| (value, ty)))
+            }
         }
     }
 
@@ -246,7 +326,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 let Some(value) = value else {
-                    return Err("a `Unit` value assigned to a top-level property".to_string());
+                    return Err("a `Unit` value assigned to a top-level property".into());
                 };
                 self.accessor_call(function, &[value])?;
                 Ok(())
@@ -288,7 +368,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     pub(super) fn static_read(&mut self, index: u32) -> Result<Option<Value>, Unsupported> {
         let ty = self.file.ir.statics[index as usize].ty;
         let slot = self.file.statics[index as usize];
-        let clif = carrier(ty).clif().expect("declined at declaration");
+        let clif = self.carrier(ty).clif().expect("declined at declaration");
         let address = self.data_address(slot);
         Ok(Some(self.builder.ins().load(clif, trusted(), address, 0)))
     }
@@ -301,7 +381,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         let Some(value) = value else {
-            return Err("a `Unit` value assigned to a top-level property".to_string());
+            return Err("a `Unit` value assigned to a top-level property".into());
         };
         let address = self.data_address(slot);
         self.builder.ins().store(trusted(), value, address, 0);
@@ -329,7 +409,7 @@ impl BodyLowering<'_, '_, '_> {
         value: Option<u32>,
     ) -> Result<Option<Value>, Unsupported> {
         let Some(layout) = self.file.ir.local_property_layouts.get(target).cloned() else {
-            return Err("an extension or context property with no realization".to_string());
+            return Err("an extension or context property with no realization".into());
         };
         // Which accessor, and whether it belongs to an owner — a member accessor is an instance
         // method and may be overridden, so it is reached through the owner's vtable slot rather
@@ -354,12 +434,12 @@ impl BodyLowering<'_, '_, '_> {
                 ..
             } => {
                 let Some(getter) = *getter else {
-                    return Err("a context property with no getter".to_string());
+                    return Err("a context property with no getter".into());
                 };
                 (accessor(getter, *setter, value.is_some())?, Some(*owner))
             }
             IrLocalPropertyLayout::TopLevelStorage { .. } => {
-                return Err("a stored property reached through a receiver".to_string())
+                return Err("a stored property reached through a receiver".into())
             }
         };
         let parameters = self.file.ir.functions[function as usize].params.clone();
@@ -370,7 +450,7 @@ impl BodyLowering<'_, '_, '_> {
             .chain(value)
             .collect::<Vec<_>>();
         if supplied.len() != parameters.len() {
-            return Err(format!(
+            return Err(declined!(
                 "an accessor taking {} operands for {} parameters",
                 parameters.len(),
                 supplied.len()
@@ -393,7 +473,7 @@ impl BodyLowering<'_, '_, '_> {
         };
         for (operand, ty) in supplied.iter().zip(&parameters) {
             let Some(argument) = self.coerce(*operand, *ty)? else {
-                return Err("a `Unit` operand of a property accessor".to_string());
+                return Err("a `Unit` operand of a property accessor".into());
             };
             if self.terminated {
                 return Ok(None);
@@ -410,7 +490,7 @@ impl BodyLowering<'_, '_, '_> {
         let class = self.file.class_of(owner, "a property accessor of")?;
         let key = model::function_key(self.file.ir, class, function);
         let Some(slot) = self.file.model.slot(class, &key) else {
-            return Err("a member accessor with no dispatch slot".to_string());
+            return Err("a member accessor with no dispatch slot".into());
         };
         let ret = self.file.ir.functions[function as usize].ret;
         self.dispatch(object, slot, &parameters, ret, &arguments[1..])
@@ -421,6 +501,6 @@ impl BodyLowering<'_, '_, '_> {
 fn accessor(getter: FunId, setter: Option<FunId>, writing: bool) -> Result<FunId, Unsupported> {
     match writing {
         false => Ok(getter),
-        true => setter.ok_or_else(|| "a write to a read-only property".to_string()),
+        true => setter.ok_or_else(|| "a write to a read-only property".into()),
     }
 }

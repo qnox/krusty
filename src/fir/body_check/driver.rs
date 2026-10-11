@@ -1047,7 +1047,9 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
     let callable = index
         .callable_for_declaration(work.target)
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
-    if signature.parameters.len() != function.params.len() {
+    if signature.parameters.len() != function.params.len()
+        || work.parameters.len() != function.params.len()
+    {
         return Err(CheckedBodyDriverFailure::ParameterShapeMismatch);
     }
     let parameters = function
@@ -1070,6 +1072,7 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
         .params
         .iter()
         .enumerate()
+        .filter(|(parameter, _)| work.parameters[*parameter])
         .filter_map(|(parameter, value)| value.default.map(|expression| (parameter, expression)))
         .map(|(parameter, expression)| {
             Ok(CheckedBodyDefault {

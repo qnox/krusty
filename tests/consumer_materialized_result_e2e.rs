@@ -116,9 +116,13 @@ fn a_spilled_erased_result_reaches_its_consumer_intact() {
          \x20   return \"OK\"\n\
          }}\n"
     );
-    let actual =
-        common::compile_and_run_box(&src, "branchy_consumer", &[common::stdlib_jar()], None)
-            .expect("the source compiles and the JVM runner is provisioned");
+    let actual = common::compile_and_run_box(
+        &src,
+        "branchy_consumer",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "OK");
 }
 
@@ -150,7 +154,7 @@ fn an_erased_result_reaches_its_consumer_intact() {
         &src,
         "consumer_materialized_result",
         &[common::stdlib_jar(), holder_classes()],
-        None,
+        Some(&common::jdk_modules()),
     )
     .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "OK");

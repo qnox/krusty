@@ -43,6 +43,20 @@ pub struct IrCompanionBlockProperty {
 }
 
 impl IrCompanionBlocks {
+    pub(super) fn remap_classifier_identities(
+        &mut self,
+        names: &HashMap<TypeName, TypeName>,
+        mut remap_ty: impl FnMut(Ty) -> Ty,
+    ) {
+        for property in &mut self.properties {
+            property.class = names
+                .get(&property.class)
+                .copied()
+                .unwrap_or(property.class);
+            property.ty = remap_ty(property.ty);
+        }
+    }
+
     /// Record that `function`, listed among `owner`'s methods, was declared by `owner`'s block.
     pub fn place_function(&mut self, function: FunId, owner: ClassId) {
         self.functions.insert(function, owner);

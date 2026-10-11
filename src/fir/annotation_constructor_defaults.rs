@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::fir::{
-    CallableId, DefaultArgumentStore, FirCallArgument, FirConstant, FirConstructorTarget,
+    CallableId, DefaultArgumentStore, FirBody, FirCallArgument, FirConstant, FirConstructorTarget,
     FirConversion, FirConversionKind, FirExprId, FirExprKind, ResolvedModuleIndex, ResolvedTy,
 };
 use crate::libraries::DefaultValue;
@@ -55,35 +55,28 @@ impl Folder<'_> {
             return published;
         }
         let mut values = published;
-        let slots = self
-            .store
-            .body(callable)
-            .map(|body| {
-                body.default_values()
-                    .iter()
-                    .map(|default| (default.parameter, default.value))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for (parameter, value) in slots {
-            let Some(folded) = self.expression(callable, value) else {
-                continue;
-            };
-            let Some(slot) = usize::try_from(parameter)
-                .ok()
-                .and_then(|parameter| values.get_mut(parameter))
-            else {
-                continue;
-            };
-            *slot = Some(folded);
+        let bodies = self.store.bodies(callable).cloned().collect::<Vec<_>>();
+        for body in &bodies {
+            for default in body.default_values() {
+                let Some(folded) = self.expression(body, default.value) else {
+                    continue;
+                };
+                let Some(slot) = usize::try_from(default.parameter)
+                    .ok()
+                    .and_then(|parameter| values.get_mut(parameter))
+                else {
+                    continue;
+                };
+                *slot = Some(folded);
+            }
         }
         self.visiting.remove(&callable);
         self.memo.insert(callable, values.clone());
         values
     }
 
-    fn expression(&mut self, owner: CallableId, id: FirExprId) -> Option<DefaultValue> {
-        let expression = self.store.body(owner)?.expr(id)?.clone();
+    fn expression(&mut self, body: &FirBody, id: FirExprId) -> Option<DefaultValue> {
+        let expression = body.expr(id)?.clone();
         match expression.kind {
             FirExprKind::Constant(constant) => Some(constant_value(constant)),
             FirExprKind::EnumEntry {
@@ -100,24 +93,24 @@ impl Folder<'_> {
             FirExprKind::ArrayLiteral {
                 array_type,
                 elements,
-            } => self.array(owner, array_type, &elements),
+            } => self.array(body, array_type, &elements),
             FirExprKind::AnnotationArray(elements) => {
-                self.array_elements(owner, expression.ty, &elements, &[])
+                self.array_elements(body, expression.ty, &elements, &[])
             }
             FirExprKind::ImplicitConversion { value, conversion } => {
                 if !keeps_closed_value(Some(conversion)) {
                     return None;
                 }
-                self.expression(owner, value)
+                self.expression(body, value)
             }
-            FirExprKind::ConstructorCall(call) => self.annotation_call(owner, expression.ty, &call),
+            FirExprKind::ConstructorCall(call) => self.annotation_call(body, expression.ty, &call),
             _ => None,
         }
     }
 
     fn array(
         &mut self,
-        owner: CallableId,
+        body: &FirBody,
         array_type: ResolvedTy,
         elements: &[crate::fir::FirArrayElement],
     ) -> Option<DefaultValue> {
@@ -132,12 +125,12 @@ impl Folder<'_> {
             .iter()
             .map(|element| element.value)
             .collect::<Vec<_>>();
-        self.array_elements(owner, array_type, &ids, &conversions)
+        self.array_elements(body, array_type, &ids, &conversions)
     }
 
     fn array_elements(
         &mut self,
-        owner: CallableId,
+        body: &FirBody,
         array_type: ResolvedTy,
         elements: &[FirExprId],
         conversions: &[Option<FirConversion>],
@@ -151,7 +144,7 @@ impl Folder<'_> {
             if !keeps_closed_value(conversion) {
                 return None;
             }
-            folded.push(self.expression(owner, element)?);
+            folded.push(self.expression(body, element)?);
         }
         Some(DefaultValue::Array {
             array_type: array_type.get(),
@@ -161,7 +154,7 @@ impl Folder<'_> {
 
     fn annotation_call(
         &mut self,
-        owner: CallableId,
+        body: &FirBody,
         ty: ResolvedTy,
         call: &crate::fir::FirConstructorCall,
     ) -> Option<DefaultValue> {
@@ -200,7 +193,7 @@ impl Folder<'_> {
                     if !keeps_closed_value(*conversion) {
                         return None;
                     }
-                    let folded = self.expression(owner, *value)?;
+                    let folded = self.expression(body, *value)?;
                     let slot = parameter_slot(&mut values, *parameter)?;
                     *slot = Some(folded);
                 }
@@ -218,7 +211,7 @@ impl Folder<'_> {
                     let array_type = call.parameter_types.get(*parameter as usize)?.get();
                     let mut folded = Vec::with_capacity(elements.len());
                     for element in elements.iter() {
-                        folded.push(self.expression(owner, element.value)?);
+                        folded.push(self.expression(body, element.value)?);
                     }
                     let slot = parameter_slot(&mut values, *parameter)?;
                     *slot = Some(DefaultValue::Array {

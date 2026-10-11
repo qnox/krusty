@@ -96,9 +96,9 @@ fn same_module_inline_frames_run() {
     );
 }
 
-/// Instructions and local variable tables, kotlinc's exactly. This is not a whole-class byte
-/// comparison: line numbers are not remapped through a source map, and the rest of the class file
-/// is outside what these frames decide.
+/// The complete class file, kotlinc's exactly. The method names below identify the behavior under
+/// test in a failure, but the pass condition includes the constant pool, every method and attribute,
+/// line and local tables, SMAP, metadata, and their serialized order.
 #[test]
 fn same_module_inline_frames_are_the_reference_compilers() {
     for method in [
@@ -112,7 +112,7 @@ fn same_module_inline_frames_are_the_reference_compilers() {
         "public static final int plain()",
         "public static final java.lang.String declaring(java.lang.String)",
     ] {
-        common::method_code_diff_against_kotlinc(
+        common::class_bytes_diff_against_kotlinc(
             "InlineFrames",
             &[],
             SOURCE,
@@ -126,7 +126,7 @@ fn same_module_inline_frames_are_the_reference_compilers() {
 
 #[test]
 fn a_suspending_expansions_frames_are_the_reference_compilers() {
-    common::method_code_diff_against_kotlinc(
+    common::class_bytes_diff_against_kotlinc(
         "SuspendingFrames",
         &[],
         SUSPENDING,

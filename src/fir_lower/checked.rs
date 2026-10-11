@@ -652,6 +652,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                overridden_declarations,
                 suspend,
                 can_inline,
                 inline_plan,
@@ -668,6 +669,7 @@ impl BodyLowering<'_> {
                     declared_result: *declared_result,
                     overridden_results,
                     semantic_role: *semantic_role,
+                    overridden_declarations,
                     suspend: *suspend,
                     can_inline: *can_inline,
                     inline_plan: inline_plan.as_deref(),
@@ -677,6 +679,7 @@ impl BodyLowering<'_> {
                     dispatch_class,
                     extension_receiver,
                     arguments: &arguments,
+                    source_line: Some(source_line),
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
@@ -921,6 +924,7 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::MissingCallable(*target))?;
                 self.module_constructor_call(ModuleConstructorRequest {
                     classifier: classifier.classifier,
+                    constructor: callable.declaration,
                     argument_parameter_types: &parameter_types,
                     declaration_parameter_types: &declaration_parameter_types,
                     primary_in_current_file,
@@ -964,22 +968,18 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let (target, parameter_types, mut arguments) =
             self.constructor_target_and_arguments(call)?;
-        let reordered = arguments
-            .iter()
-            .map(|argument| match argument {
-                IrCheckedArgument::Expression { parameter, .. }
-                | IrCheckedArgument::Default { parameter }
-                | IrCheckedArgument::Vararg { parameter, .. } => *parameter,
-            })
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair[0] > pair[1]);
+        // Like a call's, only supplied operands evaluated out of parameter order are held in
+        // temporaries; an omitted default is filled by the callee and orders nothing.
+        let reordered =
+            !super::source_calls::argument_boundaries::follow_parameter_order(&arguments, None);
         let mut prelude = Vec::new();
         if reordered {
             for argument in &mut arguments {
                 match argument {
                     IrCheckedArgument::Expression { parameter, value } => {
-                        if super::constructors::is_forwarded_super_argument(self.ir, *value) {
+                        if super::constructors::is_forwarded_super_argument(self.ir, *value)
+                            || self.passes_reordered_operand_in_place(*value)
+                        {
                             continue;
                         }
                         let ty = *parameter_types.get(*parameter as usize).ok_or(
@@ -987,7 +987,7 @@ impl BodyLowering<'_> {
                                 parameter: *parameter,
                             },
                         )?;
-                        *value = self.spill_call_operand(*value, ty, &mut prelude);
+                        *value = self.spill_reordered_operand(*value, ty, &mut prelude);
                     }
                     IrCheckedArgument::Vararg {
                         array_type,
@@ -1150,6 +1150,8 @@ impl BodyLowering<'_> {
                 result,
                 extension_receiver_parameter,
                 dispatch,
+
+                metadata_constant_read: _,
             } => {
                 let arguments = context_arguments
                     .iter()
@@ -1229,6 +1231,8 @@ impl BodyLowering<'_> {
                 result,
                 extension_receiver_parameter,
                 dispatch,
+
+                metadata_constant_read: _,
             } => {
                 let parameter = u32::try_from(
                     parameters
@@ -1377,6 +1381,7 @@ pub(super) fn lower_substitutions(values: &[FirTypeSubstitution]) -> Vec<IrCheck
             parameter: substitution.parameter,
             reified: substitution.reified,
             value: substitution.value.get(),
+            reified_runtime: substitution.reified_runtime.get(),
             additional_bounds: substitution
                 .additional_bounds
                 .iter()

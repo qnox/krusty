@@ -83,7 +83,7 @@ impl<'a> StreamedModuleSymbols<'a> {
 
     pub(crate) fn declares_top_level(&self, name: &str) -> bool {
         self.index
-            .declarations_named(name)
+            .top_level_declarations_named(name)
             .iter()
             .any(|declaration| {
                 self.index
@@ -99,6 +99,32 @@ impl<'a> StreamedModuleSymbols<'a> {
         identity: TypeName,
     ) -> Option<crate::libraries::AliasExpansion> {
         let header = self.index.type_alias_by_identity(identity)?;
+        Some(crate::libraries::AliasExpansion {
+            identity: header.identity,
+            target: header.target,
+            formals: self.index.type_alias_formals(header.declaration),
+            expansion: header.expansion.get(),
+            expansion_spelling: header.expansion_spelling.clone(),
+        })
+    }
+
+    /// The type-alias declaration occupying one provider key. Top-level aliases use the package's
+    /// ordinary semantic child identity; nested aliases are declarations in their owner's Kotlin
+    /// type namespace and deliberately do not use the backend `$` nested-class identity.
+    fn type_alias_at(
+        &self,
+        namespace: SymbolNamespace,
+        name: &str,
+    ) -> Option<crate::libraries::AliasExpansion> {
+        let header = match namespace {
+            SymbolNamespace::Package(package) => {
+                let identity = crate::types::existing_type_name_child(package, name)?;
+                self.index.type_alias_by_identity(identity)?
+            }
+            SymbolNamespace::Classifier(owner) => {
+                self.index.type_alias_in_classifier(owner, name)?
+            }
+        };
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
             target: header.target,
@@ -195,11 +221,8 @@ impl<'a> StreamedModuleSymbols<'a> {
         self.index.annotation_retention(classifier)
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.index.annotation_targets(classifier)
+    pub(crate) fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
+        self.index.annotation_targets()
     }
 
     /// Project one current-module classifier from finalized declaration headers.
@@ -228,7 +251,14 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.access = declaration_header.visibility.into();
         projected.source_file = Some(anchor.source.raw());
         projected.stable_declaration = Some(owner);
-        projected.is_nested = internal.nested_owner().is_some();
+        projected.is_nested = declaration_header.owner.is_some_and(|owner| {
+            self.index.declaration_header(owner).is_some_and(|owner| {
+                matches!(
+                    owner.kind,
+                    DeclarationKind::Classifier | DeclarationKind::EnumEntry
+                )
+            })
+        });
         projected.outer_instance = flags
             .has(DeclarationFlags::INNER)
             .then(|| {
@@ -255,6 +285,16 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.inheritance.is_extensible =
             !flags.has(DeclarationFlags::INTERFACE) && !flags.has(DeclarationFlags::FINAL);
         projected.sam_eligible = flags.has(DeclarationFlags::FUN_INTERFACE);
+        projected.annotations = self
+            .index
+            .declaration_annotations(owner)
+            .iter()
+            .map(|&annotation| crate::types::ResolvedAnnotation {
+                annotation,
+                arguments: Vec::new(),
+                facts: Default::default(),
+            })
+            .collect();
         let mut supertype_templates = classifier_header
             .declared_supertypes()
             .map(|supertype| supertype.get())
@@ -571,14 +611,17 @@ impl<'a> StreamedModuleSymbols<'a> {
         let declared_params = Some(parameters.clone().into_boxed_slice());
         LibraryCallable {
             external_identity: None,
+            annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
+            declaration_owner: None,
             owner: TypeName::ROOT,
             name: name.to_owned(),
             physical_name: None,
             reflection_name: Some(name.to_owned()),
             compiler_intrinsic: None,
             semantic_role: None,
+            overridden_declarations: Box::new([]),
             collection_barrier: None,
             inline_body_plan: None,
             plugin_expression: None,
@@ -617,6 +660,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
+            enhanced_result: crate::libraries::EnhancedResult::NONE,
         }
     }
 
@@ -681,6 +725,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             is_const: header.flags.has(DeclarationFlags::CONST),
             implicit_integer_coercion: false,
             compile_time_constant: None,
+            metadata_constant_read: false,
             visibility: header.visibility,
             owner,
             receiver_rank: 0,
@@ -1022,7 +1067,8 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .declaration_anchor(declaration)
                 .map(|anchor| anchor.source.raw());
             function.stable_declaration = Some(declaration);
-            function.annotations = self.index.declaration_annotations(declaration).to_vec();
+            function.callable.annotations =
+                self.index.declaration_annotations(declaration).to_vec();
             functions.push(function);
 
             let mut member =
@@ -1097,11 +1143,23 @@ impl<'a> StreamedModuleSymbols<'a> {
             .index
             .declaration_header(owner)
             .is_some_and(|header| header.flags.has(DeclarationFlags::ANNOTATION_CLASS));
-        for &declaration in self.index.declarations_named(name) {
+        // Both tables answer; walk the shorter one. A common spelling (`value`, `name`) is
+        // declared module-wide, an owner declares a bounded member list.
+        let named = self.index.declarations_named(name);
+        let owned = self.index.owned_declarations(owner);
+        let candidates = if owned.len() < named.len() {
+            owned
+        } else {
+            named
+        };
+        for &declaration in candidates {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
-            if header.kind != DeclarationKind::Property || header.owner != Some(owner) {
+            if header.kind != DeclarationKind::Property
+                || header.owner != Some(owner)
+                || self.index.declaration_name(declaration) != Some(name)
+            {
                 continue;
             }
             let property = self
@@ -1237,6 +1295,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 is_const: header.flags.has(DeclarationFlags::CONST),
                 implicit_integer_coercion: false,
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
+                metadata_constant_read: false,
                 visibility: header.visibility,
                 owner: internal,
                 receiver_rank: 0,
@@ -1328,7 +1387,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             SymbolNamespace::Package(_) => None,
         };
         let mut functions = Vec::new();
-        for &declaration in self.index.declarations_named(name) {
+        for &declaration in self.index.top_level_declarations_named(name) {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
@@ -1464,7 +1523,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             function.context_count = context_count;
             function.source_file = Some(anchor.source.raw());
             function.stable_declaration = Some(declaration);
-            function.annotations = self.index.declaration_annotations(declaration).to_vec();
+            function.callable.annotations =
+                self.index.declaration_annotations(declaration).to_vec();
             functions.push(function);
         }
         functions.sort_by_key(|function| function.overload_rank);
@@ -1481,7 +1541,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             SymbolNamespace::Package(_) => None,
         };
         let mut properties = Vec::new();
-        for &declaration in self.index.declarations_named(name) {
+        for &declaration in self.index.top_level_declarations_named(name) {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
             };
@@ -1632,6 +1692,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                         annotation.matches("kotlin/internal/ImplicitIntegerCoercion")
                     }),
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
+                metadata_constant_read: false,
                 visibility: header.visibility,
                 owner: TypeName::ROOT,
                 receiver_rank: 0,
@@ -1663,14 +1724,23 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+        self.index.sam_with_receiver_annotations()
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.index.source_package_child_exists(parent, name)
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
-        let stable_classifier_name = namespace
+        let ordinary_classifier = namespace
             .existing_classifier(name)
             .filter(|internal| self.index.classifier_declaration(*internal).is_some());
+        let type_alias = self.type_alias_at(namespace, name);
+        let stable_classifier_name = type_alias
+            .as_ref()
+            .map(|alias| alias.target)
+            .or(ordinary_classifier);
         let classifier =
             stable_classifier_name.and_then(|internal| self.stable_classifier(internal));
         let mut functions = FunctionSet::default();
@@ -1698,8 +1768,11 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: stable_classifier_name,
-            classifier_declaration: stable_classifier_name
-                .map(crate::libraries::ClassifierDeclaration::Ordinary),
+            classifier_declaration: type_alias
+                .map(crate::libraries::ClassifierDeclaration::TypeAlias)
+                .or_else(|| {
+                    ordinary_classifier.map(crate::libraries::ClassifierDeclaration::Ordinary)
+                }),
             classifier,
             callables,
             importable_declaration: stable_classifier_name.is_some(),

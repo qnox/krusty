@@ -16,6 +16,7 @@ use super::*;
 
 mod lambda_node;
 mod lambda_route;
+use lambda_node::callable_reference_template;
 mod regenerated_objects;
 use crate::jvm::bytecode_passes::coroutines::markers::{
     is_after_inline_marker, is_before_inline_marker,
@@ -25,7 +26,7 @@ use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
 };
 use crate::jvm::source_map::SourceMap;
-pub(super) use lambda_route::LambdaCallRoute;
+pub(super) use lambda_route::{LambdaCallRoute, SpliceReason};
 pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
 const ACC_STATIC: u16 = 0x0008;
@@ -74,6 +75,11 @@ pub(super) struct StaticSpliceRequest<'a> {
 pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
     "a reified inline body in a call shape only the byte splice handles";
 
+/// The failure of a call whose selected literals its body uses only as values, when the bridge
+/// cannot splice the body around them.
+const VALUE_USED_LITERAL_UNSPLICED: &str =
+    "an inline body that takes a literal lambda as a value cannot be spliced around it";
+
 /// How the call site supplies one parameter.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Supply {
@@ -83,6 +89,8 @@ enum Supply {
     InPlace,
     /// Read from the caller local the argument lives in.
     CallerLocal,
+    /// Evaluated and popped: the body does not read the parameter after its null check.
+    Unread,
 }
 
 /// The clean failure of an inline callee whose code the MethodNode reader rejects.
@@ -111,7 +119,7 @@ impl Emitter<'_> {
         &mut self,
         request: StaticSpliceRequest<'_>,
         code: &mut CodeBuilder,
-    ) -> bool {
+    ) -> InlineCallOutcome {
         let StaticSpliceRequest {
             call_expression,
             owner,
@@ -149,6 +157,7 @@ impl Emitter<'_> {
         } else {
             let has_lambda_arg = args.iter().any(|&argument| {
                 matches!(self.ir.expr(argument), IrExpr::Lambda { .. })
+                    || callable_reference_template(self.ir, argument).is_some()
                     || self.function_ref_class_and_captures(argument).is_some()
                     || self.property_ref_class_and_captures(argument).is_some()
             });
@@ -171,15 +180,180 @@ impl Emitter<'_> {
         }
     }
 
+    /// Splice `owner.name` whose REAL (body-fetch) descriptor is `descriptor`, mapping the body's
+    /// locals per `splice_desc`. For an ordinary static they are equal; for an INSTANCE inline
+    /// method spliced through this path, `splice_desc` PREPENDS the receiver as the first parameter
+    /// (`this` = local 0) and `args[0]` is that receiver — so the body's `aload_0`/`aload_1`/… map
+    /// to receiver/params.
+    ///
+    /// [`InlineCallOutcome::NotApplicable`] only before a placement plan is committed: no body, a
+    /// body this class cannot reach, a call without inlined literals the port does not cover, or an
+    /// unsupported host whose selected literals can all legally be materialized for a real call.
+    /// A non-local jump and an `@InlineOnly` target can never take that last decline.
+    fn try_inline_static_as(
+        &mut self,
+        call_expression: u32,
+        target: InlineStaticTarget<'_>,
+        args: &[u32],
+        leading_non_argument_operands: usize,
+        code: &mut CodeBuilder,
+        reified: &crate::jvm::reified_arguments::ReifiedArguments,
+    ) -> InlineCallOutcome {
+        let InlineStaticTarget {
+            owner,
+            name,
+            descriptor,
+            splice_desc,
+            allow_owner_bridge,
+            for_inline_copy,
+            ..
+        } = target;
+        crate::trace_compiler!(
+            "splice",
+            "inline target {owner}.{name}{descriptor} splice_descriptor={splice_desc} args={}",
+            args.len()
+        );
+        // Only a callable suspend inline function's `$$forInline` copy is spliced: its `name` body
+        // is already the callee's own state machine. Without the copy the call declines (a
+        // must-inline one bails), never splicing that machine.
+        let for_inline;
+        let body_name = if for_inline_copy {
+            for_inline = format!("{name}$$forInline");
+            for_inline.as_str()
+        } else {
+            name
+        };
+        let Some(body) = self.bodies.body(owner, body_name, descriptor) else {
+            crate::trace_compiler!("splice", "no body for {owner}.{body_name}{descriptor}");
+            return InlineCallOutcome::NotApplicable;
+        };
+        // A body that references a PRIVATE member (its own facade's helper or backing field) runs
+        // legally only inside the defining class — spliced into the caller, the reference is an
+        // IllegalAccessError (kotlinc rewrites it to a synthetic `access$…` bridge, which krusty
+        // does not model). Decline: the caller emits a real call, which stays in the class.
+        if crate::jvm::inline::references_private_member(
+            &body.code,
+            &body.source_cp,
+            &body.bootstrap_methods,
+            &mut |o, n, d| self.bodies.member_is_private(o, n, d),
+            &mut |o, n, d| self.bodies.member_is_publicly_reachable(o, n, d),
+            &mut |class| self.bodies.class_is_publicly_reachable(class),
+        ) {
+            crate::trace_compiler!(
+                "splice",
+                "inaccessible relocation dependency in {owner}.{name}{descriptor}"
+            );
+            return InlineCallOutcome::NotApplicable;
+        }
+        if !allow_owner_bridge && owner != methodref_owner(&body, name, descriptor).unwrap_or(owner)
+        {
+            crate::trace_compiler!(
+                "splice",
+                "owner-bridge mismatch for {owner}.{name}{descriptor} (real owner {:?})",
+                methodref_owner(&body, name, descriptor)
+            );
+            return InlineCallOutcome::NotApplicable;
+        }
+        // Splice the body's locals above BOTH the slot allocator's next free slot and the code's
+        // high-water mark, so the spliced temporaries can never collide with a caller local (live
+        // or reserved-but-unstored).
+        let base = self.frame.size().max(code.max_locals);
+        let inline_call = ClasspathInlineCall {
+            call_expression,
+            target: &target,
+            args,
+            leading_non_argument_operands,
+            body: &body,
+            reified,
+        };
+        // Descriptor compatibility is an eligibility check, before any literal is selected and
+        // this lowering owns the call. Suspend lowering can append a continuation to the physical
+        // call while the classpath body still has its declaration descriptor; a public inline
+        // method in that shape remains a legal real call. Once a matching call selects literals,
+        // every later missing fact or realization failure is an emission error.
+        if parse_descriptor_params(splice_desc)
+            .is_none_or(|parameters| parameters.len() != args.len())
+        {
+            return InlineCallOutcome::NotApplicable;
+        }
+        let has_lambda_arg = args
+            .iter()
+            .any(|&argument| self.is_inline_lambda_shape(argument));
+        if !has_lambda_arg {
+            return InlineCallOutcome::declined_or_handled(
+                self.try_inline_classpath_body(&inline_call, code),
+            );
+        }
+        // kotlinc expands every literal whose parameter is not `noinline`; a `noinline` literal is
+        // an ordinary argument, the function object the body receives. A call with only such
+        // literals is therefore inlined like one without lambdas.
+        if !self.ir.call_inline_modifiers.contains_key(&call_expression) {
+            return InlineCallOutcome::NotApplicable;
+        }
+        let positions = match self.inlined_literal_positions(
+            call_expression,
+            leading_non_argument_operands,
+            args,
+        ) {
+            Ok(positions) if positions.is_empty() => {
+                return InlineCallOutcome::declined_or_handled(
+                    self.try_inline_classpath_body(&inline_call, code),
+                );
+            }
+            Ok(positions) => positions,
+            Err(reason) => {
+                self.run.set_inline_bail(reason);
+                return InlineCallOutcome::HandledWithError;
+            }
+        };
+        // The literal candidates are selected. Planning may still decline an unsupported host only
+        // when every literal can legally become a real callable and the target itself is callable.
+        // Otherwise this route owns the call and a failure is an error.
+        // If the body INVOKES the lambda parameter (`FunctionN.invoke`), its lambda bodies replace
+        // those invokes. If the lambda is used only as a VALUE, passed to the constructor of an
+        // anonymous object the body creates (`Continuation(ctx){…}`'s
+        // `new …$Continuation$1(ctx, resumeWith)`), the object is regenerated around it.
+        let body_invokes_lambda =
+            crate::jvm::inline::disassemble(&body.code).is_some_and(|insns| {
+                !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
+            });
+        if !body_invokes_lambda {
+            return self.inline_value_used_lambda_call(&inline_call, code);
+        }
+        let reason = match self.lambda_call_route(&inline_call, code) {
+            Ok(LambdaCallRoute::MethodInliner(callee)) => {
+                return match self.inline_classpath_lambda_call(
+                    &inline_call,
+                    &callee,
+                    LambdaPlacement::Invokes,
+                    code,
+                ) {
+                    Ok(()) => InlineCallOutcome::Handled,
+                    Err(reason) => {
+                        self.run.set_inline_bail(reason);
+                        InlineCallOutcome::HandledWithError
+                    }
+                };
+            }
+            Ok(LambdaCallRoute::Splice(reason)) => reason,
+            Err(reason) => {
+                self.run.set_inline_bail(reason);
+                return InlineCallOutcome::HandledWithError;
+            }
+        };
+        crate::trace_compiler!("splice", "literal-lambda call spliced: {reason:?}");
+        self.splice_selected_literals(&inline_call, &positions, reason, base, code)
+    }
+
     /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
     /// constructor of an anonymous object the body creates (`Continuation(ctx){…}`'s
-    /// `new …$Continuation$1(ctx, resumeWith)`), and the object is regenerated around it. Whether
-    /// the call was handled, as the other inline-call routes report it.
+    /// `new …$Continuation$1(ctx, resumeWith)`), and the object is regenerated around it. The
+    /// literals are selected, so the call is owned: a failure is an error, never a real call.
     pub(super) fn inline_value_used_lambda_call(
         &mut self,
         inline_call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
-    ) -> bool {
+    ) -> InlineCallOutcome {
         // A shape the port does not own yet stays on the byte bridge. A body that constructs no
         // anonymous object takes the literal as an ordinary value (one passed where the parameter
         // is not function-typed, as `map[key] = { … }`).
@@ -187,15 +361,18 @@ impl Emitter<'_> {
             Ok(LambdaCallRoute::MethodInliner(callee))
                 if crate::jvm::inliner::constructs_anonymous_object(&callee, &self.bodies) =>
             {
-                if let Err(reason) = self.inline_classpath_lambda_call(
+                return match self.inline_classpath_lambda_call(
                     inline_call,
                     &callee,
                     LambdaPlacement::Objects,
                     code,
                 ) {
-                    self.run.set_inline_bail(reason);
-                }
-                return true;
+                    Ok(()) => InlineCallOutcome::Handled,
+                    Err(reason) => {
+                        self.run.set_inline_bail(reason);
+                        InlineCallOutcome::HandledWithError
+                    }
+                };
             }
             Ok(LambdaCallRoute::MethodInliner(_)) => {
                 crate::trace_compiler!("splice", "value-used lambda bridged: no object");
@@ -205,7 +382,7 @@ impl Emitter<'_> {
             }
             Err(reason) => {
                 self.run.set_inline_bail(reason);
-                return true;
+                return InlineCallOutcome::HandledWithError;
             }
         }
         if let Err(reason) = check_byte_splice_body(
@@ -214,10 +391,16 @@ impl Emitter<'_> {
             inline_call.body,
         ) {
             self.run.set_inline_bail(reason);
-            return true;
+            return InlineCallOutcome::HandledWithError;
         }
-        self.try_inline_materialized_lambda_body(inline_call, code)
-            .is_some()
+        match self.try_inline_materialized_lambda_body(inline_call, code) {
+            Some(()) => InlineCallOutcome::Handled,
+            None => {
+                self.run
+                    .set_emit_error(VALUE_USED_LITERAL_UNSPLICED.to_string());
+                InlineCallOutcome::HandledWithError
+            }
+        }
     }
 
     /// Temporary migration bridge for a literal lambda the inline body uses as a value (for
@@ -505,8 +688,20 @@ impl Emitter<'_> {
             .unwrap_or_default();
         // Route planning keeps every lambda that declares a member of the caller on the bridge;
         // one that still does is a broken plan, never code left in the caller.
-        if placement == LambdaPlacement::Objects && !self.cw.rollback(checkpoint) {
-            return Err("an object-only lambda declared a member of the calling class");
+        match placement {
+            LambdaPlacement::Objects => {
+                if !self.cw.rollback(checkpoint) {
+                    return Err("an object-only lambda declared a member of the calling class");
+                }
+            }
+            LambdaPlacement::Invokes => {
+                // Compiling a literal lambda into its scratch MethodNode may itself inline calls
+                // and allocate their source-map ranges. The scratch compile is not source
+                // execution order: the enclosing callee maps its own body before it inserts the
+                // lambda. Restore the caller's map now; `CallLines::lambda` imports the saved
+                // lambda map at the insertion.
+                self.cw.restore_source_map(&checkpoint);
+            }
         }
         let parameters =
             self.call_parameters(&supplies, &physical, args, &lambda_bindings, captured);
@@ -547,6 +742,7 @@ impl Emitter<'_> {
                     binding: match (lambda_bindings.get(&index), supply) {
                         (Some(&lambda), _) => Binding::Lambda(lambda),
                         (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
+                        (None, Supply::Unread) => Binding::Unread,
                         (None, Supply::Stored | Supply::InPlace) => Binding::Temporary,
                     },
                 })
@@ -592,6 +788,28 @@ impl Emitter<'_> {
         let mut leases = Vec::new();
         let mut in_place = HashMap::new();
         for (index, _) in args.iter().enumerate() {
+            // A parameter the body never reads is still evaluated, in order, then dropped. It
+            // takes no temporary: the next parameter keeps the slot kotlinc gives it.
+            if supplies[index] == Supply::Unread {
+                let operand_frame = self.frame.mark();
+                self.mark_synthesized_operand_run(
+                    Some((call_expression, &origins)),
+                    index,
+                    &mut inside_run,
+                    code,
+                );
+                self.emit_call_operand(
+                    call_expression,
+                    leading_non_argument_operands,
+                    args,
+                    physical,
+                    index,
+                    code,
+                );
+                self.frame.rewind_to(operand_frame);
+                super::discard(physical[index], code);
+                continue;
+            }
             let Some(temporary) = temporaries[index] else {
                 continue;
             };
@@ -630,6 +848,16 @@ impl Emitter<'_> {
         self.mark_expression_start(call_expression, code);
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
+        // An `@InlineOnly` body whose ordinary arguments are movable evaluates them where the
+        // copied body first loads their temporary. The eager expression boundary above exists so
+        // the call line can anchor the body's source-map interval, but it must not claim the
+        // generated prefix before that first source argument. Withdrawing it leaves the enclosing
+        // inline line in effect until emitting the in-place operand marks the call-site line.
+        if supplies.contains(&Supply::InPlace)
+            && !inliner::in_place_arguments_begin_at_entry(callee)
+        {
+            code.withdraw_line();
+        }
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
         let mut lines = CallLines {
@@ -639,11 +867,13 @@ impl Emitter<'_> {
             call_line,
             claimable,
             visited: HashMap::new(),
+            lambda_lines: &lambda_lines,
+            lambda_visited: HashMap::new(),
         };
         let mut objects =
             lines
                 .emitter
-                .call_objects(call_expression, target.name, true, lambda_lines);
+                .call_objects(call_expression, target.name, true, lambda_lines.clone());
         let inlined = inliner::inline(
             callee,
             parameters,
@@ -700,7 +930,15 @@ impl Emitter<'_> {
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
         // any line is written.
         match caller_line {
-            Some(line) if self.inside_condition => code.inlined_line(line),
+            Some(line)
+                if self.inside_condition
+                    || self
+                        .regeneration_site
+                        .as_ref()
+                        .is_some_and(RegenerationSite::is_class_initializer) =>
+            {
+                code.inlined_line(line)
+            }
             _ => code.forget_line(),
         }
 
@@ -711,10 +949,22 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// A source lambda with an inline body, or an unbound constructor reference the inliner places
+    /// as that lambda.
+    fn is_inline_lambda_shape(&self, argument: u32) -> bool {
+        matches!(
+            self.ir.expr(argument),
+            IrExpr::Lambda {
+                inline_body: Some(_),
+                ..
+            }
+        ) || callable_reference_template(self.ir, argument).is_some()
+    }
+
     /// Whether argument `index` of `call_expression` is a literal lambda the inline body's invokes
-    /// expand: one passed to a parameter without `noinline` (kotlinc's `isInlineParameter`). A
-    /// literal for a `noinline` parameter is an ordinary argument, the function object the body
-    /// receives. An error is a literal the call published no modifier for.
+    /// expand: one passed to an inline parameter ([`super::inline_parameters`]). A literal for a
+    /// `noinline` or non-function parameter is an ordinary argument, the function object the body
+    /// receives. An error is a literal the call published no parameter facts for.
     pub(super) fn is_inlined_literal(
         &self,
         call_expression: u32,
@@ -722,25 +972,15 @@ impl Emitter<'_> {
         index: usize,
         argument: u32,
     ) -> Result<bool, &'static str> {
-        if !matches!(
-            self.ir.expr(argument),
-            IrExpr::Lambda {
-                inline_body: Some(_),
-                ..
-            }
-        ) {
+        if !self.is_inline_lambda_shape(argument) {
             return Ok(false);
         }
-        let modifier = index
+        index
             .checked_sub(leading_non_argument_operands)
             .and_then(|parameter| {
-                self.ir
-                    .call_inline_modifiers
-                    .get(&call_expression)?
-                    .get(parameter)
+                super::inline_parameters::is_inline_parameter(self.ir, call_expression, parameter)
             })
-            .ok_or("a lambda argument has no published crossinline/noinline modifier")?;
-        Ok(*modifier != crate::types::InlineParameterModifier::Noinline)
+            .ok_or("a lambda argument has no published parameter modifier and declared type")
     }
 
     /// The positions of `args` holding a literal the inline body's invokes expand, by
@@ -766,9 +1006,12 @@ impl Emitter<'_> {
     }
 
     /// kotlinc's choice per argument. An `@InlineOnly` callee reads a dispatch receiver or ordinary
-    /// argument that is already a local from that local (`genOrGetLocal`); its extension receiver
-    /// is always stored. When the body loads its parameters first, the stored arguments are instead
-    /// evaluated in place.
+    /// argument that is already a local from that local (`genOrGetLocal`), including a local under
+    /// a representation-preserving reference coercion; its extension receiver is stored when the
+    /// body reads it. A parameter that callee loads only for the null check inlining removes is
+    /// evaluated and popped, and takes no slot. An ordinary inline function stores that parameter
+    /// anyway, so the caller's `$iv` local exists. When the body loads its parameters first, the
+    /// stored arguments are instead evaluated in place.
     ///
     /// `None` only when a function-typed local has no provider-published `crossinline`/`noinline`
     /// modifier. An inline parameter, `crossinline` included, reads that local where it already
@@ -813,10 +1056,40 @@ impl Emitter<'_> {
                 supplies.push(Supply::CallerLocal);
                 continue;
             }
-            let local = matches!(self.ir.expr(argument), IrExpr::GetValue(v)
-                if self.slots.contains_key(v))
-                && self.local_needs_no_boxing(argument, physical[index]);
-            if !local {
+            // An `@InlineOnly` body contributes no debug locals. A parameter it loads only for
+            // the null check inlining deletes is evaluated and popped, and the next parameter
+            // keeps the slot kotlinc gives it. An ordinary inline function still stores that
+            // parameter: the caller's table keeps its `$iv` local. An inlined lambda is not a
+            // value the body loads.
+            match self.is_inlined_literal(
+                call_expression,
+                leading_non_argument_operands,
+                index,
+                argument,
+            ) {
+                Ok(false) if target.inline_only => {
+                    let parameter_slot =
+                        physical.iter().take(index).map(|ty| slot_words(*ty)).sum();
+                    let parameter_read = inliner::reads_local(callee, parameter_slot)
+                        || callee.nodes.iter().any(|node| {
+                            matches!(
+                                node,
+                                Node::Insn(Insn::Iinc { slot, .. }) if *slot == parameter_slot
+                            )
+                        });
+                    if !parameter_read {
+                        supplies.push(Supply::Unread);
+                        continue;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+            let Some(operand) = self.reference_local_operand(argument) else {
+                supplies.push(evaluated);
+                continue;
+            };
+            if !self.local_needs_no_boxing(operand, physical[index]) {
                 supplies.push(evaluated);
                 continue;
             }
@@ -835,7 +1108,7 @@ impl Emitter<'_> {
                 supplies.push(evaluated);
                 continue;
             }
-            if function_typed(argument) {
+            if function_typed(operand) {
                 let parameter = index.checked_sub(leading_non_argument_operands)?;
                 let inlining = self
                     .ir
@@ -855,6 +1128,36 @@ impl Emitter<'_> {
             supplies.push(Supply::CallerLocal);
         }
         Some(supplies)
+    }
+
+    /// The caller local an argument reads, through coercions that keep the reference as it is.
+    ///
+    /// `println(message)` widens `String` to `Any?`. That coercion writes no bytecode, so kotlinc's
+    /// `genOrGetLocal` still loads the caller's local. A coercion that boxes or unboxes (`Int` to
+    /// `Any`) is not this local: the parameter is a different representation.
+    fn reference_local_operand(&self, argument: u32) -> Option<u32> {
+        let mut current = argument;
+        loop {
+            match self.ir.expr(current) {
+                IrExpr::GetValue(value) if self.slots.contains_key(value) => return Some(current),
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    type_operand,
+                } if self.reference_view_coercion(*arg, *type_operand) => current = *arg,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether an implicit coercion leaves a reference value in the same JVM representation.
+    fn reference_view_coercion(&self, arg: u32, type_operand: Ty) -> bool {
+        let source = self.value_ty(arg);
+        let target = ir_ty_to_jvm(&stored_value_ty(type_operand));
+        source.is_reference()
+            && target.is_reference()
+            && source.scalar_value_repr().is_none()
+            && type_operand.scalar_value_repr().is_none()
     }
 
     /// kotlinc's `isLocalWithNoBoxing`: the local and the parameter are both primitive or both
@@ -894,6 +1197,7 @@ impl Emitter<'_> {
                 checkcast: None,
             };
         }
+        let argument = self.reference_local_operand(argument).unwrap_or(argument);
         let IrExpr::GetValue(value) = self.ir.expr(argument) else {
             unreachable!("a caller-local argument is a local read");
         };
@@ -1177,16 +1481,20 @@ impl inliner::SourceLines for UnmappedLines {
 /// The inlined body's lines, mapped into the caller's source map against the call's line. A line
 /// the body revisits keeps the line it was first mapped to (`SourceMapCopier.visitedLines`), even
 /// when a range mapped since would extend to cover it.
-struct CallLines<'e, 'a, 'b> {
+struct CallLines<'e, 'a, 'b, 'l> {
     emitter: &'e mut Emitter<'a>,
     body: &'b crate::jvm::classreader::MethodCode,
     inline_only: bool,
     call_line: u16,
     claimable: u16,
     visited: HashMap<u16, u16>,
+    /// Source map produced while compiling the call's literal lambdas into scratch methods.
+    lambda_lines: &'l SourceMap,
+    /// One `SourceMapCopier` for those lambda lines: each old output line is imported once.
+    lambda_visited: HashMap<u16, u16>,
 }
 
-impl inliner::SourceLines for CallLines<'_, '_, '_> {
+impl inliner::SourceLines for CallLines<'_, '_, '_, '_> {
     fn map(&mut self, line: u16) -> Option<u16> {
         if let Some(&mapped) = self.visited.get(&line) {
             return Some(mapped);
@@ -1209,6 +1517,20 @@ impl inliner::SourceLines for CallLines<'_, '_, '_> {
     }
     fn call_site(&self) -> Option<u16> {
         Some(self.call_line)
+    }
+
+    fn lambda(&mut self, line: u16) -> Option<u16> {
+        if let Some(&mapped) = self.lambda_visited.get(&line) {
+            return Some(mapped);
+        }
+        let (name, path, source, call_site) = self.lambda_lines.resolve(line)?;
+        let mapped = self
+            .emitter
+            .cw
+            .source_map_for_inlining(self.claimable)?
+            .map_copied_line(name, path, source, call_site)?;
+        self.lambda_visited.insert(line, mapped);
+        Some(mapped)
     }
 }
 

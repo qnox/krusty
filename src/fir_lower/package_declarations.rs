@@ -310,6 +310,15 @@ pub(super) fn publish(
             })
         })
         .transpose()?;
+    ir.box_entry = index
+        .source_box_entry(source)
+        .map(|callable| {
+            ir.checked_callable_functions
+                .get(&callable)
+                .copied()
+                .ok_or(FirFileLoweringFailure::UnmappedEntryPoint(callable))
+        })
+        .transpose()?;
     Ok(())
 }
 

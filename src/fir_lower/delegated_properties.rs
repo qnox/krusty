@@ -409,6 +409,7 @@ pub(super) fn materialize_member_delegate(
         is_open: property.flags.has(DeclarationFlags::OPEN),
         modifiers: super::properties::member_property_modifiers(property.flags, false),
         delegate_field: Some(delegate_field),
+        has_constant_initializer: false,
         is_private: property.visibility.is_private(),
         setter_visibility: setter_visibility(index, property.declaration, property.visibility),
         getter: Some(getter),
@@ -416,6 +417,11 @@ pub(super) fn materialize_member_delegate(
         getter_jvm_name: None,
         setter_jvm_name: None,
         needs_access_bridge: false,
+        accessor_annotations: ir
+            .accessor_annotations
+            .get(&property_id)
+            .cloned()
+            .unwrap_or_default(),
     });
     realizations.insert(
         property_id,
@@ -639,6 +645,7 @@ pub(super) fn materialize_member_extension_delegate(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            source_order: declaration.source_order,
             receiver: extension_receiver,
             ty: property.ty,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),

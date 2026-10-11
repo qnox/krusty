@@ -2,8 +2,9 @@
 
 use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::{
-    build_field_serializer_instance, class_ty, contextual_serializer_for, encode_element_method,
-    field_serializer_of, is_nullable, property_is_contextual, ty_descriptor, virtual_iface,
+    build_field_serializer_instance, class_ty, contextual_serializer_for, declared_serializer_of,
+    encode_element_method, is_nullable, property_is_contextual, ty_descriptor,
+    value_class_underlying, virtual_iface,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -112,29 +113,41 @@ impl SerializeBody<'_> {
         // second answer to which properties are cached.
         let plan = delegate.then_some(cache_plan).flatten();
         let cache_local = 3u32;
+        // Every nullable value-class read owns one semantic temporary. Reserve the whole range up
+        // front so a checked computed default, which remaps its own locals into this frame below,
+        // starts after them instead of aliasing a value still used by the guarded encode call.
+        let element_temporary_start = cache_local + 1;
+        let after_element_temporaries = element_temporary_start
+            + u32::try_from(elements.len()).expect("too many serialized elements");
         // The element serializer for property `i`: the cache slot when the class caches it, else
         // built here. The PLAN decides, so this can never read a slot the serialized class did not
         // write.
-        let element_serializer = |ir: &mut IrFile, ctx: &PluginContext, i: usize, ty: &Ty| {
-            if let Some(cached) = super::child_serializer_cache::cached_strategy(
-                ir,
-                plan.as_ref(),
-                Some(cache_local),
-                i,
-                elements.len(),
-                "kotlinx/serialization/SerializationStrategy",
-            ) {
-                return Some(cached);
-            }
-            // A delegating `write$Self` is a static helper with no `$serializer` to read a
-            // type-parameter serializer off; only the inlined generic shape has one.
-            let scope = if delegate {
-                super::type_parameter_serializers::TypeParameterSerializers::NONE
-            } else {
-                type_parameter_serializers
+        let element_serializer =
+            |ir: &mut IrFile, ctx: &PluginContext, i: usize, property: &str, ty: &Ty| {
+                if let Some(cached) = super::child_serializer_cache::cached_strategy(
+                    ir,
+                    plan.as_ref(),
+                    Some(cache_local),
+                    i,
+                    elements.len(),
+                    "kotlinx/serialization/SerializationStrategy",
+                ) {
+                    return Some(cached);
+                }
+                // A delegating `write$Self` is a static helper with no `$serializer` to read a
+                // type-parameter serializer off; only the inlined generic shape has one.
+                let scope = if delegate {
+                    super::type_parameter_serializers::TypeParameterSerializers::NONE
+                } else {
+                    type_parameter_serializers
+                };
+                let annotated = super::type_argument_serializers::declared_type_spelling(
+                    ctx, ir, class_id, property,
+                );
+                super::element_serializer::element_serializer_expr_in(
+                    ir, ctx, ty, scope, &annotated,
+                )
             };
-            super::element_serializer::element_serializer_expr_in(ir, ctx, ty, scope)
-        };
         // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
         // property's private backing FIELD directly — which is what kotlinc emits.
         // (The old inlined shape lived on the `$serializer`, which cannot, and had to
@@ -170,7 +183,20 @@ impl SerializeBody<'_> {
                 this_desc(ir)
             };
             let idx = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-            let Some(v) = read_property(ir, field, pname, ty) else {
+            // A value-class element is written as its underlying value, which `fields` types it as.
+            let declared = ir.classes[foo_id as usize].fields[field].ty;
+            let v = if value_class_underlying(ir, &declared).is_some() {
+                super::value_class_types::underlying_read(
+                    ir,
+                    declared,
+                    element_temporary_start
+                        + u32::try_from(i).expect("too many serialized elements"),
+                    &mut |ir| read_property(ir, field, pname, ty),
+                )
+            } else {
+                read_property(ir, field, pname, ty)
+            };
+            let Some(v) = v else {
                 bail = true;
                 break;
             };
@@ -199,9 +225,18 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, inst, v],
                 }));
-            } else if let Some(internal) = field_serializer_of(ctx, ir, class_id, pname) {
+            } else if let Some(internal) = declared_serializer_of(ctx, ir, class_id, pname) {
                 // An explicit per-property serializer takes precedence over the property's type.
-                let inst = build_field_serializer_instance(ir, internal);
+                let scope = if delegate {
+                    super::type_parameter_serializers::TypeParameterSerializers::NONE
+                } else {
+                    type_parameter_serializers
+                };
+                let annotated = super::type_argument_serializers::declared_type_spelling(
+                    ctx, ir, class_id, pname,
+                );
+                let inst =
+                    build_field_serializer_instance(ir, ctx, internal, *ty, scope, &annotated);
                 let method = if is_nullable(ty) {
                     "encodeNullableSerializableElement"
                 } else {
@@ -233,7 +268,7 @@ impl SerializeBody<'_> {
                 // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
                 // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
                 // the SAME descriptor (writes JSON null) — a method-name swap.
-                let Some(inst) = element_serializer(ir, ctx, i, ty) else {
+                let Some(inst) = element_serializer(ir, ctx, i, pname, ty) else {
                     bail = true;
                     break;
                 };
@@ -259,7 +294,7 @@ impl SerializeBody<'_> {
             } else if is_nullable(ty) {
                 // Any derivable nullable element — builtin, interface-polymorphic, sealed, or
                 // nested — uses the nullable serializable call so the encoder can write JSON null.
-                if let Some(inst) = element_serializer(ir, ctx, i, ty) {
+                if let Some(inst) = element_serializer(ir, ctx, i, pname, ty) {
                     let inst = super::deserialize_body::narrowed(
                         ir,
                         inst,
@@ -288,7 +323,7 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, v],
                 }));
-            } else if let Some(inst) = element_serializer(ir, ctx, i, ty) {
+            } else if let Some(inst) = element_serializer(ir, ctx, i, pname, ty) {
                 // A non-null reference element with a builtin/derivable serializer (e.g.
                 // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
                 let inst = super::deserialize_body::narrowed(
@@ -372,11 +407,7 @@ impl SerializeBody<'_> {
                             foo_id,
                             field,
                             super::property_default::DefaultFrame {
-                                first_free_local: if delegate {
-                                    cache_local + u32::from(plan.is_some())
-                                } else {
-                                    encoder_slot + 1
-                                },
+                                first_free_local: after_element_temporaries,
                                 read_field: &mut read_field,
                                 // `write$Self` is a static member of the class, so the object it
                                 // writes stands in for the receiver the default was checked
@@ -441,7 +472,7 @@ impl SerializeBody<'_> {
                 stmts: vec![unsupported],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
         } else if let Some(write_self) = delegated_write_self {
             if let Some(plan) = plan.as_ref() {
                 // `write$Self` is a static member of the class that OWNS the cache, so it reads the
@@ -516,7 +547,7 @@ impl SerializeBody<'_> {
                 stmts: vec![dvar, cvar, call_write_self, end],
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
         } else {
             // The inlined shape (a generic class): open the structure, write the
             // elements here, close it.
@@ -556,7 +587,7 @@ impl SerializeBody<'_> {
                 stmts: block,
                 value: None,
             });
-            ir.functions[fid as usize].body = Some(body);
+            super::complete_generated_body(ir, fid, body);
         }
     }
 }
@@ -586,11 +617,14 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        // Declared as the handoff declares it: with a placeholder body.
+        let declared =
+            super::super::generated_body_placeholder(&mut ir, type_name("demo/Foo$$serializer"));
         let serialize = ir.add_fun(IrFunction {
             name: "serialize".to_owned(),
             params: Vec::new(),
             ret: unit(),
-            body: None,
+            body: Some(declared),
             is_static: false,
             dispatch_receiver: Some(type_name("demo/Foo$$serializer")),
             param_checks: Vec::new(),

@@ -23,6 +23,9 @@ pub(super) struct Body {
     arrivals: HashSet<LabelId>,
     /// Labels a line number starts at, or a local's range starts or ends at.
     marks: HashSet<LabelId>,
+    /// Labels a local's range starts or ends at. A local-variable boundary defeats kotlinc's
+    /// adjacent store/load fold even when no control-flow edge reaches it; a line label does not.
+    local_marks: HashSet<LabelId>,
     /// Where each protected range starts, and where each ends or is handled.
     protected_starts: HashSet<LabelId>,
     protected_ends: HashSet<LabelId>,
@@ -59,8 +62,10 @@ impl Body {
             handlers.insert(block.handler);
             arrivals.extend([block.start, block.end, block.handler]);
         }
+        let mut local_marks = HashSet::new();
         for local in &method.local_variables {
             marks.extend([local.start, local.end]);
+            local_marks.extend([local.start, local.end]);
         }
         let list = InsnList::new(std::mem::take(&mut method.nodes));
         let label_nodes = list
@@ -77,6 +82,7 @@ impl Body {
             origins,
             arrivals,
             marks,
+            local_marks,
             protected_starts,
             protected_ends,
             handlers,
@@ -172,7 +178,34 @@ impl Body {
     pub(super) fn labelled(&self, id: NodeId) -> bool {
         self.labels_before(id)
             .iter()
-            .any(|label| self.arrivals.contains(label) || self.marks.contains(label))
+            .any(|label| self.kept_by_process_labels(*label))
+    }
+
+    /// Whether only source-line labels stand before `id`. The coroutine transformer can leave the
+    /// selector's line between a generated safe-call receiver check and its reload; crossing that
+    /// label is safe, while an arrival, local boundary, or protected-range boundary is not.
+    pub(super) fn line_only_labelled(&self, id: NodeId) -> bool {
+        let labels = self.labels_before(id);
+        !labels.is_empty()
+            && labels.iter().all(|label| {
+                self.marks.contains(label)
+                    && !self.arrivals.contains(label)
+                    && !self.local_marks.contains(label)
+                    && !self.protected_starts.contains(label)
+                    && !self.protected_ends.contains(label)
+                    && !self.handlers.contains(label)
+            })
+    }
+
+    /// Whether kotlinc's `processLabels` keeps this label before temporary elimination. Labels
+    /// used by control flow, debug tables or protected ranges remain in the raw instruction list;
+    /// an unused label is removed and cannot interrupt an adjacency match.
+    pub(super) fn kept_by_process_labels(&self, label: LabelId) -> bool {
+        self.arrivals.contains(&label)
+            || self.marks.contains(&label)
+            || self.label_nodes.get(&label).is_some_and(|&node| {
+                Some(node) == self.list.first() || Some(node) == self.list.last()
+            })
     }
 
     /// Whether a label with non-trivial predecessors stands in front of instruction `id`.
@@ -187,6 +220,13 @@ impl Body {
         self.labels_before(id)
             .iter()
             .any(|label| self.marks.contains(label))
+    }
+
+    /// Whether a local-variable range begins or ends in front of `id`.
+    pub(super) fn local_marked(&self, id: NodeId) -> bool {
+        self.labels_before(id)
+            .iter()
+            .any(|label| self.local_marks.contains(label))
     }
 
     /// Whether a protected range starts in front of instruction `id`.

@@ -153,6 +153,7 @@ fn validate_argument(argument: &IrCheckedArgument) -> Result<(), UndeterminedIrT
 
 fn validate_substitution(substitution: &IrCheckedSubstitution) -> Result<(), UndeterminedIrType> {
     reject("checked substitution", substitution.value)?;
+    reject("checked reified substitution", substitution.reified_runtime)?;
     reject_all(
         "checked substitution bound",
         substitution.additional_bounds.iter().copied(),
@@ -340,6 +341,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::GetValue(_)
         | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::SetValue { .. }
+        | IrExpr::SetFrameResult { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
@@ -462,9 +464,6 @@ fn validate_class(class: &IrClass) -> Result<(), UndeterminedIrType> {
         "super-constructor parameter",
         class.super_ctor_params.iter().copied(),
     )?;
-    if let Some(types) = &class.enum_entry_of {
-        reject_all("enum-entry constructor parameter", types.iter().copied())?;
-    }
     if let Some(reference) = &class.prop_ref {
         validate_prop_ref(reference)?;
     }
@@ -639,14 +638,6 @@ impl IrFile {
                 .iter()
                 .map(|alias| alias.expansion),
         )?;
-        for constructors in self.jvm_value_class_secondary_ctors.values() {
-            for constructor in constructors {
-                reject_all(
-                    "value-class secondary constructor parameter",
-                    constructor.params.iter().map(|(_, ty)| *ty),
-                )?;
-            }
-        }
         for property in &self.statics {
             reject("static property", property.ty)?;
         }
@@ -664,10 +655,7 @@ impl IrFile {
             "deferred local declaration",
             self.deferred_local_types.values().copied(),
         )?;
-        reject_all(
-            "inline operand declaration",
-            self.inline_operand_declared_types(),
-        )?;
+        reject_all("inline declaration", self.inline_declared_types())?;
         reject_all("exhaustive when", self.whens.exhaustive.values().copied())?;
         reject_all("physical expression", self.physical_types.values().copied())?;
         for properties in self.member_ext_props.values() {
@@ -772,6 +760,7 @@ impl IrFile {
             "custom serializer constructor parameter",
             self.custom_serializer_constructions
                 .values()
+                .chain(self.type_use_serializer_constructions.values())
                 .flat_map(|construction| construction.parameters.iter().copied()),
         )?;
         reject_all(
@@ -873,6 +862,7 @@ mod tests {
             method: "invoke".to_string(),
             method_target: crate::ir::IrSamMethod::FunctionTypeInvoke,
             parameters: Vec::new(),
+            contravariant_parameters: Vec::new(),
             result: Ty::Unit,
             declared_parameters: Vec::new(),
             declared_result: Ty::Unit,
@@ -1013,6 +1003,7 @@ mod tests {
             lines: crate::ir::IrSecondaryCtorLines::default(),
             prefix_params: Vec::new(),
             params: vec![Ty::Int],
+            declared_spellings: crate::spelling::DeclaredSpellings::default(),
             named_params: Vec::new(),
             metadata_visibility: None,
             generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,

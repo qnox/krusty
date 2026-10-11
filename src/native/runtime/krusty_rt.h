@@ -147,9 +147,10 @@ typedef struct KObjectHeader {
 
 /* ---- memory ---------------------------------------------------------------------------------- */
 
-/* Record where the program's stack begins. Roots are found by scanning the stack from the
-   collector's own frame up to this address, so it must be called from the outermost frame BEFORE
-   anything allocates; the generated entry point does so with the address of a local. */
+/* Record where the program's stack begins, and attach the calling thread as the first one that
+   runs Kotlin, holding the mutator lock (`krusty_threads.c`). Roots are found by scanning the stack
+   from the collector's own frame up to this address, so it must be called from the outermost frame
+   BEFORE anything allocates; the generated entry point does so with the address of a local. */
 void kt_runtime_init(void *stack_bottom);
 
 /* Allocate `size` zeroed bytes (at least the header) for an object of `type`, collecting first if
@@ -366,6 +367,11 @@ extern const KType kt_type_list_iterator;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
+/* `E.entries`: the read-only list over a fresh array of the constants, as a
+   `kotlin.enums.EnumEntriesList`. Each enum's initializer builds one and keeps it. An `is` against
+   `kotlin.enums.EnumEntries` names the interface descriptor. */
+extern const KType kt_type_enum_entries_interface;
+KRef kt_enum_entries_of(KRef values);
 /* `xs.toList()` and `xs.reversed()` on an ARRAY: a snapshot of its elements as a list, each boxed
    on the way in. A snapshot rather than a view, which is Kotlin's own answer and is observable —
    writing through the array afterwards leaves the list as it was. */
@@ -385,6 +391,16 @@ KRef kt_array_content_to_string(KRef array);
 KRef kt_list_single(KRef value);
 kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);
+/* `Collection.size`: a list's, a set's or a map view's, decided by the descriptor. */
+kt_int kt_collection_size(KRef collection);
+kt_boolean kt_collection_is_empty(KRef collection);
+kt_boolean kt_collection_contains_all(KRef self, KRef elements);
+/* `MutableCollection`'s members over a growable list or a set (or a map view, which removes and
+   clears through to its map); a read-only list throws `UnsupportedOperationException`. */
+kt_boolean kt_mutable_collection_add(KRef self, KRef value);
+kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
+void kt_mutable_collection_clear(KRef self);
+kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
 KRef kt_list_first(KRef list);
@@ -480,6 +496,8 @@ KRef kt_iterable_filter(KRef iterable, KRef predicate);
 KRef kt_iterable_filter_not(KRef iterable, KRef predicate);
 KRef kt_iterable_first_matching(KRef iterable, KRef predicate);
 KRef kt_iterable_first_or_null(KRef iterable, KRef predicate);
+KRef kt_iterable_first(KRef iterable);
+KRef kt_iterable_last(KRef iterable);
 KRef kt_iterable_last_matching(KRef iterable, KRef predicate);
 KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation);
 void kt_iterable_for_each_indexed(KRef iterable, KRef action);
@@ -601,6 +619,7 @@ kt_boolean kt_range_contains(KRef range, kt_long value);
 /* `range.first` / `range.last` / `range.start` / `range.endInclusive`, at the range's own width. */
 kt_long kt_range_first(KRef range);
 kt_long kt_range_last(KRef range);
+kt_long kt_range_step_value(KRef range);
 kt_boolean kt_range_is_empty(KRef range);
 
 /* ---- floating-point ranges -------------------------------------------------------------------
@@ -684,6 +703,10 @@ KRef kt_long_range_down_to(kt_long first, kt_long last);
 KRef kt_char_range_down_to(kt_char first, kt_char last);
 KRef kt_uint_range_down_to(kt_int first, kt_int last);
 KRef kt_ulong_range_down_to(kt_long first, kt_long last);
+kt_int kt_progression_last_int(kt_int first, kt_int last, kt_int step);
+kt_long kt_progression_last_long(kt_long first, kt_long last, kt_long step);
+kt_int kt_progression_last_uint(kt_int first, kt_int last, kt_int step);
+kt_long kt_progression_last_ulong(kt_long first, kt_long last, kt_long step);
 kt_boolean kt_range_iterator_has_next(KRef iterator);
 kt_long kt_range_iterator_next(KRef iterator);
 
@@ -975,6 +998,8 @@ extern const KType kt_type_no_such_element_exception;
 extern const KType kt_type_concurrent_modification_exception;
 extern const KType kt_type_uninitialized_property_access_exception;
 extern const KType kt_type_no_when_branch_matched_exception;
+/* What `readln()` raises at the end of standard input. */
+extern const KType kt_type_read_after_eof_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
@@ -993,23 +1018,6 @@ KRef kt_throwable_message(KRef self);
 
 /* `Throwable.cause`, or NULL where the constructor was given none. */
 KRef kt_throwable_cause(KRef self);
-
-/* ---- kotlin.Result ------------------------------------------------------------------------- */
-
-/* A value class over `Any?` whose representation is Kotlin's: a success IS the value, and a
-   failure is a marker holding the exception. Every entry below takes that representation. */
-KRef kt_result_success(KRef value);
-KRef kt_result_failure(KRef exception);
-kt_boolean kt_result_is_failure(KRef value);
-kt_boolean kt_result_is_success(KRef value);
-KRef kt_result_get_or_null(KRef value);
-KRef kt_result_exception_or_null(KRef value);
-/* `getOrThrow()`: a success's value, or, for a failure, its exception thrown and NULL answered at
-   once — never the failure marker, which is no value of the program's type. */
-KRef kt_result_get_or_throw(KRef value);
-/* `Success(value)` or `Failure(exception)`; NULL, with the exception pending, when rendering the
-   value or the exception through its `toString` throws. */
-KRef kt_result_to_string(KRef value);
 
 /* `Throwable.toString()`: the qualified name, and `: message` after it when there is one. A class
    the SOURCE declares as a subclass of one of these inherits it through its own vtable, which is
@@ -1247,5 +1255,73 @@ void kt_println_unit(void);
 
 /* The generated entry point calls this after running the program's `main`. */
 void kt_exit(kt_int status);
+
+/* ---- the process boundary ---------------------------------------------------------------------- */
+
+/* `main(args)`'s `args`: an `Array<String>` of the arguments the program was started with, without
+   its own name, each decoded from UTF-8 with U+FFFD for what is ill-formed. */
+KRef kt_program_arguments(void);
+
+/* `readLine()` and `readlnOrNull()`: the next line of standard input without its `\n` or `\r\n`,
+   or NULL at the end of input. A last line with no terminator is still a line. */
+KRef kt_read_line(void);
+
+/* `readln()`: the same line, raising `ReadAfterEOFException` where `kt_read_line` answers NULL. */
+KRef kt_read_line_or_throw(void);
+
+/* ---- threads ----------------------------------------------------------------------------------
+
+   Every thread that runs Kotlin shares one heap, and one MUTATOR LOCK keeps it consistent: a thread
+   holds the lock while it runs Kotlin or the runtime and releases it while it runs foreign code. So
+   a call from Kotlin into C that may block is bracketed by `kt_native_enter`/`kt_native_leave`, and
+   a call from C into Kotlin (a callback, or the start routine of a thread C created) by
+   `kt_callback_enter`/`kt_callback_leave`. A static program's threads are the runtime's own
+   (`kt_thread_start`). */
+
+/* How many callee-saved registers a released thread records: the most any supported architecture
+   has (RISC-V's s0-s11). */
+#define KT_SAVED_REGISTERS 12
+
+typedef struct KThread KThread;
+
+/* Release the lock for a call into foreign code, recording the caller's callee-saved registers and
+   stack pointer so its frames stay roots while it is away. Pass the answer to `kt_native_leave`
+   when the foreign call returns. */
+KThread *kt_native_enter(void);
+void kt_native_leave(KThread *thread);
+
+/* What a callback keeps on its own frame between entering Kotlin and leaving it. */
+typedef struct KThreadEntry {
+    KThread *thread;
+    /* Whether this entry attached the thread, and so detaches it on the way out. */
+    bool attached;
+    /* A thread that was already attached, in a `kt_native_enter`: its released state, put back on
+       the way out. */
+    uintptr_t outer_registers[KT_SAVED_REGISTERS];
+    uintptr_t outer_sp;
+    KRef outer_pending;
+} KThreadEntry;
+
+/* Enter Kotlin from foreign code, taking the lock. `stack_bottom` is the address of a local in the
+   caller's frame, above every Kotlin frame the callback will run; it matters only for a thread the
+   runtime has not seen, which is attached for the callback's duration. */
+void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
+
+/* Leave Kotlin for the foreign code that called in, releasing the lock. An exception the callback
+   left in flight ends the process, reported on the thread's name (`main`, or `Thread-<n>` for a
+   thread foreign code started) as Kotlin reports one nothing caught: no Kotlin reference ever
+   crosses back into foreign code, where no root would hold it. */
+void kt_callback_leave(KThreadEntry *entry);
+
+/* A thread the runtime started, until it is joined. */
+typedef struct KThreadHandle KThreadHandle;
+
+/* Start a thread that runs `routine(argument)` as Kotlin, holding the lock as every attached thread
+   does, and ends when it returns. An exception it leaves in flight ends the process, reported as
+   Kotlin reports one nothing caught, on a thread named `Thread-<n>`. The caller holds the lock. */
+KThreadHandle *kt_thread_start(void (*routine)(KRef), KRef argument);
+
+/* Wait, with the lock released, for the thread to end, and free what it ran on. */
+void kt_thread_join(KThreadHandle *handle);
 
 #endif /* KRUSTY_RT_H */

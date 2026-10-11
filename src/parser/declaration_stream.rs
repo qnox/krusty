@@ -53,7 +53,6 @@ fn finish_unit(file: &mut File, source: &str, features: &LangFeatures, diags: &m
     hoist_local_classes(file, None);
     fixup_parenless_base_classes(file);
     super::debug_lines::attach(file, source);
-    expand_fun_type_aliases(file);
     if !diags.has_errors() {
         if let Err(error) = file.validate_integrity(source) {
             diags.error(Span::new(0, 0), format!("invalid parser AST: {error}"));
@@ -71,6 +70,7 @@ pub(crate) fn visit_declaration_units_with_features(
 ) {
     let mut parser = Parser::new(source, tokens, diags, features, false);
     let mut prelude = DeclarationPrelude::default();
+    let mut unit_tokens = 0;
     crate::wide_stack::on_wide_stack(|| {
         parser.parse_file_with_declaration_sink(&mut |parser| {
             prelude.learn_file_prefix(&parser.file);
@@ -85,6 +85,11 @@ pub(crate) fn visit_declaration_units_with_features(
             // Keeping parser `TypeRef` trees beside that index would retain Pass-1 syntax across
             // the pass boundary, so a bounded unit deliberately carries only aliases declared
             // inside that unit. The Pass-2 checker resolves module aliases from the index.
+            unit.binary_reference_tokens = crate::ast::BinaryReferenceTokens::new(
+                &parser.t[unit_tokens..parser.i],
+                std::mem::take(&mut parser.function_spans),
+            );
+            unit_tokens = parser.i;
             finish_unit(&mut unit, source, features, parser.diags);
             visit(unit, parser.diags);
         });

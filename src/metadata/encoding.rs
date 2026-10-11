@@ -6,23 +6,29 @@
 //! limit (65535 *modified-UTF-8* bytes). The constant pool must then write those chars in
 //! **modified UTF-8** (U+0000 → C0 80; no plain NUL), which is what `modified_utf8` does.
 
-const MAX_UTF8_INFO_LENGTH: usize = 65535;
+/// The modified-UTF-8 size at which kotlinc's `UtfEncodingKt.bytesToStrings` closes a `d1` part.
+/// The check runs after each char is appended, so a part ends at 65534 bytes, or at 65535 when a
+/// two-byte char crosses the threshold, never later.
+const D1_PART_CLOSE_SIZE: usize = 65534;
 
-/// Encode protobuf bytes into the `d1` `String[]` (byte→char identity, chunked).
+/// Encode protobuf bytes into the `d1` `String[]` (byte→char identity), partitioned exactly as
+/// kotlinc partitions them: append each char, count its modified-UTF-8 width, and close the part
+/// once the count reaches [`D1_PART_CLOSE_SIZE`]. A trailing empty part is not written.
 pub fn bytes_to_strings(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut len = 0usize;
     for &b in bytes {
-        let w = utf8_width(b as u32);
-        if len + w > MAX_UTF8_INFO_LENGTH {
+        cur.push(b as char); // byte 0..=255 -> U+0000..=U+00FF
+        len += if (1..=0x7f).contains(&b) { 1 } else { 2 }; // U+0000 is `C0 80`
+        if len >= D1_PART_CLOSE_SIZE {
             out.push(std::mem::take(&mut cur));
             len = 0;
         }
-        cur.push(b as char); // byte 0..=255 -> U+0000..=U+00FF
-        len += w;
     }
-    out.push(cur);
+    if !cur.is_empty() {
+        out.push(cur);
+    }
     out
 }
 
@@ -32,14 +38,6 @@ pub fn strings_to_bytes(strings: &[String]) -> Vec<u8> {
         .iter()
         .flat_map(|s| s.chars().map(|c| c as u8))
         .collect()
-}
-
-fn utf8_width(c: u32) -> usize {
-    match c {
-        0x0001..=0x007f => 1,
-        0 | 0x0080..=0x07ff => 2, // U+0000 is 2 bytes in modified UTF-8
-        _ => 3,
-    }
 }
 
 /// JVM "modified UTF-8" (JVMS 4.4.7): like UTF-8 except U+0000 is `C0 80` and supplementary chars
@@ -92,6 +90,28 @@ mod tests {
         let expect: Vec<u32> = bytes.iter().map(|&b| b as u32).collect();
         assert_eq!(chars, expect);
         assert_eq!(strings_to_bytes(&strings), bytes); // round-trip
+    }
+
+    #[test]
+    fn d1_parts_close_where_kotlinc_closes_them() {
+        // The marker (2 bytes) and 65531 ASCII bytes reach 65533; a NUL (2 bytes) takes the part to
+        // 65535 and closes it. The next part closes on reaching exactly 65534 even though one more
+        // ASCII byte would still fit, and the remainder is the last part.
+        let mut bytes = vec![0x00];
+        bytes.extend(std::iter::repeat_n(b'a', 65531));
+        bytes.push(0x00);
+        bytes.extend(std::iter::repeat_n(b'b', 65534));
+        bytes.extend([b'c', 0x80]);
+        let strings = bytes_to_strings(&bytes);
+        let sizes: Vec<usize> = strings.iter().map(|s| modified_utf8(s).len()).collect();
+        assert_eq!(sizes, vec![65535, 65534, 3]);
+        assert_eq!(strings_to_bytes(&strings), bytes);
+    }
+
+    #[test]
+    fn d1_payload_ending_on_a_part_boundary_has_no_empty_part() {
+        let bytes = vec![b'a'; 65534];
+        assert_eq!(bytes_to_strings(&bytes), vec!["a".repeat(65534)]);
     }
 
     #[test]

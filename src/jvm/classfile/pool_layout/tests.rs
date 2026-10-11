@@ -71,6 +71,39 @@ fn a_cast_a_rewrite_removes_leaves_no_entry_behind() {
 }
 
 #[test]
+/// A `checkcast` the rewrite removes leaves its class to the `InnerClasses` row, which is interned
+/// before the `Code` attribute name.
+fn a_removed_holder_class_moves_to_its_inner_classes_row() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+        inner: "pkg/Ref$LongRef".to_string(),
+        outer: Some("pkg/Ref".to_string()),
+        name: Some("LongRef".to_string()),
+        access: ACC_PUBLIC | ACC_STATIC,
+    });
+    let desc = "(Lpkg/Ref$LongRef;)Ljava/lang/Object;";
+    writer.reserve_method_pool("f", desc, None, &[]);
+    add_static(&mut writer, "f", desc, |code, writer| {
+        code.aload(0);
+        code.checkcast(writer.class_ref("pkg/Ref$LongRef"));
+        code.areturn();
+    });
+    let entries = pool(&writer.finish());
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
+    };
+    // The row is interned before the `Code` attribute name, as kotlinc writes `InnerClasses`
+    // before that name. The removed `checkcast` does not leave the class beside the descriptor.
+    assert!(position("(Lpkg/Ref$LongRef;)Ljava/lang/Object;") < position("Class pkg/Ref$LongRef"));
+    assert!(position("Class pkg/Ref$LongRef") < position("Class pkg/Ref"));
+    assert!(position("Class pkg/Ref") < position("LongRef"));
+    assert!(position("LongRef") < position("Code"));
+}
+
+#[test]
 fn a_constant_only_later_code_still_names_moves_to_that_code() {
     // `fun f(s: String): Any = s as String` interned `java/lang/String` for a cast its rewrite
     // removes; `g` names the class between its casts to `B` and `C`, which is where ASM interns it.
@@ -156,6 +189,82 @@ fn a_constant_the_last_later_code_names_moves_to_the_end_of_that_code() {
 }
 
 #[test]
+fn an_orphaned_descriptor_keeps_name_and_type_component_order() {
+    // A removed instruction originally interned `()V`. The later EnclosingMethod is its first
+    // remaining user, and ASM visits that NameAndType as name, descriptor, composite. Relayout
+    // must not put the orphaned descriptor ahead of the fresh method name merely because its old
+    // pool index is lower.
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let before = writer.cp.slot_count();
+    writer.reserve_descriptor("()V");
+    add_static(&mut writer, "f", "()I", |code, writer| {
+        code.push_int(1, writer);
+        code.ireturn();
+    });
+    let after = writer.cp.slot_count();
+    writer.set_enclosing_method("Owner", "outer", "()V");
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before + 1..after + 1,
+        leading: Vec::new(),
+        interned: after + 1..after + 1,
+    }];
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+        .expect("the class reads")
+        .expect("the orphan moves to EnclosingMethod");
+    let entries = pool(&laid_out);
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("{entry} in {entries:?}"))
+    };
+    assert!(position("outer") < position("()V"));
+    assert!(position("()V") < position("tag 12"));
+}
+
+#[test]
+fn a_removed_body_class_moves_to_its_late_inner_class_row() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    writer.reserve_method_name("f");
+    writer.reserve_descriptor("()V");
+    writer.seed_class("sample/Holder$Removed");
+    add_static(&mut writer, "f", "()V", |code, writer| {
+        code.push_string("body", writer);
+        code.pop();
+        code.ret_void();
+    });
+    writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+        inner: "sample/Holder$Removed".to_string(),
+        outer: Some("sample/Holder".to_string()),
+        name: Some("Removed".to_string()),
+        access: 0x0019,
+    });
+    let class = writer.finish();
+    // The push/pop rewrite removes `body` entirely. The seeded class survives only because the
+    // later InnerClasses row names it, so its first pool position is that row's visit window.
+    assert_eq!(
+        pool(&class),
+        [
+            "T",
+            "Class T",
+            "java/lang/Object",
+            "Class java/lang/Object",
+            "f",
+            "()V",
+            "sample/Holder$Removed",
+            "Class sample/Holder$Removed",
+            "sample/Holder",
+            "Class sample/Holder",
+            "Removed",
+            "Code",
+            "InnerClasses",
+        ]
+    );
+}
+
+#[test]
 fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
     // `g`'s local was interned ahead of the constant its code loads; ASM interns an instruction's
     // operand before the local-variable table.
@@ -196,6 +305,7 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
     let relaid = [RelaidMethod {
         index: 1,
         added: before_g + 1..after_g + 1,
+        leading: Vec::new(),
         interned: after_g + 1..after_g + 1,
     }];
     let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
@@ -216,6 +326,44 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
         spelled_slots(&laid_out, &read),
         spelled_slots(&class, &index_slots::read(&class).expect("the class reads"))
     );
+}
+
+#[test]
+fn transformation_class_entries_lead_the_rewritten_body() {
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let before = writer.cp.slot_count();
+    add_static(&mut writer, "f", "()Ljava/lang/String;", |code, writer| {
+        code.push_string("body", writer);
+        code.areturn();
+    });
+    let after = writer.cp.slot_count();
+
+    // The coroutine transformer discovers this field after the original body was emitted, but
+    // kotlinc visits it immediately before writing the transformed body. Record both the new field
+    // name and the already-present descriptor to exercise both sides of that ordering rule.
+    writer.cp.start_noting();
+    writer.add_field(0, "L$0", "Ljava/lang/String;");
+    let leading = writer.cp.take_noted();
+
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before + 1..after + 1,
+        leading,
+        interned: after + 1..after + 1,
+    }];
+    let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)
+        .expect("the class reads")
+        .expect("the transformer's field moves ahead of the body");
+    let entries = pool(&laid_out);
+    let position = |entry: &str| {
+        entries
+            .iter()
+            .position(|candidate| candidate == entry)
+            .expect("named pool entry")
+    };
+    assert!(position("L$0") < position("body"));
+    assert!(position("Ljava/lang/String;") < position("body"));
 }
 
 #[test]
@@ -298,4 +446,47 @@ fn a_copied_class_keeps_an_entry_nothing_names() {
     let class = writer.finish();
     let padded = with_integers(&class, 2);
     assert_eq!(relayout(padded.clone(), &[], Unnamed::Kept), padded);
+}
+
+#[test]
+fn a_rewritten_call_site_follows_its_bootstrap_arguments_and_method() {
+    // ASM's `addBootstrapMethod` interns a call site's bootstrap arguments, then its bootstrap
+    // method handle, before the `InvokeDynamic` and its name and type. `BootstrapMethods` names
+    // them only by attribute index, yet a rewritten method's call site is still placed after them.
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let desc = "()Ljava/lang/Object;";
+    let before_g = writer.cp.slot_count();
+    add_static(&mut writer, "g", desc, |code, writer| {
+        let argument = writer.method_type("()V");
+        let bootstrap = writer.method_handle_static(
+            "B",
+            "bootstrap",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+        );
+        let entry = writer.add_bootstrap(bootstrap, vec![argument]);
+        let site = writer.invoke_dynamic(entry, "run", "()Ljava/lang/Runnable;");
+        code.invokedynamic(site, 0, 1);
+        code.areturn();
+    });
+    let after_g = writer.cp.slot_count();
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before_g + 1..after_g + 1,
+        leading: Vec::new(),
+        interned: after_g + 1..after_g + 1,
+    }];
+    let laid_out = match relaid_class(&class, &relaid, Unnamed::Dropped).expect("the class reads") {
+        Some(laid_out) => laid_out,
+        None => class,
+    };
+    let entries = pool(&laid_out);
+    let position = |tag: &str| {
+        entries
+            .iter()
+            .position(|entry| entry == tag)
+            .unwrap_or_else(|| panic!("{tag} in {entries:?}"))
+    };
+    let (argument, handle, site) = (position("tag 16"), position("tag 15"), position("tag 18"));
+    assert!(argument < handle && handle < site, "{entries:?}");
 }

@@ -1,0 +1,182 @@
+diff --git a/build/jvm-rules/MODULE.bazel b/build/jvm-rules/MODULE.bazel
+index 0a4bb04fc8..64fca20b5a 100644
+--- a/build/jvm-rules/MODULE.bazel
++++ b/build/jvm-rules/MODULE.bazel
+@@ -116,6 +116,12 @@ backend_config_repo = use_repo_rule("//:backend_config.bzl", "backend_config_rep
+-
++
+ backend_config_repo(name = "ij_backend_config")
+-
++
++# Kotlin-only targets compile with krusty when KRUSTY_BINARY names a built executable.
++# See krusty_compiler.bzl. Unset, this is a stub and the JPS builder is unchanged.
++krusty_compiler = use_repo_rule("//:krusty_compiler.bzl", "krusty_compiler")
++
++krusty_compiler(name = "krusty_compiler")
++
+ # Parsed by `BazelProjectStructureTest` (to assert alignment with `.idea/kotlinc.xml`) and by
+ # `com.intellij.monorepo.devkit.bazel.ComposeCompilerPluginProjectPathMacroContributor` (to resolve the
+ # `KOTLIN_COMPOSE_COMPILER_PLUGIN` path macro). If you rename this variable, update both regexes too.
+diff --git a/build/jvm-rules/krusty_compiler.bzl b/build/jvm-rules/krusty_compiler.bzl
+new file mode 100644
+index 0000000000..708b799ddb
+--- /dev/null
++++ b/build/jvm-rules/krusty_compiler.bzl
+@@ -0,0 +1,39 @@
++"""Optional krusty compiler binary, selected by `KRUSTY_BINARY`.
++
++Unset, the repository holds a stub and `KRUSTY_ENABLED` is false, so `jvm_library` keeps the
++JPS builder. Set to an absolute path of a built `krusty` executable and the same rules compile
++Kotlin-only, plugin-free targets with that binary. Java sources, source jars, and compiler
++plugins stay on the JPS builder: krusty has no Java front end and does not load build-supplied
++plugins.
++"""
++
++def _krusty_compiler_impl(rctx):
++    binary = (rctx.getenv("KRUSTY_BINARY") or "").strip()
++    if binary:
++        if not rctx.path(binary).exists:
++            fail("KRUSTY_BINARY does not exist: %s" % binary)
++        rctx.watch(binary)
++        result = rctx.execute(["cp", "-L", binary, "krusty.bin"])
++        if result.return_code != 0:
++            fail("cannot copy KRUSTY_BINARY: %s" % result.stderr)
++        result = rctx.execute(["chmod", "a+x", "krusty.bin"])
++        if result.return_code != 0:
++            fail("cannot mark krusty executable: %s" % result.stderr)
++        enabled = True
++    else:
++        rctx.file(
++            "krusty.bin",
++            "#!/bin/sh\necho 'KRUSTY_BINARY is unset' >&2\nexit 1\n",
++            executable = True,
++        )
++        enabled = False
++
++    rctx.file("defs.bzl", "KRUSTY_ENABLED = %s\n" % enabled)
++    rctx.file("BUILD.bazel", "exports_files([\"krusty.bin\"])\n")
++    return rctx.repo_metadata(reproducible = not enabled)
++
++krusty_compiler = repository_rule(
++    implementation = _krusty_compiler_impl,
++    environ = ["KRUSTY_BINARY"],
++    local = True,
++)
+diff --git a/build/jvm-rules/rules/common-attrs.bzl b/build/jvm-rules/rules/common-attrs.bzl
+index 317fedc286..90774d920b 100644
+--- a/build/jvm-rules/rules/common-attrs.bzl
++++ b/build/jvm-rules/rules/common-attrs.bzl
+@@ -119,6 +119,13 @@ common_attr = add_dicts(
+             default = "//:rules/impl/MemoryLauncher.java",
+             allow_single_file = True,
+         ),
++        # Present even when KRUSTY_BINARY is unset: the repository then holds a stub that the
++        # JPS path never executes.
++        "_krusty": attr.label(
++            default = Label("@krusty_compiler//:krusty.bin"),
++            allow_single_file = True,
++            cfg = "exec",
++        ),
+         "_reduced_classpath": attr.bool(default = False),
+         "_trace": attr.label(default = "//:trace"),
+     },
+diff --git a/build/jvm-rules/rules/impl/compile.bzl b/build/jvm-rules/rules/impl/compile.bzl
+index e68fed938c..730e9aba6e 100644
+--- a/build/jvm-rules/rules/impl/compile.bzl
++++ b/build/jvm-rules/rules/impl/compile.bzl
+@@ -24,6 +24,7 @@ load(
+ load("@rules_kotlin//kotlin/internal:opts.bzl", "JavacOptions")
+ load("//:rules/common-attrs.bzl", "add_dicts")
+ load("//:rules/impl/associates.bzl", "get_associates")
++load("@krusty_compiler//:defs.bzl", "KRUSTY_ENABLED")
+ load("//:rules/impl/builder-args.bzl", "init_builder_args")
+ load("//:rules/impl/compiler-plugins.bzl", "collect_compiler_plugins_for_export", "compiler_plugins_from", "exported_compiler_plugins_from")
+ load("//:rules/resource.bzl", "ResourceGroupInfo")
+@@ -234,30 +235,64 @@ def _run_jvm_builder(
+ 
+     java_runtime = ctx.attr._tool_java_runtime[java_common.JavaRuntimeInfo]
+ 
+-    ctx.actions.run(
+-        mnemonic = "JvmCompile",
+-        env = {
+-            "MALLOC_ARENA_MAX": "2",
+-            "FORCE_REBUILD": "1",  # increment manually in case of remote cache poisoning
+-        },
+-        inputs = depset(srcs.all_srcs + srcs.src_jars + all_resources, transitive = transitiveInputs),
+-        outputs = outputs,
+-        tools = [ctx.file._jvm_builder_launcher, ctx.file._jvm_builder],
+-        executable = java_runtime.java_executable_exec_path,
+-        execution_requirements = {
+-            "supports-workers": "1",
+-            "supports-multiplex-workers": "1",
+-            "supports-worker-cancellation": "1",
+-            "supports-path-mapping": "1",
+-            "supports-multiplex-sandboxing": "1",
+-        },
+-        arguments = ctx.attr._jvm_builder_jvm_flags[BuildSettingInfo].value + [
+-            ctx.file._jvm_builder_launcher.path,
+-            ctx.file._jvm_builder.path,
+-            args,
+-        ],
+-        progress_message = "compile %%{label} (kt: %d, java: %d)" % (len(srcs.kt), javaCount),
++    # Java sources, source jars, and build-supplied plugins stay on the JPS builder. krusty
++    # refuses those shapes, and a mixed target must still compile.
++    krusty_ready = (
++        KRUSTY_ENABLED and
++        javaCount == 0 and
++        len(srcs.src_jars) == 0 and
++        not plugins.stubs_phase and
++        not plugins.compile_phase.classpath
+     )
++    if krusty_ready:
++        # --cp already carries the module's kotlin-stdlib. The copied binary sits outside a
++        # checkout that can locate a Kotlin distribution, so the implicit lookup would fail
++        # the action before any source is read.
++        args.add("--kotlinc-arg", "-no-stdlib")
++        ctx.actions.run(
++            mnemonic = "KrustyCompile",
++            env = {
++                "JAVA_HOME": java_runtime.java_home,
++                "MALLOC_ARENA_MAX": "2",
++            },
++            inputs = depset(
++                srcs.all_srcs + all_resources,
++                transitive = transitiveInputs + [java_runtime.files],
++            ),
++            outputs = outputs,
++            executable = ctx.file._krusty,
++            execution_requirements = {
++                "supports-workers": "1",
++                "requires-worker-protocol": "json",
++            },
++            arguments = [args],
++            progress_message = "compile %%{label} with krusty (kt: %d)" % len(srcs.kt),
++        )
++    else:
++        ctx.actions.run(
++            mnemonic = "JvmCompile",
++            env = {
++                "MALLOC_ARENA_MAX": "2",
++                "FORCE_REBUILD": "1",  # increment manually in case of remote cache poisoning
++            },
++            inputs = depset(srcs.all_srcs + srcs.src_jars + all_resources, transitive = transitiveInputs),
++            outputs = outputs,
++            tools = [ctx.file._jvm_builder_launcher, ctx.file._jvm_builder],
++            executable = java_runtime.java_executable_exec_path,
++            execution_requirements = {
++                "supports-workers": "1",
++                "supports-multiplex-workers": "1",
++                "supports-worker-cancellation": "1",
++                "supports-path-mapping": "1",
++                "supports-multiplex-sandboxing": "1",
++            },
++            arguments = ctx.attr._jvm_builder_jvm_flags[BuildSettingInfo].value + [
++                ctx.file._jvm_builder_launcher.path,
++                ctx.file._jvm_builder.path,
++                args,
++            ],
++            progress_message = "compile %%{label} (kt: %d, java: %d)" % (len(srcs.kt), javaCount),
++        )
+ 
+     return struct(abi_jar = abi_jar, kotlin_cri_storage_file = kotlin_cri_storage_file)
+ 

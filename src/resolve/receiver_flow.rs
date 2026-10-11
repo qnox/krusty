@@ -95,6 +95,37 @@ impl Checker<'_> {
         }
     }
 
+    /// Commit a `this@label` read of `receiver` and return its narrowed flow type, if any. A proof
+    /// recorded on that receiver's tower coordinate (`this@f != null`, `this != null` on the same
+    /// receiver, or a contract that named the receiver its call selected) applies to the labeled
+    /// read exactly as it applies to a bare `this`; a proof about any other receiver does not.
+    pub(super) fn select_labeled_receiver(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        read: ExprId,
+        mut receiver: ImplicitReceiver,
+        innermost: bool,
+    ) -> Option<Ty> {
+        let path = NarrowPath::root_only(PathRoot::Receiver(receiver.identity));
+        let narrows = |narrowed: &Ty| *narrowed != receiver.declared_ty && *narrowed != Ty::Error;
+        let narrowed = self
+            .lookup_path_narrowing(scope, &path)
+            .filter(narrows)
+            .or_else(|| {
+                innermost
+                    .then(|| self.actual_this_narrow(scope))
+                    .flatten()
+                    .filter(narrows)
+            })
+            .or_else(|| Some(receiver.ty).filter(narrows));
+        if let Some(narrowed) = narrowed {
+            self.selected_value_smartcasts.insert(read, narrowed);
+            receiver.ty = narrowed;
+        }
+        self.mark_implicit_receiver_selection(read, receiver);
+        narrowed
+    }
+
     /// The path of the receiver `this` currently denotes.
     pub(super) fn current_receiver_path(&self, scope: &CheckerScope<'_>) -> Option<NarrowPath> {
         let receiver = self.declared_implicit_receivers(scope).into_iter().next()?;

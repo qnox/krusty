@@ -64,14 +64,15 @@ impl Checker<'_> {
 
     pub(super) fn lambda_overload_partially_applicable(
         &self,
+        scope: &CheckerScope<'_>,
         overload: &crate::libraries::FunctionInfo,
         receiver: Option<Ty>,
         args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        whole_array_varargs: &[bool],
+        argument_slots: (&[usize], &[bool]),
         type_args: &[Ty],
     ) -> bool {
         let (args, arg_tys) = args_and_partial;
+        let (argument_map, whole_array_varargs) = argument_slots;
         let semantic = overload.semantic_signature();
         if !type_args.is_empty() && semantic.formals.len() != type_args.len() {
             return false;
@@ -152,19 +153,24 @@ impl Checker<'_> {
                 .collect::<Vec<_>>();
             (params, bindings)
         });
+        let unbound_formals = generic
+            .as_ref()
+            .map(|(_, bindings)| {
+                semantic
+                    .formals
+                    .iter()
+                    .filter(|formal| !bindings.contains_key(*formal))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if generic.as_ref().is_some_and(|(_, bindings)| {
             // This is the pre-lambda applicability probe. A bound that still depends on an
             // unbound callable formal is completed by the postponed lambda result, so it cannot
             // eliminate this overload yet. Final selection validates the complete signature.
-            let unresolved = semantic
-                .formals
-                .iter()
-                .filter(|formal| !bindings.contains_key(*formal))
-                .cloned()
-                .collect::<Vec<_>>();
             let mut partial_signature = semantic.clone().into_owned();
             for bounds in &mut partial_signature.formal_bounds {
-                bounds.retain(|bound| !ty_mentions_param(*bound, &unresolved));
+                bounds.retain(|bound| !ty_mentions_param(*bound, &unbound_formals));
             }
             !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 &partial_signature,
@@ -196,7 +202,14 @@ impl Checker<'_> {
                             return true;
                         };
                         let Expr::Lambda { params, .. } = self.file.expr(argument_expr) else {
-                            return true;
+                            return self.postponed_callable_reference_fits(
+                                scope,
+                                argument_expr,
+                                expected,
+                                declared.is_some_and(|declared| {
+                                    ty_mentions_param(declared, &unbound_formals)
+                                }),
+                            );
                         };
                         let Some(expected) = expected else {
                             return false;
@@ -277,6 +290,52 @@ impl Checker<'_> {
                     }
                 }
             })
+    }
+
+    /// A postponed callable reference is candidate evidence once the candidate supplies a concrete
+    /// function shape, exactly as in overload ranking: `replaceFirstChar` has `(Char) -> Char` and
+    /// `(Char) -> CharSequence` overloads, and `Char::uppercase` adapts only to the second. The same
+    /// applies to a receiver-less overloaded reference such as `::shout`. Shaping the reference
+    /// under an overload it cannot fit types it against the wrong expectation and reports a
+    /// reference the selected overload resolves. Any other argument, or a shape that still mentions
+    /// a currently unbound callee formal, constrains nothing here. That fact is read from the
+    /// declared shape before substitution can erase the formal to its upper bound.
+    fn postponed_callable_reference_fits(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        expected: Option<Ty>,
+        declared_has_unbound_formal: bool,
+    ) -> bool {
+        let Expr::CallableRef { receiver, name } = self.file.expr(argument) else {
+            return true;
+        };
+        if declared_has_unbound_formal {
+            return true;
+        }
+        let Some(expected) =
+            expected.map(|expected| self.declared_function_semantic_type(expected))
+        else {
+            return true;
+        };
+        let Ty::Fun(expected_function) = expected.non_null() else {
+            return true;
+        };
+        if expected.mentions_ty_param() {
+            return true;
+        }
+        receiver.map_or_else(
+            || self.callable_reference_adapts_to(scope, argument, expected),
+            |receiver| {
+                self.receiver_qualified_callable_reference_adapts_to(
+                    scope,
+                    receiver,
+                    name,
+                    expected_function,
+                )
+                .unwrap_or(true)
+            },
+        )
     }
 
     pub(super) fn lambda_shape_for_overload(
@@ -859,11 +918,11 @@ impl Checker<'_> {
         }
         let whole_arrays = named_whole_array_varargs(&argument_map, arg_names, &o.call_sig);
         let partially_applicable = self.lambda_overload_partially_applicable(
+            lexical_scope,
             o,
             None,
             (args, arg_tys),
-            &argument_map,
-            &whole_arrays,
+            (&argument_map, &whole_arrays),
             type_args,
         );
         crate::trace_compiler!(
@@ -958,11 +1017,14 @@ impl Checker<'_> {
                 .map(|parameter| shape.parameter_indices[parameter])
                 .collect::<Vec<_>>();
             let partial = self.lambda_overload_partially_applicable(
+                scope,
                 o,
                 Some(binding_receiver),
                 (args, arg_tys),
-                &argument_map,
-                &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
+                (
+                    &argument_map,
+                    &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
+                ),
                 type_args,
             );
             if !partial {

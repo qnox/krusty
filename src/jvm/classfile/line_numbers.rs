@@ -48,15 +48,19 @@ impl ClassWriter {
         {
             return;
         }
-        let (needs_lnt, needs_lvt) = match self
+        let (needs_lnt, needs_lvt, suppress_entry_line) = match self
             .methods
             .iter()
             .find(|method| method.name == n && method.desc == d)
         {
-            Some(method) => (method.lnt.is_empty(), method.lvt.is_empty()),
+            Some(method) => (
+                method.lnt.is_empty(),
+                method.lvt.is_empty(),
+                method.suppress_entry_line,
+            ),
             None => return,
         };
-        if !needs_lnt {
+        if !needs_lnt && !suppress_entry_line {
             if let Some((0, line)) = lnt {
                 if let Some(method) = self
                     .methods
@@ -195,6 +199,22 @@ impl CodeBuilder {
         let _ = self.record_line(line);
     }
 
+    /// Record a source line at a control-flow entry even when the same line was in effect on the
+    /// preceding linear path. Exception handlers start a distinct execution path, and kotlinc
+    /// retains their entry in the line table rather than deduplicating it against unreachable
+    /// fall-through state.
+    pub(crate) fn mark_control_entry_line(&mut self, line: u32) {
+        if self.dead || self.bytes.len() > u16::MAX as usize {
+            return;
+        }
+        let line = line.min(u16::MAX as u32) as u16;
+        let pc = self.bytes.len() as u16;
+        match self.line_marks.last_mut() {
+            Some((last_pc, last_line)) if *last_pc == pc => *last_line = line,
+            _ => self.line_marks.push((pc, line)),
+        }
+    }
+
     /// [`Self::mark_line`], reporting the index of the entry left in effect AT THE CURRENT pc —
     /// `None` when this call wrote none there.
     ///
@@ -241,15 +261,17 @@ impl CodeBuilder {
                     .is_some_and(|(lpc, _)| *lpc == pc)
         });
         match self.line_marks.last() {
-            // Already exactly this entry.
-            Some((lpc, ll)) if *lpc == pc && *ll == line => Some(self.line_marks.len() - 1),
-            // A retained entry sits here: this mark goes AFTER it, so both survive. The retention
-            // is spent — a third mark at the same offset replaces this one as usual.
+            // A retained entry sits here: this mark goes AFTER it, so both survive, even when it
+            // names the same line. kotlinc's `visitSetValue` marks an unsigned value and the
+            // inlined operation marks that line again before the receiver load. The retention is
+            // spent — a third mark at the same offset replaces this one as usual.
             Some((lpc, _)) if *lpc == pc && retained => {
                 self.retained_line_mark = None;
                 self.line_marks.push((pc, line));
                 Some(self.line_marks.len() - 1)
             }
+            // Already exactly this entry.
+            Some((lpc, ll)) if *lpc == pc && *ll == line => Some(self.line_marks.len() - 1),
             Some((lpc, _)) if *lpc == pc => {
                 let last = self.line_marks.last_mut()?;
                 last.1 = line;
@@ -308,6 +330,41 @@ impl CodeBuilder {
         }
     }
 
+    /// Withdraw `line` when it was marked at the current offset and no instruction occupies it yet.
+    ///
+    /// Kotlin's unsigned binary members begin their source position between a plain receiver and a
+    /// literal argument, so that eager boundary does not own the receiver load. A mark at an earlier
+    /// offset stays: a call such as `toUInt()` has already written its own line there, and a
+    /// zero-initializer on the same line is not the literal's to take.
+    pub(crate) fn withdraw_operand_line(&mut self, line: u32) {
+        let line = line.min(u16::MAX as u32) as u16;
+        let pc = self.bytes.len();
+        if self
+            .line_marks
+            .last()
+            .is_some_and(|&(marked_pc, marked)| marked == line && marked_pc as usize == pc)
+        {
+            let removed = self.line_marks.len() - 1;
+            self.suppress_entry_line |= self.line_marks[removed].0 == 0;
+            self.line_marks.pop();
+            if self.retained_line_mark == Some(removed) {
+                self.retained_line_mark = None;
+            }
+        }
+    }
+
+    /// The line in effect was marked on a trailing `nop`.
+    ///
+    /// A following store on that same line keeps this mark: cleanup removes the `nop` and the
+    /// entry lands on the store. Marking the store again would leave the `nop` as the only
+    /// instruction of its line, which the cleanup then keeps.
+    pub(crate) fn line_marked_on_trailing_nop(&self) -> bool {
+        let Some(&(pc, _)) = self.line_marks.last() else {
+            return false;
+        };
+        self.bytes.len() == usize::from(pc) + 1 && self.bytes.last() == Some(&0)
+    }
+
     /// Forget which line is in effect, so the next mark is written even for the same line: kotlinc
     /// resets its last line number after an inlined call (`markLineNumberAfterInlineIfNeeded`),
     /// whose code ran under the callee's lines rather than the caller's.
@@ -325,7 +382,16 @@ impl CodeBuilder {
         let pc = self.bytes.len() as u16;
         if self.line_marks.last() != Some(&(pc, line)) {
             self.line_marks.push((pc, line));
+            self.inlined_line_marks.push((pc, line));
         }
+    }
+
+    /// Line marks whose provenance is an inlined body or its caller-line restoration.
+    pub(crate) fn inlined_line_marks(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.inlined_line_marks
+            .iter()
+            .copied()
+            .filter(|mark| self.line_marks.contains(mark))
     }
 
     /// Whether the line in effect was forgotten after an inlined body ([`Self::forget_line`]), so
@@ -544,6 +610,16 @@ mod tests {
         code.inlined_line(6);
         code.inlined_line(6);
         assert_eq!(code.line_marks(), [(0, 6), (1, 6)]);
+    }
+
+    /// The same line retained and marked again both stay. An unsigned assignment
+    /// `r = r or (cur and mask)` records that line twice at the receiver load.
+    #[test]
+    fn a_retained_mark_keeps_a_second_entry_of_the_same_line() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line_retained(8);
+        code.mark_line(8);
+        assert_eq!(code.line_marks(), [(0, 8), (0, 8)]);
     }
 
     /// A retained entry is spent by the mark that appends after it: a third at the same offset

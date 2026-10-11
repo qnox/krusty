@@ -1,4 +1,5 @@
 use crate::backend::{Artifact, Backend};
+use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 
 #[derive(Default)]
@@ -12,6 +13,10 @@ impl JsBackend {
 
 impl Backend for JsBackend {
     type State = ();
+
+    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+        CompilationTarget::Js
+    }
 
     fn lower_ir_file(
         &self,
@@ -46,11 +51,13 @@ pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy
     crate::backend::counted_loops::CountedLoopPolicy {
         style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
         inlining: crate::backend::counted_loops::HeaderInlining::None,
+        until_steps: crate::backend::counted_loops::UntilSteps::Built,
     };
 
 #[cfg(test)]
 mod tests {
     use crate::backend::Artifact;
+    use crate::compilation_target::CompilationTarget;
     use crate::diag::DiagSink;
     use crate::libraries::EmptySymbolSource;
     use crate::source::SourceInput;
@@ -71,7 +78,10 @@ mod tests {
         }
         let analysis = crate::frontend::analyze_source_set_streaming_with_features(
             &inputs,
-            Box::new(EmptySymbolSource),
+            crate::frontend::PlatformProvider::new(
+                CompilationTarget::Js,
+                Box::new(EmptySymbolSource),
+            ),
             &features,
             &mut diags,
         );
@@ -204,8 +214,8 @@ fun box(): String {\n\
         // What this test is about: a call whose receiver and arguments are spilled into
         // temporaries is a checked BLOCK expression, and emitting one as a VALUE needs the
         // block-expression path rather than the statement one. `box()`'s named arguments, written
-        // out of order, are that shape.
-        assert!(source.contains("return v0.g(v2, v1);"), "{source}");
+        // out of order, are that shape; the constant `a = 1` is passed in place.
+        assert!(source.contains("return v0.g(1, v1);"), "{source}");
         assert!(!source.contains("cannot emit Block"), "{source}");
         // A member `tailrec` whose self-call dispatches on `this` is the same frame and steps
         // (docs/SPEC.md, "What `tailrec` loops is a FRAME"). The step sits in a branch of the

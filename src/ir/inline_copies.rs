@@ -14,11 +14,17 @@ use std::collections::{HashMap, HashSet};
 use super::{ExprId, IrFile};
 use crate::types::{Ty, TypeName};
 
-/// Source identity for code copied from a same-file inline declaration. Common IR retains the
-/// semantic owner and call line; a target formats the physical source-map path and line range.
-#[derive(Clone, Copy, Debug)]
+/// Source identity for code copied from a same-module inline declaration. Common IR retains the
+/// exact callable identity, semantic owner, the callee's source file, and the call line; a target
+/// formats the physical source-map path and line range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IrInlineCopyProvenance {
+    /// Exact common-IR declaration whose body was copied. A backend uses this identity to obtain
+    /// an already-resolved physical realization; it must not reconstruct one from source names.
+    pub(crate) function: super::FunId,
     pub(crate) owner: Option<TypeName>,
+    /// The source file that declares the inline function.
+    pub(crate) source: crate::fir::SourceFileId,
     pub(crate) call_line: Option<u32>,
 }
 
@@ -26,11 +32,15 @@ pub(crate) struct IrInlineCopyProvenance {
 pub(super) struct InlineExpansions {
     copies: HashSet<ExprId>,
     unread_operands: HashSet<ExprId>,
-    provenance: HashMap<ExprId, IrInlineCopyProvenance>,
-    /// The semantic type declared for a materialized inline parameter, before call-site
-    /// specialization. A backend uses this only for declaration-owned debug representation; the
-    /// declaration expression and its physical slot keep the call-site-specialized type.
-    declared_operand_types: HashMap<ExprId, Ty>,
+    /// Innermost-to-outermost source frames. A same-module body can already contain an inline
+    /// expansion when it is copied into another call; retaining only its first frame loses the
+    /// containing call and prevents a backend from mapping that nested source boundary.
+    provenance: HashMap<ExprId, Vec<IrInlineCopyProvenance>>,
+    /// The semantic type of a materialized inline declaration before call-site specialization.
+    /// Operands, unnamed generic temporaries, and result frames keep this provenance while their
+    /// expressions carry the specialized semantic type. A backend may use the declaration type
+    /// for physical storage and debug representation.
+    declared_inline_types: HashMap<ExprId, Ty>,
     /// Discarded copied `Unit` values whose source closing line must remain physically anchored.
     /// Other copied `Unit` nodes carry source-map provenance without inventing an instruction.
     retained_unit_lines: HashSet<ExprId>,
@@ -42,15 +52,25 @@ impl IrFile {
         self.inline_expansions.copies.insert(copy);
     }
 
-    /// Record the declaration owner whose source body `copy` came from. An already-provenanced
-    /// nested inline copy keeps its inner declaration rather than being relabelled as the outer.
-    pub(crate) fn record_inline_copy_owner(&mut self, copy: ExprId, owner: Option<TypeName>) {
+    /// Record the declaration identity, owner, and source file whose body `copy` came from. An
+    /// already-provenanced nested copy keeps its inner frames and appends this containing
+    /// expansion.
+    pub(crate) fn record_inline_copy_owner(
+        &mut self,
+        copy: ExprId,
+        function: super::FunId,
+        owner: Option<TypeName>,
+        source: crate::fir::SourceFileId,
+    ) {
         self.mark_inline_copy(copy);
         self.inline_expansions
             .provenance
             .entry(copy)
-            .or_insert(IrInlineCopyProvenance {
+            .or_default()
+            .push(IrInlineCopyProvenance {
+                function,
                 owner,
+                source,
                 call_line: None,
             });
     }
@@ -60,7 +80,12 @@ impl IrFile {
         if line == 0 {
             return;
         }
-        if let Some(provenance) = self.inline_expansions.provenance.get_mut(&copy) {
+        if let Some(provenance) = self
+            .inline_expansions
+            .provenance
+            .get_mut(&copy)
+            .and_then(|frames| frames.last_mut())
+        {
             provenance.call_line.get_or_insert(line);
         }
     }
@@ -68,8 +93,11 @@ impl IrFile {
     pub(crate) fn inline_copy_provenance(
         &self,
         expression: ExprId,
-    ) -> Option<IrInlineCopyProvenance> {
-        self.inline_expansions.provenance.get(&expression).copied()
+    ) -> Option<&[IrInlineCopyProvenance]> {
+        self.inline_expansions
+            .provenance
+            .get(&expression)
+            .map(Vec::as_slice)
     }
 
     /// `expression` now holds code the call site supplied rather than the inline body's.
@@ -87,14 +115,14 @@ impl IrFile {
         if self.is_inline_copy(source) {
             self.mark_inline_copy(target);
         }
-        if let Some(provenance) = self.inline_copy_provenance(source) {
+        if let Some(provenance) = self.inline_copy_provenance(source).map(<[_]>::to_vec) {
             self.inline_expansions.provenance.insert(target, provenance);
         }
         if self.is_unread_inline_operand(source) {
             self.mark_unread_inline_operand(target);
         }
-        if let Some(ty) = self.inline_operand_declared_type(source) {
-            self.record_inline_operand_declared_type(target, ty);
+        if let Some(ty) = self.inline_declared_type(source) {
+            self.record_inline_declared_type(target, ty);
         }
         if self.retains_inline_unit_line(source) {
             self.retain_inline_unit_line(target);
@@ -114,28 +142,34 @@ impl IrFile {
         self.inline_expansions.unread_operands.contains(&operand)
     }
 
-    pub(crate) fn record_inline_operand_declared_type(&mut self, declaration: ExprId, ty: Ty) {
+    pub(crate) fn record_inline_declared_type(&mut self, declaration: ExprId, ty: Ty) {
         self.inline_expansions
-            .declared_operand_types
+            .declared_inline_types
             .insert(declaration, ty);
     }
 
-    pub(crate) fn inline_operand_declared_type(&self, declaration: ExprId) -> Option<Ty> {
+    pub(crate) fn inline_declared_type(&self, declaration: ExprId) -> Option<Ty> {
         self.inline_expansions
-            .declared_operand_types
+            .declared_inline_types
             .get(&declaration)
             .copied()
     }
 
-    pub(crate) fn inline_operand_declared_types(&self) -> impl Iterator<Item = Ty> + '_ {
+    pub(crate) fn inline_declared_types(&self) -> impl Iterator<Item = Ty> + '_ {
         self.inline_expansions
-            .declared_operand_types
+            .declared_inline_types
             .values()
             .copied()
     }
 
-    pub(crate) fn inline_operand_declared_types_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
-        self.inline_expansions.declared_operand_types.values_mut()
+    pub(crate) fn inline_declared_types_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
+        self.inline_expansions.declared_inline_types.values_mut()
+    }
+
+    pub(crate) fn inline_declared_type_mut(&mut self, declaration: ExprId) -> Option<&mut Ty> {
+        self.inline_expansions
+            .declared_inline_types
+            .get_mut(&declaration)
     }
 
     pub(crate) fn retain_inline_unit_line(&mut self, expression: ExprId) {
@@ -155,8 +189,10 @@ impl IrFile {
         names: &std::collections::HashMap<TypeName, TypeName>,
     ) {
         for provenance in self.inline_expansions.provenance.values_mut() {
-            if let Some(owner) = &mut provenance.owner {
-                *owner = names.get(owner).copied().unwrap_or(*owner);
+            for frame in provenance {
+                if let Some(owner) = &mut frame.owner {
+                    *owner = names.get(owner).copied().unwrap_or(*owner);
+                }
             }
         }
     }

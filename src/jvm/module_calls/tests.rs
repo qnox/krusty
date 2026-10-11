@@ -43,6 +43,7 @@ fn a_dependency_super_call_requires_its_frozen_identity() {
             &mut ir,
             &CheckedBackendCallables::default(),
             &mut PropertyRealizations::default(),
+            crate::jvm::ir_emit::JvmDefaultMode::default(),
         ),
         Err(ModuleRealizationTarget::DependencyCallable(target))
     );
@@ -70,8 +71,9 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
     let realization = ExternalCallableRealization {
         callable: declaration,
         kind: ExternalCallableKind::Member,
-        declaration_package: None,
+        declaration_owner: None,
         parameter_identities: Box::new([]),
+        declaration_signature: None,
     };
     let mut facts = CheckedBackendCallables::default();
     facts
@@ -80,8 +82,13 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
         })
         .expect("the selected super declaration has a frozen fact");
 
-    realize_super_calls(&mut ir, &facts, &mut PropertyRealizations::default())
-        .expect("the frozen holder realizes the super call");
+    realize_super_calls(
+        &mut ir,
+        &facts,
+        &mut PropertyRealizations::default(),
+        crate::jvm::ir_emit::JvmDefaultMode::default(),
+    )
+    .expect("the frozen holder realizes the super call");
     let IrExpr::Call {
         callee:
             Callee::Static {

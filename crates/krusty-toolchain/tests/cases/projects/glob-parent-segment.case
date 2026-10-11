@@ -1,0 +1,5 @@
+A glob with a `..` segment.
+--- project.yaml
+modules: ["libs/x/../*"]
+--- libs/a/module.yaml
+product: jvm/lib

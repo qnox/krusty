@@ -19,11 +19,91 @@ use super::call_constraints::{GenericBoundViolation, InferredCallBindings};
 use super::{GenericSig, Ty};
 use std::collections::HashMap;
 
+/// The identity translation shared by every constraint phase of one call. Declaration formals
+/// that are also visible in the caller receive call-owned identities; all other formals retain
+/// their declaration identity.
+#[derive(Clone, Default)]
+pub(crate) struct CallSiteVariableMap {
+    call_owned: HashMap<&'static str, &'static str>,
+    declared: HashMap<&'static str, &'static str>,
+}
+
+impl CallSiteVariableMap {
+    fn from_call_owned(
+        formals: &[String],
+        mut call_owned_identity: impl FnMut(&'static str) -> Option<&'static str>,
+    ) -> Self {
+        let call_owned = formals
+            .iter()
+            .filter_map(|formal| {
+                let declared = crate::types::intern(formal);
+                call_owned_identity(declared).map(|call_owned| (declared, call_owned))
+            })
+            .collect::<HashMap<_, _>>();
+        let declared = call_owned
+            .iter()
+            .map(|(&declared, &call_owned)| (call_owned, declared))
+            .collect();
+        Self {
+            call_owned,
+            declared,
+        }
+    }
+
+    pub(crate) fn new(formals: &[String], lexically_visible: impl Fn(&str) -> bool) -> Self {
+        Self::from_call_owned(formals, |declared| {
+            lexically_visible(declared).then(|| crate::types::call_site_type_variable(declared))
+        })
+    }
+
+    /// Give every still-open formal an identity owned by one postponed call expression. Repeated
+    /// construction for different lambda arguments of that call returns the same identities;
+    /// a nested call to the same declaration receives different ones.
+    pub(crate) fn for_postponed_call(
+        formals: &[String],
+        compilation: u64,
+        file: u32,
+        expression: u32,
+    ) -> Self {
+        Self::from_call_owned(formals, |declared| {
+            Some(crate::types::postponed_call_type_variable(
+                compilation,
+                file,
+                expression,
+                declared,
+            ))
+        })
+    }
+
+    pub(crate) fn is_identity(&self) -> bool {
+        self.call_owned.is_empty()
+    }
+
+    pub(crate) fn instantiate_type(&self, ty: Ty) -> Ty {
+        crate::types::ty_rename_params(ty, &self.call_owned)
+    }
+
+    pub(crate) fn declared_type(&self, ty: Ty) -> Ty {
+        crate::types::ty_rename_params(ty, &self.declared)
+    }
+
+    pub(crate) fn instantiate_formal(&self, formal: &str) -> String {
+        self.call_owned
+            .get(formal)
+            .map_or_else(|| formal.to_string(), |identity| (*identity).to_string())
+    }
+
+    pub(crate) fn declared_formal(&self, formal: &str) -> String {
+        self.declared
+            .get(formal)
+            .map_or_else(|| formal.to_string(), |identity| (*identity).to_string())
+    }
+}
+
 /// A generic signature whose lexically visible formals were renamed for one call.
 pub(crate) struct CallSiteVariables {
     signature: GenericSig,
-    /// Call-owned identity -> declaration-owned identity.
-    declared: HashMap<&'static str, &'static str>,
+    variables: CallSiteVariableMap,
 }
 
 impl CallSiteVariables {
@@ -34,28 +114,16 @@ impl CallSiteVariables {
         signature: &GenericSig,
         lexically_visible: impl Fn(&str) -> bool,
     ) -> Option<Self> {
-        let fresh = signature
-            .formals
-            .iter()
-            .filter(|formal| lexically_visible(formal))
-            .map(|formal| {
-                let declared = crate::types::intern(formal);
-                (declared, crate::types::call_site_type_variable(declared))
-            })
-            .collect::<HashMap<&str, &'static str>>();
-        if fresh.is_empty() {
+        let variables = CallSiteVariableMap::new(&signature.formals, lexically_visible);
+        if variables.is_identity() {
             return None;
         }
-        let rename = |ty: Ty| crate::types::ty_rename_params(ty, &fresh);
+        let rename = |ty: Ty| variables.instantiate_type(ty);
         let renamed = GenericSig {
             formals: signature
                 .formals
                 .iter()
-                .map(|formal| {
-                    fresh
-                        .get(formal.as_str())
-                        .map_or_else(|| formal.clone(), |identity| (*identity).to_string())
-                })
+                .map(|formal| variables.instantiate_formal(formal))
                 .collect(),
             formal_bounds: signature
                 .formal_bounds
@@ -67,13 +135,9 @@ impl CallSiteVariables {
             ret: rename(signature.ret),
             return_policy: signature.return_policy,
         };
-        let declared = fresh
-            .into_iter()
-            .map(|(declared, fresh)| (fresh, crate::types::intern(declared)))
-            .collect();
         Some(Self {
             signature: renamed,
-            declared,
+            variables,
         })
     }
 
@@ -97,12 +161,8 @@ impl CallSiteVariables {
 
     /// Express a solution for [`Self::signature`] over the declaration's own formals.
     pub(crate) fn declared_bindings(&self, inferred: InferredCallBindings) -> InferredCallBindings {
-        let ty = |ty: Ty| crate::types::ty_rename_params(ty, &self.declared);
-        let formal = |formal: String| {
-            self.declared
-                .get(formal.as_str())
-                .map_or(formal, |declared| (*declared).to_string())
-        };
+        let ty = |ty: Ty| self.variables.declared_type(ty);
+        let formal = |formal: String| self.variables.declared_formal(&formal);
         InferredCallBindings {
             bindings: inferred
                 .bindings

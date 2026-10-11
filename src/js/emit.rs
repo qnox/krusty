@@ -1147,6 +1147,7 @@ mod tests {
         IrClass {
             fq_name: name.into(),
             is_source_declared: true,
+            is_compiler_generated: false,
             is_anonymous_object: false,
             enclosure: None,
             is_inner_class: false,
@@ -1187,7 +1188,7 @@ mod tests {
             super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
             is_enum: false,
             enum_entries: Vec::new(),
-            enum_entry_of: None,
+            is_enum_entry: false,
             prop_ref: None,
             func_ref: None,
             lambda: None,

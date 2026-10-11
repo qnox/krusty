@@ -55,6 +55,12 @@ pub(super) enum StaticAccessor {
     /// `access$set<X>$p(<owner>, value)` that writes the backing field, including when the
     /// property declares a setter.
     FieldSetter { class: u32, property: u32 },
+    /// `access$get<Companion>$p()` (or `…$p$s<hash>()` on a class other than `holder`), reading
+    /// `holder`'s `Companion` field that holds singleton `companion`.
+    CompanionInstance {
+        companion: TypeName,
+        holder: TypeName,
+    },
 }
 
 /// Every static owner's accessors, in first-use order.
@@ -62,12 +68,39 @@ pub(super) enum StaticAccessor {
 pub(super) struct StaticAccessorPlan {
     by_owner: HashMap<StaticOwner, Vec<StaticAccessor>>,
     protected: Vec<ProtectedMemberAccessBridge>,
+    /// The field each planned companion accessor reads, by (holder, companion), as the holder's
+    /// classifier record declares it.
+    companion_fields: HashMap<(TypeName, TypeName), Box<str>>,
+    /// Inline functions whose private reads and calls are published through accessors.
+    exporting_private_access: HashSet<u32>,
 }
 
 impl StaticAccessorPlan {
     fn accessors_of(&self, owner: StaticOwner) -> &[StaticAccessor] {
         self.by_owner.get(&owner).map_or(&[], Vec::as_slice)
     }
+
+    /// Whether `owner` declares `accessor`, so a use site may call it.
+    pub(super) fn declares(&self, owner: StaticOwner, accessor: StaticAccessor) -> bool {
+        self.accessors_of(owner).contains(&accessor)
+    }
+
+    /// Whether emitting `function` must route private access through public accessors.
+    pub(super) fn exports_private_access(&self, function: u32) -> bool {
+        self.exporting_private_access.contains(&function)
+    }
+}
+
+/// A method the bytecode splicer copies must call public accessors for private callees and
+/// private properties. That is every non-private inline function, and every private inline
+/// function such a function expands.
+pub(super) fn method_exports_private_calls(
+    ir: &IrFile,
+    plan: &StaticAccessorPlan,
+    fid: u32,
+) -> bool {
+    (ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private())
+        || plan.exports_private_access(fid)
 }
 
 /// A JVM class whose code this file emits, with the IR roots of that code.
@@ -169,15 +202,99 @@ pub(super) fn routes_through_accessor(
         && ir.method_visibility(function).is_private()
 }
 
-/// Whether `root` is the body of a non-private `inline` function. Copies of that body run in
-/// other classes, so a private call inside it must already name the public accessor.
-pub(super) fn non_private_inline_body(ir: &IrFile, root: crate::ir::ExprId) -> bool {
-    ir.functions.iter().enumerate().any(|(index, function)| {
-        let function_id = index as u32;
-        function.body == Some(root)
-            && ir.inline_fns.contains(&function_id)
-            && !ir.method_visibility(function_id).is_private()
-    })
+/// Inline functions whose bodies are copied into a non-private `inline` function.
+///
+/// The seed is every non-private inline function, and every private inline function that
+/// publishes a `$default` stub. A private inline function also joins the set when one of those
+/// bodies calls it or contains a copy of it, directly or through other inline functions. The
+/// published bytecode of every function in the set calls `access$` for a private callee and
+/// `access$get<X>$p` / `access$set<X>$p` for a private property, including the private inline
+/// function's own method: the splicer copies that method, and it copies the non-private
+/// `$default` stub. A private inline function that is expanded only into non-inline callers,
+/// and that declares no default, stays out of the set and keeps direct access.
+pub(super) fn inline_functions_exporting_private_access(ir: &IrFile) -> HashSet<u32> {
+    let mut exporting = HashSet::new();
+    let mut stack = Vec::new();
+    for index in 0..ir.functions.len() {
+        let function = index as u32;
+        if ir.inline_fns.contains(&function)
+            && (!ir.method_visibility(function).is_private() || ir.has_param_defaults(function))
+        {
+            exporting.insert(function);
+            stack.push(function);
+        }
+    }
+    while let Some(function) = stack.pop() {
+        let Some(body) = ir.functions[function as usize].body else {
+            continue;
+        };
+        for callee in inline_template_dependencies(ir, body) {
+            if ir.inline_fns.contains(&callee) && exporting.insert(callee) {
+                stack.push(callee);
+            }
+        }
+    }
+    exporting
+}
+
+/// Whether `root` is the body of a function in `exporting`.
+pub(super) fn body_exports_private_access(
+    ir: &IrFile,
+    exporting: &HashSet<u32>,
+    root: crate::ir::ExprId,
+) -> bool {
+    ir.functions
+        .iter()
+        .enumerate()
+        .any(|(index, function)| function.body == Some(root) && exporting.contains(&(index as u32)))
+}
+
+/// Inline functions whose code `root` publishes: a direct call, or a same-module expansion
+/// whose copied expressions name the declaration.
+fn inline_template_dependencies(ir: &IrFile, root: crate::ir::ExprId) -> Vec<u32> {
+    let mut targets = Vec::new();
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = stack.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let Some(frames) = ir.inline_copy_provenance(expression) {
+            targets.extend(frames.iter().map(|frame| frame.function));
+        }
+        match ir.expr(expression) {
+            IrExpr::Call { callee, .. } => {
+                if let Some(function) = local_callee_function(callee) {
+                    targets.push(function);
+                }
+            }
+            IrExpr::MethodCall { class, index, .. } => {
+                if let Some(function) = ir
+                    .classes
+                    .get(*class as usize)
+                    .and_then(|class| class.methods.get(*index as usize))
+                    .copied()
+                {
+                    targets.push(function);
+                }
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
+    }
+    targets
+}
+
+fn local_callee_function(callee: &crate::ir::Callee) -> Option<u32> {
+    match callee {
+        crate::ir::Callee::Local(function)
+        | crate::ir::Callee::LocalDefault(function)
+        | crate::ir::Callee::LocalWithDefaults { function, .. }
+        | crate::ir::Callee::ClassStatic { function, .. }
+        | crate::ir::Callee::ClassStaticDefault { function, .. }
+        | crate::ir::Callee::ClassStaticWithDefaults { function, .. } => Some(*function),
+        _ => None,
+    }
 }
 
 /// A non-private `inline` function exports a same-owner private call. A lifted local function
@@ -219,10 +336,13 @@ pub(super) fn plan(
     contexts: &[EmissionContext],
     class_member_fids: &HashSet<u32>,
 ) -> StaticAccessorPlan {
+    let exporting_private_access = inline_functions_exporting_private_access(ir);
     let protected_calls = env.run.protected_member_access_bridges.borrow();
     let private_member_bridges = env.run.private_member_access_bridges.borrow();
     let walk = Walk {
         ir,
+        classifiers: env.signature_symbols,
+        companion_fields: RefCell::default(),
         class_member_fids,
         property_realizations: env.property_realizations,
         protected_calls: &protected_calls,
@@ -245,7 +365,7 @@ pub(super) fn plan(
                 root,
                 0,
                 &HashMap::new(),
-                non_private_inline_body(ir, root),
+                body_exports_private_access(ir, &exporting_private_access, root),
                 &mut uses,
             );
         }
@@ -291,7 +411,7 @@ pub(super) fn plan(
                         root,
                         0,
                         &carriers,
-                        non_private_inline_body(ir, root),
+                        body_exports_private_access(ir, &exporting_private_access, root),
                         &mut uses,
                     );
                 }
@@ -302,6 +422,8 @@ pub(super) fn plan(
     uses.sort_by_key(|found| found.line);
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
+        companion_fields: walk.companion_fields.into_inner(),
+        exporting_private_access,
         ..StaticAccessorPlan::default()
     };
     let mut seen = HashSet::new();
@@ -481,6 +603,9 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
 
 struct Walk<'a> {
     ir: &'a IrFile,
+    classifiers: &'a dyn crate::backend::BackendClassifierSource,
+    /// The field of each companion read routed through an accessor.
+    companion_fields: RefCell<HashMap<(TypeName, TypeName), Box<str>>>,
     class_member_fids: &'a HashSet<u32>,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     /// The protected member calls emitted outside the class that may make them, by call.
@@ -559,6 +684,26 @@ impl Walk<'_> {
                 uses.push(self.protected_use(line, bridge.clone()));
                 continue;
             }
+            if let Some(read) = super::companion_field::companion_field_read(
+                ir,
+                self.classifiers,
+                ir.expr(expression),
+            ) {
+                // A read with no access path is reported where the emitter meets it.
+                if let Ok(Some((owner, accessor))) =
+                    super::companion_field::companion_field_accessor(ir, context, &read)
+                {
+                    self.companion_fields
+                        .borrow_mut()
+                        .insert((read.holder, read.companion), read.field);
+                    uses.push(Use {
+                        line,
+                        owner: StaticOwner::Class(owner),
+                        accessor,
+                    });
+                }
+                continue;
+            }
             let Some((owner, accessor)) = self.target(expression) else {
                 continue;
             };
@@ -567,12 +712,17 @@ impl Walk<'_> {
                     routes_through_accessor(ir, self.helper_access, context == owner, function)
                         || inline_exports_private_call(ir, export_private, function)
                 }
+                StaticAccessor::MemberGetter { .. } | StaticAccessor::MemberSetter { .. } => {
+                    context != owner
+                }
+                // A private field read inside an inline template is copied into other classes,
+                // so the template calls the accessor even when this class owns the field.
                 StaticAccessor::Getter(_)
                 | StaticAccessor::Setter(_)
-                | StaticAccessor::MemberGetter { .. }
-                | StaticAccessor::MemberSetter { .. }
                 | StaticAccessor::FieldGetter { .. }
-                | StaticAccessor::FieldSetter { .. } => context != owner,
+                | StaticAccessor::FieldSetter { .. } => context != owner || export_private,
+                // Placed by `companion_field_accessor`, which already decided it is needed.
+                StaticAccessor::CompanionInstance { .. } => true,
                 StaticAccessor::Protected(_) => true,
             };
             if needed {
@@ -591,11 +741,16 @@ impl Walk<'_> {
             IrExpr::Call {
                 callee: Callee::Local(function),
                 ..
-            } if !self.class_member_fids.contains(function)
-                && self.helper_access.foreign_owner(*function).is_none() =>
-            {
-                Some((StaticOwner::Facade, StaticAccessor::Function(*function)))
-            }
+            } if self.helper_access.foreign_owner(*function).is_none() => self
+                .ir
+                .class_static_local_functions
+                .get(function)
+                .copied()
+                .map(StaticOwner::Class)
+                .or_else(|| {
+                    (!self.class_member_fids.contains(function)).then_some(StaticOwner::Facade)
+                })
+                .map(|owner| (owner, StaticAccessor::Function(*function))),
             IrExpr::Call {
                 callee: Callee::ClassStatic { owner, function },
                 ..
@@ -629,8 +784,17 @@ impl Walk<'_> {
         expression: crate::ir::ExprId,
         read: bool,
     ) -> Option<(StaticOwner, StaticAccessor)> {
+        // A backend pass that moved the read into a new slot keeps its stable operation identity,
+        // which is what the realization is recorded under: a suspend lambda's body is rebuilt
+        // into its class's `invokeSuspend`.
+        let operation = match self.ir.expr(expression) {
+            IrExpr::PropertyRead { operation, .. } | IrExpr::PropertyWrite { operation, .. } => {
+                operation.unwrap_or(expression)
+            }
+            _ => expression,
+        };
         let crate::jvm::property_realizations::PropertyRealization::Local(target) =
-            self.property_realizations.get(expression)?
+            self.property_realizations.get(operation)?
         else {
             return None;
         };
@@ -645,7 +809,9 @@ impl Walk<'_> {
         };
         let owner = &self.ir.classes[class as usize];
         let declared = owner.properties.get(property as usize)?;
-        if !declared.needs_access_bridge || declared.backing_field.is_none() {
+        // A same-class read still needs the accessor when an inline template is copied out.
+        // `collect` keeps it only for another class or such a template.
+        if declared.backing_field.is_none() {
             return None;
         }
         let accessor = match (read, declared.getter.is_some(), declared.setter.is_some()) {
@@ -691,6 +857,7 @@ impl Walk<'_> {
 /// owner's `public static final synthetic`.
 pub(super) fn emit(
     ir: &IrFile,
+    run: &EmitRun,
     plan: &StaticAccessorPlan,
     owner: StaticOwner,
     facade: &str,
@@ -699,6 +866,7 @@ pub(super) fn emit(
 ) {
     let accessor = Accessor {
         ir,
+        run,
         owner,
         facade,
         declaration_line,
@@ -725,6 +893,12 @@ pub(super) fn emit(
             StaticAccessor::FieldSetter { class, property } => {
                 accessor.field_setter(class, property, cw)
             }
+            StaticAccessor::CompanionInstance { companion, holder } => accessor.companion_instance(
+                companion,
+                holder,
+                &plan.companion_fields[&(holder, companion)],
+                cw,
+            ),
             StaticAccessor::Protected(index) => {
                 let bridge = &plan.protected[index as usize];
                 let owner = bridge.owner.render();
@@ -753,15 +927,17 @@ struct FieldAccessorShape {
 
 fn field_accessor_shape(
     ir: &IrFile,
+    run: &EmitRun,
     class: u32,
     property: u32,
     write: bool,
 ) -> Option<FieldAccessorShape> {
     let owner = ir.classes.get(class as usize)?;
     let property = owner.properties.get(property as usize)?;
-    let field = owner.fields.get(property.backing_field? as usize)?;
+    let field_index = property.backing_field? as usize;
+    let field = owner.fields.get(field_index)?;
     let internal = owner.fq_name.render();
-    let field_ty = jvm_declared_ty(&field.ty);
+    let field_ty = jvm_value_ty(&field.ty);
     let field_descriptor = type_descriptor(field_ty);
     let name = if write {
         member_property_accessor_name(&property_setter_name(&property.name), false)
@@ -777,7 +953,7 @@ fn field_accessor_shape(
         name,
         descriptor,
         internal,
-        field_name: instance_field_jvm_name(ir, owner, field),
+        field_name: instance_field_jvm_name(ir, run, owner, field_index),
         field_descriptor,
         field_ty,
         words: slot_words(field_ty),
@@ -785,11 +961,16 @@ fn field_accessor_shape(
 }
 
 /// The `invokestatic` of a private backing field's accessor, when `reader` is not the field's
-/// class. `None` keeps the direct `getfield` / `putfield`.
+/// class and [`StaticAccessorPlan`] published that accessor. `None` for `reader` asks for the
+/// accessor when the field is private: a class that is not the owner, and an inline template that
+/// must not name its own private field. A private field whose property has a getter stays a direct
+/// load unless the plan published `access$get<X>$p`.
 pub(super) fn cross_class_backing_field_method(
     cw: &mut ClassWriter,
     ir: &IrFile,
+    run: &EmitRun,
     facade: &str,
+    plan: &StaticAccessorPlan,
     reader: Option<StaticOwner>,
     class: u32,
     field: u32,
@@ -807,12 +988,21 @@ pub(super) fn cross_class_backing_field_method(
         .properties
         .iter()
         .position(|property| property.backing_field == Some(field))? as u32;
-    let access = field_accessor_shape(ir, class, property, write)?;
+    let owner = StaticOwner::Class(class_decl.fq_name);
+    let accessor = if write {
+        StaticAccessor::FieldSetter { class, property }
+    } else {
+        StaticAccessor::FieldGetter { class, property }
+    };
+    if !plan.declares(owner, accessor) {
+        return None;
+    }
+    let access = field_accessor_shape(ir, run, class, property, write)?;
     Some(static_methodref(
         cw,
         ir,
         facade,
-        StaticOwner::Class(class_decl.fq_name),
+        owner,
         &access.name,
         &access.descriptor,
     ))
@@ -821,6 +1011,7 @@ pub(super) fn cross_class_backing_field_method(
 /// The accessors one static owner declares.
 struct Accessor<'a> {
     ir: &'a IrFile,
+    run: &'a EmitRun,
     owner: StaticOwner,
     facade: &'a str,
     declaration_line: u32,
@@ -969,7 +1160,7 @@ impl Accessor<'_> {
         if self.emit_static_plain_field(class, property, false, cw) {
             return;
         }
-        let access = field_accessor_shape(self.ir, class, property, false)
+        let access = field_accessor_shape(self.ir, self.run, class, property, false)
             .expect("a planned field getter must retain its backing field");
         let mut code = CodeBuilder::new(1);
         code.mark_line(self.declaration_line);
@@ -998,7 +1189,7 @@ impl Accessor<'_> {
         if self.emit_static_plain_field(class, property, true, cw) {
             return;
         }
-        let access = field_accessor_shape(self.ir, class, property, true)
+        let access = field_accessor_shape(self.ir, self.run, class, property, true)
             .expect("a planned field setter must retain its backing field");
         let mut code = CodeBuilder::new(1 + access.words);
         code.mark_line(self.declaration_line);
@@ -1051,10 +1242,17 @@ impl Accessor<'_> {
             .expect("a bridged member property has a backing field")
             as usize];
         let internal = owner.fq_name.render();
-        let field_ty = jvm_declared_ty(&field.ty);
+        let field_ty = jvm_value_ty(&field.ty);
         let field_descriptor = type_descriptor(field_ty);
         let ty = declared_property_accessor_jvm(ir, property, field);
-        let physical = instance_field_jvm_name(ir, owner, field);
+        let physical = instance_field_jvm_name(
+            ir,
+            self.run,
+            owner,
+            property
+                .backing_field
+                .expect("a bridged member property has a backing field") as usize,
+        );
         if write {
             let name = format!("access${}$p", property_setter_name(&property.name));
             let descriptor = format!("({})V", type_descriptor(ty));
@@ -1107,6 +1305,34 @@ impl Accessor<'_> {
         cw.add_method(self.flags, &name, &descriptor, &code);
     }
 
+    /// `access$get<Companion>$p`: read `holder`'s `Companion` field.
+    fn companion_instance(
+        &self,
+        companion: TypeName,
+        holder: TypeName,
+        field: &str,
+        cw: &mut ClassWriter,
+    ) {
+        let StaticOwner::Class(owner) = self.owner else {
+            unreachable!("a companion field accessor is declared by a class");
+        };
+        let (name, descriptor) =
+            super::companion_field::companion_instance_accessor(owner, holder, companion, field);
+        reserve_signature(cw, &name, &descriptor);
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(self.declaration_line);
+        let field = cw.fieldref(
+            &holder.render(),
+            field,
+            &format!("L{};", companion.render()),
+        );
+        code.getstatic(field, 1);
+        code.areturn();
+        code.ensure_locals(0);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+    }
+
     fn setter(&self, index: u32, cw: &mut ClassWriter) {
         let property = &self.ir.statics[index as usize];
         let ty = jvm_declared_ty(&property.ty);
@@ -1142,6 +1368,8 @@ impl Accessor<'_> {
     fn function(&self, function: u32, cw: &mut ClassWriter) {
         let ir = self.ir;
         let target = &ir.functions[function as usize];
+        let suspend = ir.suspend_funs.contains(&function);
+        let line = self.declaration_line;
         let parameters = jvm_function_params(ir, function);
         let result = jvm_declared_ty(&target.ret);
         let descriptor = method_descriptor(&parameters, result);
@@ -1154,6 +1382,9 @@ impl Accessor<'_> {
         reserve_signature(cw, &name, &descriptor);
         let words: u16 = parameters.iter().map(|ty| slot_words(*ty)).sum();
         let mut code = CodeBuilder::new(words);
+        if suspend && line != 0 {
+            code.mark_line(line);
+        }
         let mut slot = 0u16;
         let mut locals = Vec::new();
         let names = crate::jvm::parameter_names::function_locals(ir, function, &parameters);
@@ -1167,8 +1398,12 @@ impl Accessor<'_> {
             }
             slot += slot_words(ty);
         }
-        // kotlinc maps the forwarding call, after its operands are loaded.
-        code.mark_line(self.declaration_line);
+        // An ordinary accessor maps the forwarding call after its operands are loaded. Coroutine
+        // lowering maps a suspend accessor's whole generated body to its generated owner's
+        // declaration line (the file facade for a lifted local), not the target's source line.
+        if !suspend && line != 0 {
+            code.mark_line(line);
+        }
         let method = static_methodref(cw, ir, self.facade, self.owner, &target.name, &descriptor);
         code.invokestatic(method, words as i32, slot_words(result) as i32);
         emit_return(result, &mut code);

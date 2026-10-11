@@ -17,6 +17,9 @@
 //!   tables, then the frames' classes, every entry after the entries it names. That includes an
 //!   entry something kotlinc visits after the method also names, such as `@Metadata`: the
 //!   rewritten code interned it first;
+//! - the entries a coroutine transformation interned for the class ahead of its body (a suspend
+//!   lambda's spill fields and `@DebugMetadata`) lead that method's entries: kotlinc's
+//!   transformer visits them as it writes the method, before the body's code;
 //! - an entry a rewritten method interned for code its rewrite removed, and that code emitted
 //!   as it was names later, is placed where that code first names it: ASM interns it there;
 //! - every other entry keeps its relative place.
@@ -40,6 +43,9 @@ pub(super) struct RelaidMethod {
     /// The indices interned while the method was emitted and added: those past the previous
     /// method's.
     pub(super) added: Range<u16>,
+    /// The indices its coroutine transformation named for the class ahead of its body, in the
+    /// order it named them.
+    pub(super) leading: Vec<u16>,
     /// The indices its rewrite interned when the class was written.
     pub(super) interned: Range<u16>,
 }
@@ -134,7 +140,7 @@ impl<'a> Layout<'a> {
             reach(read, slot.index, &mut kept);
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
-                Holder::Class | Holder::AttributeName => None,
+                Holder::Class | Holder::AttributeName | Holder::CodeAttribute(_) => None,
             };
             match rewritten {
                 Some((at, part)) => {
@@ -150,14 +156,35 @@ impl<'a> Layout<'a> {
         // the entry the code interned.
         let mut visited = vec![false; count];
         let mut visited_first = vec![false; count];
-        for slot in read.visit_order() {
+        // Where in kotlinc's visit order each entry is first named, and each method's code begins.
+        let mut first_named = vec![usize::MAX; count];
+        let code_starts = method_code_starts(read);
+        for (position, slot) in read.visit_order().enumerate() {
             let rewritten = matches!(
                 slot.holder,
                 Holder::Code(method, _) if by_method.contains_key(&method)
             );
             for index in reached_from(read, slot.index) {
-                if !std::mem::replace(&mut visited[index], true) && !rewritten {
-                    visited_first[index] = true;
+                if !std::mem::replace(&mut visited[index], true) {
+                    first_named[index] = position;
+                    if !rewritten {
+                        visited_first[index] = true;
+                    }
+                }
+            }
+        }
+        // A transformation's leading entry moves ahead of its method's code unless kotlinc's writer
+        // interns it earlier, for a holder it visits before that code.
+        let mut leading = vec![false; count];
+        for method in relaid {
+            let code_start = code_starts
+                .get(&method.index)
+                .copied()
+                .unwrap_or(usize::MAX);
+            for &index in &method.leading {
+                let at = usize::from(index);
+                if at < count && first_named[at] >= code_start {
+                    leading[at] = true;
                 }
             }
         }
@@ -167,9 +194,9 @@ impl<'a> Layout<'a> {
             }
         }
         let orphaned: Vec<bool> = (0..count)
-            .map(|index| owned[index] && kept[index] && !rewritten_reach[index])
+            .map(|index| owned[index] && kept[index] && !rewritten_reach[index] && !leading[index])
             .collect();
-        let anchored = orphan_anchors(read, &by_method, &orphaned);
+        let anchored = orphan_anchors(read, relaid, &by_method, &orphaned);
         if unnamed == Unnamed::Kept {
             let unowned: Vec<u16> = (1..count)
                 .filter(|&index| read.entries[index].is_some() && !owned[index])
@@ -180,7 +207,7 @@ impl<'a> Layout<'a> {
             }
         }
         let movable: Vec<bool> = (0..count)
-            .map(|index| kept[index] && !fixed[index] && owned[index])
+            .map(|index| kept[index] && (leading[index] || !fixed[index] && owned[index]))
             .collect();
         let sequences = relaid
             .iter()
@@ -191,9 +218,14 @@ impl<'a> Layout<'a> {
                     .clone()
                     .map(usize::from)
                     .find(|&index| movable.get(index).copied().unwrap_or(false));
+                let leading = method
+                    .leading
+                    .iter()
+                    .copied()
+                    .filter(|&index| leading.get(usize::from(index)).copied().unwrap_or(false));
                 (
                     first.unwrap_or(usize::from(method.added.end)),
-                    parts.concat(),
+                    leading.chain(parts.concat()).collect(),
                 )
             })
             .collect();
@@ -266,7 +298,7 @@ impl<'a> Layout<'a> {
         }
         placed[at] = true;
         if let Some(entry) = &self.read.entries[at] {
-            for &(_, component) in &entry.components {
+            for component in entry.named() {
                 self.place(component, placed, order);
             }
         }
@@ -274,13 +306,39 @@ impl<'a> Layout<'a> {
     }
 }
 
+/// Where each method's code begins in kotlinc's visit order.
+///
+/// A body operand is that boundary. An empty body has none, so its `Code` attribute name stands in.
+/// The attribute name of a method that does have a body sits before the method's own attributes, and
+/// treating it as the boundary moves a parameter annotation — interned ahead of the body — to the
+/// attribute's name.
+fn method_code_starts(read: &ClassSlots) -> HashMap<usize, usize> {
+    let mut body = HashMap::new();
+    let mut attribute = HashMap::new();
+    for (position, slot) in read.visit_order().enumerate() {
+        match slot.holder {
+            Holder::Code(method, _) => {
+                body.entry(method).or_insert(position);
+            }
+            Holder::CodeAttribute(method) => {
+                attribute.entry(method).or_insert(position);
+            }
+            Holder::Class | Holder::AttributeName => {}
+        }
+    }
+    for (method, position) in attribute {
+        body.entry(method).or_insert(position);
+    }
+    body
+}
+
 /// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
-/// code no longer names, first named (in kotlinc's visit order) by the code of a method emitted
-/// as it was, is placed before the first entry that code names for the first time with or after
-/// it, or right after the last entry that method names when none follows. An entry some other
-/// slot names first stays where it is.
+/// code no longer names, first named (in kotlinc's visit order) by later code, a later header, or
+/// a class attribute, is placed before the first entry that visit names for the first time with or
+/// after it, or right after the last entry that visit names when none follows.
 fn orphan_anchors(
     read: &ClassSlots,
+    relaid: &[RelaidMethod],
     by_method: &HashMap<usize, usize>,
     orphaned: &[bool],
 ) -> Vec<Option<usize>> {
@@ -290,6 +348,15 @@ fn orphan_anchors(
         return anchored;
     }
     let mut seen = vec![false; count];
+    let mut owner = vec![None; count];
+    for method in relaid {
+        for index in method.added.clone().chain(method.interned.clone()) {
+            if let Some(entry_owner) = owner.get_mut(usize::from(index)) {
+                *entry_owner = Some(method.index);
+            }
+        }
+    }
+    let code_starts = method_code_starts(read);
     let mut method = None;
     // The last entry the current method names: its header, then its code.
     let mut named_max = 0;
@@ -303,14 +370,30 @@ fn orphan_anchors(
             }
         }
     };
-    for slot in read.visit_order() {
+    for (position, slot) in read.visit_order().enumerate() {
         let code = match slot.holder {
             Holder::Code(at, _) if !by_method.contains_key(&at) => Some(at),
             _ => None,
         };
         let reached = reached_from(read, slot.index);
         let Some(at) = code else {
+            // A rewrite-owned entry whose first remaining use comes after that method's code is
+            // interned at that later visit, not at the position of the removed instruction. This
+            // includes an `InnerClasses` row retaining a holder class that CapturedVars removed.
             for &index in &reached {
+                if orphaned[index]
+                    && !seen[index]
+                    && owner[index]
+                        .and_then(|method| code_starts.get(&method).copied())
+                        .is_some_and(|code_start| position > code_start)
+                {
+                    pending.push(index);
+                } else if !seen[index] && !orphaned[index] {
+                    // `reached` follows ASM's component interning order. Settle at the next
+                    // freshly interned component, not the numerically smallest old pool index:
+                    // an orphaned descriptor in a later NameAndType belongs after its fresh name.
+                    settle(&mut pending, index, &mut anchored);
+                }
                 seen[index] = true;
                 if !orphaned[index] && slot.holder == Holder::Class {
                     header_max = header_max.max(index);
@@ -327,20 +410,12 @@ fn orphan_anchors(
             named_max = header_max;
         }
         header_max = 0;
-        for &index in &reached {
+        for index in reached {
             if orphaned[index] && !seen[index] {
                 pending.push(index);
+            } else if !seen[index] && !orphaned[index] {
+                settle(&mut pending, index, &mut anchored);
             }
-        }
-        let fresh = reached
-            .iter()
-            .copied()
-            .filter(|&index| !seen[index] && !orphaned[index])
-            .min();
-        if let Some(fresh) = fresh {
-            settle(&mut pending, fresh, &mut anchored);
-        }
-        for index in reached {
             seen[index] = true;
             if !orphaned[index] {
                 named_max = named_max.max(index);
@@ -354,17 +429,21 @@ fn orphan_anchors(
 /// `index` and every entry it names, each once.
 fn reached_from(read: &ClassSlots, index: u16) -> Vec<usize> {
     let mut reached = Vec::new();
-    let mut pending = vec![index];
-    while let Some(index) = pending.pop() {
+    let mut seen = vec![false; read.entries.len()];
+    fn visit(read: &ClassSlots, index: u16, seen: &mut [bool], reached: &mut Vec<usize>) {
         let at = usize::from(index);
-        if at >= read.entries.len() || reached.contains(&at) {
-            continue;
+        if seen.get(at).copied().unwrap_or(true) {
+            return;
+        }
+        seen[at] = true;
+        if let Some(entry) = &read.entries[at] {
+            for component in entry.named() {
+                visit(read, component, seen, reached);
+            }
         }
         reached.push(at);
-        if let Some(entry) = &read.entries[at] {
-            pending.extend(entry.components.iter().map(|&(_, component)| component));
-        }
     }
+    visit(read, index, &mut seen, &mut reached);
     reached
 }
 
@@ -387,7 +466,7 @@ fn reach(read: &ClassSlots, index: u16, reached: &mut [bool]) {
         }
         reached[at] = true;
         if let Some(entry) = &read.entries[at] {
-            pending.extend(entry.components.iter().map(|&(_, component)| component));
+            pending.extend(entry.named());
         }
     }
 }

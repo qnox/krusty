@@ -75,9 +75,22 @@ impl BodyLowering<'_> {
                 let parts = runs
                     .iter()
                     .map(|run| match run {
-                        super::constant_evaluation::TemplateRun::Constant(text) => {
-                            let text = lower_constant(text, Ty::String, origin)?;
-                            Ok((self.ir.add_expr(IrExpr::Const(text)), None))
+                        super::constant_evaluation::TemplateRun::Constant { value, source } => {
+                            let text = lower_constant(value, Ty::String, origin)?;
+                            let lowered = self.ir.add_expr(IrExpr::Const(text));
+                            // The folded literal is marked where its first constant was written.
+                            // A later constant absorbed into the same run does not open a line.
+                            let debug = self.body.expression_debug_lines(*source);
+                            if debug.positionless {
+                                self.ir.mark_positionless(lowered);
+                            }
+                            if debug.source != 0 {
+                                self.ir.expr_source_lines.insert(lowered, debug.source);
+                            }
+                            if debug.end != 0 {
+                                self.ir.expr_end_lines.insert(lowered, debug.end);
+                            }
+                            Ok((lowered, None))
                         }
                         super::constant_evaluation::TemplateRun::Part(part) => Ok((
                             self.expression_with_conversion(part.value, part.conversion)?,
@@ -109,20 +122,7 @@ impl BodyLowering<'_> {
             _ if folded.is_some() => {
                 let folded = folded.expect("guarded by the arm");
                 let constant = lower_constant(&folded.value, expression.ty.get(), origin)?;
-                let constant = self.ir.add_expr(IrExpr::Const(constant));
-                // A signed literal (`-3`) is still a literal to kotlinc's frontend, which parses
-                // it as one; only a value computed by an operation loses the literal's facts.
-                let signed_literal = matches!(
-                    &expression.kind,
-                    FirExprKind::Unary {
-                        operation: FirUnaryOperation::Negate | FirUnaryOperation::Identity,
-                        operand,
-                    } if matches!(self.body.expr(*operand).map(|operand| &operand.kind), Some(FirExprKind::Constant(_)))
-                );
-                if !signed_literal {
-                    self.ir.folded_constants.insert(constant);
-                }
-                constant
+                self.ir.add_expr(IrExpr::Const(constant))
             }
             FirExprKind::Constant(constant) => {
                 let constant = lower_constant(constant, expression.ty.get(), origin)?;
@@ -499,6 +499,9 @@ impl BodyLowering<'_> {
                             check: crate::ir::NullCheck::Source,
                         });
                         if operand_ty != target.get() {
+                            self.ir
+                                .logical_types
+                                .insert(asserted, operand_ty.non_null());
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: asserted,
@@ -622,11 +625,15 @@ impl BodyLowering<'_> {
                             crate::types::Ty::Double => IrConst::Double(delta.into()),
                             _ => IrConst::Int(delta.into()),
                         }));
-                        let updated = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::Add,
-                            lhs: operand,
-                            rhs: delta,
-                        });
+                        // The addition is the signed one Kotlin promotes the operand to, at the
+                        // carrier the delta above was built for; the coercion below narrows it
+                        // back to the operator's own result (`Char.inc(): Char`).
+                        let sum = match result.non_null() {
+                            Ty::Long | Ty::ULong => Ty::Long,
+                            sum @ (Ty::Float | Ty::Double) => sum,
+                            _ => Ty::Int,
+                        };
+                        let updated = self.ir.add_arithmetic(IrBinOp::Add, operand, delta, sum);
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: updated,
@@ -634,18 +641,22 @@ impl BodyLowering<'_> {
                         })
                     }
                     FirUnaryOperation::BitwiseNot => {
+                        // `inv` xors with every bit set in the carrier. `ULong` is that `long`
+                        // carrier, the same width `Long.inv` already uses.
+                        let carrier = expression.ty.get().canonical_semantic().non_null();
                         let all_bits = self.ir.add_expr(IrExpr::Const(
-                            if expression.ty.get().non_null() == crate::types::Ty::Long {
+                            if matches!(carrier, crate::types::Ty::Long | crate::types::Ty::ULong) {
                                 IrConst::Long(-1)
                             } else {
                                 IrConst::Int(-1)
                             },
                         ));
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: IrBinOp::BitXor,
-                            lhs: operand,
-                            rhs: all_bits,
-                        })
+                        self.ir.add_arithmetic(
+                            IrBinOp::BitXor,
+                            operand,
+                            all_bits,
+                            expression.ty.get(),
+                        )
                     }
                 }
             }
@@ -699,11 +710,14 @@ impl BodyLowering<'_> {
                     | FirBinaryOperation::ShiftRight
                     | FirBinaryOperation::UnsignedShiftRight => {
                         let rhs = self.expression(*rhs)?;
-                        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: lower_binary_operation(*operation),
-                            lhs,
-                            rhs,
-                        })
+                        let op = lower_binary_operation(*operation);
+                        if op.yields_boolean() {
+                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+                        } else {
+                            // The checked type of the operator call is the selected operator's
+                            // declared result: `Int.plus(Long): Long`, `Char.minus(Char): Int`.
+                            self.ir.add_arithmetic(op, lhs, rhs, expression.ty.get())
+                        }
                     }
                 }
             }
@@ -780,6 +794,7 @@ impl BodyLowering<'_> {
                 let comparison = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(is_null), fixed), (None, compared)],
                 });
+                self.ir.logical_types.insert(comparison, Ty::Boolean);
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(comparison),
@@ -864,6 +879,9 @@ impl BodyLowering<'_> {
                         (None, present_comparison),
                     ],
                 });
+                self.ir
+                    .logical_types
+                    .insert(lhs_present_result, Ty::Boolean);
                 let lhs_is_null = null_test(self, lhs_temporary);
                 let rhs_null_comparison = null_test(self, rhs_temporary);
                 let lhs_null_result = if *operation == FirBinaryOperation::Equal {
@@ -877,6 +895,7 @@ impl BodyLowering<'_> {
                         (None, lhs_present_result),
                     ],
                 });
+                self.ir.logical_types.insert(result, Ty::Boolean);
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![lhs_variable, rhs_variable],
                     value: Some(result),
@@ -1047,67 +1066,51 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::SafeCall { receiver, selector } => {
-                self.safe_call_expression(receiver, *selector, expression.ty.get(), None)?
+                self.safe_call_expression(receiver, *selector, expression.ty.get())?
             }
             FirExprKind::Elvis { lhs, rhs } => {
-                let target = expression.ty.get();
-                let fused_safe_call = self.body.expr(*lhs).and_then(|lhs| match &lhs.kind {
-                    FirExprKind::SafeCall { receiver, selector }
-                        if self.body.expr(*selector).is_some_and(|selector| {
-                            selector.ty.get() == target && !selector.ty.get().is_nullable()
-                        }) =>
-                    {
-                        Some((*receiver, *selector))
-                    }
-                    _ => None,
+                let lhs_value = self.expression(*lhs)?;
+                let temporary = self.allocate_temporary();
+                let variable = self.ir.add_expr(IrExpr::Variable {
+                    index: temporary,
+                    ty: self
+                        .body
+                        .expr(*lhs)
+                        .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
+                        .ty
+                        .get(),
+                    init: Some(lhs_value),
+                    named: false,
                 });
-                if let Some((receiver, selector)) = fused_safe_call {
-                    let rhs = self.expression(*rhs)?;
-                    let rhs = self.coerce_result(rhs, target);
-                    self.safe_call_expression(&receiver, selector, target, Some(rhs))?
-                } else {
-                    let lhs_value = self.expression(*lhs)?;
-                    let temporary = self.allocate_temporary();
-                    let variable = self.ir.add_expr(IrExpr::Variable {
-                        index: temporary,
-                        ty: self
-                            .body
-                            .expr(*lhs)
-                            .ok_or(FirLoweringFailure::MissingExpression(*lhs))?
-                            .ty
-                            .get(),
-                        init: Some(lhs_value),
-                        named: false,
-                    });
-                    let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                    let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::Eq,
-                        lhs: condition_lhs,
-                        rhs: null,
-                    });
-                    let rhs = self.expression(*rhs)?;
-                    let rhs = self.coerce_result(rhs, expression.ty.get());
-                    let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
-                    let lhs = self.coerce_result(lhs, expression.ty.get());
-                    let result = self.ir.add_expr(IrExpr::When {
-                        branches: vec![(Some(condition), rhs), (None, lhs)],
-                    });
-                    // An elvis over a safe call is one more guard of that call's chain: its left
-                    // value's null check joins the chain's, and every `null` reaches the right side.
-                    let over_safe_call = matches!(
-                        self.ir.expr(lhs_value),
-                        IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
-                    );
-                    if over_safe_call {
-                        self.ir.null_guards.insert(result);
-                        self.ir.elvis_safe_call_guards.insert(result);
-                    }
-                    self.ir.add_expr(IrExpr::Block {
-                        stmts: vec![variable],
-                        value: Some(result),
-                    })
+                let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Eq,
+                    lhs: condition_lhs,
+                    rhs: null,
+                });
+                let rhs = self.expression(*rhs)?;
+                let rhs = self.coerce_result(rhs, expression.ty.get());
+                let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
+                let lhs = self.coerce_result(lhs, expression.ty.get());
+                let result = self.ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(condition), rhs), (None, lhs)],
+                });
+                self.ir.logical_types.insert(result, expression.ty.get());
+                // An elvis over a safe call is one more guard of that call's chain: its left
+                // value's null check joins the chain's, and every `null` reaches the right side.
+                let over_safe_call = matches!(
+                    self.ir.expr(lhs_value),
+                    IrExpr::Block { value: Some(guard), .. } if self.ir.null_guards.contains(guard)
+                );
+                if over_safe_call {
+                    self.ir.null_guards.insert(result);
+                    self.ir.elvis_safe_call_guards.insert(result);
                 }
+                self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![variable],
+                    value: Some(result),
+                })
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
@@ -1144,6 +1147,7 @@ impl BodyLowering<'_> {
                 deeply_exhaustive,
             } => {
                 let condition = self.expression(*condition)?;
+                self.ir.mark_early_inline_result_adaptation(condition);
                 let then_branch =
                     self.expression_with_conversion(*then_branch, *then_conversion)?;
                 let else_branch =
@@ -1422,7 +1426,8 @@ impl BodyLowering<'_> {
                     expression.ty.get().non_null(),
                     crate::types::Ty::Fun(signature) if signature.suspend
                 );
-                let lambda = self.checked_lambda(*callable, body, suspend)?;
+                let unit_method = self.unit_method_lambda.take() == Some(expression_id);
+                let lambda = self.checked_lambda(*callable, body, suspend, unit_method)?;
                 self.record_generated_class_provenance(expression_id, lambda as usize);
                 // Every lambda keeps its place in the naming walk, whether or not a target writes
                 // a class for it: a spliced lambda's inline-depth marker is spelled after it.
@@ -1497,14 +1502,21 @@ impl BodyLowering<'_> {
         expression_id: crate::fir::FirExprId,
         first_generated: usize,
     ) {
+        // A receiver that is itself a reference (`create2(create("D")::test)::test`) is lowered
+        // first and already owns its node. This expression owns the reference that is still unnamed.
         let mut references = (first_generated..self.ir.exprs.len()).filter(|&raw| {
-            matches!(
-                self.ir.exprs[raw],
-                crate::ir::IrExpr::CallableReference(_)
-                    | crate::ir::IrExpr::Checked(
-                        crate::ir::IrCheckedOperation::PropertyReference { .. }
-                    )
-            )
+            let unnamed = !self
+                .ir
+                .callable_reference_provenance
+                .contains_key(&(raw as u32));
+            unnamed
+                && matches!(
+                    self.ir.exprs[raw],
+                    crate::ir::IrExpr::CallableReference(_)
+                        | crate::ir::IrExpr::Checked(
+                            crate::ir::IrCheckedOperation::PropertyReference { .. }
+                        )
+                )
         });
         let (Some(reference), None) = (references.next(), references.next()) else {
             return;
@@ -1586,13 +1598,54 @@ impl BodyLowering<'_> {
         expression: FirExprId,
         conversion: Option<FirConversion>,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let source_type = self
+        let checked = self
             .body
             .expr(expression)
-            .ok_or(FirLoweringFailure::MissingExpression(expression))?
-            .ty
-            .get();
+            .ok_or(FirLoweringFailure::MissingExpression(expression))?;
+        let source_type = checked.ty.get();
+        let origin = checked.origin;
         let value = expression;
+        if let Some(FirConversionKind::Sam(sam)) = conversion.map(|conversion| conversion.kind) {
+            let recorded = self.body.sam_conversion(sam);
+            let projected = recorded.is_some_and(|conversion| {
+                conversion
+                    .contravariant_parameters
+                    .iter()
+                    .any(|parameter| *parameter)
+            });
+            let unit_method = recorded.is_some_and(|conversion| {
+                !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit
+            });
+            let literal = self
+                .body
+                .expr(value)
+                .is_some_and(|operand| matches!(operand.kind, FirExprKind::Lambda { .. }));
+            // An `in`-projected SAM types the literal as a Kotlin function (`Unit` return) and
+            // adapts that value. A direct SAM implements the void method itself.
+            if unit_method && literal && !projected {
+                self.unit_method_lambda = Some(value);
+            }
+        }
+        if let Some(folded) = conversion
+            .and_then(|conversion| self.constants.fold_conversion(self.body, value, conversion))
+        {
+            let first_generated = self.ir.exprs.len();
+            let constant = lower_constant(&folded.value, folded.ty, origin)?;
+            let lowered = self.ir.add_expr(IrExpr::Const(constant));
+            self.ir.logical_types.insert(lowered, folded.ty);
+            let debug = self.body.expression_debug_lines(value);
+            if debug.positionless {
+                self.ir.mark_positionless(lowered);
+            }
+            if debug.source != 0 {
+                self.ir.expr_source_lines.insert(lowered, debug.source);
+            }
+            if debug.end != 0 {
+                self.ir.expr_end_lines.insert(lowered, debug.end);
+            }
+            self.record_expression_origins(first_generated, lowered, origin);
+            return Ok(lowered);
+        }
         let expression = self.expression(value)?;
         let converted = self.lowered_with_conversion(expression, source_type, conversion)?;
         if conversion.is_some_and(|conversion| {
@@ -1678,6 +1731,9 @@ impl BodyLowering<'_> {
                         check,
                     });
                     if source_type != to.get() {
+                        self.ir
+                            .logical_types
+                            .insert(asserted, source_type.non_null());
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: asserted,
@@ -1696,8 +1752,21 @@ impl BodyLowering<'_> {
                         origin: conversion.origin,
                     })?
                     .clone();
-                if let IrExpr::Lambda { impl_fn, sam, .. } = &mut self.ir.exprs[expression as usize]
+                let project_adapter = conversion
+                    .contravariant_parameters
+                    .iter()
+                    .any(|parameter| *parameter);
+                if !project_adapter
+                    && matches!(
+                        self.ir.exprs.get(expression as usize),
+                        Some(IrExpr::Lambda { .. })
+                    )
                 {
+                    let IrExpr::Lambda { impl_fn, sam, .. } =
+                        &mut self.ir.exprs[expression as usize]
+                    else {
+                        unreachable!("the operand was just matched as a lambda");
+                    };
                     let target = crate::ir::IrSamTarget {
                         classifier: conversion.classifier,
                         method: conversion.method.into(),
@@ -1705,6 +1774,7 @@ impl BodyLowering<'_> {
                             conversion.method_target,
                         ),
                         parameters: conversion.parameters.iter().map(|ty| ty.get()).collect(),
+                        contravariant_parameters: conversion.contravariant_parameters.to_vec(),
                         result: conversion.result.get(),
                         declared_parameters: conversion
                             .declared_parameters
@@ -1797,6 +1867,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::And);
+        self.ir.logical_types.insert(when, Ty::Boolean);
         when
     }
 
@@ -1808,6 +1879,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::Or);
+        self.ir.logical_types.insert(when, Ty::Boolean);
         when
     }
 
@@ -1816,10 +1888,12 @@ impl BodyLowering<'_> {
     /// that singleton and a statement-like Unit result are represented physically.
     fn unit_value_after_effect(&mut self, effect: ExprId) -> ExprId {
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
-        self.ir.add_expr(IrExpr::Block {
+        let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![effect],
             value: Some(unit),
-        })
+        });
+        self.ir.logical_types.insert(block, Ty::Unit);
+        block
     }
 
     fn call_argument_values(
@@ -1861,7 +1935,6 @@ impl BodyLowering<'_> {
         receiver: &FirReceiver,
         selector: FirExprId,
         result_type: Ty,
-        null_result: Option<ExprId>,
     ) -> Result<ExprId, FirLoweringFailure> {
         let receiver_value =
             self.expression_with_conversion(receiver.value, receiver.conversion)?;
@@ -1897,13 +1970,11 @@ impl BodyLowering<'_> {
         });
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);
-        let null_result = null_result.unwrap_or_else(|| {
-            if result_type == Ty::Unit {
-                self.ir.add_expr(IrExpr::UnitInstance)
-            } else {
-                self.ir.add_expr(IrExpr::Const(IrConst::Null))
-            }
-        });
+        let null_result = if result_type == Ty::Unit {
+            self.ir.add_expr(IrExpr::UnitInstance)
+        } else {
+            self.ir.add_expr(IrExpr::Const(IrConst::Null))
+        };
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
@@ -1911,6 +1982,7 @@ impl BodyLowering<'_> {
         // common-IR `when`; a backend may choose its physical representation but must not
         // reconstruct `Nothing`, nullability, or another result from the branch instructions.
         self.ir.whens.exhaustive.insert(guarded, result_type);
+        self.ir.logical_types.insert(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],

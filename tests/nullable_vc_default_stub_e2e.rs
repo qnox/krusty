@@ -37,7 +37,7 @@ const FUNCTION_SRC: &str = "@JvmInline value class N(val s: String?)\n\
     }\n";
 
 fn assert_same_method(method: &str) {
-    match common::method_code_diff_against_kotlinc("Main", &[], FUNCTION_SRC, "MainKt", method) {
+    match common::class_bytes_diff_against_kotlinc("Main", &[], FUNCTION_SRC, "MainKt", method) {
         Some(Ok(())) => {}
         Some(Err(diff)) => panic!("{diff}"),
         None => panic!("MainKt.{method}: reference toolchain unavailable"),
