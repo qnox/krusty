@@ -1943,6 +1943,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generic receiver signatures, parameter annotations, local-variable slots, `InnerClasses`, and
   synthetic Kotlin metadata.
 
+  A holder forward of the interface's own member spans that member's declaration, as kotlinc's
+  `InterfaceLowering` builds it with the member's offsets: the call is marked on the declaration's
+  start line (the `fun` line even when an expression body starts later; an accessor's header line)
+  and the return on the line the declaration ends on (a block body's `}`, an expression body's last
+  line, an accessor body's end), which codegen marks before the return of a body that does not end
+  in an explicit `return`. The parser records each body's end line beside its closing brace
+  (`FunBodyLines`, `AccessorLines::{getter_end, setter_end}`), and lowering publishes it as
+  `IrFile::fn_end_lines`. When a bodied suspend member splits, that declaration-owned end line
+  moves to the source trampoline; the body-owned close line stays on the `$suspendImpl` carrier.
+  A republished inherited member has no source here and keeps no line.
+  Test: `tests/default_impls_forward_lines_e2e.rs`.
+
   `enable` (krusty's default) emits the full measured compatibility surface: a `public static
   synthetic access$<name>$jd` bridge on the interface per non-private body (an `invokespecial` on
   the interface's own default method; `LineNumberTable` = one entry at the invoke pc on the

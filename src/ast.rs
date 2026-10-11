@@ -721,6 +721,17 @@ impl FdFlags {
     }
 }
 
+/// Where a function body ends, as 1-based source lines (0 = unknown).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FunBodyLines {
+    /// A BLOCK body's closing `}` — kotlinc maps a `Unit` function's implicit `return` to this line
+    /// in the `LineNumberTable`. 0 for an expression body.
+    pub close: u32,
+    /// The body's last line: a block's `}` or an expression body's last character — the line of
+    /// the declaration's end offset, which a generated forwarder of the declaration returns on.
+    pub end: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct FunDecl {
     pub name: String,
@@ -772,10 +783,8 @@ pub struct FunDecl {
     /// a `$default` stub's entry pc to this line, which differs from [`Self::decl_line`] exactly when
     /// an expression body starts on a later line than the signature. Filled by the same post-pass.
     pub sig_line: u32,
-    /// 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` function's implicit
-    /// `return` to this line in the `LineNumberTable`. 0 = unknown / expression body. Filled by the
-    /// same parser post-pass as `decl_line`.
-    pub body_close_line: u32,
+    /// The lines the body ENDS on. Filled by the same parser post-pass as `decl_line`.
+    pub body_lines: FunBodyLines,
     /// Bit-packed `is_inline`/`is_final`/`is_open`/`is_override`/`is_abstract`/`is_suspend`/`is_tailrec`/
     /// `is_operator`/`is_infix` (read via the accessors below).
     /// `is_final` — `final`, cannot be overridden. `is_open` — `open`/`override` without `final`, so the
@@ -1276,11 +1285,14 @@ pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
 }
 
-/// Where a property's accessors written with a body start, each a 1-based line (0 = none).
+/// Where a property's accessors written with a body start and end, each a 1-based line (0 = none).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AccessorLines {
     pub getter: u32,
     pub setter: u32,
+    /// The line each such accessor's body ends on, as [`FunBodyLines::end`].
+    pub getter_end: u32,
+    pub setter_end: u32,
 }
 
 /// A top-level `val`/`var` property: `val name: Type = init`.

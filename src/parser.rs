@@ -2635,7 +2635,7 @@ impl<'a> Parser<'a> {
             annotation_args,
             decl_line: 0,
             sig_line: 0,
-            body_close_line: 0,
+            body_lines: crate::ast::FunBodyLines::default(),
         }
     }
 
