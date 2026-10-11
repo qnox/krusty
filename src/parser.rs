@@ -3502,6 +3502,7 @@ impl<'a> Parser<'a> {
                     // Abstract interface property: `val`/`var x: T` (no initializer/getter).
                     TokenKind::KwVal | TokenKind::KwVar => {
                         let explicit_abstract = imods.iter().any(|m| m == "abstract");
+                        let override_span = declaration_modifiers::span(self, &imods, "override");
                         let mut p = self.parse_top_property_c(
                             false,
                             true,
@@ -3516,7 +3517,8 @@ impl<'a> Parser<'a> {
                         p.has_visibility_modifier = has_visibility_modifier(&imods);
                         p.is_open =
                             !imods.iter().any(|m| m == "final") && !p.visibility.is_private();
-                        p.is_override = imods.iter().any(|m| m == "override");
+                        p.is_override = override_span.is_some();
+                        p.override_span = override_span;
                         p.is_external |= imods.iter().any(|m| m == "external");
                         p.is_expect = imods.iter().any(|m| m == "expect");
                         p.is_actual = imods.iter().any(|m| m == "actual");

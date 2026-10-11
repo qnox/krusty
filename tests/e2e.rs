@@ -1592,6 +1592,8 @@ mod optional_expectation_annotation_e2e;
 mod outcome_lists_guard_e2e;
 #[path = "override_default_stub_e2e.rs"]
 mod override_default_stub_e2e;
+#[path = "override_formal_identity_e2e.rs"]
+mod override_formal_identity_e2e;
 #[path = "primitive_explicit_equals_e2e.rs"]
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]

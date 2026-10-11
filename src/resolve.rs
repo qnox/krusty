@@ -109,6 +109,7 @@ mod explicit_receiver_levels;
 use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
 mod expression_getter;
 mod extension_receiver_uses;
+mod final_property_overrides;
 mod finalized_projection;
 mod for_loop_iteration;
 mod function_exit;
@@ -50791,6 +50792,9 @@ impl<'a> Checker<'a> {
                             message,
                         );
                     }
+                }
+                if !self.signature_defaults_only || default_owned_class {
+                    self.check_final_property_overrides(&cl.body_props, &direct_supertypes);
                 }
             }
             // Parser-hoisted classifiers nested inside a local class are separate arena

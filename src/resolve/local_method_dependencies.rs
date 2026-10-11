@@ -325,8 +325,10 @@ impl Checker<'_> {
                     OverrideImplementation::Bound,
                 );
         }
+        // A visit whose active binding does not own this parser method cannot bind it; the
+        // Pass-2 visit of the declaring unit owns that binding and this diagnostic.
         let Some(declaration) = declaration else {
-            return OverrideImplementation::Absent;
+            return OverrideImplementation::Unbound;
         };
         if let Some(found) = declared
             .into_iter()

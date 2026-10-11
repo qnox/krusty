@@ -245,3 +245,40 @@ fn inherited_hidden_generic_signature_is_specialized() {
         Some("OK")
     );
 }
+
+/// HIDDEN keeps a declaration out of calls, not out of the implementation obligations of a
+/// subclass: kotlinc rejects a concrete class that omits a HIDDEN abstract member.
+#[test]
+fn hidden_abstract_member_must_be_implemented() {
+    let lib = "package lib\n\
+        abstract class Base {\n\
+        \x20   @Deprecated(\"hidden\", level = DeprecationLevel.HIDDEN)\n\
+        \x20   abstract fun gone(): Int\n\
+        \x20   fun visible(): Int = 1\n\
+        }\n";
+    let lib = common::compile_lib("hidden-abstract", lib).expect("hidden abstract member library");
+    let consumer = "import lib.Base\n\
+        class Impl : Base()\n";
+    let result =
+        common::compiler_diagnostics(&[("Impl.kt", consumer)], &[lib, common::stdlib_jar()]);
+    // Both streams are pinned completely; krusty's obligation wording does not name the member yet.
+    let error = |message: &str| common::CompilerError {
+        file: "Impl.kt".to_string(),
+        line: 2,
+        column: 1,
+        message: message.to_string(),
+    };
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [error(
+            "class 'Impl' is not abstract and does not implement all abstract members"
+        )]
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [error(
+            "class 'Impl' is not abstract and does not implement abstract base class member:"
+        )]
+    );
+}

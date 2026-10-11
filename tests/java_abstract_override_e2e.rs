@@ -187,12 +187,17 @@ fn an_unrelated_java_method_does_not_implement_a_kotlin_interface_member() {
     );
 }
 
+/// kotlinc 2.4.20 reports both the unimplemented `from(String!)` and the `from(Int)` override that
+/// matches nothing, offering `from(p0: String!)` as the potential signature.
 #[test]
 fn an_override_with_another_parameter_type_does_not_implement_the_java_method() {
     let main = "class Wrong : J3() { override fun from(r: Int): String = \"x\" }\n";
     assert_eq!(
         java_diagnostics(&[("J3.java", FROM)], main),
-        ["class 'Wrong' is not abstract and does not implement all abstract members"]
+        [
+            "class 'Wrong' is not abstract and does not implement all abstract members",
+            "'from' overrides nothing. Potential signatures for overriding:",
+        ]
     );
 }
 

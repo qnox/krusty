@@ -11,6 +11,7 @@ impl Parser<'_> {
         allow_missing_initializer: bool,
         is_abstract: bool,
     ) -> PropDecl {
+        let override_span = declaration_modifiers::span(self, modifiers, "override");
         let mut property = self.parse_top_property_c(
             modifiers.iter().any(|modifier| modifier == "lateinit"),
             allow_missing_initializer,
@@ -25,7 +26,8 @@ impl Parser<'_> {
             && modifiers
                 .iter()
                 .any(|modifier| modifier == "open" || modifier == "override");
-        property.is_override = modifiers.iter().any(|modifier| modifier == "override");
+        property.is_override = override_span.is_some();
+        property.override_span = override_span;
         property.is_external |= modifiers.iter().any(|modifier| modifier == "external");
         property.is_expect = modifiers.iter().any(|modifier| modifier == "expect");
         property.is_actual = modifiers.iter().any(|modifier| modifier == "actual");
@@ -293,6 +295,7 @@ impl Parser<'_> {
             is_companion_extension: false,
             is_companion_block_member: false,
             is_override: false,
+            override_span: None,
             is_lateinit,
             is_external: accessor_external,
             is_expect: false,

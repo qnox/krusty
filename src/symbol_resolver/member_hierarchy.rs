@@ -38,8 +38,13 @@ pub(crate) fn override_parameter_types_match(
             .zip(implementation.iter().copied())
             .all(|(inherited, implementation)| {
                 let inherited = crate::types::ty_canonicalize_params(inherited, inherited_formals);
-                let implementation =
-                    crate::types::ty_canonicalize_params(implementation, implementation_formals);
+                // kotlinc substitutes the implementation's own formals by the inherited ones. A
+                // declaration nested in the inherited function's body can name that function's
+                // formal itself, which then occupies the inherited slot.
+                let implementation = crate::types::ty_canonicalize_params(
+                    crate::types::ty_canonicalize_params(implementation, implementation_formals),
+                    inherited_formals,
+                );
                 inherited == implementation
                     || resolution_subtype(source, inherited, implementation)
                         && resolution_subtype(source, implementation, inherited)

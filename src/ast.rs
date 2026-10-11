@@ -1332,6 +1332,8 @@ pub struct PropDecl {
     /// The declaration wrote `final`.
     pub is_final: bool,
     pub is_override: bool,
+    /// Span of the `override` modifier; present exactly when [`Self::is_override`] is.
+    pub override_span: Option<Span>,
     /// No initializer was written for `None`. This is valid syntax for abstract, expect, external,
     /// lateinit, deferred, and accessor-defined properties; semantic validation decides whether the
     /// declaration context permits the omission.
