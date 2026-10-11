@@ -407,3 +407,25 @@ fn a_non_private_secondary_constructors_ledger_matches_kotlinc() {
         "spelled out, so a reference change is visible here"
     );
 }
+
+/// A trailing comma after the last entry, then the `;` on its own line, then a secondary
+/// constructor whose parameters start on the next line (kotlin's `LanguageFeature`). The `;` ends
+/// the entry list even after the comma, so `constructor(` is a member and not an entry named
+/// `constructor` whose arguments fail to parse at `: Int`.
+#[test]
+fn the_separator_after_a_trailing_comma_ends_the_entry_list() {
+    common::expect_box_same_as_kotlinc(
+        "enum class Flag(val since: Int?, val issue: String) {\n\
+         \x20   A(since = 1, issue = \"K\"),\n\
+         \x20   B(2),\n\
+         \x20   ;\n\
+         \n\
+         \x20   constructor(\n\
+         \x20       since: Int?\n\
+         \x20   ) : this(since, issue = \"OK\")\n\
+         }\n\
+         \n\
+         fun box(): String = if (Flag.A.issue == \"K\") Flag.B.issue else \"FAIL\"\n",
+        "EnumTrailingCommaSeparator",
+    );
+}
