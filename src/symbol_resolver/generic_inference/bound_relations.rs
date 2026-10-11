@@ -12,6 +12,19 @@ use super::{
 };
 use crate::types::Ty;
 
+/// The type an unsolved `formal` stands for before its call-site evidence arrives: its declared
+/// `bound` under `bindings`. A recursive bound (`R : Comparable<R>`) names the formal itself; that
+/// occurrence is approximated to a star projection (`Comparable<*>`), as kotlinc approximates a
+/// variable's self-referential bound, so the stand-in never contains the formal it replaces.
+pub(crate) fn unsolved_formal_bound(bound: Ty, formal: &str, bindings: &GSigBinds) -> Ty {
+    let mut own = bindings.clone();
+    own.insert(
+        formal.to_string(),
+        Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
+    );
+    ty_subst(bound, &own)
+}
+
 /// Materialize a type argument that is observable only through a bound which another inferred
 /// formal has made concrete. In `<T : KFunction<E>, E : Any> f(A<E>)`, the argument fixes `E`; `T`
 /// has no independent input/result occurrence, so its unique solution is the now-concrete bound
