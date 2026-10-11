@@ -259,7 +259,11 @@ modification time of its `lib/modules` image, so retargeting or upgrading a JDK 
 still recompiles. Set `KRUSTY_SECOND_JAVA_HOME` to a JDK of another feature release to make
 `a_changed_producing_jdk_misses_the_reference_cache_across_processes` also check the cross-JDK miss.
 Recording each of those compiles into the archive as well rewrote the whole archive per store and
-pushed a cold scored run past its deadline.
+pushed a cold scored run past its deadline. In CI each JVM conformance row restores that directory
+from its base commit's GHA cache (`box-reference-classes-<version>-…`), and master saves it under
+its own commit, so a pull request pays kotlinc only for cases whose inputs it changed. The key also
+hashes `tests/box_reference_classes.rs`, so a change to the cache key or layout starts a fresh
+cache rather than carrying unreachable entries forward.
 
 A live kotlinc invocation writes one line straight to the test process's stderr (libtest's capture
 does not hide it), and a passing replay writes nothing:

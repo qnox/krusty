@@ -270,6 +270,9 @@ klib-semantics VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     root="$(just kotlin-native "{{VERSION}}")"
+    # Build both test binaries in one Cargo invocation, so the e2e crate and the library's unit-test
+    # crate compile side by side; the focused runs below then find them fresh and only execute.
+    cargo test --profile gate --no-run --test e2e --lib
     # KLIB semantics read the Native distribution only, never the box or CLI corpus.
     KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KOTLIN_NATIVE=1 \
       KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
