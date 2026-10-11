@@ -76,6 +76,7 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
     // (`build-<hash>`). The member is now `build-<hash>$<module>`, so the bridge's target has
     // to move with it. A property reference is the same kind of stored spelling (`getX`).
     retarget_renamed_bridges(ir, &old_names);
+    retarget_property_bridges(ir, &old_names, &synthesized, &suffix);
     rewrite_property_references(ir, &old_names, &synthesized, &suffix);
     suffix_override_bridges(ir, &old_names, &synthesized, &suffix);
     apply_synthesized_accessors(ir, &synthesized, &suffix);
@@ -106,6 +107,74 @@ fn retarget_renamed_bridges(ir: &mut IrFile, old_names: &HashMap<FunId, String>)
                 .unwrap_or(bridge.name.as_str());
             if current == old {
                 bridge.target_name = new_names.get(&function).cloned();
+            }
+        }
+    }
+}
+
+/// Point a property-accessor bridge at the suffixed accessor of the property it implements.
+///
+/// Such a bridge records its implementation as a property and an accessor role, not as a function:
+/// the accessor may be one the emitter synthesizes from the property. When that accessor gained
+/// `$<module>`, the bridge has to call the suffixed name (kotlinc's `getV$lib` calls `getV$main`).
+fn retarget_property_bridges(
+    ir: &mut IrFile,
+    old_names: &HashMap<FunId, String>,
+    synthesized: &[SynthesizedAccessor],
+    suffix: &str,
+) {
+    let renamed = |ir: &IrFile, implementation: crate::ir::BridgePropertyImplementation| {
+        let setter = implementation.accessor == crate::ir::BridgeAccessorRole::Setter;
+        let function = match ir.local_property_layouts.get(&implementation.property) {
+            Some(IrLocalPropertyLayout::Member {
+                getter,
+                setter: set,
+                ..
+            }) => {
+                if setter {
+                    *set
+                } else {
+                    *getter
+                }
+            }
+            _ => None,
+        };
+        if let Some(function) = function.filter(|function| old_names.contains_key(function)) {
+            return Some((
+                old_names[&function].clone(),
+                ir.functions[function as usize].name.clone(),
+            ));
+        }
+        let accessor = synthesized
+            .iter()
+            .find(|accessor| accessor.property == implementation.property)?;
+        let old = if setter {
+            accessor.setter.clone()
+        } else {
+            accessor.getter.clone()
+        }?;
+        let new = format!("{old}{suffix}");
+        Some((old, new))
+    };
+    for class in 0..ir.classes.len() {
+        for bridge in 0..ir.classes[class].bridges.len() {
+            let current = &ir.classes[class].bridges[bridge];
+            let Some(implementation) = current
+                .property_implementation
+                .filter(|_| current.target_function.is_none())
+            else {
+                continue;
+            };
+            let Some((old, new)) = renamed(ir, implementation) else {
+                continue;
+            };
+            let current = &mut ir.classes[class].bridges[bridge];
+            let target = current
+                .target_name
+                .as_deref()
+                .unwrap_or(current.name.as_str());
+            if target == old {
+                current.target_name = Some(new);
             }
         }
     }
