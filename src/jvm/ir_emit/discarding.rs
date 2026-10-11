@@ -126,12 +126,16 @@ impl Emitter<'_> {
                 }
                 // A generic call's erased result is discarded as it is. Reading it as the
                 // substituted type (a `checkcast`, an unboxing) exists only for a consumer, and
-                // kotlinc pops the erased value.
+                // kotlinc pops the erased value. A realized dependency call (`ArrayList.set` on a
+                // subclass fixing `E`) carries the same boundary: its physical result is the
+                // declaration's erasure, recorded on the call the coercion reads.
                 IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
                     arg,
                     ..
-                } if self.ir.declaration_result_coercions.contains(&expression) => {
+                } if self.ir.declaration_result_coercions.contains(&expression)
+                    || self.is_realized_call_result(*arg) =>
+                {
                     if let Some(&erased) = self.ir.physical_types.get(arg) {
                         self.emit_value(*arg, code);
                         discard(super::ir_ty_to_jvm(&erased), code);
@@ -207,5 +211,14 @@ impl Emitter<'_> {
             },
             code,
         );
+    }
+
+    /// Whether `expression` is a call whose realization recorded the declaration's physical
+    /// result, so an implicit coercion over it is the declaration-result boundary.
+    fn is_realized_call_result(&self, expression: u32) -> bool {
+        matches!(
+            self.ir.expr(expression),
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+        ) && self.ir.physical_types.contains_key(&expression)
     }
 }

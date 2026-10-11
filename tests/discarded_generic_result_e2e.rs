@@ -1,6 +1,8 @@
 //! A generic call's erased result that is discarded is popped as it is, as kotlinc does: the
 //! `checkcast` or unboxing that reads it as the substituted type exists only for a consumer. A
-//! void function's `return <Unit expression>` discards its value the same way.
+//! void function's `return <Unit expression>` discards its value the same way. A dependency member
+//! reached through a subclass that fixes its type parameter (`ArrayList<String>.set`) leaves the same
+//! erased result and is discarded the same way.
 use super::common;
 
 #[test]
@@ -53,6 +55,46 @@ fn a_discarded_generic_result_still_runs_its_call() {
     let actual = common::compile_and_run_box(
         src,
         "discarded_generic_result",
+        &[common::stdlib_jar()],
+        Some(&common::jdk_modules()),
+    )
+    .expect("the source compiles and the JVM runner is provisioned");
+    assert_eq!(actual, "OK");
+}
+
+#[test]
+fn a_discarded_dependency_member_result_is_not_cast() {
+    let src = "class Names : java.util.ArrayList<String>()\n\
+               class Counts : java.util.HashMap<String, Int>()\n\
+               fun names(n: Names) { n.add(\"a\"); n.set(0, \"b\"); n.removeAt(0) }\n\
+               fun counts(c: Counts) { c.put(\"a\", 1); c.remove(\"a\"); c.get(\"a\") }\n\
+               fun map(m: HashMap<String, Long>) { m.put(\"a\", 1L); m[\"a\"] }\n\
+               fun list(l: java.util.ArrayList<String>) { l.set(0, \"b\"); l[0] }\n";
+    common::byte_diff_against_kotlinc_cp(
+        "DiscardedDependencyResult",
+        src,
+        "DiscardedDependencyResultKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("DiscardedDependencyResultKt differs from kotlinc:\n{diff}"));
+}
+
+#[test]
+fn a_discarded_dependency_member_result_still_runs_its_call() {
+    let src = "class Names : java.util.ArrayList<String>()\n\
+               fun box(): String {\n\
+               \x20   val n = Names()\n\
+               \x20   n.add(\"a\")\n\
+               \x20   n.set(0, \"OK\")\n\
+               \x20   val m = HashMap<String, Int>()\n\
+               \x20   m.put(\"k\", 1)\n\
+               \x20   m.remove(\"k\")\n\
+               \x20   return if (m.isEmpty()) n[0] else \"fail\"\n\
+               }\n";
+    let actual = common::compile_and_run_box(
+        src,
+        "discarded_dependency_result",
         &[common::stdlib_jar()],
         Some(&common::jdk_modules()),
     )
