@@ -51,6 +51,10 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "ForbidUselessTypeArgumentsIn25",
         "type arguments are not allowed when static member is accessed.",
     );
+    file.explicit_type_arguments_in_property_access_warning = features.deprecation_warning_message(
+        "ForbidUselessTypeArgumentsIn25",
+        "object access cannot have explicit type arguments.",
+    );
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
@@ -76,12 +80,21 @@ mod tests {
             "type arguments are not allowed when static member is accessed. This will become an \
              error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
         );
+        let property_access_warning = Some(
+            "object access cannot have explicit type arguments. This will become an error in \
+             language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
+        );
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
         assert_eq!(
             old.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning
+        );
+        assert_eq!(
+            old.explicit_type_arguments_in_property_access_warning
+                .as_deref(),
+            property_access_warning
         );
         assert_eq!(
             patch.type_arguments_not_allowed_warning.as_deref(),
@@ -107,6 +120,12 @@ mod tests {
         assert_eq!(
             current.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning
+        );
+        assert_eq!(
+            current
+                .explicit_type_arguments_in_property_access_warning
+                .as_deref(),
+            property_access_warning
         );
     }
 }

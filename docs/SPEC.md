@@ -13624,6 +13624,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       `PropertyInfo::companion_associated` and `FunctionInfo::associated_classifier`) never accepted
       the arguments and is always the error. An object or companion member reached through the
       singleton value is not a static access. (`tests/static_access_type_arguments_e2e.rs`.)
+    - Object access (`FirStandaloneQualifierChecker`): an object qualifier written with type
+      arguments and used as a value (`val u = Unit<Any>`, `val p by MyUnitT<Any>`) reports "object
+      access cannot have explicit type arguments." on its list. The parser keeps a `<…>` list that
+      ends a postfix expression (before a newline, `)`, `]`, `}`, `,`, `==`, `!=`, or the end of
+      file) as type arguments on the qualifier and marks it in
+      `File::standalone_type_argument_qualifiers`. kotlinc accepted the `Unit` object itself and a
+      typealias whose expansion is an object without a companion, so those are deprecation
+      warnings; a declared or nested object, and a classifier with a companion object, written
+      directly or through a typealias, were always the error. kotlinc 2.4.20 types an
+      alias-to-object qualifier written with arguments as `Unit` and then fails in its JVM backend,
+      so the off-mode alias warnings are pinned against krusty's front end alone.
+      (`tests/object_qualifier_type_arguments_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
