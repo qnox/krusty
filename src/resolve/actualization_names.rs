@@ -74,8 +74,8 @@ impl ResolverInputs<'_> {
             .qualified_type_classifier_binding_in_scope(spelling)
             .0
         {
-            crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
-                Some(classifier)
+            crate::symbol_resolver::CandidateSelectionWithTies::Selected(path) => {
+                Some(path.classifier)
             }
             crate::symbol_resolver::CandidateSelectionWithTies::None
             | crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(_) => None,
@@ -98,10 +98,7 @@ fn resolver_inputs<'a>(
             let source_id = crate::fir::SourceFileId::from_raw(index as u32);
             headers.scopes.file(source_id)?;
             let imports = compact_source_imports(headers, source_id)?;
-            let mut explicit_targets = std::collections::HashMap::<
-                String,
-                Option<(crate::symbol_source::SymbolNamespace, String)>,
-            >::new();
+            let mut explicit = Vec::new();
             let mut stars = Vec::new();
             for import in imports {
                 if import.wildcard {
@@ -132,32 +129,11 @@ fn resolver_inputs<'a>(
                         ResolvedQualifier::Value => return None,
                     }
                 };
-                let target = (owner, declared_name.to_owned());
-                match explicit_targets.entry(import.visible_name) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(Some(target));
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if entry.get().as_ref() != Some(&target) {
-                            entry.insert(None);
-                        }
-                    }
-                }
+                explicit.push((
+                    import.visible_name,
+                    crate::symbol_resolver::CallableImport::new(owner, declared_name.to_owned()),
+                ));
             }
-            let ambiguous = explicit_targets
-                .iter()
-                .filter_map(|(name, target)| target.is_none().then_some(name.clone()))
-                .collect();
-            let explicit = explicit_targets
-                .into_iter()
-                .filter_map(|(name, target)| {
-                    let (owner, declared_name) = target?;
-                    Some((
-                        name,
-                        crate::symbol_resolver::CallableImport::new(owner, declared_name),
-                    ))
-                })
-                .collect();
             let own_package = headers.sources.get(source_id)?.package;
             let kotlin_defaults = super::source_package::kotlin_default_packages().to_vec();
             let platform_defaults = platform
@@ -166,13 +142,10 @@ fn resolver_inputs<'a>(
                 .copied()
                 .map(|package| super::source_package::identity(Some(package)))
                 .collect();
-            Some(
-                crate::symbol_resolver::FunctionImportScope::new(
-                    explicit,
-                    [vec![own_package], stars, kotlin_defaults, platform_defaults],
-                )
-                .with_ambiguous_explicit(ambiguous),
-            )
+            Some(crate::symbol_resolver::FunctionImportScope::new(
+                explicit,
+                [vec![own_package], stars, kotlin_defaults, platform_defaults],
+            ))
         })
         .collect();
     ResolverInputs {

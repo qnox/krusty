@@ -3134,6 +3134,29 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         let (property, mut candidates, inaccessible) = match candidates {
             Ok(candidates) => candidates,
             Err(_failure) if unbound => {
+                if let Some(alias) = self.applied_source_alias_expansion(scope, spelling, &[]) {
+                    let module = crate::module_symbols::ModuleSymbols::for_file(
+                        self.table,
+                        scope.source.raw(),
+                    );
+                    let source = crate::symbol_source::CompositeSource::new(vec![
+                        &module as &dyn crate::symbol_source::SymbolSource,
+                        &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+                    ]);
+                    if matches!(
+                        super::super::inner_constructor_calls::apply_inner_alias_outer_in_source(
+                            &source,
+                            alias.expansion,
+                            receiver.get(),
+                        ),
+                        super::super::inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch
+                    ) {
+                        // The selected alias is a constructor-reference candidate, not a missing
+                        // member. Checked-body selection owns its declaration-shaped receiver
+                        // diagnostic after the constructor inventory has been finalized.
+                        return Err(Self::failure());
+                    }
+                }
                 return Err(self.record_unresolved_reference(scope.owner, origin, spelling));
             }
             Err(failure) => return Err(failure),

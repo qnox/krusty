@@ -108,6 +108,32 @@ impl<'a> StreamedModuleSymbols<'a> {
         })
     }
 
+    /// The type-alias declaration occupying one provider key. Top-level aliases use the package's
+    /// ordinary semantic child identity; nested aliases are declarations in their owner's Kotlin
+    /// type namespace and deliberately do not use the backend `$` nested-class identity.
+    fn type_alias_at(
+        &self,
+        namespace: SymbolNamespace,
+        name: &str,
+    ) -> Option<crate::libraries::AliasExpansion> {
+        let header = match namespace {
+            SymbolNamespace::Package(package) => {
+                let identity = crate::types::existing_type_name_child(package, name)?;
+                self.index.type_alias_by_identity(identity)?
+            }
+            SymbolNamespace::Classifier(owner) => {
+                self.index.type_alias_in_classifier(owner, name)?
+            }
+        };
+        Some(crate::libraries::AliasExpansion {
+            identity: header.identity,
+            target: header.target,
+            formals: self.index.type_alias_formals(header.declaration),
+            expansion: header.expansion.get(),
+            expansion_spelling: header.expansion_spelling.clone(),
+        })
+    }
+
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
         let Some(parameter) = self.index.type_parameter_by_semantic_name(identity) else {
             return Vec::new();
@@ -1693,9 +1719,14 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
-        let stable_classifier_name = namespace
+        let ordinary_classifier = namespace
             .existing_classifier(name)
             .filter(|internal| self.index.classifier_declaration(*internal).is_some());
+        let type_alias = self.type_alias_at(namespace, name);
+        let stable_classifier_name = type_alias
+            .as_ref()
+            .map(|alias| alias.target)
+            .or(ordinary_classifier);
         let classifier =
             stable_classifier_name.and_then(|internal| self.stable_classifier(internal));
         let mut functions = FunctionSet::default();
@@ -1723,8 +1754,11 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: stable_classifier_name,
-            classifier_declaration: stable_classifier_name
-                .map(crate::libraries::ClassifierDeclaration::Ordinary),
+            classifier_declaration: type_alias
+                .map(crate::libraries::ClassifierDeclaration::TypeAlias)
+                .or_else(|| {
+                    ordinary_classifier.map(crate::libraries::ClassifierDeclaration::Ordinary)
+                }),
             classifier,
             callables,
             importable_declaration: stable_classifier_name.is_some(),

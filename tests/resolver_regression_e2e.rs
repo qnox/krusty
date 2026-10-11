@@ -1661,6 +1661,118 @@ fun box(): String {
 }
 
 #[test]
+fn nested_alias_constructors_inside_their_declaring_class_keep_target_identity() {
+    let src = r#"
+class Container {
+    inner class Item(val value: String)
+    inner class GenericItem<T>(val value: T)
+    class NestedItem<T>(val value: T)
+
+    typealias ItemAlias = Item
+    typealias GenericAlias<T> = GenericItem<T>
+    typealias NestedAlias = NestedItem<String>
+
+    fun result(): String {
+        if (ItemAlias("O").value != "O") return "item"
+        if (GenericAlias("K").value != "K") return "generic"
+        return NestedAlias("OK").value
+    }
+}
+
+fun box(): String = Container().result()
+"#;
+    assert_accepted_and_runs(src, "ResolverNestedAliasConstructorIdentity");
+}
+
+#[test]
+fn top_level_alias_to_an_inner_classifier_binds_the_implicit_outer_receiver() {
+    let src = r#"
+class Container {
+    inner class Item(val value: String)
+}
+typealias ItemAlias = Container.Item
+
+fun box(): String {
+    val container = Container()
+    val construct = Container::ItemAlias
+    return construct(container, "OK").value
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverTopLevelInnerAliasImplicitReceiver");
+}
+
+#[test]
+fn generic_top_level_alias_to_an_inner_classifier_maps_the_outer_argument() {
+    let src = r#"
+class Container<T>(val value: T) {
+    inner class Item {
+        fun result(): T = value
+    }
+}
+typealias ItemAlias<T> = Container<T>.Item
+
+fun box(): String {
+    val container = Container("OK")
+    if (container.ItemAlias<String>().result() != "OK") return "direct"
+    val construct = Container<String>::ItemAlias
+    return construct(container).result()
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverGenericTopLevelInnerAlias");
+}
+
+#[test]
+fn inner_alias_outer_inference_substitutes_the_same_formal_in_own_arguments() {
+    let src = r#"
+class Outer<T>(val outer: T) {
+    inner class Inner<U>(val inner: U) {
+        fun result(): String = outer.toString() + inner.toString()
+    }
+}
+typealias Same<T> = Outer<T>.Inner<T>
+
+fun box(): String {
+    val outer = Outer("O")
+    val construct = Outer<String>::Same
+    return construct(outer, "K").result()
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverInnerAliasSharedOuterFormal");
+}
+
+#[test]
+fn fixed_inner_alias_outer_rejects_a_different_applied_receiver() {
+    let src = r#"
+class Container<T> {
+    inner class Item
+}
+typealias StringItem = Container<String>.Item
+
+fun byType() = Container<Int>::StringItem
+"#;
+    assert_rejection_same_as_kotlinc("ResolverInnerAliasFixedOuterMismatch", src);
+}
+
+#[test]
+fn inapplicable_inner_alias_does_not_hide_an_applicable_extension() {
+    let src = r#"
+class Container<T> {
+    inner class Item
+}
+typealias StringItem = Container<String>.Item
+
+fun Container<Int>.StringItem(): String = "OK"
+
+fun box(): String {
+    if (Container<Int>().StringItem() != "OK") return "direct"
+    val reference = Container<Int>::StringItem
+    return reference(Container())
+}
+"#;
+    assert_accepted_and_runs(src, "ResolverInnerAliasReceiverMismatchExtension");
+}
+
+#[test]
 fn enabled_when_guard_uses_the_type_test_scope_and_short_circuits() {
     let src = r#"
 // LANGUAGE: +WhenGuards

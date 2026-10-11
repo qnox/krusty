@@ -23,8 +23,8 @@ mod classifier_associated;
 mod classifier_scope;
 
 pub(crate) use classifier_scope::{
-    classifier_candidates_at_import_level, classifier_precedence_levels, ClassifierImportLevel,
-    ScopedClassifier,
+    classifier_candidates_at_import_level, classifier_precedence_levels,
+    explicit_classifier_candidates, ClassifierImportLevel, ScopedClassifier,
 };
 mod declaration_specificity;
 mod extension_specialization;

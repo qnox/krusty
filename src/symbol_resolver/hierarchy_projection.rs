@@ -579,6 +579,7 @@ mod tests {
                 return Rc::new(ResolvedSymbols::default());
             }
             Rc::new(ResolvedSymbols {
+                classifier_name: Some(crate::types::type_name("sample/CacheProbe")),
                 classifier: Some(Arc::clone(&self.classifier)),
                 ..ResolvedSymbols::default()
             })
