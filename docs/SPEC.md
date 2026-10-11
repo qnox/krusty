@@ -1607,7 +1607,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   On a non-JVM target `@JvmInline` is an optional expectation that kotlinc resolves from a KLIB
   library (and rejects outside common sources); an annotated declaration there arrives with the
   KLIB library provider. `tests/value_class_declaration_e2e.rs` compares every form on every target
-  with its reference compiler (recorded; kotlinc-native required in the `klib-semantics` lane);
+  with its reference compiler (recorded; kotlinc-native required under `just klib-semantics`);
   `a_value_class_needs_no_jvm_inline_on_native` in `tests/native_value_classes_e2e.rs` checks the
   runtime answer against kotlinc-native's; `a_backend_refuses_a_source_set_analyzed_for_another_target`
   in `src/compiler.rs`.

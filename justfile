@@ -261,7 +261,7 @@ kotlinc-arguments VERSION=`just max-version`:
 kotlin-native VERSION=`just max-version`:
     @scripts/kotlin-native.sh "{{VERSION}}" "$PWD/target/cache/kotlin-native"
 
-# This lane is deliberately required: the integration tests may be optional in an ordinary local
+# This recipe is deliberately strict: the integration tests may be optional in an ordinary local
 # run, but this recipe provisions the distribution and turns absence or an undecodable fragment
 # into a failure. It also runs the tests that take kotlinc-native as their reference compiler,
 # with that compiler required, so a source set no recording covers is compiled live instead of

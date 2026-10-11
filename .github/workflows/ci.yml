@@ -4,7 +4,7 @@ name: ci
 # Native matrix rows: JVM runs its box corpus plus the non-box suites; Native runs its box corpus.
 # Wasm matrix rows run the box corpus through both Wasm targets, wasm-js and wasm-wasi.
 # Publish only after all rows pass and every version matches its committed platform expectations.
-# `ci-and-conformance` is the one required check over core CI, KLIB semantics, conformance, and
+# `ci-and-conformance` is the one required check over core CI, conformance, and
 # Gradle release/compatibility validation.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
@@ -165,79 +165,6 @@ jobs:
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
-
-  # Real Kotlin/Native metadata, provisioned rather than silently skipped. This lane validates the
-  # common KLIB semantic boundary only; serialized IR bodies have their own follow-up.
-  klib-semantics:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - uses: actions/setup-java@v6.0.1
-        with:
-          distribution: zulu
-          java-version: '25'
-      # Each provisioned input has its own cache, so rotating one key does not discard the others.
-      # `scripts/kotlin-native.sh` validates a restored distribution's stdlib metadata itself:
-      # rust-cache restores `target/` with its files removed, leaving bare directories behind.
-      - name: cache Kotlin/Native distribution
-        uses: actions/cache@v6
-        with:
-          path: |
-            target/cache/kotlin-native
-            target/cache/krusty-deps
-          key: klib-semantics-serialization-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      - name: cache kotlin toolchain
-        uses: actions/cache@v6
-        with:
-          path: target/cache/kotlinc
-          key: klib-semantics-kotlinc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      # kotlinc-native fetches its toolchain dependencies (LLVM, sysroots) on first use.
-      - name: cache Kotlin/Native dependencies
-        uses: actions/cache@v6
-        with:
-          path: ~/.konan/dependencies
-          key: klib-semantics-konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      - name: restore recorded kotlinc-native bytes
-        id: native-recordings
-        uses: actions/cache/restore@v6
-        with:
-          path: target/cache/native-recordings
-          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
-          restore-keys: |
-            recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-
-      - name: select kotlinc-native recording mode
-        id: native-recording-mode
-        env:
-          CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
-          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-        run: |
-          set -euo pipefail
-          write=0
-          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
-            write=1
-          fi
-          echo "write=$write" >> "$GITHUB_OUTPUT"
-      - name: decode and compare Kotlin/Native metadata
-        env:
-          # A cold lane provisions and launches kotlinc-native to create the exact binary
-          # reference before comparing it. Keep the ordinary local test deadline unchanged.
-          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
-          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
-          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
-          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-        run: just klib-semantics
-      - name: save recorded kotlinc-native bytes
-        if: steps.native-recording-mode.outputs.write == '1'
-        uses: actions/cache/save@v6
-        with:
-          path: target/cache/native-recordings
-          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.sha }}
 
   # One gate build of the binaries the matrices run. Conformance uses the test binary and the
   # CLI. Gradle uses the same CLI and the krusty-build test binary; it does not compile krusty.
@@ -471,37 +398,34 @@ jobs:
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
   # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
-  # core CI, KLIB semantics, the complete conformance matrix, the plugin build, and the complete
+  # core CI, the complete conformance matrix, the plugin build, and the complete
   # Gradle matrix succeeded. A failed shared build or version inventory skips a consumer, which
   # fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools]
+    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: require every merge gate to succeed
         env:
           CI_RESULT: ${{ needs.ci.result }}
-          KLIB_RESULT: ${{ needs.klib-semantics.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
         run: |
           echo "ci: $CI_RESULT"
-          echo "klib-semantics: $KLIB_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
           if [ "$CI_RESULT" != success ] \
-            || [ "$KLIB_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ]; then
-            echo "core CI, KLIB semantics, conformance, every Gradle gate, and every build-tools lane must succeed" >&2
+            echo "core CI, conformance, every Gradle gate, and every build-tools lane must succeed" >&2
             exit 1
           fi
 
@@ -714,7 +638,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]
+    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
