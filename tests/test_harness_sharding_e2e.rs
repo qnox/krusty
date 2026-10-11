@@ -655,9 +655,9 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     );
     for needle in [
         "      - name: restore kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm'\n",
-        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha",
+        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha",
         "      - name: save kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'\n",
-        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs') }}-${{ github.sha }}\n",
+        "          path: target/cache/ref-classes\n          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}\n",
     ] {
         assert!(
             workflow.contains(needle),

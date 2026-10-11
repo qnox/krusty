@@ -262,8 +262,9 @@ Recording each of those compiles into the archive as well rewrote the whole arch
 pushed a cold scored run past its deadline. In CI each JVM conformance row restores that directory
 from its base commit's GHA cache (`box-reference-classes-<version>-…`), and master saves it under
 its own commit, so a pull request pays kotlinc only for cases whose inputs it changed. The key also
-hashes `tests/box_reference_classes.rs`, so a change to the cache key or layout starts a fresh
-cache rather than carrying unreachable entries forward.
+hashes `tests/box_reference_classes.rs` and the case planning it shares with `src/conformance`
+(file and module splitting), which the per-entry fingerprint does not cover, so a change to the
+cache key, the layout or a case's split into units starts a fresh cache.
 
 A live kotlinc invocation writes one line straight to the test process's stderr (libtest's capture
 does not hide it), and a passing replay writes nothing:
