@@ -562,29 +562,27 @@ impl<'a> Checker<'a> {
             // Unsigned membership is compared only between operands of one type. A range kotlinc
             // does not compare (`downTo`, a floating `..<`) calls its `contains`.
             let mut contains = None;
-            let comparison = if operands_are_numeric
-                && uniform
-                && comparison_provenance.is_some()
-            {
-                range_comparison_type(range_st, range_et, range_vt)
-            } else if operands_are_numeric
-                && ![range_vt, range_st, range_et]
-                    .iter()
-                    .any(|ty| ty.is_unsigned())
-            {
-                let selected = self.range_contains_call(scope, e, range_ty, vt, value);
-                let selects_range_contains = match &selected {
-                    Some((Ty::Boolean, ResolvedCall::Member(_))) => true,
-                    Some((Ty::Boolean, ResolvedCall::Extension(extension))) => {
-                        extension.callable.compiler_intrinsic
-                            == Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
-                    }
-                    _ => false,
-                };
-                contains = Some(selected);
-                selects_range_contains
-                    .then(|| range_comparison_type(range_st, range_et, range_vt))
-                    .flatten()
+            let comparison =
+                if operands_are_numeric && uniform && comparison_provenance.is_some() {
+                    range_comparison_type(range_st, range_et, range_vt)
+                } else if operands_are_numeric
+                    && ![range_vt, range_st, range_et]
+                        .iter()
+                        .any(|ty| ty.is_unsigned())
+                {
+                    let selected = self.range_contains_call(scope, e, range_ty, vt, value);
+                    let selects_range_contains = match &selected {
+                        Some((Ty::Boolean, ResolvedCall::Member(_))) => true,
+                        Some((Ty::Boolean, ResolvedCall::Extension(extension))) => {
+                            extension.callable.compiler_intrinsic
+                                == Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
+                        }
+                        _ => false,
+                    };
+                    contains = Some(selected);
+                    selects_range_contains
+                        .then(|| range_comparison_type(range_st, range_et, range_vt))
+                        .flatten()
                 } else if prim(&range_st)
                     && range_st == range_et
                     && self.in_range_widened_value(vt, range_st)
