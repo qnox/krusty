@@ -184,6 +184,9 @@ impl Realizer<'_> {
     fn reread(&mut self, expression: ExprId) -> ExprId {
         let copy = self.ir.expr(expression).clone();
         let copy = self.add(copy);
+        if let Some(ty) = self.ir.checked_type(expression) {
+            self.ir.logical_types.insert(copy, ty);
+        }
         self.keep_representation(expression, copy);
         copy
     }
@@ -341,19 +344,22 @@ impl Realizer<'_> {
     /// A call of a runtime function resolution selected, realized by the backend like any other
     /// call of that external declaration.
     fn runtime_call(&mut self, function: &IrRuntimeFunction, args: Vec<ExprId>) -> ExprId {
-        self.add(IrExpr::Call {
-            callee: Callee::External {
-                target: function.function,
-                default_provider: None,
-                params: function.parameters.clone(),
-                ret: function.result,
-                substitutions: Vec::new(),
-                defaults: Vec::new(),
-                extension_receiver_parameter: None,
+        self.add_checked(
+            IrExpr::Call {
+                callee: Callee::External {
+                    target: function.function,
+                    default_provider: None,
+                    params: function.parameters.clone(),
+                    ret: function.result,
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: None,
+                },
+                dispatch_receiver: None,
+                args,
             },
-            dispatch_receiver: None,
-            args,
-        })
+            function.result,
+        )
     }
 
     fn short_circuit(&mut self, kind: IrShortCircuitKind, lhs: ExprId, rhs: ExprId) -> ExprId {

@@ -350,6 +350,11 @@ impl BodyLowering<'_> {
             FirExprKind::ComparisonCall { operation, call } => {
                 let call = self
                     .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
+                // `ComparisonCall` is the checker's selected `compareTo` convention call. Its
+                // result is the `Int` that the relational operator compares with zero; the outer
+                // FIR expression records only the final Boolean, so keep the nested operand's
+                // checked type explicitly too.
+                self.ir.logical_types.insert(call, Ty::Int);
                 if let IrExpr::Call {
                     callee:
                         Callee::Intrinsic {

@@ -82,6 +82,10 @@ impl IrFile {
                 callee: Callee::Intrinsic { ret, .. },
                 ..
             } => *ret,
+            // These property-read nodes carry the checker-selected logical result. A later
+            // backend decides whether the physical realization is a field or an accessor.
+            IrExpr::PropertyRead { ty, .. } => *ty,
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { result, .. }) => *result,
             IrExpr::PrimitiveBinOp { op, .. } if op.yields_boolean() => Ty::Boolean,
             IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,

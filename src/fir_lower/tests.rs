@@ -17,6 +17,7 @@ mod arithmetic_result_types;
 mod callable_body_returns;
 mod catch_clauses;
 mod checked_hierarchy;
+mod checked_operand_types;
 mod checked_substitutions;
 mod external_references;
 mod inline_plan_tests;

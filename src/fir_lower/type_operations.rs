@@ -44,10 +44,14 @@ impl BodyLowering<'_> {
             } else {
                 answer
             })));
-            return self.ir.add_expr(IrExpr::Block {
+            let block = self.ir.add_expr(IrExpr::Block {
                 stmts: vec![operand],
                 value: Some(answer),
             });
+            // This synthesized value-bearing block has no source FIR node whose finalization can
+            // attach the result of the settled semantic check.
+            self.ir.logical_types.insert(block, Ty::Boolean);
+            return block;
         }
         let op = if negated {
             IrTypeOp::NotInstanceOf
@@ -203,7 +207,7 @@ mod tests {
         });
     }
 
-    fn lowered_nothing_check(operation: FirTypeOperation) -> (IrFile, IrExpr) {
+    fn lowered_nothing_check(operation: FirTypeOperation) -> (IrFile, crate::ir::ExprId) {
         let origin = OriginId::from_raw(0);
         let mut body = FirBody::new(BodyOwnerId::from_raw(1));
         let operand = body.add_expr(FirExpr {
@@ -229,7 +233,7 @@ mod tests {
         let mut ir = IrFile::default();
         let root = lower_body(body, &ResolvedModuleIndex::default(), &mut ir)
             .expect("a settled check lowers");
-        let produced = ir.expr(*root.roots.last().expect("one root")).clone();
+        let produced = *root.roots.last().expect("one root");
         (ir, produced)
     }
 
@@ -340,7 +344,9 @@ mod tests {
             (FirTypeOperation::Is, false),
             (FirTypeOperation::NotIs, true),
         ] {
-            let (ir, produced) = lowered_nothing_check(operation);
+            let (ir, produced_id) = lowered_nothing_check(operation);
+            assert_eq!(ir.checked_type(produced_id), Some(Ty::Boolean));
+            let produced = ir.expr(produced_id).clone();
             let IrExpr::Block { stmts, value } = produced else {
                 panic!("{operation:?}: a settled check lowers to a block, got {produced:?}");
             };
