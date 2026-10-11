@@ -89,10 +89,11 @@ pub(super) fn emit_annotation_class(
         }
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
-    // Retention/target meta-annotations, matching kotlinc's ORDER: everything the source declares
-    // comes first, in source order — `kotlin.annotation.Retention(X)` and `kotlin.annotation.Target`
-    // among them — and the JVM mirrors are appended after: `java.lang.annotation.Retention(RUNTIME|
-    // CLASS|SOURCE)` (RUNTIME when defaulted), then `java.lang.annotation.Target`. The java retention
+    // Documented/retention/target meta-annotations, matching kotlinc's ORDER: everything the source
+    // declares comes first, in source order — `kotlin.annotation.Retention(X)` and
+    // `kotlin.annotation.Target` among them — and the JVM mirrors are appended after:
+    // `java.lang.annotation.Documented` for `@MustBeDocumented`, `java.lang.annotation.Retention(
+    // RUNTIME|CLASS|SOURCE)` (RUNTIME when defaulted), then `java.lang.annotation.Target`. The java retention
     // is what both the JVM and classpath consumers read the retention back from.
     let enum_stamp = |internal: &str, enum_ty: &str, constant: &str| crate::ir::AppliedAnnotation {
         internal: crate::types::type_name(internal),
@@ -101,8 +102,27 @@ pub(super) fn emit_annotation_class(
             crate::ir::AnnoValue::Enum(crate::types::type_name(enum_ty), constant.to_string()),
         )],
     };
+    // kotlinc's `AdditionalClassAnnotationLowering` adds each Java mirror only when the class does
+    // not already carry that Java meta-annotation itself.
+    let declares = |internal: &str| {
+        let internal = crate::types::type_name(internal);
+        c.applied_annotations
+            .iter()
+            .any(|retained| retained.annotation.internal == internal)
+    };
     let mut mirrors: Vec<crate::ir::AppliedAnnotation> = Vec::new();
-    if let Some(retention) = c.annotation_retention {
+    if declares("kotlin/annotation/MustBeDocumented")
+        && !declares("java/lang/annotation/Documented")
+    {
+        mirrors.push(crate::ir::AppliedAnnotation {
+            internal: crate::types::type_name("java/lang/annotation/Documented"),
+            values: Vec::new(),
+        });
+    }
+    if let Some(retention) = c
+        .annotation_retention
+        .filter(|_| !declares("java/lang/annotation/Retention"))
+    {
         use crate::ir::AnnoRetention;
         let policy = match retention {
             AnnoRetention::Default | AnnoRetention::Runtime => "RUNTIME",
@@ -115,7 +135,9 @@ pub(super) fn emit_annotation_class(
             policy,
         ));
     }
-    mirrors.extend(java_target_mirror(&c.applied_annotations));
+    if !declares("java/lang/annotation/Target") {
+        mirrors.extend(java_target_mirror(&c.applied_annotations));
+    }
     // The source's own `@Retention` is REPLACED IN PLACE by the normalized stamp rather than filtered
     // out and re-appended: the class's `annotation_retention` is the authority for the value, but the
     // annotation's position among the others is the source's and kotlinc preserves it.
