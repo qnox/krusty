@@ -68,7 +68,11 @@ impl Realizer<'_> {
                 (lower, bounds.upper, false)
             }
         } else {
-            (bounds.lower, bounds.upper, true)
+            // A side-effectful upper bound must be evaluated even when the lower comparison is
+            // false. Put its comparison first when the lower bound is safe to reread; this keeps
+            // the range literal's bound evaluation without allocating an unnecessary temporary.
+            let lower_first = !self.has_side_effects(bounds.upper);
+            (bounds.lower, bounds.upper, lower_first)
         };
         let lower = self.cast(lower, comparison);
         let upper = self.cast(upper, comparison);
