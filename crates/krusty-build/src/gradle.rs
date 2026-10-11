@@ -905,7 +905,7 @@ mod tests {
                 let rendered = error.to_string();
                 if case == "compiler-plugin" {
                     assert!(rendered.contains(expected), "{case}: {rendered}");
-                    assert!(rendered.contains("sam-with-receiver"), "{case}: {rendered}");
+                    assert!(rendered.contains("assignment-compiler-plugin"), "{case}: {rendered}");
                     assert!(log.exists(), "{case} must be rejected by krusty's registry");
                 } else {
                     let expected_line = format!("> {expected}");
@@ -1335,7 +1335,7 @@ error: warnings found and -Werror specified\n";
             Err(error) => error.to_string(),
         };
         assert!(error.contains("unsupported compiler plugin"), "{error}");
-        assert!(error.contains("sam-with-receiver"), "{error}");
+        assert!(error.contains("assignment-compiler-plugin"), "{error}");
         assert!(
             log.exists(),
             "the compiler registry must inspect the forwarded plugin classpath"
@@ -1402,13 +1402,13 @@ plugins {
     kotlin("plugin.serialization") version "KGP_VERSION"
     kotlin("jvm")
     id("krusty") version "PLUGIN_VERSION" apply false
-    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
 
 // A plugin applied before krusty, as an earlier `plugins` entry or a convention plugin applies it.
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 pluginManager.apply("krusty")
 
@@ -1518,15 +1518,15 @@ fun main() {
         let _ = std::fs::remove_file(log);
         let result = fixture
             .build()
-            .property("krusty.negative", "sam-with-receiver")
+            .property("krusty.negative", "assignment")
             .tasks([":app:compileKotlin"])
             .run();
         let error = match result {
-            Ok(()) => panic!("sam-with-receiver applied beside KSP was ignored"),
+            Ok(()) => panic!("the assignment plugin applied beside KSP was ignored"),
             Err(error) => error.to_string(),
         };
         assert!(error.contains("unsupported compiler plugin"), "{error}");
-        assert!(error.contains("sam-with-receiver"), "{error}");
+        assert!(error.contains("assignment-compiler-plugin"), "{error}");
         assert!(
             log.exists(),
             "the compiler registry must inspect the forwarded plugin classpath"
@@ -1657,12 +1657,12 @@ plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
     id("krusty") version "PLUGIN_VERSION"
-    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     application
 }
 
-if (providers.gradleProperty("krusty.negative").orNull == "sam-with-receiver") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
+if (providers.gradleProperty("krusty.negative").orNull == "assignment") {
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 
 dependencies {
@@ -2272,7 +2272,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 plugins {
     kotlin("jvm") version "KGP_VERSION"
     id("krusty") version "PLUGIN_VERSION"
-    kotlin("plugin.sam.with.receiver") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
 
@@ -2283,7 +2283,7 @@ dependencies {
 val krustyNegative = providers.gradleProperty("krusty.negative").orNull
 
 if (krustyNegative == "compiler-plugin") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.sam.with.receiver")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 
 abstract class GenerateKotlin : DefaultTask() {
