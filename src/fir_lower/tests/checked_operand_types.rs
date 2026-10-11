@@ -21,7 +21,7 @@ fn primitive_operands(ir: &IrFile, op: IrBinOp) -> Vec<(Option<Ty>, Option<Ty>)>
 
 #[test]
 fn a_comparison_call_records_the_nested_compare_result() {
-    let ir = lower_single_source(
+    let ir = lower_single_source_with_jvm_stdlib(
         "fun less(a: Comparable<Int>, b: Int): Boolean = a < b\n",
         "CheckedComparisonOperands",
     );
@@ -41,13 +41,16 @@ fn generated_data_class_equality_records_declared_field_types() {
 
     assert_eq!(
         primitive_operands(&ir, IrBinOp::Eq),
-        [(Some(Ty::Int), Some(Ty::Int))]
+        [
+            (Some(Ty::Int), Some(Ty::Int)),
+            (Some(Ty::Boolean), Some(Ty::Boolean)),
+        ]
     );
 }
 
 #[test]
 fn generated_range_membership_records_the_comparison_type() {
-    let ir = lower_single_source(
+    let ir = lower_single_source_with_jvm_stdlib(
         "fun contains(value: Int): Boolean = value in 1..3\n",
         "CheckedRangeMembershipOperands",
     );
@@ -63,7 +66,7 @@ fn generated_range_membership_records_the_comparison_type() {
 
 #[test]
 fn a_negated_containment_call_records_its_boolean_operand() {
-    let ir = lower_single_source(
+    let ir = lower_single_source_with_jvm_stdlib(
         "fun outside(value: Int, range: IntRange): Boolean = value !in range\n",
         "CheckedNegatedContainmentOperand",
     );
