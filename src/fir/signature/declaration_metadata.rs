@@ -4,12 +4,20 @@ use super::*;
 
 /// The superclass constructor a generated no-arg constructor (kotlinc's no-arg plugin) delegates
 /// to, selected by the frontend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A selected constructor with parameters has a default for every one of them; the generated
+/// constructor calls it with all of them omitted, as kotlinc does.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NoArgSuperConstructor {
     /// A source constructor of the superclass, by declaration.
     Declared(DeclarationId),
-    /// A constructor any subclass may call: `Any`'s, a dependency superclass's, or the no-arg
-    /// constructor the plugin generates for a matched source superclass.
+    /// A dependency superclass's constructor, with its parameter types.
+    External {
+        declaration: ExternalCallableId,
+        parameters: Vec<ResolvedTy>,
+    },
+    /// A constructor any subclass may call as `<init>()`: `Any`'s, or the no-arg constructor the
+    /// plugin generates for a matched superclass.
     Unrestricted,
 }
 
@@ -31,8 +39,8 @@ impl ResolvedModuleIndex {
 
     /// The superclass constructor `classifier`'s generated no-arg constructor delegates to, or
     /// `None` when the no-arg plugin gives it none.
-    pub fn no_arg_constructor(&self, classifier: DeclarationId) -> Option<NoArgSuperConstructor> {
-        self.no_arg_constructors.get(&classifier).copied()
+    pub fn no_arg_constructor(&self, classifier: DeclarationId) -> Option<&NoArgSuperConstructor> {
+        self.no_arg_constructors.get(&classifier)
     }
 
     pub fn publish_no_arg_constructor(

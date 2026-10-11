@@ -68,6 +68,18 @@ sealed class Sealed
 @NoArg
 class OfSealed(val s: Int) : Sealed()
 
+fun tag(): String = "tag"
+
+open class Defaulted(val tag: String = tag(), val n: Int = 4)
+
+@NoArg
+class OfDefaulted(val d: Int) : Defaulted()
+
+open class Overloaded @JvmOverloads constructor(val o: Long = 9L)
+
+@NoArg
+class OfOverloaded(val v: Int) : Overloaded()
+
 fun <T : Any> make(type: Class<T>): T = type.getDeclaredConstructor().newInstance()
 
 fun box(): String {
@@ -82,6 +94,9 @@ fun box(): String {
     if (make(Opened::class.java).o != 0) return "opened"
     if (make(Closed::class.java).c != 0) return "closed"
     if (make(OfSealed::class.java).s != 0) return "sealed"
+    val defaulted = make(OfDefaulted::class.java)
+    if (defaulted.tag != "tag" || defaulted.n != 4) return "defaulted"
+    if (make(OfOverloaded::class.java).o != 9L) return "overloaded"
     val secondary: String? = make(SecondaryOnly::class.java).made
     return if (secondary == null) "OK" else "secondary"
 }
@@ -91,7 +106,8 @@ fun box(): String {
 /// class with only secondary constructors; classes that already declare a constructor callable
 /// without arguments and get none; a data class, whose generated members follow the constructor; a
 /// nested class; a private primary constructor; a sealed superclass, whose constructor is reached
-/// through its marker accessor.
+/// through its marker accessor; superclass constructors whose parameters all default, called through
+/// their defaults constructor.
 #[test]
 fn no_arg_constructors_match_kotlinc() {
     let fixture = PluginFixture::new("noarg-same-module");

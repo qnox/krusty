@@ -694,8 +694,8 @@ const NO_ARG_CONSTRUCTOR_HIDDEN_MESSAGE: &str = "No-arg constructor is hidden fr
 
 /// Build the zero-argument constructor of every class the frontend gave one
 /// ([`ResolvedModuleIndex::no_arg_constructor`], kotlinc's no-arg plugin), after the class's
-/// declared constructors. It delegates to the superclass constructor the frontend selected, called
-/// as `<init>()`, and runs no initializer, as
+/// declared constructors. It delegates to the superclass constructor the frontend selected, with
+/// every parameter's default, and runs no initializer, as
 /// kotlinc's `generateNoArgConstructorBody` without `invokeInitializers`. `@Deprecated(HIDDEN)`
 /// keeps Kotlin callers from selecting it; `@java.lang.Deprecated` keeps it a public, non-synthetic
 /// method Java and frameworks can call.
@@ -707,21 +707,56 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
             Some((
                 *declaration,
                 *class,
-                index.no_arg_constructor(*declaration)?,
+                index.no_arg_constructor(*declaration)?.clone(),
             ))
         })
         .collect::<Vec<_>>();
     classifiers.sort_by_key(|(declaration, _, _)| declaration.raw());
     for (classifier, class, superclass_constructor) in classifiers {
-        let target = match superclass_constructor {
-            crate::fir::NoArgSuperConstructor::Declared(constructor) => {
+        // A selected constructor with parameters defaults every one; kotlinc calls it with all
+        // of them omitted, through its defaults constructor.
+        let (target, target_params, external_target) = match superclass_constructor {
+            crate::fir::NoArgSuperConstructor::Declared(constructor) => (
                 module_constructor_target(index, constructor)
-                    .expect("a selected source constructor has a published header")
-            }
-            crate::fir::NoArgSuperConstructor::Unrestricted => {
-                crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY
-            }
+                    .expect("a selected source constructor has a published header"),
+                index
+                    .signature(constructor)
+                    .expect("a selected source constructor has a published signature")
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>(),
+                None,
+            ),
+            crate::fir::NoArgSuperConstructor::External {
+                declaration,
+                parameters,
+            } => (
+                crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                parameters.iter().map(|parameter| parameter.get()).collect(),
+                Some(crate::ir::IrExternalConstructorTarget::unresolved(
+                    declaration,
+                )),
+            ),
+            crate::fir::NoArgSuperConstructor::Unrestricted => (
+                crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                Vec::new(),
+                None,
+            ),
         };
+        let delegate_args = target_params
+            .iter()
+            .map(|parameter| {
+                ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(
+                    *parameter,
+                )))
+            })
+            .collect::<Vec<_>>();
+        let default_parameters = (0..target_params.len())
+            .map(|parameter| {
+                u32::try_from(parameter).expect("a constructor has fewer than u32::MAX parameters")
+            })
+            .collect::<Vec<_>>();
         // kotlinc generates it in FIR: after every member the class declares and before the
         // members lowering generates (a data class's `componentN`, `copy`, …). It takes the last
         // declared member's place, and the member schedule keeps it after that member.
@@ -744,6 +779,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
             .unwrap_or(u32::MAX - 1);
         let owner = &ir.classes[class as usize];
         let superclass = owner.superclass;
+        let own = owner.fq_name;
         // kotlinc maps the delegation to where the class declaration starts (its annotations
         // included) and the return to the declaration's last line.
         let (declaration_line, end_line) = (owner.decl_start_line, owner.decl_end_line);
@@ -804,12 +840,12 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
                 vararg_index: None,
                 defaults: Vec::new(),
                 delegate_prelude: Vec::new(),
-                delegate_args: Vec::new(),
-                default_parameters: Vec::new(),
+                delegate_args,
+                default_parameters,
                 body: None,
                 delegate: crate::ir::CtorDelegateTarget::Super {
                     owner: superclass,
-                    target_params: Vec::new(),
+                    target_params,
                     target,
                     default_masks: Vec::new(),
                 },
@@ -817,6 +853,10 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
                 vc_params: false,
                 param_checks: Vec::new(),
             });
+        if let Some(external_target) = external_target {
+            ir.external_secondary_super_constructors
+                .insert((own, ordinal), external_target);
+        }
         ir.record_generated_secondary_constructor(
             class,
             crate::ir::IrSecondaryConstructorRole::NoArg,

@@ -10196,8 +10196,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   matched `class` (not an interface, object, enum or annotation class) that is not inner, local or
   a value class, declares no constructor callable as `<init>()` (no parameters, or all defaulted on
   the primary or on a `@JvmOverloads` constructor), and whose superclass has such a constructor or
-  is matched itself, gets a public `<init>()` that calls the superclass's `<init>()` and runs no
-  initializer, so its properties keep their JVM defaults. A dependency constructor's default
+  is matched itself, gets a public `<init>()` that calls that superclass constructor and runs no
+  initializer, so its properties keep their JVM defaults. A superclass constructor with parameters
+  (all defaulted) is called with every argument omitted, through its defaults constructor
+  (`(…, int, DefaultConstructorMarker)`, null/zero arguments, all mask bits set), as kotlinc lowers
+  the call, not through its `<init>()` overload. A dependency constructor's default
   PRESENCE comes from its provider-normalized call shape; the optional closed-value payload is not
   consulted, so a non-constant default remains a valid no-argument ABI fact. It carries
   `@Deprecated("No-arg constructor is hidden from direct usage", level = HIDDEN)` and
@@ -10216,7 +10219,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compiles as `false` in both. A sealed superclass is reached through its `DefaultConstructorMarker`
   constructor, the superclass constructor the frontend selected. A local class is not matched yet, as for all-open. Tests: `tests/noarg_plugin_e2e.rs`
   (direct, meta and supertype matches, secondary-only, data, nested and private-constructor classes,
-  a sealed superclass, declared no-arg constructors, mixed-case `invokeInitializers`, byte-identical to kotlinc and instantiated reflectively; the `jpa`
+  a sealed superclass, source superclasses whose primary or `@JvmOverloads` constructor defaults
+  every parameter, declared no-arg constructors, mixed-case `invokeInitializers`, byte-identical to kotlinc and instantiated reflectively; the `jpa`
   preset through a dependency each compiler builds for itself, and a dependency superclass with a
   non-constant default; the plugin's errors against
   kotlinc's), `plugins::noarg` and `plugins::registry` unit tests

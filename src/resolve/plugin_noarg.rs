@@ -114,13 +114,7 @@ impl NoArgConstructors {
                 Some(constructors) => constructors
                     .iter()
                     .find(|constructor| constructor.zero_parameter())
-                    .map(|constructor| {
-                        constructor
-                            .declaration
-                            .map_or(NoArgSuperConstructor::Unrestricted, |declaration| {
-                                NoArgSuperConstructor::Declared(declaration)
-                            })
-                    })
+                    .and_then(|constructor| constructor.target.clone())
                     .or(superclass_matches.then_some(NoArgSuperConstructor::Unrestricted)),
             };
             if let Some(target) = target {
@@ -149,8 +143,8 @@ fn is_class_kind(flags: DeclarationFlags) -> bool {
 
 /// The facts of one declared constructor that the plugin's rules read.
 struct Constructor {
-    /// The source declaration; `None` for a dependency's constructor.
-    declaration: Option<DeclarationId>,
+    /// The constructor as a generated one delegates to it; `None` when it has no identity.
+    target: Option<NoArgSuperConstructor>,
     primary: bool,
     parameter_defaults: Vec<bool>,
     jvm_overloads: bool,
@@ -199,7 +193,7 @@ fn constructors(
                 })
         };
         let primary = class.has_primary_ctor.then(|| Constructor {
-            declaration: declaration(0),
+            target: declaration(0).map(NoArgSuperConstructor::Declared),
             primary: true,
             parameter_defaults: class
                 .ctor_param_names
@@ -216,7 +210,7 @@ fn constructors(
             .zip(&class.secondary_constructor_annotations)
             .enumerate()
             .map(|(ordinal, (signature, annotations))| Constructor {
-                declaration: declaration(ordinal + 1),
+                target: declaration(ordinal + 1).map(NoArgSuperConstructor::Declared),
                 primary: false,
                 parameter_defaults: signature.param_defaults.clone(),
                 jvm_overloads: annotations.contains(&jvm_overloads),
@@ -229,7 +223,7 @@ fn constructors(
                 .constructors
                 .iter()
                 .map(|constructor| Constructor {
-                    declaration: None,
+                    target: external_target(constructor),
                     primary: constructor.is_primary_constructor(),
                     // Default PRESENCE is a source-call fact. `default_values` is only the
                     // provider's optional closed-value payload and may be empty for a call or
@@ -242,6 +236,23 @@ fn constructors(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A dependency constructor as a generated constructor delegates to it: by its provider identity,
+/// so lowering reaches its exact declaration (and, with parameters, its defaults).
+fn external_target(constructor: &crate::libraries::LibraryMember) -> Option<NoArgSuperConstructor> {
+    let declaration = constructor.external_identity?;
+    let parameters = constructor
+        .params
+        .iter()
+        .copied()
+        .map(crate::fir::ResolvedTy::new)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    Some(NoArgSuperConstructor::External {
+        declaration,
+        parameters,
+    })
 }
 
 #[cfg(test)]
