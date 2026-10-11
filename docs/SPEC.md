@@ -9433,6 +9433,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface member, which has no body to check. A builtin classifier's bounds come from its
   `.kotlin_builtins` declaration, so `Enum<String>` is an error (`E : Enum<E>`).
 
+  A typealias is checked at its declaration and at each application. Its right-hand side skips an
+  argument that is a type parameter or carries arguments of its own (`B<X>`, `B<List<X>>` are not
+  errors there) but still checks inside it (`List<B<String>>` is). An application checks the
+  outermost application of its expansion in full; below it, only an argument that is exactly an
+  alias parameter, and only components that mention one, so `typealias W<X> = B<List<X>>` written
+  `W<Int>` is an error (at the alias reference, actual `List<Int>`), while `M<X> = Map<X, B<X>>`
+  written `M<String>` is reported at `String`, the use-site argument the template argument is.
+
   A call's explicit type arguments (`g<String>()`, `B<String>()`) are checked against the
   candidate's own bounds, a constructor's being its classifier's; when the call also passes value
   arguments kotlinc first reports `inapplicable candidate(s): fun <T : Number> f(x: T): Unit` (a
