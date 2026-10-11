@@ -656,7 +656,7 @@ fn delegated_property(
             Some(receiver) => Some(ResolvedTy::new(receiver).ok()?),
             None => None,
         },
-        mutable: setter.is_some(),
+        setter_value: setter.and_then(super::override_plans::setter_value),
         interface: declaration.getter.owner_is_interface,
         depth: 0,
     }];
@@ -685,7 +685,7 @@ fn delegated_property(
                 ty: ResolvedTy::new(declared.ty).ok()?,
                 applied_ty: ResolvedTy::new(applied_ty).ok()?,
                 receiver: declared.receiver.map(ResolvedTy::new).transpose().ok()?,
-                mutable: inherited.setter.is_some(),
+                setter_value: super::override_plans::setter_value(inherited),
                 interface: false,
                 depth: inherited.receiver_rank,
             });

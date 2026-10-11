@@ -43,6 +43,12 @@ pub enum ResolvedParameterIdentity {
 }
 
 impl ResolvedParameterIdentity {
+    /// The value parameter of a property setter: its declared spelling (`set(given)`), or the
+    /// synthetic value of an implicit setter, which declares none.
+    pub(crate) fn setter_value(declared_name: Option<&str>) -> Self {
+        declared_name.map_or(Self::PropertySetterValue, |name| Self::Source(name.into()))
+    }
+
     /// Build one source declaration identity while its typed context role is still available.
     /// Spelling is payload only; it never decides whether a parameter is contextual.
     pub(crate) fn declared(
@@ -99,7 +105,10 @@ pub struct ResolvedPropertyOverride {
     /// for a member property. Like the types, a target backend erases these for its accessors.
     pub declared_receiver: Option<ResolvedTy>,
     pub implementation_receiver: Option<ResolvedTy>,
-    pub overridden_mutable: bool,
+    /// The overridden setter's value parameter, or `None` when the overridden property is a `val`.
+    /// A setter bridge names its parameter after it, as a function bridge names its parameters
+    /// after the overridden function's.
+    pub overridden_setter_value: Option<ResolvedParameterIdentity>,
     pub implementation_mutable: bool,
     /// Return-value status the overridden declaration's provider recorded. `None` for a
     /// current-module declaration, whose status is derived from its own edges, and for a Java

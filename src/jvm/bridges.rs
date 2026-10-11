@@ -616,7 +616,7 @@ fn property_bridges(
             && overridden_getter_internal
             && !property_target_is_internal(ir, callables, edge.implementation, false);
         let internal_setter_bridge = sees_internal
-            && edge.overridden_mutable
+            && edge.overridden_setter_value.is_some()
             && edge.implementation_mutable
             && property_target_is_internal(ir, callables, edge.overridden, true)
             && !property_target_is_internal(ir, callables, edge.implementation, true);
@@ -761,10 +761,10 @@ fn push_member_extension_accessor_bridges(
         bridge_erasure(edge.declared_type),
         edge.implementation_type,
     )];
-    if edge.overridden_mutable && edge.implementation_mutable {
+    if let (Some(value), true) = (&edge.overridden_setter_value, edge.implementation_mutable) {
         let mut setter = accessor(property_setter_name(&edge.name), setter, Ty::Unit, Ty::Unit);
         setter.parameters.push(BridgeParameter {
-            identity: crate::fir::ResolvedParameterIdentity::PropertySetterValue,
+            identity: value.clone(),
             semantic: edge.declared_type,
         });
         setter
@@ -863,9 +863,13 @@ fn push_property_bridge(
             property_implementation: property_implementation(edge, BridgeAccessorRole::Getter),
         });
     }
-    if !(edge.overridden_mutable && edge.implementation_mutable) {
+    let Some(value) = edge
+        .overridden_setter_value
+        .clone()
+        .filter(|_| edge.implementation_mutable)
+    else {
         return;
-    }
+    };
     // The setter keeps the declared types: over a slot whose getter only differs by the boxed
     // result, the setter's descriptor is already the implementation's own.
     let setter_param = bridge_erasure(edge.declared_type);
@@ -895,7 +899,7 @@ fn push_property_bridge(
             overridden_owner: None,
             collection_barrier: None,
             parameters: vec![BridgeParameter {
-                identity: crate::fir::ResolvedParameterIdentity::PropertySetterValue,
+                identity: value,
                 semantic: edge.declared_type,
             }],
             name: sname,

@@ -6382,7 +6382,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `.kotlin_builtins` parameter names like any other metadata declaration. A Java binary declaration
   publishes no source name. The bridge `LocalVariableTable` spells that unnamed parameter `pN`
   from the identity's ordinal (`p0`, `p1`); the ordinal stays out of source identity and reflection
-  names.
+  names. A property setter bridge follows the same rule: `set(own)` over `open var held: T` with
+  `set(given)` bridges `setHeld(Ljava/lang/Object;)` with parameter `given`, and over an implicit
+  setter (`var content: T` in an interface) with `<set-?>`. The property override edge carries the
+  overridden setter's value identity in place of a separate mutability flag.
   Tests: `tests/bridge_parameter_names_e2e.rs`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface

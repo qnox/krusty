@@ -115,7 +115,7 @@ fn lower_property_override_plans(
             implementation_receiver: edge
                 .implementation_receiver
                 .map(crate::fir::ResolvedTy::get),
-            overridden_mutable: edge.overridden_mutable,
+            overridden_setter_value: edge.overridden_setter_value.clone(),
             implementation_mutable: edge.implementation_mutable,
             has_kotlin_superclass_override: edge.has_kotlin_superclass_override,
             depth: edge.depth,
