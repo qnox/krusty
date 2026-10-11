@@ -262,9 +262,13 @@ impl Emitter<'_> {
         // kotlinc's `visitWhen` marks a source `when`'s own line and writes a `nop` on it before
         // the first branch, so a debugger stops on the `when` line. The nop survives only where a
         // debug point needs it, as every nop does.
+        // Every other `when`, an `if` included, still marks its own line there: a condition on a
+        // later line marks that one at the same offset, and both entries stay.
         if let Some(&line) = self.ir.whens.source_lines.get(&expression) {
             code.mark_line(line);
             code.nop();
+        } else {
+            self.mark_kept_start_line(expression, code);
         }
         for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {

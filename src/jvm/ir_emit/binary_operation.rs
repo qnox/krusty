@@ -274,11 +274,14 @@ impl Emitter<'_> {
         // inner `constructor-impl` still forgets, and the outer literal is the next mark. A
         // declaration still lets the literal own the line, and a nested unsigned operation that
         // is not under that flag forgets ahead of its own literal so that literal is kept.
-        let keep_receiver_line = self.inside_condition || self.unsigned_assignment_line;
+        // An enclosing `&&`/`||` that kept its own mark of this line there owns the receiver too.
+        let line = self.ir.expr_source_lines.get(&expression).copied();
+        let kept_line = line.is_some_and(|line| code.line_kept_here(line));
+        let keep_receiver_line =
+            self.inside_condition || self.unsigned_assignment_line || kept_line;
         let move_line = literal_argument
             && !keep_receiver_line
             && self.unsigned_receiver_line_moves.unwrap_or(true);
-        let line = self.ir.expr_source_lines.get(&expression).copied();
         if move_line {
             if let Some(line) = line {
                 code.withdraw_operand_line(line);
