@@ -64,14 +64,17 @@ impl ClassWriter {
         }
     }
 
-    /// Seed the primary constructor's LocalVariableTable strings (`this` and its type, then each
-    /// named parameter) once its body is built and before the method is added: kotlinc writes the
-    /// table before it computes the method's frames, whose class entries follow.
+    /// Seed the primary constructor's LocalVariableTable strings once its body is built and before
+    /// the method is added: kotlinc writes the table before it computes the method's frames, whose
+    /// class entries follow. The body's own block locals (an `init` block's `val x`) are written as
+    /// their scopes close, so they precede `this` and its type, then each named parameter.
     pub fn seed_plain_constructor_locals(
         &mut self,
+        body: &CodeBuilder,
         this_internal: &str,
         parameter_locals: &[(String, String)],
     ) {
+        self.intern_local_table(body);
         self.cp.utf8("this");
         self.cp.utf8(&format!("L{this_internal};"));
         for (name, desc) in parameter_locals {

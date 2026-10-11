@@ -76,9 +76,13 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
 
 /// Seed the primary constructor's local-variable strings, which kotlinc interns once the body is
 /// done and before the frames of that body.
-pub(super) fn seed_plain_constructor_locals(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
+pub(super) fn seed_plain_constructor_locals(
+    seed: PlainClassPoolSeed<'_>,
+    body: &CodeBuilder,
+    cw: &mut ClassWriter,
+) {
     let parameter_locals = constructor_parameter_locals(seed.ir, seed.class);
-    cw.seed_plain_constructor_locals(seed.fq_name, &parameter_locals);
+    cw.seed_plain_constructor_locals(body, seed.fq_name, &parameter_locals);
 }
 
 /// Seed what kotlinc interns once the primary constructor is written: its `$default` overload's

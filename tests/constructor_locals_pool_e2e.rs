@@ -1,5 +1,6 @@
 //! A primary constructor's `LocalVariableTable` strings join the constant pool before the class
-//! entries of its frames, as kotlinc writes the table before it computes the frames.
+//! entries of its frames, as kotlinc writes the table before it computes the frames. An `init`
+//! block's own locals close with their scope, ahead of the constructor's `this`.
 
 use super::common;
 
@@ -20,11 +21,24 @@ class Branchy(i: Int) : Base(\"O\" + if (i == 23) {\n\
 class Chosen(p: String, q: String) {\n\
     val picked: String = if (p == \"x\") p else q\n\
 }\n\
+\n\
+fun seed(x: Int = 42) = x\n\
+\n\
+class Initialized {\n\
+    val s: String\n\
+    init {\n\
+        val x = seed()\n\
+        if (x == 42)\n\
+            s = \"OK\"\n\
+        else\n\
+            s = \"fail\"\n\
+    }\n\
+}\n\
 ";
 
 #[test]
 fn constructor_locals_precede_frame_classes_in_the_pool() {
-    for class in ["store/Branchy", "store/Chosen"] {
+    for class in ["store/Branchy", "store/Chosen", "store/Initialized"] {
         common::byte_diff_against_kotlinc_cp(
             "ConstructorLocalsPool",
             SOURCE,

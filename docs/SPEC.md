@@ -6625,9 +6625,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `StackMapTable`, whose frames intern each `Class` they name. A constructor whose super argument
   or property initializer branches (`Base("O" + if (i == 23) "K" else "fail")`) therefore lists
   `this`, the constructor's type and each parameter local (`$receiver`, `$super_call_param$N`)
-  before a frame's `java/lang/String`. krusty seeded those locals after `add_method_sig`, which had
-  already written the frames. They are now seeded (`seed_plain_constructor_locals`) after the body
-  and before `add_method_sig`, inside the constructor's constant-pool range; only the `$default`
+  before a frame's `java/lang/String`. An `init` block's own locals (`val x = seed()`) are written
+  as their scope closes, so they come first, ahead of `this`. krusty seeded the constructor's locals
+  after `add_method_sig`, which had already written the frames. They are now seeded
+  (`seed_plain_constructor_locals`, the body's block locals first) after the body and before
+  `add_method_sig`, inside the constructor's constant-pool range; only the `$default`
   marker descriptor is left to `seed_plain_constructor_tail`, which extends that range through it.
   Otherwise the next method's range would begin in that gap, and a rewrite of that method (a safe
   call such as `eldest?.value?.close()`) would own the strings and move one its body no longer names

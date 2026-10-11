@@ -2847,7 +2847,7 @@ fn emit_class(
         ctor.ensure_locals(max_slot);
         ctor.link();
         if byte_parity {
-            seed_plain_constructor_locals(pool_seed(), &mut cw);
+            seed_plain_constructor_locals(pool_seed(), &ctor, &mut cw);
         }
         cw.add_method_sig(
             ctor_access,
