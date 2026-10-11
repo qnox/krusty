@@ -734,6 +734,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             receiver,
             associated_classifier: None,
             associated_access_owner: None,
+            companion_associated: false,
             formals: Vec::new(),
             ty: Ty::Error,
             context_count,
@@ -1320,6 +1321,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 receiver,
                 associated_classifier: None,
                 associated_access_owner: None,
+                companion_associated: false,
                 formals,
                 // Property lookup exposes the declared Kotlin type. A narrower explicit backing
                 // field is storage visible only while checking the declaring body's lexical
@@ -1645,6 +1647,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                     property.is_some_and(|property| property.mutable),
                 );
                 failed.associated_classifier = associated_classifier;
+                failed.companion_associated = associated_classifier.is_some();
                 if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
                     failed.associated_access_owner = associated_classifier;
                 }
@@ -1719,6 +1722,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 associated_classifier,
                 associated_access_owner: associated_classifier
                     .filter(|_| header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER)),
+                companion_associated: associated_classifier.is_some(),
                 formals,
                 ty: read_ty,
                 context_count,

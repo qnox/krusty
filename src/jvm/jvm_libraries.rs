@@ -883,6 +883,7 @@ impl JvmLibraries {
                     }),
                 associated_classifier: None,
                 associated_access_owner: None,
+                companion_associated: false,
                 formals: property_gsig
                     .as_ref()
                     .map(|gsig| gsig.formals.clone())
@@ -3313,6 +3314,7 @@ impl JvmLibraries {
                         receiver: Some(receiver),
                         associated_classifier: None,
                         associated_access_owner: None,
+                        companion_associated: false,
                         formals: property_signature
                             .map(|signature| signature.formals.clone())
                             .unwrap_or_default(),
@@ -3472,6 +3474,7 @@ impl JvmLibraries {
                     receiver: Some(Ty::obj_name(cn)),
                     associated_classifier: None,
                     associated_access_owner: None,
+                    companion_associated: false,
                     formals: property_signature
                         .map(|signature| signature.formals.clone())
                         .or_else(|| {
@@ -3608,6 +3611,7 @@ impl JvmLibraries {
                     receiver: Some(Ty::obj_name(cn)),
                     associated_classifier: None,
                     associated_access_owner: None,
+                    companion_associated: false,
                     formals: Vec::new(),
                     ty: field_ty,
                     context_count: 0,
@@ -3714,6 +3718,7 @@ impl JvmLibraries {
                         receiver: Some(recv),
                         associated_classifier: None,
                         associated_access_owner: None,
+                        companion_associated: false,
                         formals: Vec::new(),
                         ty,
                         context_count: 0,
@@ -5305,6 +5310,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     receiver: Some(receiver),
                     associated_classifier: None,
                     associated_access_owner: None,
+                    companion_associated: false,
                     formals: Vec::new(),
                     ty,
                     context_count: 0,

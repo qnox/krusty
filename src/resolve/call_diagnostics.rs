@@ -495,7 +495,12 @@ impl Checker<'_> {
         signature: &crate::libraries::GenericSig,
         bindings: &crate::symbol_resolver::GSigBinds,
     ) {
-        let Some(type_arguments) = self.file.call_type_args.get(&call.0).cloned() else {
+        let Some(type_arguments) = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(|syntax| syntax.arguments.clone())
+        else {
             return;
         };
         let declaration = Self::generic_callable_header(name, candidate);

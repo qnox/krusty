@@ -13458,6 +13458,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `UNSUPPORTED_ARRAY_OF_NOTHING_IN_CLASS_LITERAL_LHS` until the feature makes it the plain
     `UNSUPPORTED` error, reported at the complete left-hand side.
     (`tests/class_literal_array_of_nothing_e2e.rs`.)
+  - `ForbidUselessTypeArgumentsIn25` (KTLC-390): type arguments that select nothing. Each explicit
+    call-site list retains its type references and complete `<…>` span as one syntax value owned by
+    its expression segment; Pass-1 compaction remaps that owner once.
+    - Static access (`FirTypeArgumentsNotAllowedExpressionChecker`): after qualifier and member
+      selection, one normalized qualifier-access fact records the selected qualifier and whether the
+      declaration is static or companion-associated. The checker consumes that fact without
+      resolving the qualifier again. A member with no dispatch receiver selected through a
+      classifier qualifier written with type arguments reports "type arguments are not allowed when
+      static member is accessed." on the qualifier's list: an enum entry, an enum's
+      `entries`/`values()`/`valueOf()`, a Java static field or method, and the SAM constructor of a
+      nested functional interface (`E<Int>.X`, `JavaUtils<String>.foo()`, `K<Int>.I { }`), through a
+      typealias too. A `companion { … }` block member or a written `companion fun/val C.name`
+      (kotlinc's `requiresCompanionBlockOrExtensionLf`, published as
+      `PropertyInfo::companion_associated` and `FunctionInfo::associated_classifier`) never accepted
+      the arguments and is always the error. An object or companion member reached through the
+      singleton value is not a static access. (`tests/static_access_type_arguments_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and

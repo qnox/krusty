@@ -1346,4 +1346,32 @@ mod tests {
         );
         assert!(matches!(class.methods[0].body, FunBody::Expr(MISSING_EXPR)));
     }
+
+    #[test]
+    fn explicit_type_argument_syntax_remaps_with_its_retained_expression_owner() {
+        let source = "fun discarded() = Gone<String>.value\n\
+            inline fun kept() = E<Int>.entries\n";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let mut file =
+            crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
+        assert_eq!(file.call_type_args.len(), 2);
+
+        compact(&mut file);
+
+        assert_eq!(file.call_type_args.len(), 1);
+        let (&owner, syntax) = file
+            .call_type_args
+            .iter()
+            .next()
+            .expect("retained explicit type-argument syntax");
+        assert!((owner as usize) < file.expr_arena.len());
+        assert!(matches!(file.expr(ExprId(owner)), Expr::Name(name) if name == "E"));
+        assert_eq!(syntax.arguments.len(), 1);
+        assert_eq!(syntax.arguments[0].name, "Int");
+        assert_eq!(
+            &source[syntax.span.lo as usize..syntax.span.hi as usize],
+            "<Int>",
+        );
+    }
 }

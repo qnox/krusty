@@ -44,6 +44,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "'operator' modifier is not applicable to function: must override 'equals()' in Any.",
     );
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
+    file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
+    file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
+        "ForbidUselessTypeArgumentsIn25",
+        "type arguments are not allowed when static member is accessed.",
+    );
     file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
     file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
@@ -66,6 +71,7 @@ mod tests {
 
         assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
         assert_eq!(old.inapplicable_operator_modifier_warning, None);
+        assert_eq!(old.type_arguments_not_allowed_warning, None);
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(
@@ -80,6 +86,15 @@ mod tests {
                 "'operator' modifier is not applicable to function: must override 'equals()' in \
                  Any. This will become an error in language version 2.5. See \
                  https://youtrack.jetbrains.com/issue/KT-86143."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            current.type_arguments_not_allowed_warning,
+            Some(
+                "type arguments are not allowed when static member is accessed. This will become \
+                 an error in language version 2.5. See \
+                 https://youtrack.jetbrains.com/issue/KTLC-390."
                     .to_string()
             )
         );
