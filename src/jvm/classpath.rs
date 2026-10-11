@@ -2202,6 +2202,7 @@ impl Classpath {
             context_count: c.context_count(),
             deprecated_hidden: c.deprecated_hidden(),
             since_kotlin: c.since_kotlin(),
+            deprecation: c.deprecation.clone(),
             value_class_params: value_class_param_types(
                 c,
                 desc_params,

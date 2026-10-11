@@ -55,6 +55,8 @@ pub struct MetadataCallFacts {
     /// `@SinceKotlin` on the selected declaration. Newer than the compilation API level means the
     /// callable is not a candidate.
     pub since_kotlin: Option<LanguageVersion>,
+    /// The deprecation the selected declaration states.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
     /// Per DESCRIPTOR parameter position, the VALUE CLASS `@Metadata` declares there when the JVM
     /// descriptor carries its erased underlying (`timeout: kotlin.time.Duration` ↔ `J`).
     ///
@@ -95,6 +97,7 @@ impl MetadataCallFacts {
             context_count: 0,
             deprecated_hidden: false,
             since_kotlin: None,
+            deprecation: None,
             value_class_params: Vec::new(),
             value_class_ret: None,
         }

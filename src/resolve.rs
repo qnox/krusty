@@ -24597,6 +24597,7 @@ val result = object { fun value(): String = captured }
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         }
     }
 
@@ -27377,6 +27378,7 @@ fun box(): String {
                     annotation_targets: None,
                     mapped_collection: None,
                     annotation_element_defaults: Vec::new(),
+                    deprecation: None,
                 }));
             }
             [
@@ -27512,6 +27514,7 @@ fun box(): String {
                     annotation_targets: None,
                     mapped_collection: None,
                     annotation_element_defaults: Vec::new(),
+                    deprecation: None,
                 })
             })
         }

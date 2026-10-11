@@ -44,6 +44,9 @@ pub struct MethodSig {
     /// callable exists only for binary compatibility: kotlinc removes it from overload
     /// resolution entirely, so it must never enter a candidate set.
     pub deprecated_hidden: bool,
+    /// The deprecation the declaration states: Kotlin's `@Deprecated`, or a Java method's
+    /// `Deprecated` attribute.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
     /// For a Java `@interface` element: the declaration has an `AnnotationDefault`, so a use site
     /// may omit it. Always false for an ordinary method.
     pub has_annotation_default: bool,
@@ -96,6 +99,9 @@ pub struct FieldSig {
     pub signature: Option<String>,
     /// Declaration nullability annotation. An absent annotation on a Java reference denotes `T!`.
     pub nullability: Option<JavaNullability>,
+    /// The deprecation the declaration states: Kotlin's `@Deprecated`, or a Java field's
+    /// `Deprecated` attribute.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
 }
 
 impl FieldSig {
@@ -141,6 +147,46 @@ struct MemberAttributes {
     declaration_nullability: Option<JavaNullability>,
     parameter_access: Vec<u16>,
     deprecated_hidden: bool,
+    deprecation: DeprecationAttributes,
+}
+
+/// The deprecation facts one declaration's attributes carry: Kotlin's `@Deprecated` and
+/// `@DeprecatedSinceKotlin` applications, and Java's `Deprecated` attribute or annotation.
+#[derive(Default)]
+struct DeprecationAttributes {
+    annotations: Vec<crate::types::ResolvedAnnotation>,
+    java: bool,
+}
+
+impl DeprecationAttributes {
+    /// Whether an application of `descriptor` states a deprecation, so it is kept typed.
+    fn states_deprecation(descriptor: &str) -> bool {
+        matches!(
+            descriptor,
+            "Lkotlin/Deprecated;" | "Lkotlin/DeprecatedSinceKotlin;" | "Ljava/lang/Deprecated;"
+        )
+    }
+
+    fn note(&mut self, annotation: &crate::types::ResolvedAnnotation) {
+        if annotation.annotation == crate::types::type_name("java/lang/Deprecated") {
+            self.java = true;
+        } else if annotation.annotation == crate::types::type_name("kotlin/Deprecated")
+            || annotation.annotation == crate::types::type_name("kotlin/DeprecatedSinceKotlin")
+        {
+            self.annotations.push(annotation.clone());
+        }
+    }
+
+    /// The deprecation stated, where `kotlin_class` says the owner carries `@Metadata`: kotlinc
+    /// writes the `Deprecated` attribute beside its own `@Deprecated`, so the attribute deprecates
+    /// only a Java declaration.
+    fn declared(&self, kotlin_class: bool) -> Option<Box<crate::types::DeclaredDeprecation>> {
+        crate::types::DeclaredDeprecation::of_annotations(&self.annotations)
+            .or_else(|| {
+                (self.java && !kotlin_class).then_some(crate::types::DeclaredDeprecation::Java)
+            })
+            .map(Box::new)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +216,9 @@ pub struct ClassInfo {
     pub retention: Option<String>,
     /// All class-level annotation applications normalized to resolved identities and typed values.
     pub annotations: Vec<crate::types::ResolvedAnnotation>,
+    /// The deprecation the class states: Kotlin's `@Deprecated`, or a Java class's `Deprecated`
+    /// attribute.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
     /// For an annotation type: the `@kotlin.annotation.Target` `allowedTargets` entries
     /// (`AnnotationTarget` constant names) — a KOTLIN annotation's declared target set, which has no
     /// Java equivalent for `PROPERTY`. Empty when the annotation declares no `@Target` (applicable
@@ -939,7 +988,18 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         Ok(v)
     };
 
-    let fields = read_members(&mut r)?
+    let raw_fields = read_members(&mut r)?;
+    let raw_methods = read_members(&mut r)?;
+
+    // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, the generic `Signature` attr, and
+    // (for an annotation class) its `@Retention` policy.
+    let mut attrs = read_class_attrs(&mut r, &cp);
+    let kotlin_class = attrs.d1.is_some();
+    for annotation in &attrs.annotations {
+        attrs.deprecation.note(annotation);
+    }
+
+    let fields = raw_fields
         .into_iter()
         .map(|member| FieldSig {
             access: member.access,
@@ -948,9 +1008,9 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             const_value: member.attributes.const_value,
             signature: member.attributes.signature,
             nullability: member.attributes.declaration_nullability,
+            deprecation: member.attributes.deprecation.declared(kotlin_class),
         })
         .collect();
-    let raw_methods = read_members(&mut r)?;
     let annotation_element_defaults = raw_methods
         .iter()
         .filter_map(|member| {
@@ -971,13 +1031,10 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
             deprecated_hidden: member.attributes.deprecated_hidden,
+            deprecation: member.attributes.deprecation.declared(kotlin_class),
             has_annotation_default: member.attributes.annotation_default.is_some(),
         })
         .collect();
-
-    // Read class-level attributes: @kotlin.Metadata → d1/d2 arrays, the generic `Signature` attr, and
-    // (for an annotation class) its `@Retention` policy.
-    let attrs = read_class_attrs(&mut r, &cp);
 
     let raw_metadata = crate::jvm::metadata::RawMetadata {
         d1: attrs.d1.unwrap_or_default(),
@@ -1000,6 +1057,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         meta,
         signature: attrs.signature,
         retention: attrs.retention,
+        deprecation: attrs.deprecation.declared(kotlin_class),
         annotations: attrs.annotations,
         kotlin_targets: attrs.kotlin_targets,
         java_targets: attrs.java_targets,
@@ -1025,6 +1083,7 @@ struct ClassAttrs {
     signature: Option<String>,
     retention: Option<String>,
     annotations: Vec<crate::types::ResolvedAnnotation>,
+    deprecation: DeprecationAttributes,
     kotlin_targets: Vec<String>,
     java_targets: Vec<String>,
     inner_classes: Vec<InnerClassRef>,
@@ -1057,6 +1116,10 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                     out.signature = Some(s.clone());
                 }
             }
+            continue;
+        }
+        if name == "Deprecated" {
+            out.deprecation.java = true;
             continue;
         }
         if name == "InnerClasses" {
@@ -1223,11 +1286,35 @@ fn read_resolved_annotation(
             .to_string();
         arguments.push((name, read_annotation_value(reader, cp)?));
     }
+    let facts = deprecation_level_facts(annotation, &arguments);
     Ok(crate::types::ResolvedAnnotation {
         annotation,
         arguments,
-        facts: Default::default(),
+        facts,
     })
+}
+
+/// The level `@kotlin.Deprecated` selects, as the semantic facts consumers read: the classfile
+/// encodes the `DeprecationLevel` entry by its constant name.
+fn deprecation_level_facts(
+    annotation: crate::types::TypeName,
+    arguments: &[(String, crate::types::AnnotationValue)],
+) -> crate::types::AnnotationSemanticFacts {
+    let mut facts = crate::types::AnnotationSemanticFacts::default();
+    if annotation != crate::types::type_name("kotlin/Deprecated") {
+        return facts;
+    }
+    for (element, value) in arguments {
+        if let ("level", crate::types::AnnotationValue::Enum(level, entry)) =
+            (element.as_str(), value)
+        {
+            if *level == crate::types::type_name("kotlin/DeprecationLevel") {
+                facts.deprecated_hidden = entry == "HIDDEN";
+                facts.deprecated_error = entry == "ERROR";
+            }
+        }
+    }
+    facts
 }
 
 fn read_annotation_value(
@@ -1495,6 +1582,10 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     _ => None,
                 };
             }
+            Some(C::Utf8(s)) if s == "Deprecated" => {
+                r.take(len)?;
+                attributes.deprecation.java = true;
+            }
             Some(C::Utf8(s)) if s == "MethodParameters" => {
                 let mut body = Reader {
                     b: r.take(len)?,
@@ -1523,6 +1614,7 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     cp,
                     &mut attributes.declaration_nullability,
                     &mut attributes.deprecated_hidden,
+                    &mut attributes.deprecation,
                 )?;
             }
             // An omitted element is never written into an applied annotation, but instantiating
@@ -1553,6 +1645,7 @@ fn read_declaration_annotations(
     cp: &[C],
     nullability_out: &mut Option<JavaNullability>,
     deprecated_hidden_out: &mut bool,
+    deprecation_out: &mut DeprecationAttributes,
 ) -> Result<(), ReadError> {
     let utf8 = |index: u16| match cp.get(index as usize) {
         Some(C::Utf8(value)) => value.as_str(),
@@ -1561,7 +1654,15 @@ fn read_declaration_annotations(
     let mut r = Reader { b: body, i: 0 };
     let annotation_count = r.u2()?;
     for _ in 0..annotation_count {
+        let start = r.i;
         let annotation = utf8(r.u2()?);
+        if DeprecationAttributes::states_deprecation(annotation) {
+            r.i = start;
+            let annotation = read_resolved_annotation(&mut r, cp)?;
+            *deprecated_hidden_out |= annotation.is_deprecated_hidden();
+            deprecation_out.note(&annotation);
+            continue;
+        }
         let nullability = match annotation {
             "Lorg/jetbrains/annotations/NotNull;" => Some(JavaNullability::NotNull),
             "Lorg/jetbrains/annotations/Nullable;" => Some(JavaNullability::Nullable),
@@ -1569,23 +1670,7 @@ fn read_declaration_annotations(
         };
         let pair_count = r.u2()?;
         for _ in 0..pair_count {
-            let element_name = utf8(r.u2()?);
-            // `@kotlin.Deprecated`'s `level` element is an enum_const_value; any other element
-            // (or any other annotation's) is skipped structurally.
-            if annotation == "Lkotlin/Deprecated;" && element_name == "level" {
-                let tag = r.u1()? as char;
-                if tag == 'e' {
-                    let type_name = utf8(r.u2()?);
-                    let const_name = utf8(r.u2()?);
-                    if type_name == "Lkotlin/DeprecationLevel;" && const_name == "HIDDEN" {
-                        *deprecated_hidden_out = true;
-                    }
-                } else {
-                    // Unexpected shape — stop parsing rather than desync the reader.
-                    return Ok(());
-                }
-                continue;
-            }
+            r.u2()?;
             read_element_value(&mut r, cp, ElementValueExtract::Skip)?;
         }
         if nullability.is_some() {

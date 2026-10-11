@@ -556,6 +556,7 @@ impl<'a> ModuleSymbols<'a> {
             annotation_targets: None,
             mapped_collection: None,
             annotation_element_defaults: Vec::new(),
+            deprecation: None,
         };
         debug_assert!(
             c.methods
@@ -977,6 +978,7 @@ fn fn_info(
     let declared_params = Some(params.clone().into_boxed_slice());
     let call_sig = sig.call_sig();
     let callable = LibraryCallable {
+        deprecation: None,
         annotations: sig.annotations.clone(),
         external_identity: None,
         external_default_provider: None,
@@ -1109,6 +1111,7 @@ fn source_callable(
 ) -> LibraryCallable {
     let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
+        deprecation: None,
         external_identity: None,
         annotations: Vec::new(),
         external_default_provider: None,

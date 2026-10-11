@@ -60,6 +60,18 @@ impl Checker<'_> {
         if let Some(ExprLowering::SingletonValue(singleton)) = self.expr_lowers.get(&receiver) {
             return Some((receiver, singleton.classifier));
         }
+        // A static member selected through its classifier (a Java static method, a companion-block
+        // member) dispatches on no value, so its written receiver is the classifier qualifier even
+        // though resolution typed it.
+        if !read {
+            if let Some(ResolvedCall::Companion(member)) = self.resolved_calls.get(&expression) {
+                if member.singleton_dispatch.is_none() {
+                    if let Some(owner) = member.owner {
+                        return Some((receiver, owner));
+                    }
+                }
+            }
+        }
         if self.expr_types[receiver.0 as usize] != Ty::Error {
             return None;
         }

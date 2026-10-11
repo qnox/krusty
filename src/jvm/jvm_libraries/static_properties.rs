@@ -539,7 +539,7 @@ impl JvmLibraries {
             setter.context_count = context_count;
             Some(setter)
         });
-        Some(PropertyInfo {
+        let mut property = PropertyInfo {
             return_value_status: Some(mp.return_value_status),
             name: name.to_string(),
             kind: property_kind,
@@ -578,7 +578,9 @@ impl JvmLibraries {
             source_member: None,
             producer: crate::libraries::PropertyProducer::KotlinAccessor,
             read_stability: self.module_read_stability(mp, owner),
-        })
+        };
+        self.publish_kotlin_property_deprecation(Some(&mut property), mp);
+        Some(property)
     }
 
     /// A compiled property's read stability as this compilation may rely on it. kotlinc treats a

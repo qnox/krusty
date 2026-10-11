@@ -55,6 +55,9 @@ pub struct MetaFn {
     /// deprecation handling, etc. — can check for the annotations they care about without the
     /// metadata layer hard-coding any one annotation's semantics.
     pub annotations: Vec<TypeName>,
+    /// The deprecation the realization method states, stamped after decode beside the
+    /// `deprecated_hidden` flag.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
     extras: Option<Box<FunctionExtras>>,
 }
 
@@ -143,6 +146,7 @@ impl MetaFn {
             contract: decoded.contract,
             return_value_status: decoded.return_value_status,
             annotations: decoded.annotations,
+            deprecation: None,
             extras: pack_extras(
                 decoded.context_params,
                 decoded.context_parameter_kinds,

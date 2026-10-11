@@ -48,6 +48,7 @@ fn class_info_within(
         interfaces: Vec::<String>::new().into(),
         fields: Vec::new(),
         methods: Vec::new(),
+        deprecation: None,
         meta: decode_metadata_within(&raw, internal, &[], enclosing)
             .expect("round-trip metadata decodes"),
         signature: None,

@@ -125,6 +125,7 @@ impl FunctionInfo {
         candidate.flags.inherited_by_delegation = member.inherited_by_delegation();
         candidate.flags.return_value_status = member.return_value_status;
         candidate.callable.annotations = member.annotations.clone();
+        candidate.callable.deprecation = member.deprecation.clone();
         candidate.default_values = member.default_values.clone();
         candidate.stable_declaration = member.stable_declaration;
         candidate.source_member = member.source_member;

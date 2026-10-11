@@ -12,6 +12,7 @@ mod function;
 mod inline_class;
 mod property_declarations;
 mod property_identity;
+mod realization_facts;
 mod since_kotlin;
 mod string_table;
 mod type_aliases;
@@ -1167,6 +1168,8 @@ pub struct MetaConstructor {
     /// `@Deprecated(level = HIDDEN)`: binary-compatibility-only, never a resolution candidate.
     /// Stamped from the realization method's `kotlin.Deprecated` annotation after decode.
     pub deprecated_hidden: bool,
+    /// The deprecation the realization method states, stamped beside `deprecated_hidden`.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
 }
 
 /// One `Property` decoded from a class's `@Metadata`: its source name, logical (Kotlin) return-type
@@ -1205,6 +1208,11 @@ pub struct MetaProp {
     /// `@Deprecated(level = HIDDEN)`: retained for declaration/override matching and excluded from
     /// ordinary property lookup.
     pub deprecated_hidden: bool,
+    /// The deprecation the property states (on [`Self::annotation_method`]), and each accessor's
+    /// own, stamped from the realization methods after decode.
+    pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
+    pub getter_deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
+    pub setter_deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
     pub visibility: crate::types::Visibility,
     /// Decoded from the current `Property.flags` word only; `old_flags` predates the status bits.
     pub return_value_status: crate::types::ReturnValueStatus,
@@ -1285,6 +1293,9 @@ pub struct KotlinMeta {
     /// SAM conversion only when this declaration flag is present; structural single-method detection
     /// remains valid for Java interfaces, which have no Kotlin metadata.
     pub is_fun_interface: bool,
+    /// `Class.flags.CLASS_KIND` is `COMPANION_OBJECT`. [`Self::class_kind`] folds it into `Object`;
+    /// a declaration rendering still names the companion.
+    pub is_companion_object: bool,
     /// `Class.type_parameter` and `Class.supertype`/`supertype_id`, decoded in source terms. These
     /// define the semantic class graph for a Kotlin class; the classfile's superclass/interfaces are
     /// only its JVM realization and must never be unioned into this list.
@@ -1336,6 +1347,7 @@ impl Default for KotlinMeta {
             class_visibility: None,
             class_kind: None,
             is_fun_interface: false,
+            is_companion_object: false,
             class_type_parameters: crate::types::TypeParameters::default(),
             class_supertypes: Vec::new(),
             class_functions: std::sync::Arc::from([]),
@@ -1495,48 +1507,19 @@ pub fn decode_metadata_within(
     let scope =
         enclosing_type_parameters::class_scope(enclosing, &class_tparams, &class_type_param_bounds);
     let (scope_tparams, scope_bounds) = enclosing_type_parameters::split(&scope);
-    // `@Deprecated(level = HIDDEN)` lives on the JVM realization (a `kotlin.Deprecated` runtime
-    // annotation), not in the protobuf. A declaration whose realization method carries it exists
-    // for binary compatibility only — kotlinc drops it from resolution — so stamp the fact here,
-    // at the one point where declarations and classfile methods are both in hand. Matching is by
-    // exact (name, descriptor); a declaration without a descriptor stays visible.
-    let realization_hidden = |jvm_name: &str, jvm_desc: Option<&str>| -> bool {
-        jvm_desc.is_some_and(|descriptor| {
-            methods.iter().any(|method| {
-                method.deprecated_hidden
-                    && method.name == jvm_name
-                    && method.descriptor == descriptor
-            })
-        })
-    };
-    let stamp_functions = |mut functions: Vec<MetaFn>| -> Vec<MetaFn> {
-        for function in &mut functions {
-            if realization_hidden(&function.jvm_name, function.jvm_desc) {
-                function.flags = function.flags.with_deprecated_hidden(true);
-            }
-        }
-        functions
-    };
-    let stamp_properties = |mut properties: Vec<MetaProp>| -> Vec<MetaProp> {
-        for property in &mut properties {
-            property.deprecated_hidden = property
-                .annotation_method
-                .as_ref()
-                .is_some_and(|method| realization_hidden(&method.name, Some(method.desc.as_str())));
-        }
-        properties
-    };
+    let realizations = realization_facts::Realizations::new(methods);
     let data_equality_bound = class_flags
         .is_some_and(|flags| flags & (1u64 << 10) != 0)
         .then(|| Ty::obj(this_class));
-    let class_functions = stamp_functions(decode_functions(
-        &ctx,
-        9,
-        &scope_tparams,
-        &scope_bounds,
-        data_equality_bound,
-    )?)
-    .into();
+    let class_functions = realizations
+        .stamp_functions(decode_functions(
+            &ctx,
+            9,
+            &scope_tparams,
+            &scope_bounds,
+            data_equality_bound,
+        )?)
+        .into();
     // A package's field 5 is `Package.type_alias`, while a class's field 5 is
     // `Class.type_parameter`. Constructor decoding owns only the Class schema; running it over a
     // package would feed each complete TypeAlias message to the strict type-parameter decoder.
@@ -1545,18 +1528,17 @@ pub fn decode_metadata_within(
     } else {
         Vec::new()
     };
-    for constructor in &mut constructors {
-        constructor.deprecated_hidden =
-            realization_hidden(constructor.jvm_name, constructor.jvm_desc);
-    }
-    let class_properties =
-        stamp_properties(decode_properties(&ctx, 10, &scope_tparams, &scope_bounds)?).into();
+    realizations.stamp_constructors(&mut constructors);
+    let class_properties = realizations
+        .stamp_properties(decode_properties(&ctx, 10, &scope_tparams, &scope_bounds)?)
+        .into();
     Ok(KotlinMeta {
         class_visibility: class_flags
             .map(flags_visibility)
             .map(crate::types::Visibility::from_metadata),
         class_kind: class_flags.map(class_identity::class_kind),
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
+        is_companion_object: class_flags.is_some_and(|flags| (flags >> 6) & 0x7 == 6),
         class_type_parameters: crate::types::TypeParameters::new(
             class_type_params,
             class_type_param_bounds,
@@ -1564,9 +1546,13 @@ pub fn decode_metadata_within(
         ),
         class_supertypes,
         class_functions,
-        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[], None)?).into(),
+        package_functions: realizations
+            .stamp_functions(decode_functions(&ctx, 3, &[], &[], None)?)
+            .into(),
         class_properties,
-        package_properties: stamp_properties(decode_properties(&ctx, 4, &[], &[])?).into(),
+        package_properties: realizations
+            .stamp_properties(decode_properties(&ctx, 4, &[], &[])?)
+            .into(),
         type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
         constructors: constructors.into(),
         is_inner: class_flags.is_some_and(enclosing_type_parameters::is_inner),
@@ -2408,6 +2394,7 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                     jvm_desc: jvm_desc.map(|descriptor| intern(&descriptor)),
                     primary: flags & IS_SECONDARY_CONSTRUCTOR_BIT == 0,
                     deprecated_hidden: false,
+                    deprecation: None,
                 });
             }
             (_, w) => {
