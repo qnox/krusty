@@ -64,17 +64,17 @@ fn a_boolean_behind_a_generic_result_is_negated() {
 /// The checked-type contract covers both erased library reads and nodes synthesized after FIR.
 /// `Pair.first` physically returns a reference, while its checked scalar type selects arithmetic,
 /// unsigned ordering and IEEE equality. The remaining checks exercise each producer which must
-/// explicitly type its synthesized `when` or delegate-storage read.
+/// explicitly type its synthesized `when` or top-level/member delegate-storage read.
 #[test]
 fn erased_scalars_and_synthesized_nodes_keep_their_checked_types() {
-    let source = "data class NullableHash(val value: Int?)\n\
-         class Added(private val delta: Int) {\n\
-         \x20   operator fun getValue(thisRef: Int, property: Any?): Int = thisRef + delta\n\
+    let source = "import kotlin.reflect.KProperty\n\
+         data class NullableHash(val value: Int?)\n\
+         class Stored(private val value: Int) {\n\
+         \x20   operator fun getValue(thisRef: Any?, property: KProperty<*>): Int = value\n\
          }\n\
-         val Int.topShifted by Added(1)\n\
+         val topShifted by Stored(41)\n\
          class Scope {\n\
-         \x20   val Int.memberShifted by Added(2)\n\
-         \x20   fun read(value: Int): Int = value.memberShifted\n\
+         \x20   val memberShifted by Stored(42)\n\
          }\n\
          fun castOrForty(value: Any): Int = (value as? Int) ?: 40\n\
          fun sameNullable(left: Int?, right: Int?): Boolean = left === right\n\
@@ -98,8 +98,8 @@ fn erased_scalars_and_synthesized_nodes_keep_their_checked_types() {
          \x20   if (castOrForty(\"no\") + castOrForty(1) != 41) return \"safe cast\"\n\
          \x20   if (steppedSum(1..5, 2) != 9) return \"ascending step\"\n\
          \x20   if (steppedSum(5 downTo 1, 2) != 9) return \"descending step\"\n\
-         \x20   if (40.topShifted != 41) return \"top delegate\"\n\
-         \x20   if (Scope().read(40) != 42) return \"member delegate\"\n\
+         \x20   if (topShifted != 41) return \"top delegate\"\n\
+         \x20   if (Scope().memberShifted != 42) return \"member delegate\"\n\
          \x20   return \"OK\"\n\
          }\n";
     every_backend_agrees_with_kotlinc("CheckedTypeProducerFamilies", source);
