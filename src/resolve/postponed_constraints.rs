@@ -206,6 +206,71 @@ impl PostponedCallConstraints {
         }
     }
 
+    /// Record the result subtype relation a checked lambda contributes to the call's open
+    /// `formals`. `selector = { it }` against `(String) -> R` gives `String <: R`; a produced
+    /// `(Number) -> Unit` against `(R) -> Unit` gives `R <: Number` through parameter
+    /// contravariance. Both sides use resolved identities and the common assignability collector.
+    pub(super) fn constrain_lambda_result(
+        &mut self,
+        source: &dyn SymbolSource,
+        formals: &[String],
+        declared: Ty,
+        checked: Ty,
+    ) {
+        let (Ty::Fun(declared), Ty::Fun(checked)) = (declared.non_null(), checked.non_null())
+        else {
+            return;
+        };
+        let inferred = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+            source,
+            declared.ret,
+            checked.ret,
+        );
+        // A lambda's call-owned variables are the only writable identities here. Any enclosing
+        // variables present in the result are fixed expectations, not constraints on this call.
+        let excluded = self
+            .formals
+            .iter()
+            .filter(|formal| !formals.contains(formal))
+            .cloned()
+            .collect();
+        self.constrain_assignable(source, declared.ret, checked.ret, &inferred, &excluded);
+    }
+
+    /// Specialize a lambda expectation for a fixed-point recheck. Its inputs consume every
+    /// solution known so far, but a result owned by this postponed call remains open so the
+    /// rechecked body can refine an earlier provisional solution. Bindings outside this call stay
+    /// fixed in the result; explicit type arguments and enclosing declaration variables must not
+    /// be reopened as inference targets.
+    pub(super) fn refinement_lambda_expectation(
+        &self,
+        declared: Ty,
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> Ty {
+        let Ty::Fun(function) = declared.non_null() else {
+            return crate::symbol_resolver::ty_subst_keep_unbound(declared, bindings);
+        };
+        let fixed_result_bindings = bindings
+            .iter()
+            .filter(|(formal, _)| !self.formals.contains(*formal))
+            .map(|(formal, actual)| (formal.clone(), *actual))
+            .collect();
+        let expectation = Ty::fun_with_shape(
+            function
+                .params
+                .iter()
+                .map(|parameter| {
+                    crate::symbol_resolver::ty_subst_keep_unbound(*parameter, bindings)
+                })
+                .collect(),
+            crate::symbol_resolver::ty_subst_keep_unbound(function.ret, &fixed_result_bindings),
+            function.context_count,
+            function.has_receiver,
+            function.suspend,
+        );
+        declared.rewrap_nullability(expectation)
+    }
+
     pub(super) fn constrain_equal(&mut self, source: &dyn SymbolSource, formal: &str, actual: Ty) {
         let formal = self.variables.instantiate_formal(formal);
         if !self.formals.iter().any(|allowed| allowed == &formal) {
@@ -266,6 +331,72 @@ impl Checker<'_> {
         aggregate.merge(&self.fed_source(), frame);
         self.set(expression, checked);
         checked
+    }
+
+    /// The solution `constraints` give `formal`: its lower bound when every upper bound admits
+    /// it, otherwise an upper bound that every upper bound admits.
+    pub(super) fn postponed_solution(
+        &self,
+        constraints: &PostponedCallConstraints,
+        formal: &str,
+    ) -> Option<Ty> {
+        let upper = constraints
+            .upper
+            .get(formal)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        constraints
+            .lower
+            .get(formal)
+            .copied()
+            .filter(|lower| {
+                upper
+                    .iter()
+                    .all(|bound| self.receiver_is_assignable(*lower, *bound))
+            })
+            .or_else(|| {
+                upper.iter().copied().find(|candidate| {
+                    upper
+                        .iter()
+                        .all(|bound| self.receiver_is_assignable(*candidate, *bound))
+                })
+            })
+    }
+
+    /// Fix, before a lambda is analyzed, each of the call's open `formals` that the lambda's
+    /// `inputs` (its receiver and parameter types) mention and that the arguments analyzed so far
+    /// already solve. kotlinc fixes a lambda's input type variables before it analyzes the body, so
+    /// `selector = { it }` solving `R = String` types `printer: (R, R) -> String` as
+    /// `(String, String) -> String`; leaving `R` open would type the body against a variable that
+    /// is already known. A solution that still mentions one of the call's own formals is not proper
+    /// yet and stays open.
+    pub(super) fn fix_postponed_lambda_inputs(
+        &self,
+        formals: &[String],
+        inputs: &[Ty],
+        constraints: &PostponedCallConstraints,
+        bindings: &mut crate::symbol_resolver::GSigBinds,
+    ) {
+        for formal in formals {
+            if bindings.contains_key(formal)
+                || !inputs
+                    .iter()
+                    .any(|input| ty_mentions_param(*input, std::slice::from_ref(formal)))
+            {
+                continue;
+            }
+            let Some(solution) = self
+                .postponed_solution(constraints, formal)
+                .filter(|solution| !ty_mentions_param(*solution, formals))
+            else {
+                continue;
+            };
+            crate::trace_compiler!(
+                "lambda_apply",
+                "fixed lambda input formal={formal} solution={solution:?}",
+            );
+            bindings.insert(formal.clone(), solution);
+        }
     }
 
     pub(super) fn postponed_call_mentions(&self, ty: Ty) -> bool {

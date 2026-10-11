@@ -18,6 +18,7 @@ pub(in crate::resolve::streaming_signature_bridge) struct ReceiverLevelCall<'cal
         &'call [crate::fir::SigCallArgumentProbe<'source>],
     pub(in crate::resolve::streaming_signature_bridge) type_arguments: &'call [Ty],
     pub(in crate::resolve::streaming_signature_bridge) trailing_lambda: bool,
+    pub(in crate::resolve::streaming_signature_bridge) expected: Option<Ty>,
 }
 
 /// Parameter shapes in declaration order, with the source argument each parameter slot receives.
@@ -40,6 +41,7 @@ impl ProductionSignatureSemantics<'_> {
             arguments,
             type_arguments,
             trailing_lambda,
+            expected: _,
         } = call;
         let family = self.with_resolver(scope, |resolver| {
             Some(

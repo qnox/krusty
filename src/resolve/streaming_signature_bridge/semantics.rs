@@ -2237,7 +2237,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
         qualified: bool,
-        _expected: Option<crate::fir::ResolvedTy>,
+        expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
@@ -2568,7 +2568,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         arguments,
                         type_arguments,
                         trailing_lambda,
-                        None,
+                        expected,
                         demand,
                     );
                 }
@@ -2578,6 +2578,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     arguments,
                     &resolved_type_arguments,
                     trailing_lambda,
+                    expected.map(crate::fir::ResolvedTy::get),
                     demand,
                 ) {
                     return Ok(expectations);
@@ -4295,7 +4296,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
-        _expected: Option<crate::fir::ResolvedTy>,
+        expected: Option<crate::fir::ResolvedTy>,
         _demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
@@ -4328,16 +4329,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             arguments,
             type_arguments: &type_arguments,
             trailing_lambda,
+            expected: expected.map(crate::fir::ResolvedTy::get),
         };
-        let (parameters, slots) = self
-            .receiver_member_level_expectations(receiver.get(), call)?
-            .ok_or_else(Self::failure)?;
-        crate::trace_compiler!(
-            "signature",
-            "member call expectations receiver={:?} spelling={spelling} parameters={parameters:?} slots={slots:?}",
-            receiver.get(),
-        );
-        Ok(Self::postponed_expectations(arguments, &slots, &parameters))
+        self.qualified_receiver_call_expectations(receiver.get(), call)?
+            .ok_or_else(Self::failure)
     }
 
     fn fold_selected_integer_binary(

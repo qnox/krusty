@@ -251,31 +251,47 @@ fn owner_generic_member_value_class_operand_specialization_runs() {
 }
 
 #[test]
-fn generic_member_extension_value_class_receiver_specialization_rejected() {
-    assert!(rejects(
-        "class Scope {\n\
+fn generic_member_extension_value_class_receiver_specialization_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         class Scope {\n\
              fun <T, R> T.mapResult(\n\
                  transform: suspend (T) -> R\n\
              ): suspend () -> R = { transform(this) }\n\
-             fun trigger() = Result.success(\"OK\").mapResult { \"OK\" }\n\
+             fun trigger() = Result.success(\"OK\").mapResult { it.getOrThrow() }\n\
          }\n\
-         fun box(): String = \"unreachable\"\n"
-    ));
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             Scope().trigger()\n\
+                 .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "MemberExtensionGenericValueClass").as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]
-fn owner_generic_member_extension_value_class_receiver_specialization_rejected() {
-    assert!(rejects(
-        "class Scope<T> {\n\
+fn owner_generic_member_extension_value_class_receiver_specialization_runs() {
+    let source = "import kotlin.coroutines.*\n\
+         class Scope<T> {\n\
              fun <R> T.mapResult(\n\
                  transform: suspend (T) -> R\n\
              ): suspend () -> R = { transform(this) }\n\
          }\n\
          fun trigger() = with(Scope<Result<String>>()) {\n\
-             Result.success(\"OK\").mapResult { \"OK\" }\n\
+             Result.success(\"OK\").mapResult { it.getOrThrow() }\n\
          }\n\
-         fun box(): String = \"unreachable\"\n"
-    ));
+         fun box(): String {\n\
+             var result = \"fail\"\n\
+             trigger().startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })\n\
+             return result\n\
+         }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "OwnerMemberExtensionGenericValueClass")
+            .as_deref(),
+        Some("OK")
+    );
 }
 
 #[test]
