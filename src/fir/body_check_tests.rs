@@ -446,9 +446,12 @@ fn block_body_parameters_and_returns_use_body_local_stable_targets() {
         .parameters[0];
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        analysis.types[0].as_ref().expect("checked file"),
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info: analysis.types[0].as_ref().expect("checked file"),
+            source: SourceFileId::from_raw(0),
+            index: streamed.module.index(),
+        },
         BodyOwnerId::from_raw(declaration.raw()),
         root,
         &[CheckedBodyParameter {
@@ -459,7 +462,6 @@ fn block_body_parameters_and_returns_use_body_local_stable_targets() {
             inline_modifier: crate::types::InlineParameterModifier::None,
             name_binding: CheckedBodyParameterNameBinding::Lexical,
         }],
-        streamed.module.index(),
         &mut origins,
     )
     .expect("block body must build checked FIR");
@@ -541,9 +543,12 @@ fn selected_source_member_call_keeps_stable_target_receiver_and_default_mapping(
         .expect("resolved Box parameter type");
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        analysis.types[0].as_ref().expect("checked file"),
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info: analysis.types[0].as_ref().expect("checked file"),
+            source: SourceFileId::from_raw(0),
+            index: streamed.module.index(),
+        },
         BodyOwnerId::from_raw(23),
         root,
         &[CheckedBodyParameter {
@@ -554,7 +559,6 @@ fn selected_source_member_call_keeps_stable_target_receiver_and_default_mapping(
             inline_modifier: crate::types::InlineParameterModifier::None,
             name_binding: CheckedBodyParameterNameBinding::Lexical,
         }],
-        streamed.module.index(),
         &mut origins,
     )
     .expect("selected source member call must build checked FIR");
@@ -642,13 +646,15 @@ fn selected_source_operator_is_a_stable_fir_call_not_a_spelling_based_binary() {
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: streamed.module.index(),
+        },
         BodyOwnerId::from_raw(29),
         root,
         &parameters,
-        streamed.module.index(),
         &mut origins,
     )
     .expect("selected source operator must build checked FIR");
@@ -938,13 +944,15 @@ fn selected_compare_to_keeps_both_callable_identity_and_comparison_semantics() {
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: streamed.module.index(),
+        },
         BodyOwnerId::from_raw(43),
         root,
         &parameters,
-        streamed.module.index(),
         &mut origins,
     )
     .expect("selected comparison must build checked FIR");
@@ -1021,13 +1029,15 @@ fn selected_range_to_operator_is_a_stable_fir_call() {
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: streamed.module.index(),
+        },
         BodyOwnerId::from_raw(47),
         root,
         &parameters,
-        streamed.module.index(),
         &mut origins,
     )
     .expect("selected rangeTo must build checked FIR");
@@ -1081,13 +1091,15 @@ fn indexed_reads_distinguish_builtin_storage_from_selected_get_calls() {
                 })
                 .collect::<Vec<_>>();
             check_expression_body_with_parameters(
-                file,
-                info,
-                SourceFileId::from_raw(0),
+                BodyCheckUnit {
+                    file,
+                    info,
+                    source: SourceFileId::from_raw(0),
+                    index: streamed.module.index(),
+                },
                 BodyOwnerId::from_raw(owner),
                 root,
                 &parameters,
-                streamed.module.index(),
                 origins,
             )
             .expect("indexed read must build checked FIR")
@@ -1156,13 +1168,15 @@ fn builtin_index_assignment_is_an_explicit_checked_fir_write() {
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(59),
         root,
         &parameters,
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("array assignment must build checked FIR");
@@ -1217,13 +1231,15 @@ fn selected_index_set_operator_is_a_stable_fir_call() {
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(61),
         root,
         &[parameter],
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("selected set operator must build checked FIR");
@@ -1273,13 +1289,15 @@ fn indexed_assignment_explicitly_discards_a_non_unit_set_result() {
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(62),
         root,
         &[parameter],
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("selected set operator must build checked FIR");
@@ -1335,13 +1353,15 @@ fn selected_statement_inc_operator_is_a_stable_fir_call_before_writeback() {
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(67),
         root,
         &[parameter],
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("selected inc operator must build checked FIR");
@@ -1401,13 +1421,15 @@ fn custom_in_range_keeps_both_selected_convention_calls() {
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(71),
         root,
         &parameters,
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("custom membership must build checked FIR");
@@ -1483,13 +1505,15 @@ fn mixed_open_end_membership_selects_range_until() {
     let parameters = [parameter(0), parameter(1), parameter(2)];
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(73),
         root,
         &parameters,
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("mixed open-end membership must build checked FIR");
@@ -1571,13 +1595,15 @@ fn uniform_open_end_double_membership_stays_a_comparison() {
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(74),
         root,
         &[parameter],
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("uniform open-end membership must build checked FIR");
@@ -1647,13 +1673,15 @@ fn uniform_open_end_double_range_until_can_be_shadowed() {
     let parameters = [parameter(0), parameter(1), parameter(2)];
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(75),
         root,
         &parameters,
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("shadowed uniform open-end membership must build checked FIR");
@@ -1754,13 +1782,15 @@ fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(72),
         root,
         &[parameter],
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("floating-point membership must build checked FIR");
@@ -1808,13 +1838,15 @@ fn a_nearer_double_range_to_is_a_contains_call() {
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
+        BodyCheckUnit {
+            file,
+            info,
+            source: SourceFileId::from_raw(0),
+            index: analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        },
         BodyOwnerId::from_raw(73),
         root,
         &parameters,
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
         &mut origins,
     )
     .expect("a shadowed floating range must build checked FIR");
@@ -1867,13 +1899,15 @@ fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
         };
         let mut origins = OriginStore::default();
         let body = check_expression_body_with_parameters(
-            file,
-            info,
-            SourceFileId::from_raw(0),
+            BodyCheckUnit {
+                file,
+                info,
+                source: SourceFileId::from_raw(0),
+                index,
+            },
             BodyOwnerId::from_raw(80 + ordinal as u32),
             root,
             &[parameter],
-            index,
             &mut origins,
         )
         .expect("type operation must build checked FIR");
