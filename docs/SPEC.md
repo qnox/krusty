@@ -10287,8 +10287,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface`s alike, through a SAM-converted argument and a SAM constructor; a method with no
   value parameters is unchanged. kotlinc's `SUPPORTED_PRESETS` is empty, so `preset=` adds
   nothing. An abstract method that already declares an extension receiver keeps its own shape in
-  krusty; kotlinc 2.4.20 instead drops that receiver and makes the first value parameter the
-  receiver. The convention is a frontend fact (`SymbolSource::sam_with_receiver_annotations`, read
+  krusty. kotlinc 2.4.20's frontend instead drops that receiver and makes the first value
+  parameter the receiver, but its backend then fails every such lambda conversion with an
+  internal error (`LambdaMetafactoryArgumentsBuilder.validateMethodParameters`: "Mismatching
+  lambda and instance method parameters"), so there is no kotlinc output to match. The convention is a frontend fact (`SymbolSource::sam_with_receiver_annotations`, read
   by `symbol_resolver::semantic_sam_signature`), so checking, lowering and the backend see the same
   receiver function type. Tests: `tests/sam_with_receiver_plugin_e2e.rs` (annotated Java and
   Kotlin interfaces, an inherited annotated method, a meta-annotation, an annotated subinterface of
