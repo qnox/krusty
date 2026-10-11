@@ -9377,7 +9377,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (also of an anonymous object), and classifier type-parameter bounds. A type operator's target
   (`is`/`as`/`as?`, including a `when` branch) and a callable's type-parameter bound
   (`fun <T : B<String>>`, `where`, a property's or a local function's) check only the
-  applications nested in them, not their outermost application. A declared type Pass 1
+  applications nested in them: their outermost application is checked once
+  `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds` is on. A declared type Pass 1
   finalized is not resolved again; the checker walks its written syntax beside the finalized type
   and the alias spellings Pass 1 recorded for it. That includes the header of an abstract or
   interface member, which has no body to check. A builtin classifier's bounds come from its
@@ -13477,6 +13478,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `UNSUPPORTED_ARRAY_OF_NOTHING_IN_CLASS_LITERAL_LHS` until the feature makes it the plain
     `UNSUPPORTED` error, reported at the complete left-hand side.
     (`tests/class_literal_array_of_nothing_e2e.rs`.)
+  - `ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds`: `UPPER_BOUND_VIOLATED` also
+    checks the outermost application of a type operator's target (`a as B<String>`, `is`, a `when`
+    branch) and of a callable's type-parameter bound (`fun <T : B<String>>`, `where`, a property's
+    or a local function's). It is not a deprecation: with the feature off kotlinc reports nothing
+    there, not a warning. (`tests/upper_bound_violations_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and
