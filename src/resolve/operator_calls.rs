@@ -495,7 +495,6 @@ impl<'a> Checker<'a> {
             let et = self.expr(scope, end);
             let operands = InRangeOperands {
                 expression: e,
-                value,
                 kind,
                 value_ty: vt,
             };
@@ -553,11 +552,39 @@ impl<'a> Checker<'a> {
             let range_st = range_operand(st);
             let range_et = range_operand(et);
             let comparison_provenance = selected_range_comparison_provenance(kind, &range_call);
-            // Require uniform operand types — the lowering emits direct same-type comparisons, so a
-            // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
+            let contains = self.operator_call_ret(
+                scope,
+                e,
+                range_ty,
+                "contains",
+                &[vt],
+                &[value],
+                self.span(e),
+                None,
+            );
+            // kotlinc's `RangeContainsLowering` compares in the widest numeric type of the bounds
+            // and the value (`computeComparisonClass`) when the call is the range's own `contains`
+            // or a stdlib closed-range extension. Unsigned membership is compared only between
+            // operands of one type.
+            let selects_range_contains =
+                matches!(&contains, Some((Ty::Boolean, ResolvedCall::Member(_))))
+                    || matches!(
+                        &contains,
+                        Some((Ty::Boolean, ResolvedCall::Extension(extension)))
+                            if extension.callable.compiler_intrinsic
+                                == Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
+                    );
+            let operands_are_numeric = [range_vt, range_st, range_et].iter().all(prim);
+            let uniform = range_vt == range_st && range_st == range_et;
             let comparison =
-                if prim(&range_vt) && range_vt == range_st && range_st == range_et {
-                    Some(range_st.range_counter_type().unwrap_or(range_st))
+                if operands_are_numeric
+                    && (uniform
+                        || ![range_vt, range_st, range_et]
+                            .iter()
+                            .any(|ty| ty.is_unsigned()))
+                    && selects_range_contains
+                {
+                    range_comparison_type(range_st, range_et, range_vt)
                 } else if prim(&range_st)
                     && range_st == range_et
                     && self.in_range_widened_value(vt, range_st)
@@ -590,7 +617,7 @@ impl<'a> Checker<'a> {
                 // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
                 // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
-                self.finish_range_contains(scope, &operands, range_ty, range_call)
+                self.finish_range_contains(&operands, range_ty, range_call, contains)
             }
         };
         self.set(e, t)
@@ -598,21 +625,12 @@ impl<'a> Checker<'a> {
 
     fn finish_range_contains(
         &mut self,
-        scope: &CheckerScope<'_>,
         operands: &InRangeOperands,
         range_ty: Ty,
         range_call: ResolvedCall,
+        contains: Option<(Ty, ResolvedCall)>,
     ) -> Ty {
-        let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
-            scope,
-            operands.expression,
-            range_ty,
-            "contains",
-            &[operands.value_ty],
-            &[operands.value],
-            self.span(operands.expression),
-            None,
-        ) else {
+        let Some((Ty::Boolean, contains_call)) = contains else {
             self.diags.error(
                 self.span(operands.expression),
                 format!(
@@ -635,6 +653,38 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// `computeComparisonClass`: the widest numeric type of a range literal's bounds and the value.
+fn range_comparison_type(start: Ty, end: Ty, value: Ty) -> Option<Ty> {
+    widest_numeric_type(widest_numeric_type(start, end)?, value)
+}
+
+/// `leastCommonPrimitiveNumericType`.
+fn widest_numeric_type(left: Ty, right: Ty) -> Option<Ty> {
+    let either = |types: &[Ty]| types.contains(&left) || types.contains(&right);
+    Some(if either(&[Ty::Double]) {
+        Ty::Double
+    } else if either(&[Ty::Float]) {
+        Ty::Float
+    } else if either(&[Ty::ULong]) {
+        Ty::ULong
+    } else if either(&[Ty::UInt, Ty::UShort, Ty::UByte]) {
+        Ty::UInt
+    } else if either(&[Ty::Long]) {
+        Ty::Long
+    } else if either(&[Ty::Int, Ty::Short, Ty::Byte]) {
+        Ty::Int
+    } else if either(&[Ty::Char]) {
+        Ty::Char
+    } else {
+        return None;
+    })
+}
+
+/// Whether the selected range declaration is one kotlinc's `RangeContainsLowering` turns into
+/// comparisons: a closed range built by `rangeTo`, `rangeUntil` or `until` over progression
+/// elements, or a floating-point `rangeTo`. `downTo` builds a progression, which is not a
+/// `ClosedRange`, and a floating-point `rangeUntil` an `OpenEndRange`: membership in either calls
+/// its `contains`.
 fn selected_range_comparison_provenance(
     kind: crate::ast::RangeKind,
     range_call: &ResolvedCall,
@@ -653,11 +703,8 @@ fn selected_range_comparison_provenance(
         (RangeKind::Until, MemberRealization::Intrinsic(CompilerIntrinsic::RangeUntil)) => {
             Some(Provenance::RangeUntil)
         }
-        (RangeKind::DownTo, MemberRealization::Intrinsic(CompilerIntrinsic::RangeDownTo)) => {
-            Some(Provenance::RangeDownTo)
-        }
         (
-            RangeKind::Through | RangeKind::OpenEnd,
+            RangeKind::Through,
             MemberRealization::Intrinsic(CompilerIntrinsic::FloatingRangeMembership),
         ) => Some(Provenance::FloatingRangeMembership),
         _ => None,
@@ -696,7 +743,6 @@ pub(crate) struct ResolvedInRangeComparison {
 
 struct InRangeOperands {
     expression: ExprId,
-    value: ExprId,
     kind: crate::ast::RangeKind,
     value_ty: Ty,
 }

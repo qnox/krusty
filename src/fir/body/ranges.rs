@@ -18,7 +18,6 @@ pub enum FirRangeComparisonProvenance {
     RangeConstruction { open_end: bool },
     FloatingRangeMembership,
     RangeUntil,
-    RangeDownTo,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

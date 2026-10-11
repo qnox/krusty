@@ -539,6 +539,26 @@ fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compile
     }
 }
 
+/// `matchStdlibExtensionContainsCall`: an operator `contains` extension of a closed range with one
+/// parameter.
+fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    use crate::types::wk;
+    if facts.kind != FnKind::Extension
+        || facts.name != "contains"
+        || !facts.is_operator
+        || facts.params.len() != 1
+        || facts.context_count != 0
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let receiver = facts.receiver?.obj_internal()?;
+    let closed = receiver == wk::closed_range()
+        || receiver == wk::closed_floating_point_range()
+        || wk::progression_class(receiver) == Some(wk::ProgressionClass::Range);
+    closed.then_some(CompilerIntrinsic::ClosedRangeContains)
+}
+
 fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if facts.context_count != 0
         || facts.vararg.is_some()
@@ -630,7 +650,7 @@ pub(crate) fn function_realization(
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
-        progression_builder(&facts)
+        progression_builder(&facts).or_else(|| closed_range_contains(&facts))
     } else {
         None
     }
