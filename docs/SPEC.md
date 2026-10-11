@@ -12844,9 +12844,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   hold for the element's own annotations too, whatever their order. A class-literal argument that
   does not fold is reported on the argument: `annotation argument must be a compile-time constant.`
   when its receiver failed to resolve, `annotation argument must be class literal (T::class).` when
-  its receiver is a value (`tests/annotation_emission_e2e.rs`). File annotations' policies are
-  resolved once per source and reach every checking unit. Verified against kotlinc 2.4.20.
-  (`tests/opt_in_usage_e2e.rs`.)
+  its receiver is a value. File annotations' policies are resolved once per source and reach
+  every checking unit. Verified against kotlinc 2.4.20. (`tests/opt_in_usage_e2e.rs`.)
+
+- **A non-constant annotation argument is reported on the argument, by kind.** As kotlinc's
+  `FirAnnotationArgumentChecker` does, each argument (or array-literal element) that does not fold
+  gets one diagnostic at its own position. A class literal whose receiver failed to resolve, and any
+  other non-constant expression, is `annotation argument must be a compile-time constant.`; a class
+  literal of a value is `annotation argument must be class literal (T::class).`; a read of a module
+  `val` with a default getter and a literal initializer (`"a"`, `-1`, `true`, through any receiver)
+  is `only 'const val' can be used in constant expressions.`. A `var`, a custom or delegated getter,
+  any other initializer, a dependency's property, a local or parameter, a branch and a call of a
+  module function are not constants; an operator takes its first non-constant operand's kind; an
+  argument that already failed to resolve gets nothing more. A library call or intrinsic member
+  kotlinc evaluates is not classified, so krusty's own fold message still covers those it cannot
+  fold yet. Verified against kotlinc 2.4.20. (`tests/annotation_argument_constness_e2e.rs`.)
 
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its
