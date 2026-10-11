@@ -1809,6 +1809,10 @@ pub struct FirBody {
     /// to a literal. Both are `FirExprKind::Constant`; metadata's constant-initializer rule
     /// tells them apart.
     constant_reads: HashSet<FirExprId>,
+    /// Local writes that a postfix `x++`/`x--` performs from the temporary holding `x`'s old value
+    /// (`val tmp = x; x = tmp.inc(); tmp`). That temporary still equals `x` when the write runs,
+    /// which is the source form a target may realize as an in-place update.
+    postfix_updates: HashSet<FirExprId>,
     /// This callable's own lifting site, for a lambda or local function body.
     lifting_site: Option<FirLiftingSite>,
     /// Target-realized callables declared in this body that have no common FIR body: the accessors
@@ -1875,6 +1879,7 @@ impl FirBody {
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::new(),
             constant_reads: HashSet::new(),
+            postfix_updates: HashSet::new(),
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
@@ -2542,6 +2547,16 @@ impl FirBody {
     /// Whether this constant is a read of a constant declaration rather than a literal.
     pub fn is_constant_read(&self, expression: FirExprId) -> bool {
         self.constant_reads.contains(&expression)
+    }
+
+    pub(crate) fn record_postfix_update(&mut self, write: FirExprId) {
+        self.postfix_updates.insert(write);
+    }
+
+    /// Whether this local write is a postfix increment's update from the saved old value; see
+    /// `postfix_updates`.
+    pub fn is_postfix_update(&self, write: FirExprId) -> bool {
+        self.postfix_updates.contains(&write)
     }
 
     pub(crate) fn set_generated_class_provenance(

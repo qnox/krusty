@@ -2959,6 +2959,32 @@ impl BodyFirChecker<'_> {
         self.source_member_operator_call(expression, convention, receiver, &[])
     }
 
+    /// [`Self::zero_arg_expression_operator_call`] applied to an already checked receiver value,
+    /// such as the temporary a postfix increment saved its operand's old value in.
+    pub(super) fn zero_arg_expression_operator_call_on_value(
+        &mut self,
+        expression: ExprId,
+        convention: &str,
+        receiver: FirExprId,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        if let Some(ResolvedCall::LocalFunction(selected)) = self
+            .info
+            .resolved_operator_call(expression, convention)
+            .cloned()
+        {
+            let cause = self.expression_origin(expression)?;
+            return self.local_operator_call_on_value(
+                self.file.expr_span(expression),
+                cause,
+                &selected,
+                receiver,
+                &[],
+            );
+        }
+        self.source_member_operator_call_on_value(expression, convention, receiver, &[])
+            .map(FirExprKind::Call)
+    }
+
     /// Statement-position counterpart of [`Self::zero_arg_expression_operator_call`]. The caller
     /// has already synthesized the storage read that becomes the extension receiver.
     pub(super) fn zero_arg_statement_operator_call_on_value(

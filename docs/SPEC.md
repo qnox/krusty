@@ -1863,6 +1863,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`i++`, `++i`, `i--` and `--i` on an `Int` local in statement position are `iinc`**, like
   `i += 1`: the lowered increment wraps the same `i + 1` in an identity coercion to its checked
   result type, which the `iinc` selection looks through. Test: `tests/increment_statement_e2e.rs`.
+- **A postfix `x++`/`x--` used as a value updates from the saved old value**: it is
+  `val tmp = x; x = tmp.inc(); tmp`, so the storage is read once. A captured `var` in a lambda,
+  a local shared into a closure (its `Ref` cell), a captured local-class value, and a plain `Long`/`Double`/`Byte`/`Char` local or one
+  with a user `inc()` therefore load the temporary for the update (`getfield element; istore t;
+  aload r; iload t; iconst_1; iadd; putfield element; iload t`), never re-read the storage. The
+  checked FIR marks a local write so built (`FirBody::is_postfix_update` →
+  `IrFile::postfix_updates`); for an `Int` local the JVM backend realizes the whole block as
+  kotlinc's `JvmOptimizationLowering` does — `iload x; iinc x, ±1` with no temporary slot. Prefix
+  forms are unchanged: they apply the operator to a fresh read. Known gap: the statement form
+  (`Stmt::IncDec`) still builds `x = x.inc()` from a second read; kotlinc keeps the `<unary>`
+  temporary there too (and does not fold its store/load), so a statement-position postfix on a
+  captured, shared or non-`Int` local still differs from kotlinc's bytecode.
+  Test: `tests/increment_statement_e2e.rs::postfix_updates_use_the_saved_old_value_like_kotlinc`.
 - **`&&`/`||` are laid out as short-circuit jumps**, as kotlinc lays out `ANDAND`/`OROR`. In a
   condition each operand branches on its own: `if (a && b)` is `jumpIfFalse(a, else);
   jumpIfFalse(b, else)`, `if (a || b)` is `jumpIfTrue(a, then); jumpIfFalse(b, else)`, and `!`
@@ -4186,8 +4199,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`++`/`--` as an expression value** (`val a = i++`, `++i`, and in operand position — a call argument,
   a string template, a `when` subject): a single `Expr::IncDec { target, dec, prefix }` node, usable
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
-  The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
-  new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
+  A prefix form's value is the re-read updated local; a postfix form saves the old value in a temporary
+  and updates from it (see "A postfix `x++`/`x--` updates from the saved old value").
+  `tests/incdec_expr_e2e.rs`.
 - **A narrow integral constant keeps its own WIDTH in common IR.** `FirConstant` has no signed case
   narrower than `Int` and no `UByte`/`UShort` case, so a constant expression's checked TYPE is the
   only thing carrying those widths — which is why `lower_constant` already reads it to tell `UByte`

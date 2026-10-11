@@ -207,10 +207,14 @@ impl BodyLowering<'_> {
                 if let Some(element) = self.shared_local_type(*target) {
                     self.shared_cell_write(self.value_slot(*target), element, value)
                 } else {
-                    self.ir.add_expr(IrExpr::SetValue {
+                    let update = self.ir.add_expr(IrExpr::SetValue {
                         var: self.value_slot(*target),
                         value,
-                    })
+                    });
+                    if self.body.is_postfix_update(expression_id) {
+                        self.ir.postfix_updates.insert(update);
+                    }
+                    update
                 }
             }
             FirExprKind::PropertyRead {

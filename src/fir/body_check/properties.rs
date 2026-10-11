@@ -1780,7 +1780,7 @@ impl BodyFirChecker<'_> {
             });
             let temporary = self.allocate_local();
             let (bound, bound_ty) = if prefix {
-                let updated = self.increment_value(expression, target, decrement)?;
+                let updated = self.increment_value(expression, target, None, decrement)?;
                 (updated, updated_ty)
             } else {
                 (read, read_ty)

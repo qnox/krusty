@@ -1999,6 +1999,11 @@ pub struct IrFile {
     /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
     /// them as the plain arithmetic and store they are, never as a fused increment.
     pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Local assignments a postfix `x++`/`x--` performs from the unnamed temporary holding `x`'s
+    /// old value (`val tmp = x; x = tmp + 1; tmp`). The temporary still equals `x` there, so a
+    /// target may realize the update in place, as kotlinc's `JvmOptimizationLowering` does for an
+    /// `Int` local (`iinc`); otherwise it adds to the temporary it reads.
+    pub postfix_updates: std::collections::HashSet<ExprId>,
     /// Boolean negations (kotlinc's `not`), spelled as `operand == false`; see `negations`.
     pub negations: std::collections::HashSet<ExprId>,
     /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's

@@ -25,6 +25,9 @@ impl Emitter<'_> {
             self.emit_discarding(block, code);
             return;
         }
+        if self.try_emit_postfix_iinc(&stmts, value, false, code) {
+            return;
+        }
         let inline_stack_height = code.stack_height();
         let normalizes_inline_stack =
             self.ir.external_inline_expansions.contains(&block) && inline_stack_height != 0;
@@ -128,6 +131,9 @@ impl Emitter<'_> {
         value: Option<u32>,
         code: &mut CodeBuilder,
     ) {
+        if value.is_some() && self.try_emit_postfix_iinc(stmts, value, true, code) {
+            return;
+        }
         // External inline plans record only their semantic boundary in common IR. When evaluation
         // begins with caller operands already live, the finished-method FixStack pass derives and
         // restores their complete JVM representation from these markers.
@@ -622,6 +628,33 @@ impl Emitter<'_> {
         for slot in reserved.into_iter().flatten().rev() {
             self.frame.leave_temp(slot);
         }
+    }
+
+    /// Emit a postfix `Int` local update in place (see `local_updates::postfix_iinc`): the old
+    /// value, when used, is read straight from the local before its `iinc`.
+    fn try_emit_postfix_iinc(
+        &mut self,
+        stmts: &[u32],
+        value: Option<u32>,
+        used: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let local_ty = |var| {
+            self.slots
+                .get(&var)
+                .filter(|_| self.inline_return_frame_result_type(var).is_none())
+                .map(|&(_, ty)| ty)
+        };
+        let Some(postfix) = super::local_updates::postfix_iinc(self.ir, stmts, value, local_ty)
+        else {
+            return false;
+        };
+        self.mark_statement_line(stmts[0], code);
+        if used {
+            self.emit_value(postfix.old_value, code);
+        }
+        code.iinc(self.slots[&postfix.var].0, postfix.delta);
+        true
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
