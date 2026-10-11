@@ -12378,6 +12378,11 @@ impl<'a> Checker<'a> {
         let Some(identity) = ty.non_null().ty_param_name() else {
             return Vec::new();
         };
+        self.declared_tparam_extra_bounds(identity)
+    }
+
+    /// The declared bounds of type parameter `identity` after its first, from its header.
+    fn declared_tparam_extra_bounds(&self, identity: &str) -> Vec<Ty> {
         if let Some(bounds) = self.resolved_index.and_then(|index| {
             let parameter = index.type_parameter_by_semantic_name(identity)?;
             let header = index.type_parameter_header(parameter)?;
@@ -35342,6 +35347,10 @@ impl<'a> CheckerModuleSymbols<'a> {
 }
 
 impl SymbolSource for CheckerModuleSymbols<'_> {
+    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
+        self.type_parameter_extra_bounds(name)
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         match self {
             Self::Legacy(source) => source.package_exists(parent, name),
@@ -36195,6 +36204,10 @@ impl crate::assignable::TypeOracle for Checker<'_> {
             .and_then(|classifier| classifier.type_param_bounds.get(index).cloned())
             .filter(|bounds| !bounds.is_empty())
             .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))])
+    }
+
+    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
+        self.declared_tparam_extra_bounds(name)
     }
 
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {

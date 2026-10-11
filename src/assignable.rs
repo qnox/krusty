@@ -53,6 +53,34 @@ pub trait TypeOracle {
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         lower
     }
+
+    /// The upper bounds of type variable `name` after its first, which `Ty::TyParam` carries
+    /// (`where T : A, T : B` adds `B`). A variable is a subtype of every one of its bounds.
+    fn type_variable_extra_bounds(&self, _name: &str) -> Vec<Ty> {
+        Vec::new()
+    }
+}
+
+/// Whether the source type variable `name` meets `sup`: through its inferred binding when it has
+/// one, otherwise through its upper bound. A variable with several declared bounds is bounded by
+/// their intersection, so it meets `sup` exactly when that intersection does.
+fn variable_bound_assignable(
+    cx: &TyCtx,
+    oracle: &dyn TypeOracle,
+    sub: Ty,
+    name: &str,
+    bound: Ty,
+    sup: Ty,
+) -> bool {
+    let upper = cx.lookup(name).unwrap_or_else(|| {
+        let extra = oracle.type_variable_extra_bounds(name);
+        if extra.is_empty() {
+            bound
+        } else {
+            Ty::intersection(&[&[bound][..], &extra].concat())
+        }
+    });
+    upper != sub && assignable_inner(cx, oracle, upper, sup)
 }
 
 /// Target-independent upper shape of a flexible type whose lower bound is retained in [`Ty`].
@@ -226,8 +254,8 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         {
             return true;
         }
-        if let Ty::TyParam(_, bound) = sub {
-            return *bound != sub && assignable_inner(cx, oracle, *bound, sup);
+        if let Ty::TyParam(name, bound) = sub {
+            return variable_bound_assignable(cx, oracle, sub, name, *bound, sup);
         }
         return is_assignable(cx, oracle, sub.non_null(), *inner);
     }
@@ -241,8 +269,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // the target arm hides the only declared proof of that relation.
     if let (Ty::TyParam(source_name, source_bound), Ty::TyParam(target_name, _)) = (sub, sup) {
         if source_name != target_name {
-            let source = cx.lookup(source_name).unwrap_or(*source_bound);
-            return source != sub && assignable_inner(cx, oracle, source, sup);
+            return variable_bound_assignable(cx, oracle, sub, source_name, *source_bound, sup);
         }
     }
 
@@ -256,8 +283,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
             .is_some_and(|target| target != sup && assignable_inner(cx, oracle, sub, target));
     }
     if let Ty::TyParam(name, bound) = sub {
-        let source = cx.lookup(name).unwrap_or(*bound);
-        return source != sub && assignable_inner(cx, oracle, source, sup);
+        return variable_bound_assignable(cx, oracle, sub, name, *bound, sup);
     }
 
     // Everything (a boxed primitive included) is assignable to `Any`/`Object`.

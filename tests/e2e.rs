@@ -3030,3 +3030,6 @@ mod value_class_receiver_inline_only_e2e;
 mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
+
+#[path = "where_bound_arguments_e2e.rs"]
+mod where_bound_arguments_e2e;

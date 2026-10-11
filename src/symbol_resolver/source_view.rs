@@ -136,6 +136,13 @@ impl SymbolSource for ResolverSource<'_> {
         }
     }
 
+    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
+        match self {
+            Self::Direct(source) => source.type_variable_extra_bounds(name),
+            Self::Memoized(source) => source.type_variable_extra_bounds(name),
+        }
+    }
+
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         match self {
             Self::Direct(source) => source.generated_serializer_singleton(classifier),

@@ -1775,6 +1775,10 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
+        self.type_parameter_extra_bounds(name)
+    }
+
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {
         self.index.sam_with_receiver_annotations()
     }

@@ -1250,6 +1250,10 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
+        self.type_parameter_extra_bounds(name)
+    }
+
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {
         &self.syms.sam_with_receiver_annotations
     }

@@ -9203,6 +9203,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unresolved. The remaining bounds are kept beside the erasure and retried when the lookup fails; the
   erasure itself is untouched, so descriptors still match kotlinc. Test:
   `tests/feature_coverage_n_e2e.rs::where_clause_two_bounds`.
+- **A type variable is a SUBTYPE of the intersection of all its bounds.** Member lookup already saw
+  every bound, but assignability walked only the one `Ty::TyParam` carries, so an argument whose type
+  is the variable was rejected for a parameter of a later bound (`takeCs(a)` with
+  `where T : Comparable<T>, T : CharSequence`), also through a chained bound (`<T : X, X>` with
+  `where X : CharSequence`) and when selecting an operator (`(1U..10U).contains(a)`). Assignability
+  now asks the oracle for the variable's remaining declared bounds (`type_variable_extra_bounds`) and
+  compares the source as the intersection of all of them, so a variable meets a target exactly when
+  that intersection does; there is no per-bound retry. An inferred binding still replaces the bounds.
+  Test: `tests/where_bound_arguments_e2e.rs`.
 - **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
   candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
   `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver
