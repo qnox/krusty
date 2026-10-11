@@ -2172,10 +2172,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `FirDataClassConsistentDataCopyAnnotationChecker`, krusty reports both annotations on one data
   class as incompatible (an error on each entry), either annotation on a non-data classifier as the
   wrong target, and `@ConsistentCopyVisibility` under the flag as redundant (a warning). The
-  `ErrorAboutDataClassCopyVisibilityChange` deprecation warnings are not modeled here. An ordinary
-  selected-member access diagnostic renders the callable and its recorded parameter roles; a legacy
+  `ErrorAboutDataClassCopyVisibilityChange` changes the declaration and inaccessible-use migration
+  diagnostics from warnings to errors; both remain absent once copy respects constructor visibility.
+  An ordinary selected-member access diagnostic renders the callable and its recorded parameter roles; a legacy
   context receiver therefore remains `context(String)`, rather than acquiring a fabricated name.
-  Tests: `tests/consistent_copy_visibility_e2e.rs` (normalized `copy`/`copy$default` javap sections
+  Tests: `tests/consistent_copy_visibility_e2e.rs`, `tests/data_class_copy_visibility_e2e.rs`
+  (normalized `copy`/`copy$default` javap sections
   differential vs kotlinc with and without the flag and per annotation, a protected ctor,
   byte-level toggling isolation, internal-ctor pin, and annotation/call-site diagnostics) plus the
   flag-modeling tests in `crates/krusty-cli/src/cli.rs` and `src/features.rs`, and the
@@ -13710,6 +13712,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       alias-to-object qualifier written with arguments as `Unit` and then fails in its JVM backend,
       so the off-mode alias warnings are pinned against krusty's front end alone.
       (`tests/object_qualifier_type_arguments_e2e.rs`.)
+  - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
+    public is reported at the constructor's visibility modifier unless it is annotated
+    `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its
+    generated `copy()` is reported at the callee name where the constructor is not visible, whatever
+    the annotations. Neither is reported once `DataClassCopyRespectsConstructorVisibility` gives
+    `copy()` the constructor's visibility. Class records carry the `data` modifier, from the
+    declaration or the metadata `IS_DATA` flag, so a dependency's `copy()` is checked the same way
+    (`tests/data_class_copy_visibility_e2e.rs`).
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and

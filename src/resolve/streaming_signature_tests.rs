@@ -103,6 +103,75 @@ fn generated_data_class_copy_publishes_its_complete_callable_header() {
 }
 
 #[test]
+fn generated_data_class_copy_keeps_a_user_overload_as_a_distinct_declaration() {
+    let source = "data class D(val x: Int) {\n\
+                  fun copy(text: String) = text\n\
+                  }";
+    let inputs = [SourceInput::kotlin(source).with_file_stem("GeneratedAndUserDataCopy")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("both copy overload signatures must finalize")
+        .module
+        .index();
+    let copies = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .filter(|declaration| index.declaration_name(*declaration) == Some("copy"))
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 2, "generated and written copy declarations");
+
+    let generated = copies
+        .iter()
+        .copied()
+        .find(|declaration| {
+            index
+                .declaration_header(*declaration)
+                .is_some_and(|header| {
+                    header
+                        .flags
+                        .has(crate::fir::DeclarationFlags::DATA_CLASS_COPY)
+                })
+        })
+        .expect("generated data-class copy identity");
+    let written = copies
+        .iter()
+        .copied()
+        .find(|declaration| *declaration != generated)
+        .expect("written copy identity");
+    assert!(!index
+        .declaration_header(written)
+        .expect("written copy header")
+        .flags
+        .has(crate::fir::DeclarationFlags::COMPILER_GENERATED));
+
+    let generated_callable = index
+        .callable_for_declaration(generated)
+        .expect("generated copy callable");
+    let written_callable = index
+        .callable_for_declaration(written)
+        .expect("written copy callable");
+    assert!(index
+        .callable_parameter(generated_callable.id, 0)
+        .expect("generated copy parameter")
+        .flags()
+        .has_default());
+    assert!(!index
+        .callable_parameter(written_callable.id, 0)
+        .expect("written copy parameter")
+        .flags()
+        .has_default());
+}
+
+#[test]
 fn suppressed_value_class_members_do_not_stop_later_header_publication() {
     let (Some(stdlib), Some(jdk)) = (
         crate::toolchain::stdlib_jar(),

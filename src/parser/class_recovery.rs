@@ -9,6 +9,7 @@ pub(super) fn error_class_decl(span: Span) -> ClassDecl {
     ClassDecl {
         name_span: span,
         primary_ctor_visibility: Visibility::Public,
+        primary_ctor_visibility_span: None,
         name: "<error>".to_string(),
         visibility: Visibility::Public,
         annotations: Vec::new(),

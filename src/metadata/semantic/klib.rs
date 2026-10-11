@@ -949,6 +949,7 @@ struct SemanticFunctionShape {
     modality: metadata::KotlinModality,
     is_operator: bool,
     is_infix: bool,
+    is_synthesized: bool,
     is_static: bool,
     return_value_status: crate::types::ReturnValueStatus,
 }
@@ -1082,6 +1083,7 @@ fn semantic_function_shape(
         modality: metadata::declaration_modality(flags),
         is_operator: flags & (1 << 8) != 0,
         is_infix: flags & (1 << 9) != 0,
+        is_synthesized: (flags >> 6) & 0x3 == 3,
         is_static: modern_flags
             .is_some_and(|flags| flags & crate::metadata::function_flags::IS_STATIC != 0),
         return_value_status: modern_flags.map_or_else(Default::default, |flags| {
@@ -1342,6 +1344,7 @@ fn semantic_function(
         is_suspend: function.is_suspend,
         is_operator: function.is_operator,
         is_infix: function.is_infix,
+        is_synthesized: function.is_synthesized,
         is_expect: function.is_expect,
         is_external: function.is_external,
         is_static,

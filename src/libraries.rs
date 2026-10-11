@@ -2298,6 +2298,8 @@ pub struct LibraryType {
     /// default-method compatibility surface (bridges/forwarders), while a JAVA default method never
     /// does — kotlinc emits no forwarder for `java.util.function.Function.andThen`.
     pub is_kotlin: bool,
+    /// A Kotlin `data class`, from its declaration or its metadata `IS_DATA` flag.
+    pub is_data: bool,
     /// Source file that declares this classifier in the current compilation module. Dependency and
     /// platform classifiers leave it unset. Core accessibility uses this for top-level `private`.
     pub source_file: Option<u32>,
@@ -2483,6 +2485,7 @@ impl LibraryType {
             // The header commits existence only; the provider's full record supplies the real
             // declaration facts, this one included.
             is_kotlin: false,
+            is_data: false,
             access: ClassifierAccess::Public,
             source_file: None,
             stable_declaration: None,
@@ -2775,6 +2778,7 @@ mod tests {
     fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
         let mut t = super::LibraryType {
             is_kotlin: true,
+            is_data: false,
             access: super::ClassifierAccess::Public,
             source_file: None,
             stable_declaration: None,
