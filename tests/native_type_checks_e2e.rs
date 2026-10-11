@@ -109,6 +109,19 @@ fn a_nullable_array_check_admits_null() {
 }
 
 #[test]
+fn a_nullable_check_types_its_single_evaluation_wrapper() {
+    let src = "fun make(value: Any?): Any? = value\n\
+               fun box(): String {\n\
+               \x20   if (make(null) !is String?) return \"fail: null\"\n\
+               \x20   if (make(\"text\") !is String?) return \"fail: text\"\n\
+               \x20   if (make(7) is String?) return \"fail: number\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "NullableCheckSingleEvaluation");
+    expect_native_box(src, "NullableCheckSingleEvaluation", "OK");
+}
+
+#[test]
 fn a_safe_cast_to_an_array_answers_null_rather_than_the_wrong_array() {
     // `as?` is the check with a value attached, so it has to reach the same descriptor. Answering
     // the receiver unchecked would hand back an `Array<String>` typed `IntArray`, and every read

@@ -196,11 +196,16 @@ impl BodyLowering<'_> {
         let test = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(null_test), true_value), (None, instance_test)],
         });
+        self.ir.logical_types.insert(test, Ty::Boolean);
         match declaration {
-            Some(declaration) => self.ir.add_expr(IrExpr::Block {
-                stmts: vec![declaration],
-                value: Some(test),
-            }),
+            Some(declaration) => {
+                let block = self.ir.add_expr(IrExpr::Block {
+                    stmts: vec![declaration],
+                    value: Some(test),
+                });
+                self.ir.logical_types.insert(block, Ty::Boolean);
+                block
+            }
             None => test,
         }
     }
@@ -326,7 +331,7 @@ mod tests {
         BodyOwnerId, FirBody, FirExpr, FirExprKind, FirStatement, FirStatementKind,
         FirTypeOperation, OriginId, ResolvedModuleIndex, ResolvedTy,
     };
-    use crate::ir::{IrConst, IrExpr, IrFile, IrTypeOp};
+    use crate::ir::{IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
     use crate::types::Ty;
 
     use super::super::lower_body;
@@ -485,6 +490,57 @@ mod tests {
                 .any(|(op, ty)| { *op == IrTypeOp::Cast && *ty == Ty::nullable(parameter) }),
             "the success cast names T?, got {operations:?}"
         );
+    }
+
+    #[test]
+    fn a_negated_nullable_test_types_each_synthesized_boolean_value() {
+        let origin = OriginId::from_raw(0);
+        let mut body = FirBody::new(BodyOwnerId::from_raw(1));
+        let operand = body.add_expr(FirExpr {
+            origin,
+            ty: resolved(Ty::nullable(Ty::obj("kotlin/Any"))),
+            kind: FirExprKind::Constant(crate::fir::FirConstant::Null),
+        });
+        let check = body.add_expr(FirExpr {
+            origin,
+            ty: resolved(Ty::Boolean),
+            kind: FirExprKind::TypeOperation {
+                operation: FirTypeOperation::NotIs,
+                operand,
+                target: resolved(Ty::nullable(Ty::obj("sample/Item"))),
+            },
+        });
+        let statement = body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(check),
+        });
+        body.push_root(statement);
+
+        let mut ir = IrFile::default();
+        let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir)
+            .expect("a negated nullable test lowers");
+        let negation = *lowered.roots.last().expect("one root");
+        let IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Eq,
+            lhs: block,
+            ..
+        } = ir.expr(negation)
+        else {
+            panic!("the source !is is a negation, got {:?}", ir.expr(negation));
+        };
+        let IrExpr::Block {
+            value: Some(when), ..
+        } = ir.expr(*block)
+        else {
+            panic!(
+                "the unstable operand is bound once, got {:?}",
+                ir.expr(*block)
+            );
+        };
+
+        assert_eq!(ir.checked_type(*when), Some(Ty::Boolean));
+        assert_eq!(ir.checked_type(*block), Some(Ty::Boolean));
+        assert_eq!(ir.checked_type(negation), Some(Ty::Boolean));
     }
 
     /// The shape, not just the answer: a settled check folds the ANSWER and keeps the operand as an
