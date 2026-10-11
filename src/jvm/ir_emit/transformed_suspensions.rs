@@ -333,12 +333,20 @@ pub(super) type TransformedCoroutines = RefCell<HashMap<String, CoroutineOutcome
 impl EmitRun {
     /// Write `class`, transforming the coroutines its methods asked for, and keep what they found.
     /// A method whose saved operand stack cannot be normalized fails the compile.
-    pub(super) fn finish_class(&self, class: ClassWriter) -> Vec<u8> {
+    pub(super) fn finish_class(&self, mut class: ClassWriter) -> Vec<u8> {
         // A failed method can stop before restoring a valid operand stack. The whole emit pass is
         // discarded once this flag is observed, so do not ask the frame computer to analyze that
         // incomplete class in the meantime. These bytes cannot escape `emit_pass`.
         if self.emission_failed() {
             return Vec::new();
+        }
+        // A class whose code switches on an enum declares its `$WhenMappings` nested class.
+        if let Some(mappings) = self
+            .when_mappings
+            .borrow()
+            .inner_class(&class.internal_name)
+        {
+            class.add_inner_class(mappings);
         }
         let finished = class.finish_with_coroutines();
         for failure in finished.failures {

@@ -713,6 +713,20 @@ pub enum IrExpr {
     EnumEntries {
         classifier: TypeName,
     },
+    /// JVM `MappedEnumWhenLowering`: the switch key of `subject`'s entry, read from the emitting
+    /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
+    /// `Int`. `registrations` are the table entries this subject `when` (and every subject `when`
+    /// nested in it) claims, in kotlinc's visiting order; see [`EnumSwitchRegistration`].
+    EnumSwitchOrdinal {
+        classifier: TypeName,
+        subject: ExprId,
+        registrations: Box<[EnumSwitchRegistration]>,
+    },
+    /// The `$WhenMappings` key of one enum entry in the emitting class's table. Value type: `Int`.
+    EnumSwitchKey {
+        classifier: TypeName,
+        name: Box<str>,
+    },
     /// A reified-type-parameter CLASS placeholder inside an EMITTED `inline fun <reified T>` body:
     /// `Intrinsics.reifiedOperationMarker(4, name)` followed by the ERASED class constant — the
     /// pattern every splicer (kotlinc's and krusty's) patches with the call-site class at inline
@@ -878,6 +892,15 @@ pub struct IrFunction {
     /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
     /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.
     pub param_checks: Vec<Option<IrParameterCheck>>,
+}
+
+/// One claim on the emitting class's `$WhenMappings`: the `$EnumSwitchMapping$N` table for
+/// `classifier`, and, with `entry`, that entry's key in it. A table is numbered by the first claim
+/// on its enum and a key by the first claim on its entry, so claims are replayed in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumSwitchRegistration {
+    pub classifier: TypeName,
+    pub entry: Option<Box<str>>,
 }
 
 /// One entry of an `enum class` in [`IrClass`]. Groups what were parallel `Vec`s keyed by entry index

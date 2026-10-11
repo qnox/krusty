@@ -1486,6 +1486,15 @@ impl super::Emitter<'_> {
                 };
                 code.getstatic(f, words);
             }
+            IrExpr::EnumSwitchOrdinal {
+                classifier,
+                subject,
+                registrations,
+            } => self.emit_enum_switch_ordinal(*classifier, *subject, registrations, code),
+            IrExpr::EnumSwitchKey { classifier, name } => {
+                let key = self.enum_switch_key(*classifier, name);
+                code.push_int(key, self.cw);
+            }
             IrExpr::EnumValues { classifier } => {
                 let fq = classifier.render();
                 let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));

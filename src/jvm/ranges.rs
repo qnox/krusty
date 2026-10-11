@@ -175,6 +175,8 @@ pub(super) fn realize(
             | IrExpr::EnumValues { .. }
             | IrExpr::EnumValueOf { .. }
             | IrExpr::EnumEntries { .. }
+            | IrExpr::EnumSwitchOrdinal { .. }
+            | IrExpr::EnumSwitchKey { .. }
             | IrExpr::ReifiedTypeOp { .. }
             | IrExpr::ReifiedClassMarker { .. }
             | IrExpr::RefNew { .. }

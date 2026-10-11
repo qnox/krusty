@@ -29,6 +29,7 @@ mod declaration_collisions;
 mod default_call_operands;
 mod default_parameter_representation;
 mod deferred_local_storage;
+mod enum_when_mappings;
 mod external_calls;
 mod field_compaction;
 pub mod frame_audit;
