@@ -4650,6 +4650,8 @@ pub(crate) fn finalized_streamed_signature_index(
     let mut deferred_interface_delegations = Vec::new();
     let open_by_default =
         super::plugin_status::OpenByDefault::collect(headers, table, &classifier_types);
+    super::plugin_noarg::NoArgConstructors::collect(headers, table, &classifier_types, diags)
+        .publish(&mut index);
     for stub in &headers.stubs {
         let anchor = headers
             .declarations

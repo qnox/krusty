@@ -68,7 +68,19 @@ pub(super) fn emit_declared(
     if annotations.deprecated() {
         cw.mark_method_deprecated(name, descriptor);
     }
-    if annotations.deprecated_hidden() {
+    if hidden_realization_is_synthetic(annotations) {
         cw.set_method_synthetic(name, descriptor);
     }
+}
+
+/// kotlinc emits a `@Deprecated(level = HIDDEN)` declaration `ACC_SYNTHETIC`, so Java cannot call
+/// it either, unless it also carries `@java.lang.Deprecated`: that annotation keeps the method
+/// visible to Java (KT-80649), which kotlinc's no-arg plugin relies on for its constructor.
+pub(super) fn hidden_realization_is_synthetic(
+    annotations: &crate::ir::DeclarationAnnotations,
+) -> bool {
+    annotations.deprecated_hidden()
+        && !annotations
+            .applications()
+            .any(|annotation| annotation.internal.matches("java/lang/Deprecated"))
 }

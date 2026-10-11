@@ -101,6 +101,23 @@ source declarations and dependency classifiers alike. The transformed modality i
 declaration header is published, so the checker, common lowering and the backends all read the same
 `open` declaration and no later phase knows a plugin was involved.
 
+### Generated constructor — `no-arg`
+
+kotlinc's no-arg plugin generates a zero-argument constructor in FIR and builds its body in IR. The
+native port splits the same way. `IrPlugin::no_arg_constructor_annotations` names the annotations
+(from `annotation=<fqname>` and the `jpa` preset), matched by the same class predicate as all-open
+(`resolve::plugin_class_predicate`). Where headers are published, `resolve::plugin_noarg` reports
+kotlinc's checker errors on the class name (a matched inner class; a superclass with no constructor
+callable without arguments that is not matched itself). For each class that gets the constructor
+(a matched, non-inner, non-local, non-value class that declares no constructor JVM callers can
+call without arguments) it publishes the superclass constructor the new one calls as `<init>()`
+(`ResolvedModuleIndex::no_arg_constructor`): a declared source constructor by identity, so its
+access (a sealed superclass's marker accessor) comes with it, or an unrestricted one. Common
+lowering builds the constructor from that decision: it delegates to that constructor, runs no
+initializer, and carries `@Deprecated(level = HIDDEN)` and `@java.lang.Deprecated`, so Kotlin cannot
+select it while Java and frameworks can. `invokeInitializers=true` is not implemented and fails the
+compile (`UnimplementedOption`).
+
 ### Reference plugin — `serialization`
 
 `@Serializable class Foo(val a: Int, val b: String)` → the PoC synthesizes the structure kotlinc's
@@ -247,13 +264,14 @@ silently dropping a plugin would emit wrong bytecode, each activated plugin gets
 
 | Situation | Diagnostic | Severity |
 |---|---|---|
-| native reimpl (serialization, all-open) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
+| native reimpl (serialization, all-open, no-arg) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
 | hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
 | hosted (KSP), from a driver with no codegen host (`Activation::codegen_host == false`) | `HostUnavailable` — reporting it hosted would drop its generated sources | **ERROR** (fails the compile) |
-| `-Xplugin` jar declaring a registrar no extension answers to (Compose, no-arg, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
+| `-Xplugin` jar declaring a registrar no extension answers to (Compose, sam-with-receiver, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
 | `-Xplugin` entry krusty cannot read (not a zip, not a directory) | `Unsupported` — it cannot be identified, so it cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:…` for an id no extension answers to | `Unsupported` (`plugin id '<id>'`) — the option cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:<key>=…` with a key the extension's command-line processor does not declare (checked where the extension lists its keys, as all-open does) | `UnsupportedOption` — kotlinc's own `unsupported plugin option: <id>:<key>=<value>` | **ERROR** (fails the compile) |
+| `-P plugin:<id>:<key>=<value>` with a declared setting krusty's native pass does not implement (no-arg's `invokeInitializers=true`) | `UnimplementedOption` — the setting would change the generated code | **ERROR** (fails the compile) |
 
 So a build that pulls in Compose fails loudly with a clear message ("remove the plugin or compile this
 module with kotlinc") instead of producing a silently-broken artifact, and a serialization build is
