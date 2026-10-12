@@ -24,3 +24,14 @@ pub(super) fn normalize_tail(
     attach_dependency_function_realization(package, name, compiler_builtin_owner, candidate);
     common.attach(compiler_builtin_owner, namespace, name, candidate);
 }
+
+/// Publish one receiver-less Java declaration in its classifier's static namespace while
+/// retaining that source call shape for diagnostics. Later selection consumes the normalized
+/// candidate and never needs to re-read JVM access flags.
+pub(super) fn publish_classifier_static(
+    candidates: &mut Vec<crate::libraries::LibraryMember>,
+    mut member: crate::libraries::LibraryMember,
+) {
+    member.set_is_classifier_static(true);
+    candidates.push(member);
+}

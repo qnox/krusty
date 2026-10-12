@@ -10691,6 +10691,16 @@ struct LexicalCallable {
     signature: Signature,
 }
 
+#[derive(Clone, Copy)]
+struct LocalExtensionSelectionRequest<'a> {
+    receiver: Ty,
+    args: &'a [ExprId],
+    arg_tys: &'a [Ty],
+    argument_names: Option<&'a [Option<String>]>,
+    trailing_lambda: bool,
+    supplied_type_arguments: Option<usize>,
+}
+
 /// A typealias whose lifetime is one lexical body scope. `target` is recorded once when the
 /// declaration is checked; later selection never has to recover a classifier from the expansion.
 /// `formals` are declaration-owned semantic identities, not source spellings; applying the alias
@@ -10803,7 +10813,10 @@ fn semantic_member_ext_funs_in(
     source: &dyn SymbolSource,
     owner_ty: Ty,
     name: &str,
-) -> (Vec<MemberExtFunSig>, HashMap<String, Ty>) {
+) -> (
+    Vec<(crate::libraries::LibraryMember, MemberExtFunSig)>,
+    HashMap<String, Ty>,
+) {
     let Some(owner) = owner_ty.obj_internal() else {
         return (Vec::new(), HashMap::default());
     };
@@ -10816,11 +10829,13 @@ fn semantic_member_ext_funs_in(
         .cloned()
         .zip(owner_ty.type_args().iter().copied())
         .collect();
-    let functions: Vec<MemberExtFunSig> = declaration
+    let functions = declaration
         .members
         .iter()
         .filter(|member| member.name == name && member.is_member_extension())
-        .filter_map(Checker::semantic_member_ext_fun)
+        .filter_map(|member| {
+            Checker::semantic_member_ext_fun(member).map(|signature| (member.clone(), signature))
+        })
         .collect();
     (functions, class_bindings)
 }
@@ -10877,7 +10892,7 @@ fn member_extension_function_shapes_in(
                 dispatch_receiver.ty,
                 functions.len(),
             );
-            for function in functions {
+            for (member, function) in functions {
                 let generic = function.signature.generic_sig.as_ref();
                 let declared_receiver = crate::symbol_resolver::ty_subst(
                     generic
@@ -10942,6 +10957,7 @@ fn member_extension_function_shapes_in(
                     dispatch_receiver,
                     is_operator: function.signature.is_operator(),
                     function: function.clone(),
+                    member,
                     class_bindings: class_bindings.clone(),
                     declared_params,
                     owner,
@@ -11590,7 +11606,30 @@ impl<'a> Checker<'a> {
                 self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
                 Some(candidate.ret)
             }
-            Ok(None) => None,
+            Ok(None) => {
+                let candidates = self.rejected_member_extension_candidates(
+                    scope,
+                    call,
+                    args.len(),
+                    extension_receiver,
+                    name,
+                    selection,
+                    receivers,
+                );
+                self.report_single_mapped_candidate_type_errors(
+                    scope,
+                    call,
+                    name,
+                    args,
+                    arg_tys,
+                    CallConstraints {
+                        type_args: &explicit_type_args,
+                        receiver: extension_receiver,
+                        expected: result_constraint.expected(),
+                    },
+                    &candidates,
+                )
+            }
             Err(_) => {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -12927,11 +12966,8 @@ impl<'a> Checker<'a> {
                     member_mapping_failure: None,
                 };
             }
-            Some(CallableCandidateSelection::MissingContext(_)) => {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    "no implicit value is available for the context parameters".to_string(),
-                );
+            Some(CallableCandidateSelection::MissingContext(selected)) => {
+                self.report_selected_callable_missing_context(scope, call, &selected);
                 return MemberSlotCall::Rejected;
             }
             Some(CallableCandidateSelection::Ambiguous(candidates)) => {
@@ -18153,18 +18189,15 @@ impl<'a> Checker<'a> {
                     }
                     RejectedCallOwner::Member => {}
                 }
-                // A lone candidate that rejects the explicit type arguments reports that beside its
-                // argument errors, as kotlinc does for the one candidate it resolved to; the call's
-                // diagnostics then read in source order.
                 let call_diagnostics = self.diags.diags.len();
-                self.report_callable_type_argument_arity(
-                    call,
-                    &name,
-                    call_targs.len(),
-                    &inapplicable_candidates,
-                );
                 'report: {
                     if let Some(failure) = member_mapping_failure {
+                        self.report_callable_type_argument_arity(
+                            call,
+                            &name,
+                            call_targs.len(),
+                            &inapplicable_candidates,
+                        );
                         self.report_retained_member_mapping_failure(call, &name, args, *failure);
                         break 'report;
                     }
@@ -18195,6 +18228,12 @@ impl<'a> Checker<'a> {
                         args,
                         &inapplicable_candidates,
                     ) {
+                        self.report_callable_type_argument_arity(
+                            call,
+                            &name,
+                            call_targs.len(),
+                            &inapplicable_candidates,
+                        );
                         break 'report;
                     }
                     if inapplicable_candidates.is_empty() {
@@ -35536,6 +35575,9 @@ struct MemberExtensionFunctionShape {
     priority: MemberExtensionPriority,
     dispatch_receiver: ImplicitReceiver,
     function: MemberExtFunSig,
+    /// Exact provider declaration that produced `function`. Signature recovery carries this
+    /// identity forward instead of searching the classifier a second time by a partial key.
+    member: crate::libraries::LibraryMember,
     class_bindings: HashMap<String, Ty>,
     /// Applied declaration parameter types, retained beside the receiver so inherited `operator`
     /// capability can be matched without re-reading either provider's source representation.
@@ -40697,144 +40739,6 @@ impl<'a> Checker<'a> {
             return None;
         }
         take_unanimous_mapping_error(&mut failures)
-    }
-
-    /// When overload selection rejects a family by type but exactly one declaration has a valid
-    /// source-argument mapping, report that declaration's mapped argument errors. This diagnostic
-    /// step is origin-neutral: top-level and extension candidates carry the same semantic shape and
-    /// must not fall back to a generic inapplicable message merely because one came from a package
-    /// receiver.
-    fn report_single_mapped_candidate_type_errors(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        constraints: CallConstraints<'_>,
-        candidates: &[crate::libraries::FunctionInfo],
-    ) -> Option<Ty> {
-        let type_args = constraints.type_args;
-        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let nearest_scope_rank = candidates
-            .iter()
-            .map(|candidate| candidate.scope_rank)
-            .min();
-        let mapped = candidates
-            .iter()
-            .filter(|candidate| Some(candidate.scope_rank) == nearest_scope_rank)
-            .filter_map(|candidate| {
-                let signature = candidate.semantic_signature();
-                if !type_args.is_empty() && signature.formals.len() != type_args.len() {
-                    return None;
-                }
-                let bindings = constraints.bindings(&self.fed_source(), &signature);
-                let params = crate::symbol_resolver::ty_subst_all(&signature.params, &bindings);
-                let shape = self.contextual_call_shape(
-                    scope,
-                    &params,
-                    &candidate.call_sig,
-                    candidate.context_count,
-                    argument_names,
-                )?;
-                let parameters = call_argument_parameter_indices(
-                    args.len(),
-                    shape.params.len(),
-                    argument_names,
-                    trailing_lambda,
-                    &shape.call_sig,
-                )?;
-                Some((candidate, shape, parameters))
-            })
-            .collect::<Vec<_>>();
-        let [(candidate, shape, parameters)] = mapped.as_slice() else {
-            return None;
-        };
-        if self.report_dnn_null_inference(
-            call,
-            candidate,
-            args,
-            argument_names,
-            trailing_lambda,
-            type_args.len(),
-        ) {
-            return Some(Ty::Error);
-        }
-        let checkpoint = self.diags.diags.len();
-        if let Some(signature) = candidate.generic_sig.as_ref() {
-            let bindings = crate::symbol_resolver::infer_generic_call_bindings(
-                signature,
-                parameters.iter().enumerate().map(|(source, &parameter)| {
-                    let argument = args[source];
-                    let actual = self
-                        .callable_reference_types
-                        .get(&argument)
-                        .copied()
-                        .unwrap_or(arg_tys[source]);
-                    (parameter, actual, false)
-                }),
-                candidate.call_sig.vararg_index,
-            );
-            for (formal_index, formal) in signature.formals.iter().enumerate() {
-                let inferred_from_callable_reference =
-                    parameters.iter().enumerate().any(|(source, &parameter)| {
-                        matches!(self.file.expr(args[source]), Expr::CallableRef { .. })
-                            && signature.params.get(parameter).is_some_and(|parameter| {
-                                ty_mentions_param(*parameter, std::slice::from_ref(formal))
-                            })
-                    });
-                if !inferred_from_callable_reference {
-                    continue;
-                }
-                let satisfies_bounds = bindings.get(formal).is_some_and(|&actual| {
-                    signature
-                        .formal_bounds
-                        .get(formal_index)
-                        .into_iter()
-                        .flatten()
-                        .all(|&bound| self.receiver_is_assignable(actual, bound))
-                });
-                if !satisfies_bounds {
-                    self.diags.error(
-                        self.span(call),
-                        format!(
-                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                            crate::types::type_parameter_source_name(formal)
-                        ),
-                    );
-                    return Some(Ty::Error);
-                }
-            }
-        }
-        for (source, &parameter) in parameters.iter().enumerate() {
-            let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
-            else {
-                continue;
-            };
-            let expected = if shape.call_sig.vararg_index == Some(parameter)
-                && !self.file.is_spread_arg(args[source])
-            {
-                declared.array_read_elem().unwrap_or(declared)
-            } else {
-                declared
-            };
-            if !shape.call_sig.parameter_admits(parameter, expected, actual) {
-                self.report_assignability_error(
-                    expected,
-                    actual,
-                    self.span(args[source]),
-                    "argument",
-                );
-            } else {
-                self.expect_call_arg(scope, expected, args[source], actual);
-            }
-        }
-        if self.diags.diags.len() > checkpoint {
-            return Some(Ty::Error);
-        }
-
-        self.report_extension_receiver_type_mismatch(call, name, candidate, constraints)
     }
 
     // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
@@ -58177,9 +58081,18 @@ impl<'a> Checker<'a> {
                 crate::symbol_resolver::CandidateSelection::None => None,
             };
             if selected_get.is_none() {
-                match self
-                    .select_local_extension_candidate(scope, at, "get", &indices, &its, None, false)
-                {
+                match self.select_local_extension_candidate(
+                    scope,
+                    "get",
+                    LocalExtensionSelectionRequest {
+                        receiver: at,
+                        args: &indices,
+                        arg_tys: &its,
+                        argument_names: None,
+                        trailing_lambda: false,
+                        supplied_type_arguments: None,
+                    },
+                ) {
                     LocalExtensionSelection::Selected(selected)
                         if selected.signature.is_operator() =>
                     {
@@ -63892,11 +63805,8 @@ impl<'a> Checker<'a> {
             }
             Some(selection) => match selection {
                 CallableCandidateSelection::Selected(selected) => selected,
-                CallableCandidateSelection::MissingContext(_) => {
-                    self.diags.error(
-                        self.call_callee_name_span(e),
-                        "no implicit value is available for the context parameters".to_string(),
-                    );
+                CallableCandidateSelection::MissingContext(selected) => {
+                    self.report_selected_callable_missing_context(scope, e, &selected);
                     return Some(Ty::Error);
                 }
                 CallableCandidateSelection::Ambiguous(_) => {
@@ -64211,27 +64121,14 @@ impl<'a> Checker<'a> {
     /// Select the lexical local-extension rung without committing it to a source call expression.
     /// Ordinary calls and synthesized conventions therefore share receiver specialization,
     /// applicability scoring, context selection, and ambiguity handling.
-    #[allow(clippy::too_many_arguments)]
     fn select_local_extension_candidate(
         &self,
         scope: &CheckerScope<'_>,
-        receiver: Ty,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        argument_names: Option<&[Option<String>]>,
-        trailing_lambda: bool,
+        request: LocalExtensionSelectionRequest<'_>,
     ) -> LocalExtensionSelection {
         for rung in self.lookup_lexical_callable_overload_rungs(scope, name) {
-            match self.select_local_extension_candidate_in_rung(
-                scope,
-                receiver,
-                &rung,
-                args,
-                arg_tys,
-                argument_names,
-                trailing_lambda,
-            ) {
+            match self.select_local_extension_candidate_in_rung(scope, &rung, request) {
                 LocalExtensionSelection::None => {}
                 selected => return selected,
             }
@@ -64239,25 +64136,33 @@ impl<'a> Checker<'a> {
         LocalExtensionSelection::None
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn select_local_extension_candidate_in_rung(
         &self,
         scope: &CheckerScope<'_>,
-        receiver: Ty,
         rung: &[LexicalCallable],
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        argument_names: Option<&[Option<String>]>,
-        trailing_lambda: bool,
+        request: LocalExtensionSelectionRequest<'_>,
     ) -> LocalExtensionSelection {
+        let LocalExtensionSelectionRequest {
+            receiver,
+            args,
+            arg_tys,
+            argument_names,
+            trailing_lambda,
+            supplied_type_arguments,
+        } = request;
         let mut applicable = Vec::new();
         for callable in rung {
             let LexicalCallableOrigin::Local(statement) = callable.origin else {
                 continue;
             };
-            let Stmt::LocalFun(_) = self.file.stmt(statement) else {
+            let Stmt::LocalFun(function) = self.file.stmt(statement) else {
                 continue;
             };
+            if supplied_type_arguments
+                .is_some_and(|supplied| supplied != function.type_params.len())
+            {
+                continue;
+            }
             let Some(signature) =
                 local_extension_applicability::applicable_local_extension_signature(
                     &self.fed_source(),
@@ -64306,7 +64211,6 @@ impl<'a> Checker<'a> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn select_bare_local_candidate(
         &self,
         scope: &CheckerScope<'_>,
@@ -64360,12 +64264,15 @@ impl<'a> Checker<'a> {
             for receiver in self.implicit_receivers(scope) {
                 match self.select_local_extension_candidate_in_rung(
                     scope,
-                    receiver.ty,
                     rung,
-                    args,
-                    arg_tys,
-                    argument_names,
-                    trailing_lambda,
+                    LocalExtensionSelectionRequest {
+                        receiver: receiver.ty,
+                        args,
+                        arg_tys,
+                        argument_names,
+                        trailing_lambda,
+                        supplied_type_arguments: None,
+                    },
                 ) {
                     LocalExtensionSelection::None => {}
                     LocalExtensionSelection::Ambiguous => {
@@ -65268,7 +65175,18 @@ impl<'a> Checker<'a> {
         )? {
             return Ok(Some(target));
         }
-        match self.select_local_extension_candidate(scope, recv, name, &[], &[], None, false) {
+        match self.select_local_extension_candidate(
+            scope,
+            name,
+            LocalExtensionSelectionRequest {
+                receiver: recv,
+                args: &[],
+                arg_tys: &[],
+                argument_names: None,
+                trailing_lambda: false,
+                supplied_type_arguments: None,
+            },
+        ) {
             LocalExtensionSelection::Selected(selected) => {
                 if !selected.signature.is_operator() {
                     if let Some(operator_span) = operator_span {

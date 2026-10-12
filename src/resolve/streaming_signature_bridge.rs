@@ -25,6 +25,7 @@ mod demanded_source_call;
 mod diagnostics;
 mod file_import_scopes;
 mod header_projection;
+mod implicit_context_candidates;
 mod integer_constants;
 mod local_signatures;
 mod lookups;
@@ -72,7 +73,7 @@ struct ProductionSignatureSemantics<'a> {
     extension_receivers: &'a HashMap<crate::fir::DeclarationId, crate::fir::ResolvedTy>,
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
     signature_origins: HashMap<crate::fir::DeclarationId, crate::fir::OriginId>,
-    scoped_receivers: RefCell<HashMap<crate::fir::DeclarationId, Vec<Ty>>>,
+    scoped_receivers: RefCell<HashMap<crate::fir::DeclarationId, Vec<SignatureImplicitReceiver>>>,
     scoped_constraint_inputs: RefCell<HashMap<crate::fir::DeclarationId, Vec<Vec<Ty>>>>,
     scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
@@ -99,6 +100,28 @@ struct ProductionSignatureSemantics<'a> {
     /// every class looking for a member-extension property that almost never matched.
     property_type_parameters_by_declaration:
         RefCell<Option<HashMap<crate::fir::DeclarationId, DeclarationTypeParameters>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SignatureImplicitReceiver {
+    ty: Ty,
+    context_parameter: bool,
+}
+
+impl SignatureImplicitReceiver {
+    fn ordinary(ty: Ty) -> Self {
+        Self {
+            ty,
+            context_parameter: false,
+        }
+    }
+
+    fn context_parameter(ty: Ty) -> Self {
+        Self {
+            ty,
+            context_parameter: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1070,73 +1093,6 @@ impl ProductionSignatureSemantics<'_> {
             }
         })
         .ok()
-    }
-
-    /// Bind implicit context parameters from the compact receiver tower, then expose only the
-    /// declaration's source-visible value parameters to ordinary argument mapping and overload
-    /// selection. Context values are inference evidence, but never positional call arguments.
-    fn implicit_context_candidates(
-        &self,
-        scope: crate::fir::SignatureScope,
-        candidates: impl IntoIterator<Item = crate::libraries::FunctionInfo>,
-    ) -> Vec<crate::libraries::FunctionInfo> {
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let receivers = self.implicit_receivers(scope);
-        candidates
-            .into_iter()
-            .filter_map(|mut candidate| {
-                let mut signature = candidate.semantic_signature().into_owned();
-                let context_count = candidate.context_count.min(signature.params.len());
-                if context_count == 0 {
-                    return Some(candidate);
-                }
-                let context_parameters = &signature.params[..context_count];
-                let actual = super::context_argument_types(
-                    &receivers,
-                    context_parameters,
-                    &crate::symbol_resolver::SourceOracle(&source),
-                );
-                crate::trace_compiler!(
-                    "signature",
-                    "context candidate name={} receivers={receivers:?} parameters={context_parameters:?} actual={actual:?}",
-                    candidate.callable.name,
-                );
-                let actual = actual?;
-                let mut bindings = crate::symbol_resolver::GSigBinds::default();
-                for (&parameter, actual) in context_parameters.iter().zip(actual) {
-                    crate::symbol_resolver::unify_inferred_ty(parameter, actual, &mut bindings);
-                }
-                signature.params = signature.params[context_count..]
-                    .iter()
-                    .map(|parameter| {
-                        crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
-                    })
-                    .collect();
-                signature.ret =
-                    crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
-                let visible =
-                    (context_count..candidate.call_sig.param_names.len()).collect::<Vec<_>>();
-                candidate.call_sig = candidate.call_sig.select_parameters(&visible);
-                candidate.generic_sig = Some(signature);
-                candidate.context_count = 0;
-                crate::trace_compiler!(
-                    "signature",
-                    "context-projected candidate name={} receivers={receivers:?} params={:?} formals={:?} type_bindings={bindings:?}",
-                    candidate.callable.name,
-                    candidate.semantic_params(),
-                    candidate
-                        .generic_sig
-                        .as_ref()
-                        .map(|signature| signature.formals.as_slice())
-                        .unwrap_or_default(),
-                );
-                Some(candidate)
-            })
-            .collect()
     }
 
     /// The resolver-facing kind for one evaluated signature argument. An integer LITERAL keeps its
@@ -2602,6 +2558,16 @@ impl ProductionSignatureSemantics<'_> {
     }
 
     fn implicit_receivers(&self, scope: crate::fir::SignatureScope) -> Vec<Ty> {
+        self.signature_implicit_receivers(scope)
+            .into_iter()
+            .map(|receiver| receiver.ty)
+            .collect()
+    }
+
+    fn signature_implicit_receivers(
+        &self,
+        scope: crate::fir::SignatureScope,
+    ) -> Vec<SignatureImplicitReceiver> {
         let mut receivers = self
             .scoped_receivers
             .borrow()
@@ -2611,7 +2577,7 @@ impl ProductionSignatureSemantics<'_> {
             .rev()
             .copied()
             .collect::<Vec<_>>();
-        let mut declared = self.declaration_implicit_receivers(scope);
+        let mut declared = self.declaration_implicit_receiver_entries(scope);
         // A demanded local/anonymous member is evaluated under its own stable declaration, while
         // receiver lambdas enclosing that declaration were entered under the non-local signature
         // currently being solved. Carry those active receiver rungs through the stable owner chain.
@@ -2625,7 +2591,7 @@ impl ProductionSignatureSemantics<'_> {
                     owner: declaration,
                     source: scope.source,
                 };
-                let ancestor_receivers = self.declaration_implicit_receivers(ancestor_scope);
+                let ancestor_receivers = self.declaration_implicit_receiver_entries(ancestor_scope);
                 let insertion = declared
                     .iter()
                     .position(|receiver| ancestor_receivers.contains(receiver))
@@ -2727,7 +2693,10 @@ impl ProductionSignatureSemantics<'_> {
             .unwrap_or_default()
     }
 
-    fn declaration_implicit_receivers(&self, scope: crate::fir::SignatureScope) -> Vec<Ty> {
+    fn declaration_implicit_receiver_entries(
+        &self,
+        scope: crate::fir::SignatureScope,
+    ) -> Vec<SignatureImplicitReceiver> {
         let Some(anchor) = self.headers.declarations.anchor(scope.owner) else {
             return Vec::new();
         };
@@ -2754,7 +2723,7 @@ impl ProductionSignatureSemantics<'_> {
                                 })
                                 .map(|function| function.receiver_ty())
                             {
-                                receivers.push(extension);
+                                receivers.push(SignatureImplicitReceiver::ordinary(extension));
                             }
                         } else if anchor.kind == crate::fir::DeclarationKind::Property {
                             if let Some(extension) = signature
@@ -2764,10 +2733,15 @@ impl ProductionSignatureSemantics<'_> {
                                 .find(|property| property.stable_declaration() == Some(scope.owner))
                                 .map(|property| property.receiver_ty())
                             {
-                                receivers.push(extension);
+                                receivers.push(SignatureImplicitReceiver::ordinary(extension));
                             }
                         }
-                        receivers.extend(context_receivers.iter().copied());
+                        receivers.extend(
+                            context_receivers
+                                .iter()
+                                .copied()
+                                .map(SignatureImplicitReceiver::context_parameter),
+                        );
                     }
                     let arguments = signature
                         .type_params
@@ -2783,9 +2757,16 @@ impl ProductionSignatureSemantics<'_> {
                             Ty::ty_param(name, bound)
                         })
                         .collect::<Vec<_>>();
-                    receivers.push(Ty::obj_args_name(signature.internal, &arguments));
+                    receivers.push(SignatureImplicitReceiver::ordinary(Ty::obj_args_name(
+                        signature.internal,
+                        &arguments,
+                    )));
                     if direct_classifier {
-                        receivers.extend(self.classifier_context_receivers(owner, scope.source));
+                        receivers.extend(
+                            self.classifier_context_receivers(owner, scope.source)
+                                .into_iter()
+                                .map(SignatureImplicitReceiver::context_parameter),
+                        );
                     }
                     let Some(outer) = signature.inner_of else {
                         // A local/anonymous classifier captures the dispatch receiver of the
@@ -2805,6 +2786,8 @@ impl ProductionSignatureSemantics<'_> {
                             {
                                 for enclosing in lexical.iter().skip(index + 1).copied() {
                                     for receiver in self.classifier_receiver_chain(enclosing) {
+                                        let receiver =
+                                            SignatureImplicitReceiver::ordinary(receiver);
                                         if !receivers.contains(&receiver) {
                                             receivers.push(receiver);
                                         }
@@ -2859,8 +2842,15 @@ impl ProductionSignatureSemantics<'_> {
             .find(|property| property.stable_declaration == Some(scope.owner))
             .map(|property| (!property.is_companion_extension).then_some(property.receiver))
         {
-            let mut receivers = receiver.into_iter().collect::<Vec<_>>();
-            receivers.extend(context_receivers);
+            let mut receivers = receiver
+                .into_iter()
+                .map(SignatureImplicitReceiver::ordinary)
+                .collect::<Vec<_>>();
+            receivers.extend(
+                context_receivers
+                    .into_iter()
+                    .map(SignatureImplicitReceiver::context_parameter),
+            );
             return receivers;
         }
         let source_receiver = self
@@ -2878,8 +2868,15 @@ impl ProductionSignatureSemantics<'_> {
             .find(|signature| signature.stable_declaration == Some(scope.owner))
             .filter(|signature| !signature.is_companion_extension())
             .and_then(|signature| signature.source_receiver);
-        let mut receivers = source_receiver.into_iter().collect::<Vec<_>>();
-        receivers.extend(context_receivers);
+        let mut receivers = source_receiver
+            .into_iter()
+            .map(SignatureImplicitReceiver::ordinary)
+            .collect::<Vec<_>>();
+        receivers.extend(
+            context_receivers
+                .into_iter()
+                .map(SignatureImplicitReceiver::context_parameter),
+        );
         receivers
     }
 }

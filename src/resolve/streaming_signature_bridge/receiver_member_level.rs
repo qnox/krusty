@@ -9,7 +9,106 @@
 use super::*;
 use crate::symbol_source::SymbolSource;
 
+pub(super) struct ReceiverMemberLevel {
+    pub(super) callables: crate::libraries::Callables,
+    /// Unprojected source declarations keyed by stable identity. Rejected recovery uses this
+    /// source shape when it must demand an inferred return, retaining the applied enclosing
+    /// dispatch receiver and then applying any context projection exactly once.
+    pub(super) candidate_sources: Vec<ReceiverCandidateSource>,
+    /// Exact declarations excluded only because one of their context parameters is unavailable.
+    pub(super) unavailable_context: Vec<crate::libraries::FunctionInfo>,
+}
+
+pub(super) struct ReceiverCandidateSource {
+    pub(super) candidate: crate::libraries::FunctionInfo,
+    /// Applied enclosing instance that owns a member extension. A top-level extension has no
+    /// dispatch receiver and specializes only from its explicit extension receiver.
+    pub(super) dispatch_receiver: Option<Ty>,
+    /// Exact member-extension tower priority retained from the provider shape. Rejected-call
+    /// recovery applies the same override/inheritance ordering as ordinary selection before the
+    /// shared callable-specificity pass.
+    pub(super) member_extension_priority: Option<super::super::MemberExtensionPriority>,
+}
+
+/// Whether two projected candidate records denote the same provider declaration. Projection and
+/// receiver specialization may change their types, so recovery keys on the stable identity each
+/// provider publishes and uses the complete declaration coordinate only for synthetic records.
+pub(super) fn same_candidate_declaration(
+    left: &crate::libraries::FunctionInfo,
+    right: &crate::libraries::FunctionInfo,
+) -> bool {
+    if let (Some(left), Some(right)) = (left.stable_declaration, right.stable_declaration) {
+        return left == right;
+    }
+    if let (Some(left), Some(right)) = (left.source_member, right.source_member) {
+        return left == right;
+    }
+    if let (Some(left), Some(right)) = (
+        left.callable.external_identity,
+        right.callable.external_identity,
+    ) {
+        return left == right;
+    }
+    left.kind == right.kind
+        && left.callable.declaration_owner == right.callable.declaration_owner
+        && left.callable.owner == right.callable.owner
+        && left.callable.name == right.callable.name
+        && left.callable.descriptor == right.callable.descriptor
+}
+
 impl ProductionSignatureSemantics<'_> {
+    /// Member-extension declarations visible through the implicit dispatch tower, before context
+    /// applicability or value-argument applicability is applied. Rejected-call recovery needs this
+    /// declaration family when ordinary selection rejects an argument: `receiver_callables` owns
+    /// explicit-receiver members and lexical extensions, while member extensions are declarations
+    /// of an implicit dispatch receiver and therefore live in this separate tower.
+    pub(super) fn implicit_member_extension_candidate_sources(
+        &self,
+        scope: crate::fir::SignatureScope,
+        extension_receiver: Ty,
+        spelling: &str,
+    ) -> Vec<ReceiverCandidateSource> {
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let receivers = self
+            .signature_dispatch_receivers(scope)
+            .into_iter()
+            .map(super::super::ImplicitReceiver::signature_receiver)
+            .collect::<Vec<_>>();
+        super::super::member_extension_function_shapes_in(
+            &source,
+            &receivers,
+            extension_receiver,
+            spelling,
+        )
+        .into_iter()
+        .map(|shape| {
+            let mut candidate = crate::libraries::FunctionInfo::classifier_member(
+                crate::libraries::FnKind::Extension,
+                shape.owner,
+                shape.member,
+            );
+            crate::symbol_resolver::specialize_member_function(
+                &source,
+                shape.dispatch_receiver.ty,
+                &mut candidate,
+                &shape.class_bindings,
+            );
+            candidate.scope_rank = u32::try_from(shape.priority.dispatch_rank).unwrap_or(u32::MAX);
+            candidate.receiver_rank =
+                u32::try_from(shape.priority.dispatch_depth).unwrap_or(u32::MAX);
+            ReceiverCandidateSource {
+                candidate,
+                dispatch_receiver: Some(shape.dispatch_receiver.ty),
+                member_extension_priority: Some(shape.priority),
+            }
+        })
+        .collect()
+    }
+
     /// Collect `receiver`'s member level for `spelling`: the constructors of the inner classifier
     /// it binds, listed first as kotlinc lists them, then its callables.
     pub(super) fn receiver_member_level(
@@ -19,19 +118,80 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
     ) -> Result<crate::libraries::Callables, crate::fir::DiagnosticId> {
+        self.receiver_member_level_with_context_status(scope, resolver, receiver, spelling)
+            .map(|level| level.callables)
+    }
+
+    /// Collect the member level while retaining declarations excluded solely by unavailable
+    /// context. The ordinary selector consumes `callables`; rejected-call recovery consumes both
+    /// families so a missing context never turns an existing declaration into an unresolved name.
+    pub(super) fn receiver_member_level_with_context_status(
+        &self,
+        scope: crate::fir::SignatureScope,
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        receiver: Ty,
+        spelling: &str,
+    ) -> Result<ReceiverMemberLevel, crate::fir::DiagnosticId> {
+        self.receiver_member_level_with_context_status_and_constraints(
+            scope,
+            resolver,
+            receiver,
+            spelling,
+            &[],
+            None,
+        )
+    }
+
+    pub(super) fn receiver_member_level_with_context_status_and_constraints(
+        &self,
+        scope: crate::fir::SignatureScope,
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        receiver: Ty,
+        spelling: &str,
+        type_arguments: &[Ty],
+        expected: Option<Ty>,
+    ) -> Result<ReceiverMemberLevel, crate::fir::DiagnosticId> {
         let (mut functions, properties) =
             resolver.receiver_callables(receiver, spelling).into_parts();
+        let dispatch_receivers = self.signature_dispatch_receivers(scope);
+        let candidate_sources = functions
+            .overloads
+            .iter()
+            .cloned()
+            .map(|candidate| {
+                let dispatch_receiver = candidate.is_extension().then(|| {
+                    dispatch_receivers.iter().copied().find(|receiver| {
+                        self.table
+                            .applied_type_hierarchy(receiver.non_null())
+                            .into_iter()
+                            .any(|(owner, _, _)| owner == candidate.callable.owner)
+                    })
+                });
+                ReceiverCandidateSource {
+                    candidate,
+                    dispatch_receiver: dispatch_receiver.flatten(),
+                    member_extension_priority: None,
+                }
+            })
+            .collect();
         let mut overloads = match self.bound_inner_classifier(scope, receiver, spelling)? {
             Some(internal) => resolver.bound_inner_constructor_candidates(receiver, internal),
             None => Vec::new(),
         };
-        overloads.extend(
-            self.implicit_context_candidates(scope, std::mem::take(&mut functions.overloads)),
-        );
+        let (available, unavailable_context) = self
+            .partition_implicit_context_candidates_with_constraints(
+                scope,
+                std::mem::take(&mut functions.overloads),
+                type_arguments,
+                expected,
+            );
+        overloads.extend(available);
         functions.overloads = overloads;
-        Ok(crate::libraries::Callables::from_parts(
-            functions, properties,
-        ))
+        Ok(ReceiverMemberLevel {
+            callables: crate::libraries::Callables::from_parts(functions, properties),
+            candidate_sources,
+            unavailable_context,
+        })
     }
 
     /// Whether the implicit receiver that binds the inner classifier `internal` for a bare

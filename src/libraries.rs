@@ -20,6 +20,7 @@ mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+mod member_flags;
 mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
@@ -67,6 +68,7 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
+pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
     classifier_shape, constructor_parameter_identities, constructor_parameter_list,
@@ -134,101 +136,6 @@ impl ClassifierAccess {
 }
 
 pub use crate::types::{TypeParameterBounds, TypeParameterView, TypeParameters, TypeVariance};
-
-/// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
-/// `suspend`/`is_operator`/`is_extension`/`is_abstract` into one byte. Read through the `LibraryMember` accessors of the same
-/// names; mutated through the matching `set_*` methods; built with the `with_*` chain. Headroom for
-/// name; mutated through the matching `set_*` methods.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LmFlags(u16);
-
-impl LmFlags {
-    const RET_NULLABLE: u16 = 1 << 0;
-    const IS_INTERFACE: u16 = 1 << 1;
-    const SUSPEND: u16 = 1 << 2;
-    /// The member is declared `operator`. Only `@Metadata` records it — the JVM has no such flag — and
-    /// only a convention call site (`"x" { … }` for `operator fun String.invoke`) needs it, so it
-    /// travels with the member rather than being re-derived from a name.
-    const IS_OPERATOR: u16 = 1 << 3;
-    /// The member is a member EXTENSION (`class DslScope { fun String.f() }`): its declaring class is
-    /// the dispatch receiver and its FIRST JVM parameter is the extension receiver. Nothing in the
-    /// descriptor distinguishes that from an ordinary member taking a parameter of the same type, and
-    /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
-    const IS_EXTENSION: u16 = 1 << 4;
-    const IS_ABSTRACT: u16 = 1 << 5;
-    const IS_INFIX: u16 = 1 << 6;
-    const IS_FINAL: u16 = 1 << 7;
-    /// Interface delegation keeps this implemented member's inherited body instead of forwarding it
-    /// to the delegate. Providers decide this at their boundary; see
-    /// [`LibraryMember::inherited_by_delegation`].
-    const INHERITED_BY_DELEGATION: u16 = 1 << 8;
-    /// This constructor is the classifier's primary declaration. Providers retain the metadata
-    /// bit so plugin-generated constructions can select that declaration without assuming list
-    /// order or accepting a same-shaped secondary constructor.
-    const IS_PRIMARY_CONSTRUCTOR: u16 = 1 << 9;
-    /// `@Deprecated(level = HIDDEN)`: retained for override matching and binary compatibility,
-    /// but excluded from ordinary call candidates.
-    const DEPRECATED_HIDDEN: u16 = 1 << 10;
-
-    #[inline]
-    const fn with(mut self, mask: u16, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u16) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_ret_nullable(self, on: bool) -> Self {
-        self.with(Self::RET_NULLABLE, on)
-    }
-    #[inline]
-    pub const fn with_is_interface(self, on: bool) -> Self {
-        self.with(Self::IS_INTERFACE, on)
-    }
-    #[inline]
-    pub const fn with_suspend(self, on: bool) -> Self {
-        self.with(Self::SUSPEND, on)
-    }
-    #[inline]
-    pub const fn with_is_operator(self, on: bool) -> Self {
-        self.with(Self::IS_OPERATOR, on)
-    }
-    #[inline]
-    pub const fn with_is_extension(self, on: bool) -> Self {
-        self.with(Self::IS_EXTENSION, on)
-    }
-    #[inline]
-    pub const fn with_is_abstract(self, on: bool) -> Self {
-        self.with(Self::IS_ABSTRACT, on)
-    }
-    #[inline]
-    pub const fn with_is_final(self, on: bool) -> Self {
-        self.with(Self::IS_FINAL, on)
-    }
-    #[inline]
-    pub const fn with_is_infix(self, on: bool) -> Self {
-        self.with(Self::IS_INFIX, on)
-    }
-    #[inline]
-    pub const fn with_inherited_by_delegation(self, on: bool) -> Self {
-        self.with(Self::INHERITED_BY_DELEGATION, on)
-    }
-    #[inline]
-    pub const fn with_is_primary_constructor(self, on: bool) -> Self {
-        self.with(Self::IS_PRIMARY_CONSTRUCTOR, on)
-    }
-    #[inline]
-    pub const fn with_deprecated_hidden(self, on: bool) -> Self {
-        self.with(Self::DEPRECATED_HIDDEN, on)
-    }
-}
 
 /// Provider-owned physical realization of a semantic member. Resolution carries this opaque handle
 /// unchanged; only lowering interprets it after overload selection has committed the declaration.
@@ -795,6 +702,10 @@ impl LibraryMember {
     pub fn deprecated_hidden(&self) -> bool {
         self.flags.has(LmFlags::DEPRECATED_HIDDEN)
     }
+
+    pub fn is_classifier_static(&self) -> bool {
+        self.flags.has(LmFlags::IS_CLASSIFIER_STATIC)
+    }
     #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
@@ -806,6 +717,10 @@ impl LibraryMember {
     #[inline]
     pub fn set_deprecated_hidden(&mut self, on: bool) {
         self.flags = self.flags.with_deprecated_hidden(on);
+    }
+
+    pub fn set_is_classifier_static(&mut self, on: bool) {
+        self.flags = self.flags.with_is_classifier_static(on);
     }
     #[inline]
     pub fn set_is_interface(&mut self, on: bool) {
@@ -1601,6 +1516,9 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Provider-normalized receiver-less declaration in a classifier's static namespace. The
+    /// checker uses this only as source call shape; target realization remains on the callable.
+    pub classifier_static: bool,
     /// The classifier of a `companion { … }` block member or `companion fun C.name`: named through
     /// the classifier with no value operand, so providers publish it as a receiver-less candidate.
     pub associated_classifier: Option<TypeName>,
@@ -1862,6 +1780,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            classifier_static: false,
             associated_classifier: None,
             associated_access_owner: None,
             receiver,
@@ -1935,6 +1854,7 @@ impl FunctionInfo {
         member.set_is_abstract(self.flags.is_abstract);
         member.set_is_final(self.flags.is_final);
         member.set_deprecated_hidden(self.flags.deprecated_hidden);
+        member.set_is_classifier_static(self.classifier_static);
         member.return_value_status = self.flags.return_value_status;
         // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
         // fact about the DECLARATION, and the emit site may have no way to re-derive it (a mapped

@@ -308,7 +308,16 @@ impl<'a> Checker<'a> {
         };
         if !member_applicable {
             match self.select_local_extension_candidate(
-                scope, receiver, name, arg_exprs, arg_tys, None, false,
+                scope,
+                name,
+                LocalExtensionSelectionRequest {
+                    receiver,
+                    args: arg_exprs,
+                    arg_tys,
+                    argument_names: None,
+                    trailing_lambda: false,
+                    supplied_type_arguments: None,
+                },
             ) {
                 LocalExtensionSelection::Selected(selected)
                     if has_convention_modifier(
