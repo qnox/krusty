@@ -80,6 +80,20 @@ pub const FORWARD_PROPERTY_IDS: Case = Case {
              // MODULE: main(lib)\nfun box() = read()\n",
 };
 
+pub const LOCAL_FUNCTION_SYMBOLS: Case = Case {
+    stem: "multimoduleLocalFunctionSymbols",
+    source: "// MODULE: lib\n\
+             fun fromLib(): String {\n\
+                 fun local() = \"O\"\n\
+                 return local()\n\
+             }\n\
+             // MODULE: main(lib)\n\
+             fun box(): String {\n\
+                 fun local() = \"K\"\n\
+                 return fromLib() + local()\n\
+             }\n",
+};
+
 pub const NATIVE_ABI_SYMBOLS: Case = Case {
     stem: "multimoduleNativeAbiSymbols",
     source: "// TARGET_BACKEND: NATIVE\n\
@@ -99,6 +113,7 @@ pub const ALL: &[Case] = &[
     DEFAULT_CALLABLE_IDS,
     PROPERTY_IDS,
     FORWARD_PROPERTY_IDS,
+    LOCAL_FUNCTION_SYMBOLS,
     NATIVE_ABI_SYMBOLS,
 ];
 
