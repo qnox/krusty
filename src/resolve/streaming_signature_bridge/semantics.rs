@@ -4149,39 +4149,27 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             .map_err(|_| Self::failure());
                     }
                 }
-                let [argument] = ordinary_argument_types.as_slice() else {
-                    return self.rejected_member_call(
+                let rejected = || {
+                    self.rejected_member_call(
                         scope,
                         origin,
                         receiver.get(),
                         spelling,
                         arguments,
+                        &type_arguments,
                         trailing_lambda,
-                    );
+                    )
+                };
+                let [argument] = ordinary_argument_types.as_slice() else {
+                    return rejected();
                 };
                 let Some(operator) = crate::ast::BinOp::from_arith_operator_name(spelling) else {
-                    return self.rejected_member_call(
-                        scope,
-                        origin,
-                        receiver.get(),
-                        spelling,
-                        arguments,
-                        trailing_lambda,
-                    );
+                    return rejected();
                 };
                 return self
                     .checked_binary(scope, origin, operator, receiver.get(), *argument)
                     .map_or_else(
-                        |_| {
-                            self.rejected_member_call(
-                                scope,
-                                origin,
-                                receiver.get(),
-                                spelling,
-                                arguments,
-                                trailing_lambda,
-                            )
-                        },
+                        |_| rejected(),
                         |ty| {
                             Ok(crate::fir::ResolvedMemberCall {
                                 ty: Some(ty),
