@@ -247,7 +247,6 @@ pub(crate) fn lower_companion_properties(
             let backing = &companion_class.fields[field as usize];
             let visibility = declaration.visibility;
             let is_jvm_field = jvm_field_eligible(declaration, backing);
-            let inert_receiver = receiver_is_inert(ir, companion, field);
             let initializer = match declaration.initializer {
                 Some(initializer) => match initializer_store(ir, companion, field, initializer) {
                     Some(store) => Some((initializer, store)),
@@ -267,7 +266,7 @@ pub(crate) fn lower_companion_properties(
             // when it cannot (`I?` over `Int`). The value-class pass records which of the two
             // this static is; leaving the field on the companion made a property reference call
             // an instance accessor the class does not have.
-            if declaration.is_open || backing.is_lateinit() || (!is_jvm_field && !inert_receiver) {
+            if declaration.is_open || backing.is_lateinit() {
                 continue;
             }
             candidates.push(Candidate {
@@ -483,10 +482,25 @@ pub(crate) fn lower_companion_properties(
     let original_expression_count = ir.exprs.len();
     for expression in 0..original_expression_count {
         let replacement = match ir.exprs[expression].clone() {
-            IrExpr::GetField { class, index, .. }
-                if static_for_field.contains_key(&(class, index)) =>
-            {
-                Some(IrExpr::GetStatic(static_for_field[&(class, index)]))
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } if static_for_field.contains_key(&(class, index)) => {
+                let read = IrExpr::GetStatic(static_for_field[&(class, index)]);
+                // Hoisting changes only storage. An explicit, effectful companion receiver is
+                // still evaluated in source order before the static read, just as kotlinc does.
+                if crate::ir::expr_runs_no_code(ir, receiver)
+                    || redundant_companion_receiver(ir, class, receiver)
+                {
+                    Some(read)
+                } else {
+                    let read = ir.add_expr(read);
+                    Some(IrExpr::Block {
+                        stmts: vec![receiver],
+                        value: Some(read),
+                    })
+                }
             }
             IrExpr::SetField {
                 receiver,

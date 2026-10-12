@@ -2989,33 +2989,15 @@ mod reified_nullable_instance_check_e2e;
 #[path = "reified_object_type_of_e2e.rs"]
 mod reified_object_type_of_e2e;
 
-#[path = "companion_default_initializer_e2e.rs"]
-mod companion_default_initializer_e2e;
-#[path = "companion_field_bridge_use_e2e.rs"]
-mod companion_field_bridge_use_e2e;
-#[path = "companion_init_assigned_property_e2e.rs"]
-mod companion_init_assigned_property_e2e;
-#[path = "companion_property_visibility_e2e.rs"]
-mod companion_property_visibility_e2e;
-#[path = "delegate_field_signature_e2e.rs"]
-mod delegate_field_signature_e2e;
 #[path = "discarded_inline_result_temporary_e2e.rs"]
 mod discarded_inline_result_temporary_e2e;
-#[path = "enum_companion_property_e2e.rs"]
-mod enum_companion_property_e2e;
-#[path = "enum_init_block_line_e2e.rs"]
-mod enum_init_block_line_e2e;
-#[path = "inner_outer_field_signature_e2e.rs"]
-mod inner_outer_field_signature_e2e;
+mod jvm_storage_realization;
 #[path = "primitive_to_object_equality_e2e.rs"]
 mod primitive_to_object_equality_e2e;
 #[path = "special_builtin_call_sites_e2e.rs"]
 mod special_builtin_call_sites_e2e;
 #[path = "type_intrinsics_e2e.rs"]
 mod type_intrinsics_e2e;
-#[path = "volatile_field_e2e.rs"]
-mod volatile_field_e2e;
-
 #[path = "value_class_receiver_inline_only_e2e.rs"]
 mod value_class_receiver_inline_only_e2e;
 
