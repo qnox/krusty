@@ -8,6 +8,7 @@
 //! `lateinit var` is the exception: its field is `public static`, and the default getter throws
 //! while that field is null.
 
+use super::field_visibility::annotated_field_modifiers;
 use super::*;
 
 /// The `ConstantValue` payload of a compile-time literal, excluding `null` (JVMS 4.7.2 has no
@@ -96,7 +97,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             }
         } else {
             0x001A // PRIVATE | STATIC | FINAL
-        };
+        } | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
         let desc = ir_type_desc(&s.ty);
         // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
         // as the same property declared inside a class does — the facade's field table is a different
@@ -468,7 +469,7 @@ pub(super) fn emit_class_static_fields(
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        };
+        } | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
         // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
         // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
         // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
@@ -558,7 +559,7 @@ pub(super) fn emit_enum_static_fields(
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        };
+        } | annotated_field_modifiers(ir.static_declaration_annotations(index));
         // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
