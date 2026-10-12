@@ -367,7 +367,8 @@ pub(in crate::resolve) struct StreamedPropertyHeader {
     pub(in crate::resolve) getter_declared: bool,
     pub(in crate::resolve) receiver: Option<TypeRef>,
     pub(in crate::resolve) receiver_source_spelling: Option<TypeRef>,
-    pub(in crate::resolve) context_parameters: Vec<(String, TypeRef)>,
+    pub(in crate::resolve) context_parameters:
+        Vec<(String, TypeRef, crate::types::ContextParameterKind)>,
     pub(in crate::resolve) declared_type: Option<TypeRef>,
     pub(in crate::resolve) backing_field_type: Option<TypeRef>,
     pub(in crate::resolve) type_parameters: Vec<String>,
@@ -454,6 +455,7 @@ pub(in crate::resolve) fn streamed_property_header_by_declaration(
             Some((
                 headers.lookup_names.get(parameter.name)?.to_string(),
                 materialize(parameter.ty)?,
+                parameter.context_kind,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
@@ -561,7 +563,13 @@ pub(in crate::resolve) fn legacy_property_header(property: &PropDecl) -> Streame
         context_parameters: property
             .context_params
             .iter()
-            .map(|parameter| (parameter.name.clone(), parameter.ty.clone()))
+            .map(|parameter| {
+                (
+                    parameter.name.clone(),
+                    parameter.ty.clone(),
+                    parameter.context_kind,
+                )
+            })
             .collect(),
         declared_type: property.declared_ty().cloned(),
         backing_field_type: property

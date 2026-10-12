@@ -5,7 +5,7 @@
 //! (`AbstractCollection.contains(Object)` implements `List<E>.contains(E)` inside
 //! `java.util.AbstractList`). krusty compared the substituted signatures exactly, so every concrete
 //! subclass of an abstract Java class with a reference-typed parameter was rejected as "not
-//! abstract and does not implement all abstract members" (Moshi's `JsonAdapter<T>` adapters).
+//! abstract and does not implement abstract base class member" (Moshi's `JsonAdapter<T>` adapters).
 
 use super::common;
 
@@ -183,7 +183,7 @@ fn an_unrelated_java_method_does_not_implement_a_kotlin_interface_member() {
     let main = "interface Sink<E> { fun add(e: E) }\nclass K : JBase(), Sink<String>\n";
     assert_eq!(
         java_diagnostics(&[("JBase.java", base)], main),
-        ["class 'K' is not abstract and does not implement all abstract members"]
+        ["class 'K' is not abstract and does not implement abstract member:\nfun add(e: E): Unit"]
     );
 }
 
@@ -195,8 +195,10 @@ fn an_override_with_another_parameter_type_does_not_implement_the_java_method() 
     assert_eq!(
         java_diagnostics(&[("J3.java", FROM)], main),
         [
-            "class 'Wrong' is not abstract and does not implement all abstract members",
-            "'from' overrides nothing. Potential signatures for overriding:",
+            "class 'Wrong' is not abstract and does not implement abstract base class member:\n\
+             fun from(p0: String!): String!",
+            "'from' overrides nothing. Potential signatures for overriding:\n\
+             fun from(p0: String!): String!",
         ]
     );
 }

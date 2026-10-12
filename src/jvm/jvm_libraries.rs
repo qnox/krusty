@@ -6742,6 +6742,15 @@ mod tests {
             Ty::platform_nullable(Ty::obj_args("kotlin/Array", &[Ty::platform_nullable(base)],)),
             "the Java provider must retain the flexible reference-array lower bound",
         );
+
+        assert_eq!(
+            java_type_nullability(Ty::fun(vec![Ty::String, Ty::Int], Ty::String), None),
+            Ty::platform_nullable(Ty::fun(
+                vec![Ty::platform_nullable(Ty::String), Ty::Int],
+                Ty::platform_nullable(Ty::String),
+            )),
+            "Java publication makes function containers and reference positions flexible without boxing scalar positions",
+        );
     }
 
     #[test]
@@ -6857,6 +6866,35 @@ mod tests {
                 vec![Ty::String],
                 Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any"))),
             )]
+        );
+    }
+
+    #[test]
+    fn java_function_signature_keeps_boxed_slot_flexibility_when_semanticized() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let signature = libraries
+            .publish_java_member_generic_signature(
+                Some(
+                    "()Lkotlin/jvm/functions/Function1<\
+                     Ljava/lang/String;Ljava/lang/Integer;>;",
+                ),
+                &[],
+                None,
+                None,
+            )
+            .expect("Java function-typed generic signature");
+        assert_eq!(
+            signature.ret,
+            Ty::platform_nullable(Ty::fun(
+                vec![Ty::platform_nullable(Ty::String)],
+                Ty::platform_nullable(Ty::Int),
+            )),
+            "Java reference flexibility must be recorded before Function1 slots are unboxed",
         );
     }
 
@@ -6991,7 +7029,7 @@ mod tests {
         .expect("valid generic field signature");
         assert_eq!(
             libraries.semanticize_jvm_type(valid),
-            Ty::fun(vec![Ty::Int, Ty::Long], Ty::String)
+            Ty::fun(vec![Ty::Int, Ty::Long], Ty::String),
         );
 
         for signature in [

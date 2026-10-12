@@ -1574,6 +1574,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     is_abstract: classifier_flags.has(ClassFlags::ANNOTATION),
                                     is_open: header.is_open,
                                     context_params: Vec::new(),
+                                    context_param_names: Vec::new(),
+                                    context_parameter_identities: Vec::new(),
                                     source_member: compact_headers.is_none().then_some(
                                         crate::libraries::SourceMember::ClassProperty {
                                             file: i as u32,
@@ -2111,12 +2113,14 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         let context_params = property_header
                             .context_parameters
                             .iter()
-                            .map(|(_, parameter)| ty_of_ref(parameter, &class_names, &btp, diags))
+                            .map(|(_, parameter, _)| {
+                                ty_of_ref(parameter, &class_names, &btp, diags)
+                            })
                             .collect::<Vec<_>>();
                         let symbolic_context_params = property_header
                             .context_parameters
                             .iter()
-                            .map(|(_, parameter)| {
+                            .map(|(_, parameter, _)| {
                                 ty_of_ref(parameter, &class_names, &symbolic_btp, diags)
                             })
                             .collect::<Vec<_>>();
@@ -2130,8 +2134,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .context_parameters
                                 .iter()
                                 .zip(&context_params)
-                                .filter(|((name, _), _)| name != "_")
-                                .map(|((name, _), ty)| (name.clone(), *ty, false)),
+                                .filter(|((name, _, _), _)| name != "_")
+                                .map(|((name, _, _), ty)| (name.clone(), *ty, false)),
                         );
                         if let Some(receiver) = extension_receiver {
                             property_scope.push(("this".to_string(), receiver, false));
@@ -2355,6 +2359,23 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                         })
                                         .unwrap_or(property_ty),
                                     context_params: symbolic_context_params,
+                                    context_param_names: property_header
+                                        .context_parameters
+                                        .iter()
+                                        .map(|(name, _, _)| name.clone())
+                                        .collect(),
+                                    context_parameter_identities: property_header
+                                        .context_parameters
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(ordinal, (name, _, kind))| {
+                                            crate::fir::ResolvedParameterIdentity::declared(
+                                                ordinal as u32,
+                                                name,
+                                                *kind,
+                                            )
+                                        })
+                                        .collect(),
                                     type_params: property_header
                                         .type_parameters
                                         .iter()
@@ -2373,7 +2394,23 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                             symbolic_btp
                                                 .bound(parameter)
                                                 .ty_param_bound()
-                                                .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                                                .unwrap_or_else(|| {
+                                                    Ty::nullable(Ty::obj("kotlin/Any"))
+                                                })
+                                        })
+                                        .collect::<Vec<_>>(),
+                                    formal_bounds: property_header
+                                        .type_parameters
+                                        .iter()
+                                        .map(|parameter| {
+                                            let mut bounds = vec![symbolic_btp
+                                                .bound(parameter)
+                                                .ty_param_bound()
+                                                .unwrap_or_else(|| {
+                                                    Ty::nullable(Ty::obj("kotlin/Any"))
+                                                })];
+                                            bounds.extend(symbolic_btp.extra_bounds_of(parameter));
+                                            bounds
                                         })
                                         .collect::<Vec<_>>(),
                                     is_var: property_header.mutable,
@@ -2458,6 +2495,23 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .flags
                                     .has(crate::fir::DeclarationFlags::ABSTRACT),
                             context_params,
+                            context_param_names: property_header
+                                .context_parameters
+                                .iter()
+                                .map(|(name, _, _)| name.clone())
+                                .collect(),
+                            context_parameter_identities: property_header
+                                .context_parameters
+                                .iter()
+                                .enumerate()
+                                .map(|(ordinal, (name, _, kind))| {
+                                    crate::fir::ResolvedParameterIdentity::declared(
+                                        ordinal as u32,
+                                        name,
+                                        *kind,
+                                    )
+                                })
+                                .collect(),
                             source_member: compact_headers.is_none().then_some(
                                 crate::libraries::SourceMember::ClassProperty {
                                     file: i as u32,
@@ -3717,7 +3771,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         let context_params = property_header
                             .context_parameters
                             .iter()
-                            .map(|(_, parameter)| {
+                            .map(|(_, parameter, _)| {
                                 ty_of_ref(parameter, &class_names, &semantic_tparams, diags)
                             })
                             .collect::<Vec<_>>();
@@ -3725,8 +3779,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .context_parameters
                             .iter()
                             .zip(&context_params)
-                            .filter(|((name, _), _)| name != "_")
-                            .map(|((name, _), ty)| (name.clone(), *ty, false))
+                            .filter(|((name, _, _), _)| name != "_")
+                            .map(|((name, _, _), ty)| (name.clone(), *ty, false))
                             .collect::<Vec<_>>();
                         // An extension getter is inferred in the same receiver scope in which it is
                         // checked. Without `this`, an ordinary expression getter such as
@@ -3937,7 +3991,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let context_params = property_header
                         .context_parameters
                         .iter()
-                        .map(|(_, parameter)| {
+                        .map(|(_, parameter, _)| {
                             ty_of_ref(parameter, &class_names, &property_tparams, diags)
                         })
                         .collect::<Vec<_>>();
@@ -3945,8 +3999,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .context_parameters
                         .iter()
                         .zip(&context_params)
-                        .filter(|((name, _), _)| name != "_")
-                        .map(|((name, _), ty)| (name.clone(), *ty, false))
+                        .filter(|((name, _, _), _)| name != "_")
+                        .map(|((name, _, _), ty)| (name.clone(), *ty, false))
                         .collect::<Vec<_>>();
                     // A top-level backing-field property with a CUSTOM accessor (`val x = init get() =
                     // field`, `var y = init set(v){…}`) is lowered as a facade static + custom
@@ -4141,32 +4195,18 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             context_param_names: property_header
                                 .context_parameters
                                 .iter()
-                                .map(|(name, _)| name.clone())
+                                .map(|(name, _, _)| name.clone())
                                 .collect(),
-                            context_parameter_identities: p
-                                .context_params
+                            context_parameter_identities: property_header
+                                .context_parameters
                                 .iter()
                                 .enumerate()
-                                .map(|(ordinal, parameter)| match parameter.context_kind {
-                                    crate::types::ContextParameterKind::Named => {
-                                        crate::fir::ResolvedParameterIdentity::ContextValue {
-                                            ordinal: ordinal as u32,
-                                            source_name: parameter.name.as_str().into(),
-                                        }
-                                    }
-                                    crate::types::ContextParameterKind::Anonymous => {
-                                        crate::fir::ResolvedParameterIdentity::AnonymousContextParameter {
-                                            ordinal: ordinal as u32,
-                                        }
-                                    }
-                                    crate::types::ContextParameterKind::LegacyReceiver => {
-                                        crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
-                                            ordinal: ordinal as u32,
-                                        }
-                                    }
-                                    crate::types::ContextParameterKind::None => unreachable!(
-                                        "a property context prefix must carry a context role"
-                                    ),
+                                .map(|(ordinal, (name, _, kind))| {
+                                    crate::fir::ResolvedParameterIdentity::declared(
+                                        ordinal as u32,
+                                        name,
+                                        *kind,
+                                    )
                                 })
                                 .collect(),
                             package: source_package_ids[i],

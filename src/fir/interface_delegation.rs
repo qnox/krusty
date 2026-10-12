@@ -99,6 +99,10 @@ pub struct ResolvedDelegatedFunctionDeclaration {
     pub semantic_role: Option<crate::types::SemanticCallRole>,
     pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
     pub parameter_identities: Box<[ResolvedParameterIdentity]>,
+    /// Number of leading semantic parameters owned by the declaration's context clause.
+    /// This boundary is part of the callable's source shape even when its flattened parameter
+    /// types are otherwise identical to an ordinary function's parameters.
+    pub context_count: usize,
     /// The declaration's own unapplied semantic signature.
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
