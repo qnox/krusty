@@ -412,3 +412,77 @@ fn a_value_class_resumed_through_a_default_stub_and_a_lambda_is_boxed_once() {
         Some("OK")
     );
 }
+
+/// kotlinc's coroutine transformer takes a body whose suspension point returns a value class's
+/// carrier: codegen unboxes the result right after the point, between `mark(8)` and `mark(9)`, and
+/// the transformer moves that unboxing to the resume path, so the direct path keeps the carrier.
+/// The unboxing passes a null on only for a nullable value class: `Wrapped(val a: Any?)` is never
+/// null, and its null carrier is the box of `Wrapped(null)`.
+const RESUME_PATH: &str = "@JvmInline\n\
+value class Ref(val s: String)\n\
+@JvmInline\n\
+value class Wrapped(val a: Any?)\n\
+@JvmInline\n\
+value class Count(val n: Int?)\n\
+fun keep(a: Any?) {}\n\
+suspend fun reference(): Ref = Ref(\"r\")\n\
+suspend fun wrapped(): Wrapped = Wrapped(\"w\")\n\
+suspend fun nullableReference(): Ref? = null\n\
+suspend fun count(): Count = Count(1)\n\
+suspend fun leaf(): Int = 1\n";
+
+#[test]
+fn a_suspend_lambda_unboxes_a_carrier_result_on_resume() {
+    let src = format!(
+        "{RESUME_PATH}fun used(): suspend () -> Unit = {{ val r = reference(); leaf(); keep(r.s) }}\n"
+    );
+    common::assert_classes_identical_to_kotlinc("SvcUsed", &src, &["SvcUsedKt$used$1"]);
+}
+
+#[test]
+fn a_suspend_lambda_discards_an_any_carrier_result() {
+    let src = format!("{RESUME_PATH}fun discarded(): suspend () -> Unit = {{ wrapped() }}\n");
+    common::assert_classes_identical_to_kotlinc(
+        "SvcDiscarded",
+        &src,
+        &["SvcDiscardedKt$discarded$1"],
+    );
+}
+
+#[test]
+fn a_nullable_carrier_passes_null_past_the_resumed_unboxing() {
+    let src = format!(
+        "{RESUME_PATH}fun nullable(): suspend () -> Unit = {{ val r = nullableReference(); leaf(); keep(r?.s) }}\n"
+    );
+    common::assert_classes_identical_to_kotlinc("SvcNullable", &src, &["SvcNullableKt$nullable$1"]);
+}
+
+/// A nullable underlying type is its carrier's: `unbox-impl` returns the `Integer`, not an `int`.
+#[test]
+fn a_boxed_primitive_carrier_unboxes_to_its_wrapper_on_resume() {
+    let src = format!(
+        "{RESUME_PATH}fun counted(): suspend () -> Unit = {{ val c = count(); leaf(); keep(c.n) }}\n"
+    );
+    common::assert_classes_identical_to_kotlinc("SvcCounted", &src, &["SvcCountedKt$counted$1"]);
+}
+
+#[test]
+fn a_named_function_unboxes_a_carrier_result_on_resume() {
+    let src = format!(
+        "{RESUME_PATH}suspend fun named(): String {{ val r = reference(); leaf(); return r.s }}\n"
+    );
+    common::assert_classes_identical_to_kotlinc(
+        "SvcNamed",
+        &src,
+        &["SvcNamedKt", "SvcNamedKt$named$1"],
+    );
+}
+
+/// The class's constant pool is laid out apart from kotlinc's, so its code is what is compared.
+#[test]
+fn a_never_null_value_class_completes_as_its_box() {
+    let src = format!(
+        "{RESUME_PATH}suspend fun completes(): Wrapped {{ leaf(); return Wrapped(null) }}\n"
+    );
+    common::assert_class_code_matches_kotlinc("SvcCompletes", &src, "SvcCompletesKt$completes$1");
+}

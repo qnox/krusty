@@ -24,9 +24,9 @@ use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
     adopt_cps_signature, append_continuation, box_returns, build_continuation_class,
     ensure_tail_return, realize_coroutine_context, recorded_suspension_result, shift_locals,
-    suspend_call_fid, value_class_suspension_result, EmitTimeMachines, MachineContext,
+    suspend_call_fid, EmitTimeMachines, MachineContext,
 };
-use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile, IrValueClassSuspendResult};
+use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::local_class_names::name_continuation;
 use crate::types::Ty;
 
@@ -196,13 +196,22 @@ pub(super) fn owned_suspensions(
     Some(
         points
             .iter()
-            .map(|&call| TransformedSuspension {
-                call,
-                result: match suspend_call_fid(ir, call, route.suspend_set) {
-                    Some(callee) => route.context.orig_rets[callee as usize],
-                    None => recorded_suspension_result(ir, call)
+            .map(|&call| {
+                let resumed_box =
+                    super::value_class_results::resumed_box(ir, call, route.suspend_set);
+                // A call that returns a value class's carrier where it does not suspend is that
+                // carrier on either path once the resumed box is unboxed.
+                let result = match (resumed_box, suspend_call_fid(ir, call, route.suspend_set)) {
+                    (Some((_, carrier)), _) => carrier,
+                    (None, Some(callee)) => route.context.orig_rets[callee as usize],
+                    (None, None) => recorded_suspension_result(ir, call)
                         .expect("an eligible suspension point records its result"),
-                },
+                };
+                TransformedSuspension {
+                    call,
+                    result,
+                    resumed_box,
+                }
             })
             .collect(),
     )
@@ -308,12 +317,6 @@ pub(super) fn eligible_points(
         );
         let block = ir.is_unintercepted_suspension(call) && subject == Subject::NamedFunction;
         (direct && !ir.intrinsic_suspension_points.contains_key(&call) || block)
-            // A boxed result arrives as the box on either path, which the call's own unbox
-            // consumes; a carrier result arrives boxed only on resume, which the IR machine handles.
-            && !matches!(
-                value_class_suspension_result(ir, call, route.suspend_set),
-                Some(IrValueClassSuspendResult::Carrier { .. })
-            )
             && (suspend_call_fid(ir, call, route.suspend_set).is_some()
                 || recorded_suspension_result(ir, call).is_some())
     };

@@ -182,6 +182,10 @@ Known gaps, both byte differences in the function's own method (the continuation
   A call to a same-file member suspend function is a plain call, whether its receiver is explicit,
   `this`, or the lambda's own extension receiver. Invoking a suspend function value is a plain
   call too: the continuation is appended and `FunctionN.invoke` is marked like a direct call.
+  So is a call that returns a value class's carrier, for a lambda or a named function: the
+  emitter unboxes the resumed box between `mark(8)` and `mark(9)` right after the invoke, as
+  kotlinc's `generateResumePathUnboxing` does, and the transformer moves that unboxing to the
+  resume path.
   The rest keep the lifted function with an IR-machine continuation.
   An inline or specialized suspend lambda is public: the class, its constructor, and its
   `InnerClasses` row carry `ACC_PUBLIC`. A lambda outside an inline declaration stays

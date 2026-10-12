@@ -80,8 +80,8 @@ impl Emitter<'_> {
             SuspendedResultReturn::ValueClassBox {
                 classifier,
                 carrier,
+                nullable,
             } => {
-                let nullable = carrier.is_nullable();
                 let carrier = super::ir_ty_to_jvm(&carrier);
                 if let Some(internal) = carrier.obj_internal() {
                     let class = self.cw.class_ref(&internal.render());
@@ -94,7 +94,7 @@ impl Emitter<'_> {
                 );
                 let box_impl = self.cw.methodref(&owner, "box-impl", &descriptor);
                 if nullable {
-                    // `box-impl` rejects the `null` a nullable value class's carrier holds.
+                    // A nullable value class's `null` is its carrier's, which `box-impl` rejects.
                     let null_case = code.new_label();
                     let boxed = code.new_label();
                     code.dup();

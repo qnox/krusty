@@ -25,11 +25,13 @@ pub(crate) enum SuspendedResultReturn {
     /// A forwarded `Unit` result becomes `Unit.INSTANCE`, for the selected Kotlin target version.
     Unit,
     /// A value class's carrier, as a function returns it, becomes the value class's box, as a
-    /// continuation's `invokeSuspend` hands it to its completion. A nullable carrier boxes all but
-    /// `null`.
+    /// continuation's `invokeSuspend` hands it to its completion. A nullable value class boxes all
+    /// but `null`.
     ValueClassBox {
         classifier: crate::types::TypeName,
         carrier: crate::types::Ty,
+        /// Whether the value class is nullable, its `null` the carrier's.
+        nullable: bool,
     },
     /// An interface-delegation forwarder whose callee returns a value class as its reference
     /// carrier. `COROUTINE_SUSPENDED` is returned as it is; any other result is that carrier,

@@ -25,9 +25,16 @@ pub(super) fn unboxed_carrier(result: Option<IrValueClassSuspendResult>) -> Opti
 }
 
 /// The value class and carrier of suspend function `function`, when it returns the carrier where it
-/// does not suspend: its continuation completes with the box.
-pub(crate) fn completion_box(ir: &IrFile, function: u32) -> Option<(TypeName, Ty)> {
-    unboxed_carrier(ir.value_class_suspend_returns.get(&function).copied())
+/// does not suspend: its continuation completes with the box. With them, whether the value class
+/// may be null ([`box_may_be_null`]), whose null carrier completes as `null`.
+pub(crate) fn completion_box(ir: &IrFile, function: u32) -> Option<(TypeName, Ty, bool)> {
+    let (value_class, carrier) =
+        unboxed_carrier(ir.value_class_suspend_returns.get(&function).copied())?;
+    Some((
+        value_class,
+        carrier,
+        box_may_be_null(ir, value_class, carrier),
+    ))
 }
 
 /// The value class and carrier of a suspend call whose callee's continuation completes with the box:
@@ -44,6 +51,34 @@ pub(super) fn boxed_on_resume(
         call,
         suspend_functions,
     ))
+}
+
+/// The value class and carrier of suspension point `call` when its resumption delivers the box
+/// where a call that did not suspend returns the carrier: a direct call to a callee that returns
+/// the carrier ([`boxed_on_resume`]). A suspend function value's `invoke` returns the box on both
+/// paths, which the use lowered against that call unboxes.
+pub(super) fn resumed_box(
+    ir: &IrFile,
+    call: ExprId,
+    suspend_functions: &HashSet<u32>,
+) -> Option<(TypeName, Ty)> {
+    match ir.exprs[call as usize] {
+        IrExpr::InvokeFunction { .. } => None,
+        _ => boxed_on_resume(ir, call, suspend_functions),
+    }
+}
+
+/// Whether the box of `value_class` that crosses a suspension as `carrier` may be null: the declared
+/// value class is nullable, and its `null` is the carrier's, which boxing and unboxing pass on
+/// rather than calling `box-impl` or `unbox-impl`. A nullable carrier shows that, unless the
+/// underlying type is nullable itself: such a value class is never null, and its null carrier is
+/// the box of `X(null)`.
+pub(crate) fn box_may_be_null(ir: &IrFile, value_class: TypeName, carrier: Ty) -> bool {
+    carrier.is_nullable()
+        && !ir
+            .value_class_underlying_name(value_class)
+            .expect("a carrier result's value class has its underlying type")
+            .is_nullable()
 }
 
 /// The carrier of the boxed value `resumed` reads: `checkcast X; unbox-impl`, with the `null` of a
@@ -77,7 +112,7 @@ pub(super) fn resumed_carrier(
         dispatch_receiver: Some(boxed),
         args: Vec::new(),
     });
-    if !carrier.is_nullable() {
+    if !box_may_be_null(ir, classifier, carrier) {
         return unboxed;
     }
     let tested = ir.add_expr(ir.exprs[resumed as usize].clone());
@@ -122,7 +157,7 @@ pub(super) fn boxed_carrier(
         dispatch_receiver: None,
         args: vec![cast],
     });
-    if !carrier.is_nullable() {
+    if !box_may_be_null(ir, classifier, carrier) {
         return boxed;
     }
     let tested = ir.add_expr(ir.exprs[value as usize].clone());

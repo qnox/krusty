@@ -727,8 +727,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   itself nullable, so the two are not confused. Its continuation hands the value to its completion
   typed `Any?`, so `invokeSuspend` boxes it after the `COROUTINE_SUSPENDED` check
   (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn; checkcast carrier; X.box-impl; areturn`, a
-  nullable carrier keeping `null`). A caller resumed with the value therefore unboxes it
-  (`checkcast X; unbox-impl`). It cannot hand its own continuation to such a call: kotlinc builds a
+  nullable value class keeping `null`). A caller resumed with the value therefore unboxes it
+  (`checkcast X; unbox-impl`). Only a nullable value class (`Name?`) passes a `null` past
+  `box-impl` and `unbox-impl`: `X(val v: Any?)` is never null, and its null carrier is the box of
+  `X(null)` on the way out and the carrier of a resumed box on the way in. A body kotlinc's coroutine
+  transformer takes, a suspend lambda's or a named function's, unboxes the result right after the
+  point as kotlinc's `generateResumePathUnboxing` does, between `mark(8)` and `mark(9)` and ahead of
+  a `checkcast Object` the transformer deletes; the transformer moves the unboxing to the resume
+  path, and the direct path keeps the carrier, which the point's consumer then reads as the carrier
+  (`tests/suspend_value_class_results_e2e.rs::a_suspend_lambda_unboxes_a_carrier_result_on_resume`
+  and the tests after it). It cannot hand its own continuation to such a call: kotlinc builds a
   state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
   carrier crosses as the box on both paths (`Boxed`), and so does a nullable result whose ordinary
   erasure is the box (`Result<String>?`, `X(val v: Int)?`). A nullable result over a non-null

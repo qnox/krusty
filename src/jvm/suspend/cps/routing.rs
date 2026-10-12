@@ -28,8 +28,13 @@ pub(crate) struct TransformedSuspension {
     /// The call expression. Its continuation operand is an `IrExpr::CurrentContinuation`, the
     /// function's `$completion` parameter; the transformer replaces it with the machine's own.
     pub call: ExprId,
-    /// The callee's declared result, which the call's erased `Object` result is coerced to.
+    /// The callee's declared result, which the call's erased `Object` result is coerced to: the
+    /// carrier, for a call whose resumption delivers a value class's box.
     pub result: crate::types::Ty,
+    /// The value class whose box a resumption of this call delivers, with the carrier the call
+    /// returns where it does not suspend. The emitter unboxes it between kotlinc's unbox markers
+    /// and the transformer moves that unboxing to the resume path.
+    pub resumed_box: Option<(crate::types::TypeName, crate::types::Ty)>,
 }
 
 /// A function whose machine kotlinc's coroutine transformer builds from its bytecode.

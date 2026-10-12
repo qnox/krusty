@@ -541,8 +541,9 @@ pub(super) struct ContinuationClass<'a> {
     /// `Some(name)` when re-entry goes through a synthetic static on the owner.
     pub(super) bridge: Option<&'a str>,
     /// The value class whose carrier the re-entered method returns where it does not suspend; the
-    /// completion takes the value as its box.
-    pub(super) completion_box: Option<(TypeName, Ty)>,
+    /// completion takes the value as its box. With it, whether the value class may be null, whose
+    /// null carrier stays null.
+    pub(super) completion_box: Option<(TypeName, Ty, bool)>,
 }
 
 pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
@@ -654,7 +655,7 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
             invoke.invokestatic(reference, words, 1);
         }
     }
-    if let Some((value_class, carrier)) = completion_box {
+    if let Some((value_class, carrier, nullable)) = completion_box {
         // `COROUTINE_SUSPENDED` goes back as it is; any other result is the carrier, boxed.
         let resumed = invoke.new_label();
         invoke.dup();
@@ -667,7 +668,7 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
         invoke.if_acmpne(resumed);
         invoke.areturn();
         invoke.bind(resumed);
-        let physical = ir_ty_to_jvm(&carrier.non_null());
+        let physical = ir_ty_to_jvm(&carrier).non_null();
         if let Some(internal) = physical.obj_internal() {
             let class = cw.class_ref(&internal.render());
             invoke.checkcast(class);
@@ -677,7 +678,7 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
             &mut invoke,
             value_class,
             physical,
-            carrier.is_nullable(),
+            nullable,
         );
     }
     invoke.areturn();
@@ -797,8 +798,8 @@ impl Emitter<'_> {
                 self.cw,
                 code,
                 value_class,
-                ir_ty_to_jvm(&carrier.non_null()),
-                carrier.is_nullable(),
+                ir_ty_to_jvm(&carrier).non_null(),
+                crate::jvm::suspend::box_may_be_null(self.ir, value_class, carrier),
             );
         }
     }
