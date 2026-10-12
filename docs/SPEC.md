@@ -2487,6 +2487,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   substituted type materializes it at its own declared type, as kotlinc's codegen does at every
   consumer: `fun f(b: Box<String>): CharSequence = b.v` is `getV; checkcast CharSequence`, and a
   function returning `Any` writes no cast. Test: `tests/erased_result_consumer_e2e.rs`.
+- **A captured reference `var` is cast at its consumer.** A `var` a lambda or local class writes
+  lives in a `Ref$ObjectRef`, whose `element` is an `Object`. kotlinc reads the element and casts
+  it only where the consumer's type needs it: `record(label)` with an `Any?` parameter, a
+  `val held: Any = label` and a `return label` from a function returning `Any?` take the element
+  unchanged, while `measure(label)` casts to `String`. A read under a widening implicit coercion
+  is the same read; a value-class or unsigned element keeps its carrier adaptation. Test:
+  `tests/captured_ref_consumer_e2e.rs`.
 - **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
   established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
   that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a

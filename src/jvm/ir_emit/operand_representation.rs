@@ -79,6 +79,8 @@ impl Emitter<'_> {
             // The coercion is not emitted, so its line marks the call that produces the value.
             self.mark_expression_start(expression, code);
             self.emit_consumed_operand(expression, code)
+        } else if self.reads_reference_cell(expression) {
+            self.emit_consumed_operand(expression, code)
         } else {
             self.emit_value(expression, code);
             self.value_ty(expression)
@@ -135,11 +137,60 @@ impl Emitter<'_> {
                 self.erased_invocations.remove(&expression);
                 Ty::obj("java/lang/Object")
             }
-            None => {
-                self.emit_value(expression, code);
-                self.value_ty(expression)
-            }
+            // A captured `var` of a reference type is read from its holder's `Object` element. The
+            // consumer casts it to its own type, as kotlinc does: an `Any` parameter, store or
+            // return takes the element unchanged.
+            None => match self.reference_cell_read(expression) {
+                Some((read, holder, elem)) => {
+                    // The read is emitted here, not through `emit_value`, so it marks its line.
+                    self.mark_expression_start(expression, code);
+                    self.mark_expression_start(read, code);
+                    self.emit_shared_cell_read(holder, elem, false, code)
+                }
+                None => {
+                    self.emit_value(expression, code);
+                    self.value_ty(expression)
+                }
+            },
         }
+    }
+
+    /// The holder and element type of a captured reference `var` read from its holder's
+    /// `Object` element, directly or under a widening implicit coercion. A value-class or
+    /// unsigned element keeps its carrier adaptation.
+    fn reference_cell_read(
+        &self,
+        expression: crate::ir::ExprId,
+    ) -> Option<(crate::ir::ExprId, crate::ir::ExprId, Ty)> {
+        let (read, widened_to) = match *self.ir.expr(expression) {
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } => (arg, Some(type_operand)),
+            _ => (expression, None),
+        };
+        let IrExpr::RefGet { holder, elem } = *self.ir.expr(read) else {
+            return None;
+        };
+        let object = Ty::obj("java/lang/Object");
+        let plain_reference = ir_ty_to_jvm(&elem).is_reference()
+            && !matches!(
+                self.reference_coercion(object, elem),
+                ReferenceCoercion::Carried
+            );
+        let widening = widened_to.is_none_or(|target| {
+            ir_ty_to_jvm(&target).is_reference()
+                && matches!(
+                    self.reference_coercion(elem, target),
+                    ReferenceCoercion::Unchanged
+                )
+        });
+        (plain_reference && widening).then_some((read, holder, elem))
+    }
+
+    fn reads_reference_cell(&self, expression: crate::ir::ExprId) -> bool {
+        self.reference_cell_read(expression).is_some()
     }
 
     /// How `expression` produces a reference value in an erased `Object` slot that checked IR
