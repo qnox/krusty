@@ -309,6 +309,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         })
         .collect();
 
+    let namespace = module_namespace(module_name);
     let package = ir
         .package
         .as_deref()
@@ -330,11 +331,62 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         if !functions[index].is_empty() {
             continue;
         }
+        // Local and compiler-generated functions have no checked callable identity. They still
+        // belong to one source module: independently analyzed dependencies restart their local
+        // function ids and may otherwise export identical strong symbols at the final link.
         let base = match &package {
-            Some(package) => format!("kt_{package}_{}", c_identifier(&function.name)),
-            None => format!("kt_{}", c_identifier(&function.name)),
+            Some(package) => format!(
+                "kt_modlocal_{namespace}_{package}_{}",
+                c_identifier(&function.name)
+            ),
+            None => format!("kt_modlocal_{namespace}_{}", c_identifier(&function.name)),
         };
         functions[index] = unique(base, &|name| vec![name.to_string()]);
     }
     Symbols { classes, functions }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::IrFunction;
+    use crate::types::Ty;
+
+    fn fallback_function(name: &str) -> IrFile {
+        let mut ir = IrFile::default();
+        ir.package = Some("sample".to_string());
+        ir.functions.push(IrFunction {
+            name: name.to_string(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir
+    }
+
+    #[test]
+    fn fallback_functions_are_namespaced_by_source_module() {
+        let first = symbols(
+            &fallback_function("local"),
+            "first-module",
+            HashSet::default(),
+        );
+        let second = symbols(
+            &fallback_function("local"),
+            "second-module",
+            HashSet::default(),
+        );
+
+        assert_eq!(
+            first.functions,
+            ["kt_modlocal_first_2d_module_sample_local"]
+        );
+        assert_eq!(
+            second.functions,
+            ["kt_modlocal_second_2d_module_sample_local"]
+        );
+    }
 }
