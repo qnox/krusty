@@ -8,8 +8,9 @@
 //!
 //! kotlinc-js and kotlinc-wasm ship in the kotlinc distribution every test run provisions.
 //! kotlinc-native is its own distribution (`just kotlin-native`), named by `KRUSTY_KOTLIN_NATIVE`.
-//! Without it a recorded answer still replays; an unrecorded one is unavailable, which the
-//! `klib-semantics` lane turns into a failure with `KRUSTY_REQUIRE_KOTLIN_NATIVE`.
+//! Without it a recorded answer still replays; an unrecorded one is unavailable. The
+//! maximum-version Native CI row and focused local `just klib-semantics` recipe turn that into a
+//! failure with `KRUSTY_REQUIRE_KOTLIN_NATIVE`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use std::process::Command;
 
 use krusty::compilation_target::CompilationTarget;
 
-use super::common::byte_dump::{self, fingerprint_parts};
+use super::reference_recording_support::{kotlin_native_root, recorded};
 
 /// What a compiler did with a source set: whether it accepted it, and every error it reported in
 /// emission order. Each error is one complete block, `file:line:column: message`, with any further
@@ -139,50 +140,6 @@ pub fn kotlin_native_box(source: &str) -> Option<String> {
     Some(String::from_utf8(stdout.clone()).expect("recorded text is UTF-8"))
 }
 
-/// Read the recording for this source set, or produce and record it with `live`.
-fn recorded(
-    target: CompilationTarget,
-    kind: &str,
-    sources: &[(&str, &str)],
-    args: &[String],
-    live: impl FnOnce(&Path) -> Option<BTreeMap<String, Vec<u8>>>,
-) -> Option<BTreeMap<String, Vec<u8>>> {
-    let fingerprint = fingerprint(target, kind, sources, args);
-    let slot = format!("reference-{kind}-{target:?}-{fingerprint:032x}");
-    if let Some(files) = byte_dump::load_shared_files(&slot, fingerprint) {
-        return Some(files);
-    }
-    let work = super::common::scratch_dir().expect("cannot allocate a reference-compiler fixture");
-    let answer = live(&work);
-    let _ = std::fs::remove_dir_all(&work);
-    let answer = answer?;
-    byte_dump::store_shared_files(&slot, fingerprint, &answer);
-    Some(answer)
-}
-
-fn fingerprint(
-    target: CompilationTarget,
-    kind: &str,
-    sources: &[(&str, &str)],
-    args: &[String],
-) -> u128 {
-    let mut blob = Vec::new();
-    let mut field = |bytes: &[u8]| {
-        blob.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        blob.extend_from_slice(bytes);
-    };
-    field(format!("{target:?}").as_bytes());
-    field(kind.as_bytes());
-    for (name, text) in sources {
-        field(name.as_bytes());
-        field(text.as_bytes());
-    }
-    for argument in args {
-        field(argument.as_bytes());
-    }
-    fingerprint_parts(&[&blob])
-}
-
 enum Output {
     /// Analyze and serialize a KLIB: every frontend diagnostic, no native code generation.
     Library,
@@ -259,17 +216,6 @@ fn run_reference(
         status: output.status.code().unwrap_or(-1),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
-}
-
-/// The Kotlin/Native distribution root, when provisioned.
-fn kotlin_native_root() -> Option<PathBuf> {
-    let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    if root.is_none() && std::env::var_os("KRUSTY_REQUIRE_KOTLIN_NATIVE").is_some() {
-        panic!("KRUSTY_REQUIRE_KOTLIN_NATIVE is set but KRUSTY_KOTLIN_NATIVE is not");
-    }
-    root
 }
 
 #[cfg(test)]

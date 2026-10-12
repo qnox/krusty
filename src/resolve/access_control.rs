@@ -25,7 +25,11 @@ pub(super) trait SourceMemberSite {
     /// that is not the root package, and it does not grant package-private access.
     fn source_package(&self) -> Option<TypeName>;
     fn module_owns(&self, owner: TypeName) -> bool;
-    fn internal_friend(&self, owner: TypeName) -> bool;
+    fn internal_friend(
+        &self,
+        owner: TypeName,
+        callable: Option<crate::fir::ExternalCallableId>,
+    ) -> bool;
     fn access_classes(&self) -> Vec<TypeName>;
     fn protected_classes(&self) -> Vec<TypeName>;
     fn companion_of(&self, enclosing: TypeName) -> Option<TypeName>;
@@ -39,17 +43,20 @@ pub(super) trait SourceMemberSite {
 /// member. `protected` reaches those plus any subclass of `owner`. A top-level site with no
 /// enclosing class cannot see a non-public member. Java package-private declarations are
 /// accessible from their declaring package.
-pub(super) fn site_member_accessible(
+/// The member-access operation when the selected dependency declaration has a stable provider
+/// identity. The identity, rather than the package or classifier spelling, determines friendship.
+pub(super) fn site_callable_accessible(
     site: &impl SourceMemberSite,
     vis: Visibility,
     owner: TypeName,
+    callable: Option<crate::fir::ExternalCallableId>,
 ) -> bool {
     if site.visibility_suppressed() {
         return true;
     }
     match vis {
         Visibility::Public => true,
-        Visibility::Internal => site.module_owns(owner) || site.internal_friend(owner),
+        Visibility::Internal => site.module_owns(owner) || site.internal_friend(owner, callable),
         Visibility::PackagePrivate => site.source_package() == Some(owner.namespace()),
         Visibility::Private | Visibility::Protected => {
             // Access is lexical, so the enclosing chain is walked, not the receiver chain: a
@@ -74,15 +81,15 @@ pub(super) fn site_member_accessible(
     }
 }
 
-/// [`site_member_accessible`], plus the protected-receiver constraint: a `protected` member is
-/// usable on a receiver assignable to the accessing subclass (or to the declaring class itself).
-pub(super) fn site_receiver_member_accessible(
+/// [`site_callable_accessible`], plus the protected-receiver constraint.
+pub(super) fn site_receiver_callable_accessible(
     site: &impl SourceMemberSite,
     vis: Visibility,
     owner: TypeName,
     receiver: Ty,
+    callable: Option<crate::fir::ExternalCallableId>,
 ) -> bool {
-    if !site_member_accessible(site, vis, owner) {
+    if !site_callable_accessible(site, vis, owner, callable) {
         return false;
     }
     vis != Visibility::Protected
@@ -109,8 +116,14 @@ impl SourceMemberSite for Checker<'_> {
         module_declares_classifier(&self.module, owner)
     }
 
-    fn internal_friend(&self, owner: TypeName) -> bool {
-        self.libraries.internal_accessible(owner)
+    fn internal_friend(
+        &self,
+        owner: TypeName,
+        callable: Option<crate::fir::ExternalCallableId>,
+    ) -> bool {
+        self.libraries
+            .dependency_access_policy()
+            .internal_callable_accessible(callable, owner)
     }
 
     fn access_classes(&self) -> Vec<TypeName> {
@@ -140,18 +153,151 @@ impl SourceMemberSite for Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
-    /// Whether a member of `owner` with visibility `vis` is accessible from the current site.
-    pub(super) fn member_accessible(&self, vis: Visibility, owner: TypeName) -> bool {
-        site_member_accessible(self, vis, owner)
+    /// Whether one already-selected dependency callable is visible from the current site.
+    pub(super) fn callable_accessible(
+        &self,
+        vis: Visibility,
+        owner: TypeName,
+        callable: Option<crate::fir::ExternalCallableId>,
+    ) -> bool {
+        site_callable_accessible(self, vis, owner, callable)
     }
 
-    pub(super) fn receiver_member_accessible(
+    pub(super) fn receiver_callable_accessible(
         &self,
         vis: Visibility,
         owner: TypeName,
         receiver: Ty,
+        callable: Option<crate::fir::ExternalCallableId>,
     ) -> bool {
-        site_receiver_member_accessible(self, vis, owner, receiver)
+        site_receiver_callable_accessible(self, vis, owner, receiver, callable)
+    }
+
+    /// Property-only visibility exception controlled by Kotlin's
+    /// `AllowAccessToProtectedFieldFromSuperCompanion` language feature. Despite that historical
+    /// feature name, this is a semantic property access: FIR records the resolved property and the
+    /// target backend alone decides whether it becomes a field load or an accessor call.
+    pub(super) fn receiver_property_accessible(
+        &self,
+        visibility: Visibility,
+        owner: TypeName,
+        receiver: Ty,
+        callable: Option<crate::fir::ExternalCallableId>,
+    ) -> bool {
+        if self.visibility_access_suppressed() {
+            return true;
+        }
+        if self.receiver_callable_accessible(visibility, owner, receiver, callable) {
+            return true;
+        }
+        if visibility != Visibility::Protected
+            || !self.file.allow_protected_super_companion_property_access
+            || receiver.non_null().obj_internal() != Some(owner)
+        {
+            return false;
+        }
+        let Some(superclass) = owner.nested_owner() else {
+            return false;
+        };
+        let declared_companion = self
+            .resolver()
+            .classifier(superclass)
+            .and_then(|class| {
+                class
+                    .companion_object
+                    .as_ref()
+                    .map(|(_, companion)| *companion)
+            })
+            .is_some_and(|companion| companion == owner);
+        declared_companion
+            && self
+                .lexical_source_class_names()
+                .into_iter()
+                .any(|enclosing| {
+                    enclosing != superclass && self.obj_name_is_subtype(enclosing, superclass)
+                })
+    }
+
+    /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is not
+    /// reachable from the current site.
+    pub(super) fn reject_if_inaccessible(
+        &mut self,
+        vis: Visibility,
+        name: &str,
+        owner: TypeName,
+        span: Span,
+    ) -> bool {
+        self.reject_callable_if_inaccessible(vis, name, owner, None, span)
+    }
+
+    pub(super) fn reject_callable_if_inaccessible(
+        &mut self,
+        vis: Visibility,
+        name: &str,
+        owner: TypeName,
+        callable: Option<crate::fir::ExternalCallableId>,
+        span: Span,
+    ) -> bool {
+        if !self.callable_accessible(vis, owner, callable)
+            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        {
+            let kind = match vis {
+                Visibility::Private => "private",
+                Visibility::Protected => "protected",
+                Visibility::Internal => "internal",
+                Visibility::PackagePrivate => "package-private",
+                Visibility::Public => "public",
+            };
+            self.diags.error(
+                span,
+                format!(
+                    "cannot access '{name}': it is {kind} in '{}'",
+                    owner.render()
+                ),
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Render an already-established semantic property-access rejection. The caller owns receiver
+    /// and lexical accessibility; the provider contributes only the declaration label used by the
+    /// diagnostic (for example Java's `field name: Type!`).
+    pub(super) fn report_inaccessible_property(
+        &mut self,
+        visibility: Visibility,
+        name: &str,
+        ty: Ty,
+        owner: TypeName,
+        property: Option<crate::fir::ExternalPropertyId>,
+        span: Span,
+    ) {
+        if self.visibility_access_suppressed() {
+            return;
+        }
+        let label = property.and_then(|property| {
+            self.libraries
+                .external_property_diagnostic_label(property, name, ty)
+        });
+        let Some(label) = label else {
+            self.reject_if_inaccessible(visibility, name, owner, span);
+            return;
+        };
+        let visibility = match visibility {
+            Visibility::Private => "private",
+            Visibility::Protected => "protected",
+            Visibility::Internal => "internal",
+            Visibility::PackagePrivate => "package-private",
+            Visibility::Public => "public",
+        };
+        self.diags.error(
+            span,
+            format!(
+                "cannot access '{label}': it is {visibility} in '{}'.",
+                Self::access_owner_display(owner),
+            ),
+        );
     }
 
     /// Whether a property reference at this receiver exposes its setter. An inaccessible setter,
@@ -162,10 +308,14 @@ impl<'a> Checker<'a> {
         receiver: Ty,
     ) -> bool {
         property.setter.is_some()
-            && self.receiver_member_accessible(
+            && self.receiver_callable_accessible(
                 property.setter_visibility,
                 property.getter.owner,
                 receiver,
+                property
+                    .setter
+                    .as_ref()
+                    .and_then(|setter| setter.external_identity),
             )
     }
 }
@@ -204,7 +354,11 @@ mod tests {
         fn module_owns(&self, _: crate::types::TypeName) -> bool {
             false
         }
-        fn internal_friend(&self, _: crate::types::TypeName) -> bool {
+        fn internal_friend(
+            &self,
+            _: crate::types::TypeName,
+            _: Option<crate::fir::ExternalCallableId>,
+        ) -> bool {
             false
         }
         fn access_classes(&self) -> Vec<crate::types::TypeName> {
@@ -228,15 +382,17 @@ mod tests {
     fn a_missing_source_record_does_not_grant_root_package_access() {
         let owner = crate::types::type_name("RootClass");
         assert_eq!(owner.namespace(), crate::types::TypeName::ROOT);
-        assert!(!super::site_member_accessible(
+        assert!(!super::site_callable_accessible(
             &PackageSite(None),
             crate::types::Visibility::PackagePrivate,
             owner,
+            None,
         ));
-        assert!(super::site_member_accessible(
+        assert!(super::site_callable_accessible(
             &PackageSite(Some(crate::types::TypeName::ROOT)),
             crate::types::Visibility::PackagePrivate,
             owner,
+            None,
         ));
     }
 }

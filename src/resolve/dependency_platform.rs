@@ -470,6 +470,10 @@ impl SymbolSource for DependencyPlatform {
 }
 
 impl SemanticPlatform for DependencyPlatform {
+    fn dependency_access_policy(&self) -> &dyn crate::libraries::DependencyAccessPolicy {
+        self.platform.dependency_access_policy()
+    }
+
     fn validate_initialization(&self) -> Result<(), crate::libraries::PlatformInitializationError> {
         self.platform.validate_initialization()
     }

@@ -48,6 +48,12 @@ pub(super) struct SignedFunction {
     /// whose compiler-owned declarations may receive package-level intrinsic roles. Ordinary
     /// dependencies remain false even when their manifests and packages mimic that stdlib.
     pub(super) compiler_builtin_owner: bool,
+    /// This declaration's KLIB is a friend of the current compilation. Friendship is attached to
+    /// the declaration while its archive identity is still known; package ownership cannot encode
+    /// it because unrelated KLIBs may contribute declarations to the same package.
+    pub(super) internal_friend: bool,
+    /// Exact declaring KLIB module identity, when this declaration came from an archive.
+    pub(super) module: Option<String>,
     /// The constant default of each value parameter, read from the library's IR; empty when the
     /// IR was not read or no default is a constant.
     pub(super) defaults: Vec<Option<crate::libraries::DefaultValue>>,
@@ -63,6 +69,10 @@ pub(super) struct SignedProperty {
     pub(super) setter: Option<KlibAccessorIdSignature>,
     pub(super) parameters: PropertyParameterIdentities,
     pub(super) type_parameters: TypeParameterIdentities,
+    /// Whether the KLIB that declares this property is a friend of this compilation.
+    pub(super) internal_friend: bool,
+    /// Exact declaring KLIB module identity, when this declaration came from an archive.
+    pub(super) module: Option<String>,
 }
 
 /// A declaration the provider cannot publish, because its identity or its parameter identities
@@ -108,9 +118,19 @@ impl std::error::Error for KlibLibraryError {}
 pub(super) fn sign_package_function(
     package: &[String],
     declaration: KotlinFunction,
+    internal_friend: bool,
+    module: Option<&str>,
 ) -> Result<SignedFunction, KlibLibraryError> {
     let path = declaration.name.clone();
-    sign_function(top_level(package), &path, declaration, None)
+    let mut signed = sign_function(
+        top_level(package),
+        &path,
+        declaration,
+        None,
+        internal_friend,
+    )?;
+    signed.module = module.map(str::to_owned);
+    Ok(signed)
 }
 
 /// Sign one top-level property of the package with exactly these segments, together with its
@@ -118,9 +138,19 @@ pub(super) fn sign_package_function(
 pub(super) fn sign_package_property(
     package: &[String],
     declaration: KotlinProperty,
+    internal_friend: bool,
+    module: Option<&str>,
 ) -> Result<SignedProperty, KlibLibraryError> {
     let path = declaration.name.clone();
-    sign_property(top_level(package), &path, declaration, None)
+    let mut signed = sign_property(
+        top_level(package),
+        &path,
+        declaration,
+        None,
+        internal_friend,
+    )?;
+    signed.module = module.map(str::to_owned);
+    Ok(signed)
 }
 
 fn top_level(package: &[String]) -> MetadataContainer<'_> {
@@ -141,6 +171,7 @@ pub(super) fn sign_function(
     path: &str,
     declaration: KotlinFunction,
     enclosing: Option<&TypeParameterIdentities>,
+    internal_friend: bool,
 ) -> Result<SignedFunction, KlibLibraryError> {
     let package = container.package;
     let signature = package_function_signature(container, &declaration)
@@ -158,6 +189,8 @@ pub(super) fn sign_function(
         parameters,
         type_parameters,
         compiler_builtin_owner: false,
+        internal_friend,
+        module: None,
         defaults: Vec::new(),
     })
 }
@@ -169,6 +202,7 @@ pub(super) fn sign_property(
     path: &str,
     declaration: KotlinProperty,
     enclosing: Option<&TypeParameterIdentities>,
+    internal_friend: bool,
 ) -> Result<SignedProperty, KlibLibraryError> {
     let package = container.package;
     let fail = |error: &dyn std::fmt::Display| unsignable(package, path, error);
@@ -206,6 +240,8 @@ pub(super) fn sign_property(
         setter,
         parameters,
         type_parameters,
+        internal_friend,
+        module: None,
     })
 }
 

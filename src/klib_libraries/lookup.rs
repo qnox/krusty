@@ -173,6 +173,7 @@ pub(super) fn published_function(
         builtin_realizations::realize_package_function(
             package,
             signed.compiler_builtin_owner,
+            &signed.signature,
             &mut function,
         );
     }

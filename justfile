@@ -146,9 +146,11 @@ profile-box FILTER="":
 conformance-all-plain:
     just conformance
     just native-conformance-run "$(just conformance-bin)" "$(just max-version)"
+    just native-conformance-regressions "$(just conformance-bin)" "$(just max-version)"
     just wasm-conformance-run wasm-js "$(just conformance-bin)" "$(just max-version)"
     just wasm-conformance-run wasm-wasi "$(just conformance-bin)" "$(just max-version)"
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --skip kotlin_codegen_box_wasm --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
+    just wasm-conformance-regressions "$(just conformance-bin)" "$(just max-version)"
+    KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance:: --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
 
 # Run all conformance tests for one runtime-selected Kotlin version. The shared Cargo target avoids
 # per-version rebuilds; the reference compiler and corpus are provisioned on demand.
@@ -165,13 +167,17 @@ conformance-one VERSION:
     export KRUSTY_LANGUAGE_VERSION="$v"
     export KRUSTY_KOTLINC="$kc"
     export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+    export KRUSTY_KOTLIN_NATIVE="${KRUSTY_KOTLIN_NATIVE:-$(just kotlin-native "$v")}"
     bin="$(just conformance-bin)"
     just conformance-run "$bin" "$v"
     bash scripts/native-conformance-run.sh "$bin"
+    bash scripts/target-conformance-regressions.sh native "$bin" "$v"
     bash scripts/box-lane-run.sh wasm-js "$bin"
     bash scripts/box-lane-run.sh wasm-wasi "$bin"
+    export KRUSTY_DEPS_CACHE="${KRUSTY_DEPS_CACHE:-$PWD/target/cache/krusty-deps}"
+    bash scripts/target-conformance-regressions.sh wasm "$bin" "$v"
     conf_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"; [ "$conf_threads" -gt 4 ] && conf_threads=4
-    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --skip kotlin_codegen_box_wasm --test-threads="$conf_threads"
+    KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance:: --test-threads="$conf_threads"
 
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and
@@ -261,11 +267,9 @@ kotlinc-arguments VERSION=`just max-version`:
 kotlin-native VERSION=`just max-version`:
     @scripts/kotlin-native.sh "{{VERSION}}" "$PWD/target/cache/kotlin-native"
 
-# This lane is deliberately required: the integration tests may be optional in an ordinary local
-# run, but this recipe provisions the distribution and turns absence or an undecodable fragment
-# into a failure. It also runs the tests that take kotlinc-native as their reference compiler,
-# with that compiler required, so a source set no recording covers is compiled live instead of
-# skipped.
+# Focused local KLIB check: this recipe provisions the distribution and turns absence or an
+# undecodable fragment into a failure. Ordinary CI runs the same decoder, value-class and
+# kotlinc-native oracle coverage in its maximum-version Native conformance row.
 klib-semantics VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -273,7 +277,13 @@ klib-semantics VERSION=`just max-version`:
     # KLIB semantics read the Native distribution only, never the box or CLI corpus.
     KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KOTLIN_NATIVE=1 \
       KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
-      ./run-tests.sh --test e2e -- klib_ value_class_declaration_e2e \
+      ./run-tests.sh --test e2e -- klib_ --nocapture
+    KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KOTLIN_NATIVE=1 \
+      KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
+      ./run-tests.sh --test e2e -- value_class_declaration_e2e --nocapture
+    KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KOTLIN_NATIVE=1 \
+      KRUSTY_CLASS_DUMP_COMPILE_MISSING=1 KRUSTY_PROVISION_BOX_CORPUS=0 \
+      ./run-tests.sh --test e2e -- \
         native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
     KRUSTY_KOTLIN_NATIVE="$root" KRUSTY_REQUIRE_KLIB=1 \
       ./run-tests.sh --lib klib_
@@ -500,9 +510,12 @@ native-conformance-run BIN VERSION REPORT="":
     v="{{VERSION}}"
     kotlinc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
     box_dir="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
+    # Native cases are analyzed against this version's Kotlin/Native stdlib KLIB.
+    kotlin_native="${KRUSTY_KOTLIN_NATIVE:-$(just kotlin-native "$v")}"
     KRUSTY_LANGUAGE_VERSION="$v" \
       KRUSTY_KOTLINC="$kotlinc" \
       KRUSTY_KOTLIN_BOX_DIR="$box_dir" \
+      KRUSTY_KOTLIN_NATIVE="$kotlin_native" \
       bash scripts/native-conformance-run.sh "{{BIN}}" {{ if REPORT != "" { quote(REPORT) } else { "" } }}
 
 # Run one Wasm box lane (`wasm-js` or `wasm-wasi`) of a prebuilt conformance binary for one Kotlin
@@ -518,12 +531,35 @@ wasm-conformance-run LANE BIN VERSION REPORT="":
       KRUSTY_KOTLIN_BOX_DIR="$box_dir" \
       bash scripts/box-lane-run.sh "{{LANE}}" "{{BIN}}" {{ if REPORT != "" { quote(REPORT) } else { "" } }}
 
-# Run every non-box conformance test with the binary from `conformance-bin`. CI invokes this beside
-# `conformance-run` in every supported-version JVM row. A sibling `krusty` next to BIN is the CLI.
+# Run every JVM-owned non-box conformance test with the binary from `conformance-bin`. CI invokes
+# this beside `conformance-run` in every supported-version JVM row. Runnable-target tests have
+# target-owned recipes below. A sibling `krusty` next to BIN is the CLI.
 conformance-regressions BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
+
+# Run focused Native conformance tests only after provisioning the exact Native distribution whose
+# stdlib KLIB owns their semantics. The corpus itself remains in `native-conformance-run`.
+native-conformance-regressions BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    kotlin_native="${KRUSTY_KOTLIN_NATIVE:-$(just kotlin-native "$v")}"
+    KRUSTY_KOTLIN_NATIVE="$kotlin_native" \
+      bash scripts/target-conformance-regressions.sh native "{{BIN}}" "$v"
+
+# Run focused Wasm conformance tests in the Wasm row, after its exact target KLIBs have been
+# provisioned by the box lanes. The two corpus functions remain in their dedicated runners.
+wasm-conformance-regressions BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    kotlinc="${KRUSTY_KOTLINC:-$(just kotlinc "$v")}"
+    deps_cache="${KRUSTY_DEPS_CACHE:-$PWD/target/cache/krusty-deps}"
+    KRUSTY_KOTLINC="$kotlinc" \
+      KRUSTY_DEPS_CACHE="$deps_cache" \
+      bash scripts/target-conformance-regressions.sh wasm "{{BIN}}" "$v"
 
 # Preview the shields.io endpoint badges in docs/badges/*.json (untracked) for the max version.
 # With no arguments it runs both target lanes; pass CASES, BYTES, and NATIVE together to render

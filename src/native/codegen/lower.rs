@@ -195,6 +195,15 @@ pub struct FileInput<'a> {
     pub abi_symbols: &'a mut crate::fx_hash::HashSet<String>,
     /// This file's identity in the module. Its initializer is exported under it.
     pub source: crate::fir::SourceFileId,
+    /// The exact source module this file belongs to. Module-local callable and initializer symbols
+    /// include it because stable callable/source ids restart for every independently analyzed
+    /// module in one emission session.
+    pub module_name: &'a str,
+    /// Stable dependency symbols this file must export, keyed by its common-IR callable identity.
+    pub dependency_exports: &'a HashMap<FunId, String>,
+    /// Stable dependency symbols already exported by preceding source modules, keyed by the exact
+    /// KLIB identity the dependency provider attaches to `Callee::External`.
+    pub dependency_symbols: &'a HashMap<crate::backend::KlibDependencyCallable, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
@@ -219,6 +228,9 @@ pub fn lower_file(
         runtime_symbols,
         abi_symbols,
         source,
+        module_name,
+        dependency_exports,
+        dependency_symbols,
         value_classes,
     } = input;
     let class_model = model::build(ir, value_classes)?;
@@ -239,7 +251,7 @@ pub fn lower_file(
         callables,
         values: value_classes,
         module: &mut module,
-        symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
+        symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
         imports: HashMap::default(),
@@ -268,6 +280,8 @@ pub fn lower_file(
         walkable_classes: crate::fx_hash::HashMap::default(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
+        module_name,
+        dependency_symbols,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -313,6 +327,7 @@ pub fn lower_file(
     let defines_entry = selected.is_some();
     let abi = super::super::c_abi::file_records(ir, abi_symbols);
     lowering.define_c_exports(file_init, &abi)?;
+    lowering.define_dependency_exports(file_init, dependency_exports)?;
 
     let object = module
         .finish()
@@ -412,6 +427,10 @@ struct FileLowering<'a> {
     /// Whether this file declares a class an object of which could stand behind a `Comparable<T>`;
     /// see [`declares_its_own_comparable`].
     declares_its_own_comparable: bool,
+    /// Exact source-module identity used only for collision-free target symbol realization.
+    module_name: &'a str,
+    /// Exact declaration-identity join to code emitted for preceding source modules.
+    dependency_symbols: &'a HashMap<crate::backend::KlibDependencyCallable, String>,
 }
 
 impl<'a> FileLowering<'a> {

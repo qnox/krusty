@@ -168,18 +168,31 @@ pub fn kotlinc_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// The reference stdlib KLIB a compilation for `target` is analyzed against. The JS and Wasm ones
-/// ship in the kotlinc distribution; Native's is the Kotlin/Native distribution's. `None` for the
-/// JVM, whose stdlib is a jar, and for a distribution that is not provisioned.
+/// The reference stdlib KLIB a compilation for `target` is analyzed against. JS and wasm-js ship
+/// in the kotlinc distribution, wasm-wasi is the exact-version Kotlin Maven KLIB, and Native's is
+/// the Kotlin/Native distribution's. `None` for the JVM, whose stdlib is a jar, and for a target
+/// library that is not provisioned.
 pub fn kotlin_stdlib_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
     use crate::compilation_target::CompilationTarget;
     match target {
         CompilationTarget::Jvm => None,
         CompilationTarget::Js => dist_jar("kotlin-stdlib-js.klib"),
         CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib"),
-        CompilationTarget::WasmWasi => dist_jar("kotlin-stdlib-wasm-wasi.klib"),
+        CompilationTarget::WasmWasi => kotlin_wasm_wasi_stdlib_klib(),
         CompilationTarget::Native => kotlin_native_stdlib_klib(),
     }
+}
+
+/// Kotlin publishes the wasm-wasi stdlib as a target-specific Maven KLIB for every supported
+/// release. Some compiler distributions do not bundle that publication, so use its versioned
+/// coordinate as the one authoritative source rather than selecting a different platform's bytes.
+fn kotlin_wasm_wasi_stdlib_klib() -> Option<PathBuf> {
+    ensure_maven_artifact(
+        "org.jetbrains.kotlin",
+        "kotlin-stdlib-wasm-wasi",
+        &reference_version(),
+        "klib",
+    )
 }
 
 /// The common stdlib KLIB of the reference Kotlin/Native distribution. `KRUSTY_KOTLIN_NATIVE`

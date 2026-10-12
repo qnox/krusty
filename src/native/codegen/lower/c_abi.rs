@@ -7,6 +7,20 @@
 use super::*;
 
 impl<'a> FileLowering<'a> {
+    /// Export exact dependency declaration identities as target symbols. The ordinary
+    /// module-local entry remains unchanged; this narrow trampoline is the only bridge from a
+    /// later module's provider-selected `Callee::External` to this file's executable body.
+    pub(super) fn define_dependency_exports(
+        &mut self,
+        file_init: FuncId,
+        exports: &HashMap<FunId, String>,
+    ) -> Result<(), Unsupported> {
+        for (&function, symbol) in exports {
+            self.define_export(file_init, function, symbol)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn define_c_exports(
         &mut self,
         file_init: FuncId,
@@ -19,12 +33,12 @@ impl<'a> FileLowering<'a> {
             else {
                 continue;
             };
-            self.define_c_export(file_init, *function, symbol)?;
+            self.define_export(file_init, *function, symbol)?;
         }
         Ok(())
     }
 
-    fn define_c_export(
+    fn define_export(
         &mut self,
         file_init: FuncId,
         function: u32,

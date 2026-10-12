@@ -16,30 +16,42 @@ use crate::metadata::klib_ir::{KlibIrConstant, KlibIrModuleTrees, KlibIrSignatur
 /// defaults. A member's defaults live in the tree of the top-level classifier that encloses it.
 #[derive(Default)]
 pub(super) struct DefaultSelection {
-    by_package: HashMap<Vec<String>, HashSet<String>>,
+    by_module: HashMap<String, HashMap<Vec<String>, HashSet<String>>>,
     /// Exact top-level function identities whose selected metadata came from the typed platform
     /// stdlib input. A manifest cannot add an identity to this set.
-    authoritative_functions: HashSet<KlibPublicIdSignature>,
+    authoritative_functions: HashSet<(String, KlibPublicIdSignature)>,
 }
 
 impl DefaultSelection {
-    pub(super) fn insert_top_level(&mut self, signature: &KlibPublicIdSignature) {
+    pub(super) fn insert(&mut self, module: Option<&str>, signature: &KlibPublicIdSignature) {
+        let Some(module) = module else {
+            return;
+        };
         let Some(top_level) = signature.declaration().segments().first() else {
             return;
         };
-        self.by_package
+        self.by_module
+            .entry(module.to_owned())
+            .or_default()
             .entry(signature.package().segments().to_vec())
             .or_default()
             .insert(top_level.clone());
     }
 
-    pub(super) fn select_authoritative_function(&mut self, signature: &KlibPublicIdSignature) {
-        self.authoritative_functions.insert(signature.clone());
+    pub(super) fn select_authoritative_function(
+        &mut self,
+        module: Option<&str>,
+        signature: &KlibPublicIdSignature,
+    ) {
+        if let Some(module) = module {
+            self.authoritative_functions
+                .insert((module.to_owned(), signature.clone()));
+        }
     }
 
     /// Whether the top-level declaration serialized under `signature` is one of these. A
     /// file-local identity is never one: metadata publishes no declaration under it.
-    pub(super) fn contains(&self, signature: &KlibIrSignature) -> bool {
+    pub(super) fn contains(&self, module: &str, signature: &KlibIrSignature) -> bool {
         let public = match signature {
             KlibIrSignature::Public(public) => public,
             KlibIrSignature::Accessor(accessor) => accessor.property(),
@@ -48,15 +60,17 @@ impl DefaultSelection {
         let Some(top_level) = public.declaration().segments().first() else {
             return false;
         };
-        self.by_package
-            .get(public.package().segments())
+        self.by_module
+            .get(module)
+            .and_then(|packages| packages.get(public.package().segments()))
             .is_some_and(|names| names.contains(top_level))
     }
 
-    fn selected_authoritative_function(&self, signature: &KlibIrSignature) -> bool {
+    fn selected_authoritative_function(&self, module: &str, signature: &KlibIrSignature) -> bool {
         matches!(
             signature,
-            KlibIrSignature::Public(public) if self.authoritative_functions.contains(public)
+            KlibIrSignature::Public(public)
+                if self.authoritative_functions.contains(&(module.to_owned(), public.clone()))
         )
     }
 }
@@ -65,15 +79,16 @@ impl DefaultSelection {
 /// declarations with at least one constant default are listed.
 #[derive(Default)]
 pub(super) struct ParameterDefaults {
-    defaults: HashMap<KlibIrSignature, Vec<Option<DefaultValue>>>,
+    defaults: HashMap<(String, KlibIrSignature), Vec<Option<DefaultValue>>>,
     /// Every identity a library already declared, constant defaults or not.
-    declared: HashSet<KlibIrSignature>,
+    declared: HashSet<(String, KlibIrSignature)>,
 }
 
 impl ParameterDefaults {
     /// Read the defaults of every function `trees` declares.
     pub(super) fn add_library(
         &mut self,
+        module: &str,
         trees: &KlibIrModuleTrees,
         selection: &DefaultSelection,
         compiler_builtin_owner: bool,
@@ -84,6 +99,7 @@ impl ParameterDefaults {
             };
             let defaults = value_parameter_defaults(arena, function);
             self.record_selected(
+                module,
                 signature.clone(),
                 defaults,
                 selection,
@@ -94,6 +110,7 @@ impl ParameterDefaults {
 
     fn record_selected(
         &mut self,
+        module: &str,
         signature: KlibIrSignature,
         defaults: Vec<Option<DefaultValue>>,
         selection: &DefaultSelection,
@@ -103,7 +120,7 @@ impl ParameterDefaults {
         // identities remain first-wins. Only a function whose selected declaration is from the
         // typed platform stdlib may replace a dependency-first record, including clearing a
         // conflicting constant when the authoritative IR has no closed constant default.
-        let selected_authoritative = selection.selected_authoritative_function(&signature);
+        let selected_authoritative = selection.selected_authoritative_function(module, &signature);
         // A dependency tree can be decoded because another overload under the same top-level name
         // is defaulted. It still cannot contribute defaults for an exact signature whose selected
         // declaration belongs to the platform stdlib, even if that stdlib has no indexed IR body.
@@ -111,20 +128,31 @@ impl ParameterDefaults {
             return;
         }
         let replace = compiler_builtin_owner && selected_authoritative;
-        if !self.declared.insert(signature.clone()) && !replace {
+        let identity = (module.to_owned(), signature);
+        if !self.declared.insert(identity.clone()) && !replace {
             return;
         }
         if defaults.iter().any(Option::is_some) {
-            self.defaults.insert(signature, defaults);
+            self.defaults.insert(identity, defaults);
         } else if replace {
-            self.defaults.remove(&signature);
+            self.defaults.remove(&identity);
         }
     }
 
     /// The constant defaults of the declaration under `signature`, one per value parameter;
     /// empty when it has none.
-    pub(super) fn of(&self, signature: &KlibIrSignature) -> Vec<Option<DefaultValue>> {
-        self.defaults.get(signature).cloned().unwrap_or_default()
+    pub(super) fn of(
+        &self,
+        module: Option<&str>,
+        signature: &KlibIrSignature,
+    ) -> Vec<Option<DefaultValue>> {
+        let Some(module) = module else {
+            return Vec::new();
+        };
+        self.defaults
+            .get(&(module.to_owned(), signature.clone()))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -272,7 +300,7 @@ mod tests {
     }
 
     fn selected_authoritative_default() -> (DefaultSelection, KlibIrSignature) {
-        let inventory = PackageInventory::from_packages(vec![
+        let inventory = PackageInventory::from_package_inputs(vec![
             (
                 vec!["fixture".to_owned()],
                 KotlinPackage {
@@ -280,6 +308,8 @@ mod tests {
                     ..KotlinPackage::default()
                 },
                 false,
+                false,
+                Some("dependency".to_owned()),
             ),
             (
                 vec!["fixture".to_owned()],
@@ -288,6 +318,8 @@ mod tests {
                     ..KotlinPackage::default()
                 },
                 true,
+                false,
+                Some("stdlib".to_owned()),
             ),
         ])
         .expect("the duplicate function is signable");
@@ -303,7 +335,7 @@ mod tests {
     }
 
     fn same_name_overload_selection() -> (DefaultSelection, KlibIrSignature, KlibIrSignature) {
-        let inventory = PackageInventory::from_packages(vec![
+        let inventory = PackageInventory::from_package_inputs(vec![
             (
                 vec!["fixture".to_owned()],
                 KotlinPackage {
@@ -314,6 +346,8 @@ mod tests {
                     ..KotlinPackage::default()
                 },
                 false,
+                false,
+                Some("dependency".to_owned()),
             ),
             (
                 vec!["fixture".to_owned()],
@@ -324,6 +358,8 @@ mod tests {
                     ..KotlinPackage::default()
                 },
                 true,
+                false,
+                Some("stdlib".to_owned()),
             ),
         ])
         .expect("the overloads are signable");
@@ -348,10 +384,12 @@ mod tests {
 
     #[test]
     fn constructor_defaults_are_published_on_the_ordinary_callable() {
-        let mut inventory = PackageInventory::from_packages(vec![(
+        let mut inventory = PackageInventory::from_package_inputs(vec![(
             vec!["fixture".to_owned()],
             defaulted_box(),
             false,
+            false,
+            Some("fixture".to_owned()),
         )])
         .expect("the fixture is signable");
         let identity = type_name("fixture/Box");
@@ -363,7 +401,7 @@ mod tests {
             .clone();
         let mut defaults = ParameterDefaults::default();
         defaults.defaults.insert(
-            KlibIrSignature::Public(signature),
+            ("fixture".to_owned(), KlibIrSignature::Public(signature)),
             vec![Some(DefaultValue::Int(7))],
         );
         inventory.attach_defaults(&defaults);
@@ -392,21 +430,101 @@ mod tests {
                 .signature
                 .clone(),
         );
-        let selection = DefaultSelection::default();
         let mut defaults = ParameterDefaults::default();
         defaults.record_selected(
+            "fixture",
             signature.clone(),
             vec![Some(DefaultValue::Int(7))],
-            &selection,
+            &DefaultSelection::default(),
             false,
         );
         defaults.record_selected(
+            "fixture",
             signature.clone(),
             vec![Some(DefaultValue::Int(9))],
-            &selection,
+            &DefaultSelection::default(),
             false,
         );
-        assert_eq!(defaults.of(&signature), [Some(DefaultValue::Int(7))]);
+        assert_eq!(
+            defaults.of(Some("fixture"), &signature),
+            [Some(DefaultValue::Int(7))]
+        );
+    }
+
+    #[test]
+    fn equal_signatures_keep_each_modules_own_default() {
+        let mut ordinary = defaulted_box();
+        ordinary
+            .classes
+            .get_mut("fixture/Box")
+            .expect("fixture class")
+            .visibility = Visibility::Internal;
+        let mut friend = defaulted_box();
+        friend
+            .classes
+            .get_mut("fixture/Box")
+            .expect("fixture class")
+            .visibility = Visibility::Internal;
+        let mut inventory = PackageInventory::from_package_inputs(vec![
+            (
+                vec!["fixture".to_owned()],
+                ordinary,
+                false,
+                false,
+                Some("ordinary".to_owned()),
+            ),
+            (
+                vec!["fixture".to_owned()],
+                friend,
+                false,
+                true,
+                Some("friend".to_owned()),
+            ),
+        ])
+        .expect("equal declarations from distinct modules are signable");
+        let signature = KlibIrSignature::Public(
+            inventory
+                .classifier(type_name("fixture/Box"))
+                .expect("the class is published")
+                .constructors[0]
+                .signature
+                .clone(),
+        );
+        let mut defaults = ParameterDefaults::default();
+        defaults.record_selected(
+            "ordinary",
+            signature.clone(),
+            vec![Some(DefaultValue::Int(7))],
+            &DefaultSelection::default(),
+            false,
+        );
+        defaults.record_selected(
+            "friend",
+            signature.clone(),
+            vec![Some(DefaultValue::Int(9))],
+            &DefaultSelection::default(),
+            false,
+        );
+        inventory.attach_defaults(&defaults);
+
+        assert_eq!(
+            defaults.of(Some("ordinary"), &signature),
+            [Some(DefaultValue::Int(7))]
+        );
+        assert_eq!(
+            defaults.of(Some("friend"), &signature),
+            [Some(DefaultValue::Int(9))]
+        );
+        let published = classifier_record(
+            &inventory,
+            &ExternalIdentities::default(),
+            type_name("fixture/Box"),
+        )
+        .expect("the friend classifier is published");
+        assert_eq!(
+            published.constructors[0].default_values,
+            [Some(DefaultValue::Int(9))]
+        );
     }
 
     #[test]
@@ -414,25 +532,31 @@ mod tests {
         let (selection, signature) = selected_authoritative_default();
         let mut defaults = ParameterDefaults::default();
         defaults.record_selected(
+            "stdlib",
             signature.clone(),
             vec![Some(DefaultValue::Int(7))],
             &selection,
             false,
         );
-        assert!(defaults.of(&signature).is_empty());
+        assert!(defaults.of(Some("stdlib"), &signature).is_empty());
         defaults.record_selected(
+            "stdlib",
             signature.clone(),
             vec![Some(DefaultValue::Int(9))],
             &selection,
             true,
         );
         defaults.record_selected(
+            "stdlib",
             signature.clone(),
             vec![Some(DefaultValue::Int(11))],
             &selection,
             false,
         );
-        assert_eq!(defaults.of(&signature), [Some(DefaultValue::Int(9))]);
+        assert_eq!(
+            defaults.of(Some("stdlib"), &signature),
+            [Some(DefaultValue::Int(9))]
+        );
     }
 
     #[test]
@@ -440,12 +564,13 @@ mod tests {
         let (selection, signature) = selected_authoritative_default();
         let mut defaults = ParameterDefaults::default();
         // Seed a stale value directly to pin the clearing half of the replacement contract.
-        defaults.declared.insert(signature.clone());
+        let identity = ("stdlib".to_owned(), signature.clone());
+        defaults.declared.insert(identity.clone());
         defaults
             .defaults
-            .insert(signature.clone(), vec![Some(DefaultValue::Int(7))]);
-        defaults.record_selected(signature.clone(), vec![None], &selection, true);
-        assert!(defaults.of(&signature).is_empty());
+            .insert(identity, vec![Some(DefaultValue::Int(7))]);
+        defaults.record_selected("stdlib", signature.clone(), vec![None], &selection, true);
+        assert!(defaults.of(Some("stdlib"), &signature).is_empty());
     }
 
     #[test]
@@ -453,19 +578,24 @@ mod tests {
         let (selection, authoritative, dependency) = same_name_overload_selection();
         let mut defaults = ParameterDefaults::default();
         defaults.record_selected(
+            "stdlib",
             authoritative.clone(),
             vec![Some(DefaultValue::Int(7))],
             &selection,
             false,
         );
         defaults.record_selected(
+            "dependency",
             dependency.clone(),
             vec![Some(DefaultValue::Int(9))],
             &selection,
             false,
         );
-        assert!(defaults.of(&authoritative).is_empty());
-        assert_eq!(defaults.of(&dependency), [Some(DefaultValue::Int(9))]);
+        assert!(defaults.of(Some("stdlib"), &authoritative).is_empty());
+        assert_eq!(
+            defaults.of(Some("dependency"), &dependency),
+            [Some(DefaultValue::Int(9))]
+        );
     }
 
     #[test]
@@ -487,18 +617,23 @@ mod tests {
         let selection = inventory.default_selection();
         let mut defaults = ParameterDefaults::default();
         defaults.record_selected(
+            "ordinary",
             signature.clone(),
             vec![Some(DefaultValue::Int(7))],
             &selection,
             false,
         );
         defaults.record_selected(
+            "ordinary",
             signature.clone(),
             vec![Some(DefaultValue::Int(9))],
             &selection,
             true,
         );
-        assert_eq!(defaults.of(&signature), [Some(DefaultValue::Int(7))]);
+        assert_eq!(
+            defaults.of(Some("ordinary"), &signature),
+            [Some(DefaultValue::Int(7))]
+        );
     }
 
     #[test]
@@ -515,17 +650,22 @@ mod tests {
         ));
         let mut defaults = ParameterDefaults::default();
         defaults.record_selected(
+            "stdlib",
             accessor.clone(),
             vec![Some(DefaultValue::Int(7))],
             &selection,
             false,
         );
         defaults.record_selected(
+            "stdlib",
             accessor.clone(),
             vec![Some(DefaultValue::Int(9))],
             &selection,
             true,
         );
-        assert_eq!(defaults.of(&accessor), [Some(DefaultValue::Int(7))]);
+        assert_eq!(
+            defaults.of(Some("stdlib"), &accessor),
+            [Some(DefaultValue::Int(7))]
+        );
     }
 }

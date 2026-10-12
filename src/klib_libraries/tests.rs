@@ -5,8 +5,8 @@ use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::{ExternalCallableKind, FnKind, FunctionInfo, KlibDeclarationSignature};
 use crate::metadata::id_signature::{package_function_signature, MetadataContainer};
 use crate::metadata::semantic::{
-    KotlinFunction, KotlinFunctionTypeShape, KotlinProperty, KotlinType, KotlinTypeParameter,
-    KotlinTypeParameterId,
+    KotlinFunction, KotlinFunctionTypeShape, KotlinProperty, KotlinType, KotlinTypeAlias,
+    KotlinTypeParameter, KotlinTypeParameterId,
 };
 use crate::types::{
     type_name, ContextParameterKind, SemanticCallableOwner, Ty, TypeVariance, Visibility,
@@ -123,6 +123,51 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
     );
 }
 
+#[test]
+fn a_friend_top_level_alias_is_not_hidden_by_an_equal_nonfriend_identity() {
+    let alias = |expansion: &str| KotlinTypeAlias {
+        name: "Alias".to_owned(),
+        formals: Vec::new(),
+        expansion: class(expansion, false),
+        visibility: Visibility::Internal,
+    };
+    let package = segments(&["shared"]);
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![
+        (
+            package.clone(),
+            KotlinPackage {
+                type_aliases: vec![alias("kotlin/Int")],
+                ..KotlinPackage::default()
+            },
+            false,
+            false,
+            Some("ordinary".to_owned()),
+        ),
+        (
+            package,
+            KotlinPackage {
+                type_aliases: vec![alias("kotlin/String")],
+                ..KotlinPackage::default()
+            },
+            false,
+            true,
+            Some("friend".to_owned()),
+        ),
+    ])
+    .expect("equal aliases from distinct modules remain signable");
+    let libraries = KlibLibraries::over(Rc::new(inventory));
+
+    assert_eq!(
+        <KlibLibraries as crate::libraries::SemanticPlatform>::type_alias_expansion(
+            &libraries,
+            type_name("shared/Alias"),
+        )
+        .map(|alias| alias.expansion),
+        Some(Ty::String),
+        "the exact friend archive owns the selected alias expansion"
+    );
+}
+
 fn println() -> KotlinFunction {
     let mut println = function("println", None, vec![class("kotlin/Any", true)]);
     println.param_names = vec!["message".to_owned()];
@@ -199,6 +244,47 @@ fn single_function(libraries: &KlibLibraries, package: &str, name: &str) -> Func
         );
     };
     function.clone()
+}
+
+#[test]
+fn internal_friend_access_follows_the_selected_archive_not_the_package() {
+    let mut friend_only = function("friendOnly", None, Vec::new());
+    friend_only.visibility = Visibility::Internal;
+    let mut ordinary_only = function("ordinaryOnly", None, Vec::new());
+    ordinary_only.visibility = Visibility::Internal;
+    let shared = segments(&["shared"]);
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![
+        (
+            shared.clone(),
+            package_of(vec![friend_only]),
+            false,
+            true,
+            Some("friend".to_string()),
+        ),
+        (
+            shared,
+            package_of(vec![ordinary_only]),
+            false,
+            false,
+            Some("ordinary".to_string()),
+        ),
+    ])
+    .expect("both package fragments are signable");
+    let libraries = KlibLibraries::over(Rc::new(inventory));
+
+    let friend = single_function(&libraries, "shared", "friendOnly");
+    let ordinary = single_function(&libraries, "shared", "ordinaryOnly");
+    let platform = &libraries as &dyn crate::libraries::SemanticPlatform;
+    assert!(platform
+        .dependency_access_policy()
+        .internal_callable_accessible(friend.callable.external_identity, friend.callable.owner,));
+    assert!(!platform
+        .dependency_access_policy()
+        .internal_callable_accessible(
+            ordinary.callable.external_identity,
+            ordinary.callable.owner,
+        ));
+    assert_eq!(friend.callable.owner, ordinary.callable.owner);
 }
 
 #[test]
@@ -473,6 +559,7 @@ fn write_closed_range_contains_klib(
     unique_name: &str,
     operator: bool,
     ret: Ty,
+    defaulted: bool,
 ) -> std::path::PathBuf {
     let mut declaration = crate::metadata::builder::FnMeta::plain(
         "contains",
@@ -481,6 +568,9 @@ fn write_closed_range_contains_klib(
     );
     declaration.receiver = Some(Ty::obj("kotlin/ranges/IntRange"));
     declaration.operator = operator;
+    declaration.param_modifiers = vec![crate::metadata::DeclaredValueParameter::defaulted(
+        defaulted,
+    )];
     let fragment = crate::metadata::klib_fragment::package_fragment(
         &["kotlin", "ranges"],
         &crate::metadata::klib_fragment::KlibFileMembers {
@@ -506,24 +596,48 @@ fn write_closed_range_contains_klib(
     writer
         .write_directory(&directory)
         .expect("write range-contains KLIB");
-    let ir = directory.join("default/ir");
-    std::fs::create_dir_all(&ir).expect("create spoofed dependency IR directory");
-    for table in [
-        "files.knf",
-        "strings.knt",
-        "signatures.knt",
-        "irDeclarations.knd",
-        "bodies.knb",
-        "types.knt",
-    ] {
-        std::fs::write(ir.join(table), [0u8; 4]).expect("write empty spoofed dependency IR table");
-    }
     directory
 }
 
 #[test]
+fn a_metadata_only_klib_publishes_declarations_without_inventing_default_values() {
+    let directory =
+        write_closed_range_contains_klib("metadata-only", "metadata-only", true, Ty::Boolean, true);
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::dependency(directory.clone())])
+        .expect("the metadata-only dependency opens");
+    let contains = single_function(&libraries, "kotlin/ranges", "contains");
+    assert_eq!(contains.call_sig.param_defaults, [true]);
+    assert_eq!(contains.default_values, []);
+
+    drop(libraries);
+    std::fs::remove_dir_all(directory).expect("remove metadata-only dependency");
+}
+
+#[test]
+fn a_partial_serialized_ir_channel_remains_invalid() {
+    let directory =
+        write_closed_range_contains_klib("partial-ir", "partial-ir", true, Ty::Boolean, false);
+    let ir = directory.join("default/ir");
+    std::fs::create_dir_all(&ir).expect("create partial IR directory");
+    std::fs::write(ir.join("files.knf"), [0u8; 4]).expect("write the one partial IR table");
+    let error = KlibLibraries::open(&[KlibLibraryInput::dependency(directory.clone())])
+        .err()
+        .expect("a partial serialized IR channel is invalid");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "cannot decode the KLIB IR declarations of {}: the KLIB has no serialized IR at default/ir/strings.knt",
+            directory.display()
+        )
+    );
+
+    std::fs::remove_dir_all(directory).expect("remove partial-IR dependency");
+}
+
+#[test]
 fn a_dependency_cannot_claim_stdlib_authority_from_its_manifest() {
-    let directory = write_closed_range_contains_klib("spoofed-stdlib", "stdlib", true, Ty::Boolean);
+    let directory =
+        write_closed_range_contains_klib("spoofed-stdlib", "stdlib", true, Ty::Boolean, false);
 
     let libraries = KlibLibraries::open(&[KlibLibraryInput::dependency(directory.clone())])
         .expect("the dependency archive opens");
@@ -547,9 +661,15 @@ fn a_dependency_first_duplicate_cannot_hide_the_designated_stdlib_role() {
     // Public KLIB signatures intentionally omit result type and source modifiers. Give the
     // dependency the same serialized identity but incompatible metadata so this proves the full
     // authoritative declaration replaces it rather than merely receiving the stdlib authority bit.
-    let dependency =
-        write_closed_range_contains_klib("duplicate-dependency", "dependency", false, Ty::String);
-    let stdlib = write_closed_range_contains_klib("designated-stdlib", "stdlib", true, Ty::Boolean);
+    let dependency = write_closed_range_contains_klib(
+        "duplicate-dependency",
+        "dependency",
+        false,
+        Ty::String,
+        false,
+    );
+    let stdlib =
+        write_closed_range_contains_klib("designated-stdlib", "stdlib", true, Ty::Boolean, false);
     let libraries = KlibLibraries::open(&[
         KlibLibraryInput::dependency(dependency.clone()),
         KlibLibraryInput::platform_stdlib(stdlib.clone()),
@@ -573,6 +693,29 @@ fn a_dependency_first_duplicate_cannot_hide_the_designated_stdlib_role() {
     drop(libraries);
     std::fs::remove_dir_all(dependency).expect("remove duplicate dependency");
     std::fs::remove_dir_all(stdlib).expect("remove designated stdlib");
+}
+
+#[test]
+fn a_later_dependency_with_the_same_module_name_cannot_replace_the_designated_stdlib() {
+    let stdlib =
+        write_closed_range_contains_klib("designated-stdlib", "shared", true, Ty::Boolean, false);
+    let dependency =
+        write_closed_range_contains_klib("later-dependency", "shared", false, Ty::String, false);
+    let libraries = KlibLibraries::open(&[
+        KlibLibraryInput::platform_stdlib(stdlib.clone()),
+        KlibLibraryInput::dependency(dependency.clone()),
+    ])
+    .expect("the designated stdlib and same-name dependency open");
+
+    let contains = single_function(&libraries, "kotlin/ranges", "contains");
+    let expected = Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains);
+    assert!(contains.flags.operator);
+    assert_eq!(contains.callable.ret, Ty::Boolean);
+    assert_eq!(contains.callable.compiler_intrinsic, expected);
+
+    drop(libraries);
+    std::fs::remove_dir_all(stdlib).expect("remove designated stdlib");
+    std::fs::remove_dir_all(dependency).expect("remove later dependency");
 }
 
 #[test]

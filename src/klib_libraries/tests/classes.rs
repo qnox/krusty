@@ -14,7 +14,7 @@ use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignatu
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrMember};
 use crate::metadata::klib_ir::{read_declaration_trees, KlibIrSignature};
 use crate::metadata::semantic::{
-    parse_package_fragment_checked, KotlinClass, KotlinConstructor, KotlinModality,
+    parse_package_fragment_checked, KotlinClass, KotlinConstructor, KotlinModality, KotlinTypeAlias,
 };
 
 const PACKAGE: &str = "fixture/signatures";
@@ -897,6 +897,87 @@ fn a_class_repeated_across_fragments_publishes_one_classifier_and_one_identity_p
     assert!(libraries
         .external_callable(crate::fir::ExternalCallableId::from_raw(2))
         .is_none());
+}
+
+#[test]
+fn a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature() {
+    let mut ordinary = in_memory_class(1);
+    ordinary.visibility = Visibility::Internal;
+    ordinary.type_aliases.push(KotlinTypeAlias {
+        name: "Alias".to_owned(),
+        formals: Vec::new(),
+        expansion: class("kotlin/Int", false),
+        visibility: Visibility::Public,
+    });
+    let mut friend = in_memory_class(1);
+    friend.visibility = Visibility::Internal;
+    friend.type_aliases.push(KotlinTypeAlias {
+        name: "Alias".to_owned(),
+        formals: Vec::new(),
+        expansion: class("kotlin/String", false),
+        visibility: Visibility::Public,
+    });
+    let package = segments(&["shared"]);
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![
+        (
+            package.clone(),
+            package_with_classes(vec![("shared/Token", ordinary)]),
+            false,
+            false,
+            Some("ordinary".to_string()),
+        ),
+        (
+            package,
+            package_with_classes(vec![("shared/Token", friend)]),
+            false,
+            true,
+            Some("friend".to_string()),
+        ),
+    ])
+    .expect("equal classifier signatures from distinct modules remain signable");
+    assert_eq!(
+        inventory
+            .classifier(type_name("shared/Token"))
+            .and_then(|classifier| classifier.module.as_deref()),
+        Some("friend"),
+        "the classifier and its owned declarations keep one selected origin"
+    );
+    let libraries = KlibLibraries::over(std::rc::Rc::new(inventory));
+    let platform = &libraries as &dyn crate::libraries::SemanticPlatform;
+
+    let token = libraries
+        .classifier(type_name("shared/Token"))
+        .expect("the selected friend classifier is published");
+    assert!(platform
+        .dependency_access_policy()
+        .internal_classifier_accessible(type_name("shared/Token")));
+    let constructor = realization(&libraries, token.constructors[0].external_identity);
+    let run = realization(
+        &libraries,
+        declared_functions(&token, "run")[0]
+            .callable
+            .external_identity,
+    );
+    assert_eq!(
+        constructor
+            .dependency_callable
+            .as_ref()
+            .map(|identity| identity.module.as_str()),
+        Some("friend")
+    );
+    assert_eq!(
+        run.dependency_callable
+            .as_ref()
+            .map(|identity| identity.module.as_str()),
+        Some("friend")
+    );
+    assert_eq!(
+        platform
+            .type_alias_expansion(type_name("shared/Token.Alias"))
+            .map(|alias| alias.expansion),
+        Some(Ty::String),
+        "the friend classifier and its nested aliases are selected atomically"
+    );
 }
 
 #[test]

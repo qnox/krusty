@@ -579,15 +579,25 @@ fn compile_blocks_mixed(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let UnitSources {
         kotlin: blocks,
+        common,
         java: java_blocks,
-        ..
     } = sources;
     let report = |phase: &str| {
         if let Some(progress) = progress {
             progress(phase);
         }
     };
-    let options = unit_options(case, blocks.iter().map(|(_, source)| source.as_str())).ok()?;
+    let mut options = unit_options(case, blocks.iter().map(|(_, source)| source.as_str())).ok()?;
+    // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
+    // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
+    // carry that topology into the frontend; enable the matching project feature on the exact
+    // unit configuration instead of treating `expect`/`actual` as ordinary JVM source.
+    if common != 0 {
+        options
+            .language_settings
+            .features
+            .enable("MultiPlatformProjects");
+    }
     let mut diags = DiagSink::new();
     report("module classpath");
     let mut cp_paths: Vec<std::path::PathBuf> = cp_jars.to_vec();
@@ -829,6 +839,28 @@ fn compile_module_test(
         flat: all,
         module_ranges,
     })
+}
+
+/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
+pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
+    if !krusty::conformance::backend_targeted(case.source, &["JVM", "JVM_IR"])
+        || krusty::conformance::backend_muted(case.source, &["JVM", "JVM_IR"])
+    {
+        return;
+    }
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = common::classpath_jars_for(case.source);
+    let classes = compile_module_test(case.source, &classpath, Some(jdk.as_path()), &|_| {})
+        .unwrap_or_else(|| panic!("{}: JVM must compile the exact module graph", case.stem));
+    let box_class = find_box_class(&classes.flat)
+        .unwrap_or_else(|| panic!("{}: JVM module graph must emit box()", case.stem));
+    assert_eq!(
+        common::run_box(&classes.flat, &box_class, std::slice::from_ref(&stdlib),),
+        Some("OK".to_string()),
+        "{}: JVM must run the exact separately compiled module graph",
+        case.stem
+    );
 }
 
 /// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,

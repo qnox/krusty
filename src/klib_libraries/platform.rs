@@ -3,13 +3,33 @@
 //! Every hook answers from KLIB declarations or from Kotlin's own language classifiers, so the
 //! same provider serves each target that reads its libraries from KLIBs.
 
-use crate::libraries::{function_classifiers, AliasExpansion, LibraryCallable, SemanticPlatform};
+use crate::libraries::{
+    function_classifiers, AliasExpansion, DependencyAccessPolicy, LibraryCallable, SemanticPlatform,
+};
 use crate::symbol_source::SymbolSource;
 use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
 use super::KlibLibraries;
 
+impl DependencyAccessPolicy for KlibLibraries {
+    fn internal_classifier_accessible(&self, owner: TypeName) -> bool {
+        self.inventory.classifier_is_friend(owner)
+    }
+
+    fn internal_callable_accessible(
+        &self,
+        identity: Option<crate::fir::ExternalCallableId>,
+        _owner: TypeName,
+    ) -> bool {
+        identity.is_some_and(|identity| self.identities.internal_friend(identity))
+    }
+}
+
 impl SemanticPlatform for KlibLibraries {
+    fn dependency_access_policy(&self) -> &dyn DependencyAccessPolicy {
+        self
+    }
+
     fn function_type(&self, arity: usize) -> Option<Ty> {
         Some(function_classifiers::function_type(arity))
     }

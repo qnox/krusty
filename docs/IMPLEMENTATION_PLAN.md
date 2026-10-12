@@ -4642,8 +4642,9 @@ code is the one the code generator already names: provider-owned bodies through 
   the JVM surface passes 5372. The gaps, largest first: KLIB default arguments (`assertEquals`'s
   `message`, from the parameter's IR default), builtin members carrying no compiler intrinsic
   (`Int.plus`, `String.plus`, `compareTo`), and inline stdlib bodies (`let`, `apply`, `run`). The
-  Native lane switches, as a per-lane libraries setting in `tests/box_lane.rs`, once it no longer
-  regresses.
+  Native, wasm-js and wasm-wasi box lanes analyze against their exact target stdlib KLIBs (a
+  per-lane setting in `tests/box_lane.rs`); their `*-klib` ratchets are the target-library numbers,
+  and the former JVM-surface Native/Wasm lanes are retired.
 - **Builtin operations (done).** A KLIB builtin gets its compiler operation from the shared rules
   the JVM provider uses (`builtin_member_realization`, `builtin_top_level_realization`,
   `add_core_builtin_declarations`), by exact declaration, whether or not it has an IR body. A
@@ -5424,8 +5425,8 @@ non-inline callers, still reads the field directly. Test:
   loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
   same-file calls).
 - Box lanes `wasm-js` and `wasm-wasi` share Native's driver (`tests/box_lane.rs`) and ratchet; CI
-  runs both in a `wasm` row. They analyze against the JVM library surface until a Wasm klib
-  platform exists, so they gate the emitter and publish no conformance badge yet.
+  runs both in a `wasm` row. Each analyzes against its exact target stdlib KLIB and keeps a
+  distinct `*-klib` outcome inventory because the platform surfaces differ.
 - The backend reads each value's checked type (`IrFile::checked_type`) and the frontend-selected
   entry (`IrFile::entry_point`, `IrFile::box_entry`); a missing or duplicate entry is rejected in
   `Backend::check_module` before anything is emitted.
@@ -5439,18 +5440,17 @@ non-inline callers, still reads the field directly. Test:
   declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
   program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
   keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
-  struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Declined by name:
-  enum, value, annotation, inner and local capturing classes, companions, bridged overrides,
-  supertypes from another file or the library, and a call that could reach `kotlin.Any`'s own
-  `toString`/`hashCode`, which have no body in the module until the library's bodies are.
+  struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Independently
+  analyzed `// MODULE:` units retain one Wasm program state and join generated dependency KLIB
+  declarations by `(module unique_name, IdSignature)`. Unsupported class forms still decline by
+  their exact form; the committed target-KLIB inventories are the authoritative current backlog.
   Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
   181/181/182; Native's counts are unchanged by the shared tables.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
-- Next: exceptions on wasm EH, library calls keyed by the selected declaration, enums and
-  companions on the class tables, multi-file and `// MODULE:` programs, then a klib-backed library
-  provider shared with Native.
+- Next: exceptions on wasm EH, enums and companions on the class tables, and further target-KLIB
+  library bodies/intrinsics keyed by the selected declaration.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

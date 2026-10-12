@@ -323,3 +323,35 @@ fn is_c_identifier(name: &str) -> bool {
 fn is_c_global_identifier(name: &str) -> bool {
     is_c_identifier(name) && !name.starts_with('_')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{file_records, Record};
+    use crate::fx_hash::HashSet;
+    use crate::ir::{IrFile, IrFunction};
+    use crate::types::Ty;
+
+    #[test]
+    fn a_runtime_definition_reserves_the_same_global_c_export() {
+        let mut ir = IrFile::default();
+        ir.functions.push(IrFunction {
+            name: "read".to_string(),
+            params: Vec::new(),
+            ret: Ty::String,
+            body: Some(0),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut symbols = HashSet::default();
+        symbols.insert("read".to_string());
+
+        let records = file_records(&ir, &mut symbols);
+
+        assert!(matches!(
+            records.as_slice(),
+            [Record::Refusal { comment }]
+                if comment == "krusty: public function `read` would duplicate C symbol `read`"
+        ));
+    }
+}

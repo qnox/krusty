@@ -54,6 +54,7 @@ pub(super) fn checked_ir_file<'a>(
         source,
         classifiers: CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform()),
         callables,
+        dependency_exports: Default::default(),
         native_plugins: symbols.native_plugins(),
         module_name: module.module_name,
         stems: module.stems,

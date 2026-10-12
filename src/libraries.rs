@@ -15,6 +15,7 @@ mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
 mod default_value;
+mod dependency_access_policy;
 mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
@@ -24,6 +25,7 @@ pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
 mod result_nullability;
+mod stdlib_klib_intrinsics;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
@@ -31,14 +33,17 @@ pub use annotation_application::{
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
-    NonvirtualCallRealization, OverriddenCallKind, OverriddenCallRealization,
+    KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
+    OverriddenCallRealization,
 };
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
+pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use default_value::DefaultValue;
+pub use dependency_access_policy::DependencyAccessPolicy;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
@@ -46,6 +51,7 @@ pub use platform_contract::{
 };
 pub use property_producer::PropertyProducer;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
+pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
 use crate::fx_hash::{HashMap, HashSet};
 use crate::types::InlineParameterModifier;
@@ -64,12 +70,13 @@ pub use inline_body::{
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
     classifier_shape, constructor_parameter_identities, constructor_parameter_list,
-    declared_constructor, declared_function, declared_property, declared_retention,
-    declared_targets, declared_type_alias, enum_entries_getter, enum_value_of, enum_values,
-    function_generic_sig, function_parameter_identities, member_record, only_input_type_formals,
-    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
-    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
-    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
+    declared_constructor, declared_function, declared_nested_type_alias, declared_property,
+    declared_retention, declared_targets, declared_type_alias, enum_entries_getter, enum_value_of,
+    enum_values, function_generic_sig, function_parameter_identities, member_record,
+    only_input_type_formals, property_parameter_identities, reified_type_parameter_ordinals,
+    settle_no_arg_construction, CallablePlacement, ClassTypeParameters, EnclosingBounds,
+    FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
+    TypeParameterIdentities,
 };
 use std::borrow::Cow;
 
@@ -467,21 +474,12 @@ impl SingletonDispatch {
     }
 }
 
-/// The source classifier denoted by a resolved type-alias expansion.
-///
-/// Function types keep their semantic arity and suspend family here. JVM continuation-bearing
-/// descriptors are representation details and never participate in this identity. Providers call
-/// this once while publishing an [`AliasExpansion`]; consumers compare the recorded `target`
-/// instead of attempting to reconstruct it from the expansion later.
-pub(crate) fn type_alias_target_classifier(expansion: Ty) -> Option<TypeName> {
-    match expansion.non_null() {
-        Ty::Unit => Some(crate::types::type_name("kotlin/Unit")),
-        Ty::Nothing => Some(crate::types::type_name("kotlin/Nothing")),
-        expansion => function_classifiers::supertype_classifier(expansion).kotlin_class_internal(),
-    }
-}
-
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
+    /// Provider-owned policy for exact friend-module access to compiled declarations.
+    fn dependency_access_policy(&self) -> &dyn DependencyAccessPolicy {
+        dependency_access_policy::closed_dependency_access()
+    }
+
     /// Confirm that every selected dependency was ingested completely before declaration lookup.
     fn validate_initialization(&self) -> Result<(), PlatformInitializationError> {
         Ok(())
@@ -512,11 +510,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Whether this classifier is an `expect annotation class` with no declaration on the current
     /// target. It is visible in common sources and erased when that target supplies no `actual`.
     fn is_optional_expectation(&self, _classifier: TypeName) -> bool {
-        false
-    }
-
-    /// Whether a compiled declaration owner belongs to a friend module of this compilation.
-    fn internal_accessible(&self, _owner: TypeName) -> bool {
         false
     }
 

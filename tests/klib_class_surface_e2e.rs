@@ -396,18 +396,27 @@ fn compile_native_fragment(
 }
 
 #[test]
-fn a_value_class_is_declined_by_name_and_writes_nothing() {
+fn a_value_class_writes_its_exact_underlying_property() {
     let Some((messages, packages)) = written_packages(&[(
         "boxed",
-        "package boxed\n@JvmInline value class Meters(val value: Int)\n",
+        "package boxed\ninternal value class Meters(val value: Int)\n",
     )]) else {
         return;
     };
-    assert_eq!(
-        messages,
-        ["krusty: the KLIB writer does not support value classes yet"]
-    );
-    assert_eq!(packages.len(), 0);
+    assert_eq!(messages, Vec::<String>::new());
+    let [package] = packages.as_slice() else {
+        panic!(
+            "the writer produced {} packages instead of one",
+            packages.len()
+        );
+    };
+    assert_eq!(package.class_order, ["boxed/Meters"]);
+    let class = &package.classes["boxed/Meters"];
+    assert_eq!(class.visibility, krusty::types::Visibility::Internal);
+    assert_eq!(class.inline_class_property.as_deref(), Some("value"));
+    assert_eq!(class.constructors.len(), 1);
+    assert_eq!(class.constructors[0].param_names, ["value"]);
+    assert_eq!(types(&class.constructors[0].params), "kotlin/Int");
 }
 
 /// The class surface of [`CLASSES`]: classes in pre-order (each nested class after its owner, siblings

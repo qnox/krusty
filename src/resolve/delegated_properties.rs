@@ -1501,7 +1501,11 @@ impl Checker<'_> {
                     }
                 };
                 if let Some(selected) = member_extension {
-                    if !self.member_accessible(selected.visibility, selected.owner) {
+                    if !self.callable_accessible(
+                        selected.visibility,
+                        selected.owner,
+                        selected.external_identity,
+                    ) {
                         return DelegateOperatorSelection::None;
                     }
                     let interface = resolver

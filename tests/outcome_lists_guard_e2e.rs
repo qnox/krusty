@@ -101,7 +101,7 @@ impl Drop for Repo {
     }
 }
 
-const FAILURES: &str = "tests/box_expected_failures/native/2.4.20.txt";
+const FAILURES: &str = "tests/box_expected_failures/native-klib/2.4.20.txt";
 const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/jvm/2.4.20.txt";
 const CLI_FAILURES: &str = "tests/cli_expected_failures/jvm/2.4.20.txt";
 const CLI_NOT_APPLICABLE: &str = "tests/cli_expected_not_applicable/jvm/2.4.20.txt";
@@ -136,7 +136,7 @@ fn replacing_an_entry_fails_and_names_the_added_one() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
-        "outcome-lists: tests/box_expected_failures/native/2.4.20.txt gains 1 entry:\n    c/three.kt\n\
+        "outcome-lists: tests/box_expected_failures/native-klib/2.4.20.txt gains 1 entry:\n    c/three.kt\n\
          outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
     );
 }
@@ -165,7 +165,7 @@ fn a_manifest_for_a_newly_supported_version_is_exempt() {
     repo.write(FAILURES, "a/one.kt\n");
     let base = repo.commit();
     repo.write(
-        "tests/box_expected_failures/native/2.5.0.txt",
+        "tests/box_expected_failures/native-klib/2.5.0.txt",
         "a/one.kt\nnew/file.kt\n",
     );
     let head = repo.commit();

@@ -51,6 +51,7 @@ mod companion_blocks;
 mod constants;
 mod constructors;
 mod default_arguments;
+pub(crate) use default_arguments::module_override_callable;
 mod expression_provenance;
 mod field_flags;
 mod fields;

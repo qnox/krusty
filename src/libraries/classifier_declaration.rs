@@ -28,3 +28,17 @@ pub enum ClassifierDeclaration {
     Ordinary(TypeName),
     TypeAlias(AliasExpansion),
 }
+
+/// The source classifier denoted by a resolved type-alias expansion.
+///
+/// Function types keep their semantic arity and suspend family here. JVM continuation-bearing
+/// descriptors are representation details and never participate in this identity.
+pub(crate) fn type_alias_target_classifier(expansion: Ty) -> Option<TypeName> {
+    match expansion.non_null() {
+        Ty::Unit => Some(crate::types::type_name("kotlin/Unit")),
+        Ty::Nothing => Some(crate::types::type_name("kotlin/Nothing")),
+        expansion => {
+            super::function_classifiers::supertype_classifier(expansion).kotlin_class_internal()
+        }
+    }
+}

@@ -17,7 +17,7 @@ use krusty::backend::Entry;
 use krusty::conformance::TestTarget;
 use krusty::wasm::{WasmBackend, WasmTarget};
 
-use super::box_lane::{self, Lane, Outcome};
+use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
 
 /// The prefix the wasm backend puts on every decline; what follows names the construct.
@@ -34,6 +34,41 @@ impl WasmLane {
     /// The directive tokens that name this target: `WASM` names both.
     fn tokens(&self) -> [&'static str; 2] {
         ["WASM", self.target.backend_token()]
+    }
+
+    fn run_artifacts(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        suffix: &str,
+        artifacts: Vec<krusty::backend::Artifact>,
+    ) -> Outcome {
+        if artifacts.is_empty() {
+            return Outcome::Frontend(
+                "the frontend produced no checked file and said nothing".to_string(),
+            );
+        }
+        let directory = scratch.join(format!(
+            "{stem}-{suffix}-{}-{}-{}",
+            self.target.name(),
+            std::process::id(),
+            rayon::current_thread_index().unwrap_or(0)
+        ));
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            return Outcome::Failed(format!("creating the case directory: {error}"));
+        }
+        for (name, bytes) in &artifacts {
+            if let Err(error) = std::fs::write(directory.join(name), bytes) {
+                return Outcome::Failed(format!("writing {name}: {error}"));
+            }
+        }
+        let outcome = box_lane::run_program(
+            Command::new("node")
+                .arg("--no-warnings")
+                .arg(directory.join("box.mjs")),
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        outcome
     }
 }
 
@@ -84,8 +119,13 @@ impl Lane for WasmLane {
         }
     }
 
+    /// The exact target stdlib KLIB: wasm-js and wasm-wasi publish different platform surfaces.
+    fn libraries(&self) -> Libraries {
+        Libraries::StdlibKlib
+    }
+
     fn unavailable(&self) -> Option<String> {
-        if !box_lane::frontend_available() {
+        if !self.libraries().available(self.test_target()) {
             return Some("no stdlib and JDK modules to analyze against".to_string());
         }
         node_unavailable()
@@ -104,10 +144,7 @@ impl Lane for WasmLane {
         None
     }
 
-    fn harness_limitation(&self, src: &str) -> Option<&'static str> {
-        if src.contains("// MODULE:") {
-            return Some("multi-module compilation is not wired to the module dependency provider");
-        }
+    fn harness_limitation(&self, _src: &str) -> Option<&'static str> {
         None
     }
 
@@ -122,6 +159,7 @@ impl Lane for WasmLane {
         let artifacts = match box_lane::compile(
             sources,
             directive_source,
+            self.libraries(),
             self.test_target(),
             &backend,
             "box",
@@ -130,32 +168,31 @@ impl Lane for WasmLane {
             Ok(artifacts) => artifacts,
             Err(outcome) => return outcome,
         };
-        if artifacts.is_empty() {
-            return Outcome::Frontend(
-                "the frontend produced no checked file and said nothing".to_string(),
-            );
-        }
-        let directory = scratch.join(format!(
-            "{stem}-{}-{}-{}",
-            self.target.name(),
-            std::process::id(),
-            rayon::current_thread_index().unwrap_or(0)
-        ));
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            return Outcome::Failed(format!("creating the case directory: {error}"));
-        }
-        for (name, bytes) in &artifacts {
-            if let Err(error) = std::fs::write(directory.join(name), bytes) {
-                return Outcome::Failed(format!("writing {name}: {error}"));
-            }
-        }
-        let outcome = box_lane::run_program(
-            Command::new("node")
-                .arg("--no-warnings")
-                .arg(directory.join("box.mjs")),
-        );
-        let _ = std::fs::remove_dir_all(&directory);
-        outcome
+        self.run_artifacts(scratch, stem, "single", artifacts)
+    }
+
+    fn compile_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        let artifacts = match box_lane::compile_modules(
+            scratch,
+            stem,
+            modules,
+            directive_source,
+            self.libraries(),
+            self.test_target(),
+            &backend,
+            DECLINE_PREFIX,
+        ) {
+            Ok(artifacts) => artifacts,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "modules", artifacts)
     }
 }
 
@@ -167,6 +204,27 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
     let wasi = WasmLane {
         target: WasmTarget::Wasi,
     };
+    assert_eq!(js.libraries(), Libraries::StdlibKlib);
+    assert_eq!(wasi.libraries(), Libraries::StdlibKlib);
+    assert_eq!(js.test_target(), TestTarget::WasmJs);
+    assert_eq!(wasi.test_target(), TestTarget::WasmWasi);
+    for (target, expected) in [
+        (TestTarget::WasmJs, "kotlin-stdlib-wasm-js.klib".to_string()),
+        (
+            TestTarget::WasmWasi,
+            format!(
+                "kotlin-stdlib-wasm-wasi-{}.klib",
+                krusty::kotlin_version::target()
+            ),
+        ),
+    ] {
+        if let Some(path) = krusty::toolchain::kotlin_stdlib_klib(target.compilation_target()) {
+            assert_eq!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(expected.as_str())
+            );
+        }
+    }
     let muted_on_wasi = "// IGNORE_BACKEND: WASM_WASI\nfun box() = \"OK\"";
     assert_eq!(js.not_applicable(muted_on_wasi), None);
     assert_eq!(
@@ -253,13 +311,47 @@ fn kotlin_codegen_box_wasm_wasi_conformance() {
     });
 }
 
-/// Run `src` on both Wasm targets after the JVM oracle has answered `OK` for it; every target
-/// must lower it and answer `OK` too. Skips where the lanes themselves cannot run.
-fn expect_wasm_box(src: &str, stem: &str) {
-    super::common::expect_box_ok_with_stdlib(src, stem);
+fn focused_wasm_lane_available(lane: &WasmLane, stem: &str) -> bool {
+    let Some(reason) = lane.unavailable() else {
+        return true;
+    };
+    if std::env::var_os(format!("KRUSTY_REQUIRE_{}_CONFORMANCE", lane.env_infix())).is_some() {
+        panic!(
+            "{stem}: required {} setup is unavailable: {reason}",
+            lane.label()
+        );
+    }
+    false
+}
+
+/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
+pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
+    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
+    let units = krusty::conformance::module_units(&modules);
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
-        if lane.unavailable().is_some() {
+        if lane.not_applicable(case.source).is_some() {
+            continue;
+        }
+        let stem = format!("{}-{}", target.name(), case.stem);
+        if !focused_wasm_lane_available(&lane, &stem) {
+            return;
+        }
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source,),
+            Outcome::Pass,
+            "{stem}: {} must run the exact separately analyzed module graph",
+            target.name()
+        );
+    }
+}
+
+/// Run `src` directly against both Wasm targets' KLIBs and runtimes; every target must answer `OK`.
+/// Skips only where a directly invoked lane cannot run; target-owned harness passes require it.
+fn expect_wasm_box(src: &str, stem: &str) {
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        if !focused_wasm_lane_available(&lane, stem) {
             return;
         }
         let outcome = lane.compile_and_run(
@@ -276,7 +368,7 @@ fn expect_wasm_box(src: &str, stem: &str) {
 fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
-        if lane.unavailable().is_some() {
+        if !focused_wasm_lane_available(&lane, stem) {
             return;
         }
         let outcome = lane.compile_and_run(

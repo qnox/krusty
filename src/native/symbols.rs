@@ -14,8 +14,22 @@ use crate::ir::IrFile;
 /// The id is the checked callable identity, so the file that defines the function and the file
 /// that calls it name the same symbol without seeing each other's lowering. A suffix would break
 /// that: the caller has no way to know a collision the defining file resolved locally.
-pub(super) fn module_function_symbol(callable: crate::fir::CallableId) -> String {
-    format!("kt_mod_{}", callable.raw())
+pub(super) fn module_function_symbol(
+    module_name: &str,
+    callable: crate::fir::CallableId,
+) -> String {
+    format!(
+        "kt_mod_{}_{}",
+        module_namespace(module_name),
+        callable.raw()
+    )
+}
+
+/// Injective target spelling of a source-module identity.
+fn module_namespace(module_name: &str) -> String {
+    let mut namespace = String::new();
+    mangle_name(&mut namespace, module_name);
+    namespace
 }
 
 /// Symbol of the getter entry point of a property one file of a module declares and another uses.
@@ -23,26 +37,41 @@ pub(super) fn module_function_symbol(callable: crate::fir::CallableId) -> String
 /// Same rule as [`module_function_symbol`]: the id is the checked property identity, so the file
 /// that declares the property and the file that reads it name one symbol without seeing each
 /// other's lowering. A `var`'s setter is [`module_property_setter_symbol`].
-pub(super) fn module_property_getter_symbol(property: crate::fir::PropertyId) -> String {
-    format!("kt_modprop_get_{}", property.raw())
+pub(super) fn module_property_getter_symbol(
+    module_name: &str,
+    property: crate::fir::PropertyId,
+) -> String {
+    format!(
+        "kt_modprop_get_{}_{}",
+        module_namespace(module_name),
+        property.raw()
+    )
 }
 
 /// Symbol of the setter entry point of a module `var`; see [`module_property_getter_symbol`].
-pub(super) fn module_property_setter_symbol(property: crate::fir::PropertyId) -> String {
-    format!("kt_modprop_set_{}", property.raw())
+pub(super) fn module_property_setter_symbol(
+    module_name: &str,
+    property: crate::fir::PropertyId,
+) -> String {
+    format!(
+        "kt_modprop_set_{}_{}",
+        module_namespace(module_name),
+        property.raw()
+    )
 }
 
 /// Symbol of the allocating entry point of a module constructor.
 ///
-/// The symbol spells the constructor's stable identity: the qualified name of the class it
-/// constructs and its complete parameter list, in an injective encoding. It depends neither on
-/// interning order nor on where the constructor sits among its class's constructors, so the file
-/// that declares the class and the file that constructs it name one symbol. `None` for a parameter
-/// type that a checked signature never carries.
+/// The symbol spells the source module plus the constructor's stable identity: the qualified name
+/// of the class it constructs and its complete parameter list, in an injective encoding. It
+/// depends neither on interning order nor on where the constructor sits among its class's
+/// constructors, so files of one module agree while equal internal classes in unrelated modules
+/// cannot collide. `None` for a parameter type that a checked signature never carries.
 pub(super) fn module_constructor_symbol(
+    module_name: &str,
     constructor: &crate::ir::IrModuleConstructor,
 ) -> Option<String> {
-    let mut symbol = String::from("kt_modctor_");
+    let mut symbol = format!("kt_modctor_{}_", module_namespace(module_name));
     mangle_name(&mut symbol, &constructor.owner.render());
     symbol.push_str("__");
     if let Some(outer) = constructor.outer {
@@ -56,12 +85,20 @@ pub(super) fn module_constructor_symbol(
 }
 
 /// Symbols of the entry points that box a value of a module value class and read one back, which
-/// the file declaring the class defines for every other file of the module. Named from the
-/// class's qualified name, which both files hold, and not from anything either file interned.
-pub(super) fn module_value_box_symbols(classifier: crate::types::TypeName) -> (String, String) {
+/// the file declaring the class defines for every other file of the module. Named from the exact
+/// source module and class's qualified name, which both files hold, and not from anything either
+/// file interned.
+pub(super) fn module_value_box_symbols(
+    module_name: &str,
+    classifier: crate::types::TypeName,
+) -> (String, String) {
     let mut name = String::new();
     mangle_name(&mut name, &classifier.render());
-    (format!("kt_modvbox_{name}"), format!("kt_modvunbox_{name}"))
+    let namespace = module_namespace(module_name);
+    (
+        format!("kt_modvbox_{namespace}_{name}"),
+        format!("kt_modvunbox_{namespace}_{name}"),
+    )
 }
 
 /// Letters and digits stand for themselves; every other character, `_` included, is `_<hex>_`.
@@ -135,14 +172,22 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
 /// Symbol of the entry another file calls when it leaves arguments of a top-level function out:
 /// the function's whole parameter frame followed by a mask of the omitted ordinals. See
 /// `codegen::lower::defaults`.
-pub(super) fn module_default_symbol(callable: crate::fir::CallableId) -> String {
-    format!("kt_mod_{}__defaults", callable.raw())
+pub(super) fn module_default_symbol(module_name: &str, callable: crate::fir::CallableId) -> String {
+    format!(
+        "kt_mod_{}_{}__defaults",
+        module_namespace(module_name),
+        callable.raw()
+    )
 }
 
 /// Symbol of a file's once-only top-level initializer. Both the file and any caller in the module
 /// derive it from the source-file identity, the same way [`module_function_symbol`] is derived.
-pub(super) fn file_init_symbol(source: crate::fir::SourceFileId) -> String {
-    format!("kt_fileinit_{}", source.raw())
+pub(super) fn file_init_symbol(module_name: &str, source: crate::fir::SourceFileId) -> String {
+    format!(
+        "kt_fileinit_{}_{}",
+        module_namespace(module_name),
+        source.raw()
+    )
 }
 
 pub(super) fn c_identifier(name: &str) -> String {
@@ -164,8 +209,9 @@ pub(super) fn c_identifier(name: &str) -> String {
 /// ordinary C objects too: a class `X` and a top-level function `type_X` must not both become
 /// `kt_type_X`.
 pub(super) struct Symbols {
-    /// The sanitized, unique base name of each class, from which `struct kt_class_<base>`,
-    /// `kt_type_<base>`, `kt_<base>__init` and the struct members `<base>_f<i>` derive.
+    /// The module-qualified, unique base name of each class, from which
+    /// `struct kt_class_<base>`, `kt_type_<base>`, `kt_<base>__init` and the struct members
+    /// `<base>_f<i>` derive.
     pub classes: Vec<String>,
     /// C symbol per IR function index.
     pub functions: Vec<String>,
@@ -182,7 +228,18 @@ fn class_symbol_family(base: &str) -> [String; 6] {
     ]
 }
 
-pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
+/// Collision-free base of every symbol owned by a source class.
+///
+/// Classifiers may have the same qualified spelling in independent modules, especially for
+/// `internal` declarations. Their descriptors, vtables, constructors and exported member entry
+/// points therefore share this exact source-module namespace rather than a process-global FQN.
+fn module_class_symbol_base(module_name: &str, fq_name: &str) -> String {
+    let mut base = format!("mod_{}_", module_namespace(module_name));
+    mangle_name(&mut base, fq_name);
+    base
+}
+
+pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>) -> Symbols {
     // The runtime's own symbols are taken before any of the program's are handed out. A Kotlin
     // `fun cast(value: Any)` would otherwise be named `kt_cast`, which the runtime already defines,
     // and the link fails with a duplicate symbol that says nothing about the Kotlin name behind it.
@@ -199,9 +256,15 @@ pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
         if declared.dispatch_receiver.is_some() {
             continue;
         }
-        let symbol = module_function_symbol(*callable);
+        let symbol = module_function_symbol(module_name, *callable);
         taken.insert(symbol.clone());
-        taken.insert(module_default_symbol(*callable));
+        let default_identity = match ir.inherited_param_default_provider(*function) {
+            Some(provider) => crate::ir::module_override_callable(provider),
+            None => Some(*callable),
+        };
+        if let Some(default_identity) = default_identity {
+            taken.insert(module_default_symbol(module_name, default_identity));
+        }
         functions[index] = symbol;
     }
     // A property's entry points are synthesized from its identity rather than being entries in
@@ -211,14 +274,14 @@ pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
         .keys()
         .chain(ir.referenced_module_properties.keys())
     {
-        taken.insert(module_property_getter_symbol(*property));
-        taken.insert(module_property_setter_symbol(*property));
+        taken.insert(module_property_getter_symbol(module_name, *property));
+        taken.insert(module_property_setter_symbol(module_name, *property));
     }
     taken.extend(
         ir.module_constructions
             .records
             .values()
-            .filter_map(module_constructor_symbol),
+            .filter_map(|constructor| module_constructor_symbol(module_name, constructor)),
     );
     let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
         let mut candidate = base.clone();
@@ -239,9 +302,10 @@ pub(super) fn symbols(ir: &IrFile, reserved: HashSet<String>) -> Symbols {
         .classes
         .iter()
         .map(|class| {
-            unique(c_identifier(&class.fq_name()), &|base| {
-                class_symbol_family(base).to_vec()
-            })
+            unique(
+                module_class_symbol_base(module_name, &class.fq_name()),
+                &|base| class_symbol_family(base).to_vec(),
+            )
         })
         .collect();
 

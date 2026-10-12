@@ -1,11 +1,10 @@
 name: ci
 
-# Build the conformance test binary once. Every supported Kotlin version gets independent JVM and
-# Native matrix rows: JVM runs its box corpus plus the non-box suites; Native runs its box corpus.
-# Wasm matrix rows run the box corpus through both Wasm targets, wasm-js and wasm-wasi.
+# Build the conformance test binary once. Every supported Kotlin version gets independent JVM,
+# Native, and Wasm matrix rows. Each row owns its corpus and focused target regressions.
 # Publish only after all rows pass and every version matches its committed platform expectations.
-# `ci-and-conformance` is the one required check over core CI, KLIB semantics, conformance, and
-# Gradle release/compatibility validation.
+# `ci-and-conformance` is the one required check over core CI, conformance (including the focused
+# KLIB decoder/oracle checks), and Gradle release/compatibility validation.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -166,81 +165,9 @@ jobs:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
 
-  # Real Kotlin/Native metadata, provisioned rather than silently skipped. This lane validates the
-  # common KLIB semantic boundary only; serialized IR bodies have their own follow-up.
-  klib-semantics:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - uses: actions/setup-java@v6.0.1
-        with:
-          distribution: zulu
-          java-version: '25'
-      # Each provisioned input has its own cache, so rotating one key does not discard the others.
-      # `scripts/kotlin-native.sh` validates a restored distribution's stdlib metadata itself:
-      # rust-cache restores `target/` with its files removed, leaving bare directories behind.
-      - name: cache Kotlin/Native distribution
-        uses: actions/cache@v6
-        with:
-          path: |
-            target/cache/kotlin-native
-            target/cache/krusty-deps
-          key: klib-semantics-serialization-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      - name: cache kotlin toolchain
-        uses: actions/cache@v6
-        with:
-          path: target/cache/kotlinc
-          key: klib-semantics-kotlinc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      # kotlinc-native fetches its toolchain dependencies (LLVM, sysroots) on first use.
-      - name: cache Kotlin/Native dependencies
-        uses: actions/cache@v6
-        with:
-          path: ~/.konan/dependencies
-          key: klib-semantics-konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
-      - name: restore recorded kotlinc-native bytes
-        id: native-recordings
-        uses: actions/cache/restore@v6
-        with:
-          path: target/cache/native-recordings
-          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
-          restore-keys: |
-            recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-
-      - name: select kotlinc-native recording mode
-        id: native-recording-mode
-        env:
-          CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
-          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-        run: |
-          set -euo pipefail
-          write=0
-          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
-            write=1
-          fi
-          echo "write=$write" >> "$GITHUB_OUTPUT"
-      - name: decode and compare Kotlin/Native metadata
-        env:
-          # A cold lane provisions and launches kotlinc-native to create the exact binary
-          # reference before comparing it. Keep the ordinary local test deadline unchanged.
-          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
-          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
-          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
-          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-        run: just klib-semantics
-      - name: save recorded kotlinc-native bytes
-        if: steps.native-recording-mode.outputs.write == '1'
-        uses: actions/cache/save@v6
-        with:
-          path: target/cache/native-recordings
-          key: recorded-kotlinc-native-bytes-${{ hashFiles('kotlin-versions') }}-${{ github.sha }}
-
   # One gate build of the binaries the matrices run. Conformance uses the test binary and the
-  # CLI. Gradle uses the same CLI and the krusty-build test binary; it does not compile krusty.
+  # focused KLIB tests. Gradle uses the same CLI and the krusty-build test binary; consumers do not
+  # compile krusty again.
   build-shared-bins:
     runs-on: ubuntu-latest
     steps:
@@ -270,6 +197,14 @@ jobs:
           bin=$(just krusty-build-tests)
           phase_end krusty-build-tests
           cp "$bin" krusty-build-tests
+          phase_begin klib-e2e-tests
+          bin=$(scripts/cargo-test-binary.sh e2e --test e2e)
+          phase_end klib-e2e-tests
+          cp "$bin" klib-e2e-tests
+          phase_begin klib-unit-tests
+          bin=$(scripts/cargo-test-binary.sh krusty --lib)
+          phase_end klib-unit-tests
+          cp "$bin" klib-unit-tests
       - uses: actions/upload-artifact@v7
         with:
           name: shared-bins
@@ -277,6 +212,8 @@ jobs:
             conformance-bin
             krusty
             krusty-build-tests
+            klib-e2e-tests
+            klib-unit-tests
           if-no-files-found: error
 
   # Supported-version matrix + the max version (for the badge later), from the kotlin-versions manifest.
@@ -341,6 +278,52 @@ jobs:
           # Do not let a Native or Wasm row publish the JVM row's broader immutable cache before its
           # serialization/KSP inputs exist. Every key still identifies one exact compiler version.
           key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: cache Wasm target KLIB dependencies (${{ matrix.version }})
+        if: matrix.target == 'wasm'
+        uses: actions/cache@v6
+        with:
+          path: target/cache/krusty-deps
+          key: wasm-target-klibs-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      # Native cases are analyzed against this version's Kotlin/Native stdlib KLIB.
+      # `scripts/kotlin-native.sh` re-downloads a restored root whose stdlib payload is incomplete.
+      - name: cache Kotlin/Native distribution (${{ matrix.version }})
+        if: matrix.target == 'native'
+        uses: actions/cache@v6
+        with:
+          path: target/cache/kotlin-native/${{ matrix.version }}
+          key: kotlin-native-conformance-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      # Only the maximum-version Native row runs the focused kotlinc-native oracle checks. The
+      # ordinary Native conformance step below already provisions the exact compiler distribution.
+      - name: cache Kotlin/Native dependencies
+        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.konan/dependencies
+            target/cache/krusty-deps
+          key: native-conformance-konan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      - name: restore recorded kotlinc-native bytes
+        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max
+        id: native-recordings
+        uses: actions/cache/restore@v6
+        with:
+          path: target/cache/native-recordings
+          key: recorded-kotlinc-native-bytes-${{ matrix.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          restore-keys: |
+            recorded-kotlinc-native-bytes-${{ matrix.version }}-
+      - name: select kotlinc-native recording mode
+        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max
+        id: native-recording-mode
+        env:
+          CACHE_HIT: ${{ steps.native-recordings.outputs.cache-hit }}
+          MASTER_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          write=0
+          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
+            write=1
+          fi
+          echo "write=$write" >> "$GITHUB_OUTPUT"
       - name: cache box corpus (${{ matrix.version }})
         id: box-corpus
         uses: actions/cache@v6
@@ -432,6 +415,13 @@ jobs:
           chmod +x conformance-bin
           just native-conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" native-pct.txt
           bash scripts/conformance-badge.sh fields native-conformance native-pct.txt "${{ matrix.version }}"
+      - name: run focused Native conformance ${{ matrix.version }}
+        # Keep focused target regressions independent of a recorded corpus failure. They share the
+        # exact Native distribution/KLIB setup, but not the corpus process or its ratchet.
+        if: matrix.target == 'native' && (success() || steps.native_box.outcome == 'failure')
+        id: native_focused
+        continue-on-error: true
+        run: just native-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: upload Native conformance
         if: always() && matrix.target == 'native'
         uses: actions/upload-artifact@v7
@@ -439,25 +429,66 @@ jobs:
           name: native-pct-${{ matrix.version }}
           path: native-pct.txt
           if-no-files-found: error
+      - name: run focused KLIB semantics and Native oracle coverage
+        # The corpus step records its failure and enforcement follows this step, so the focused
+        # decoder/oracle coverage remains independent just as it was in its former standalone job.
+        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max && (success() || steps.native_box.outcome == 'failure' || steps.native_focused.outcome == 'failure')
+        env:
+          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_REQUIRE_KLIB: "1"
+          KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
+          RUST_MIN_STACK: "134217728"
+        run: |
+          set -euo pipefail
+          chmod +x klib-e2e-tests klib-unit-tests
+          root=$(just kotlin-native "${{ matrix.version }}")
+          kotlinc=$(just kotlinc "${{ matrix.version }}")
+          export KRUSTY_KOTLIN_NATIVE="$root"
+          export KRUSTY_KOTLINC="$kotlinc"
+          timeout 600s ./klib-e2e-tests klib_ --nocapture
+          timeout 600s ./klib-e2e-tests value_class_declaration_e2e --nocapture
+          timeout 600s ./klib-e2e-tests \
+            native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
+          timeout 600s ./klib-unit-tests klib_ --nocapture
+      - name: save recorded kotlinc-native bytes
+        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max && steps.native-recording-mode.outputs.write == '1'
+        uses: actions/cache/save@v6
+        with:
+          path: target/cache/native-recordings
+          key: recorded-kotlinc-native-bytes-${{ matrix.version }}-${{ github.sha }}
       - name: enforce native box conformance ${{ matrix.version }}
         if: matrix.target == 'native' && steps.native_box.outcome == 'failure'
         run: exit 1
+      - name: enforce focused Native conformance ${{ matrix.version }}
+        if: matrix.target == 'native' && steps.native_focused.outcome == 'failure'
+        run: exit 1
       # Both Wasm lanes run every accepted case under Node.js, which runs WasmGC without flags from
-      # version 22. Each lane's ratchet fails the step on a regression or an unrecorded pass. The
-      # lanes still analyze against the JVM library surface, so they gate the Wasm emitter and
-      # publish no conformance badge until a Wasm klib platform backs them.
+      # version 22. Each lane's ratchet fails the step on a regression or an unrecorded pass. Each
+      # lane analyzes against its exact wasm-js or wasm-wasi stdlib KLIB before target
+      # emission. They remain separate because Kotlin publishes different platform surfaces.
       - uses: actions/setup-node@v7
         if: matrix.target == 'wasm'
         with:
           node-version: '22'
       - name: run wasm box conformance ${{ matrix.version }}
         if: matrix.target == 'wasm'
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: |
           set -euo pipefail
           chmod +x conformance-bin
           for lane in wasm-js wasm-wasi; do
             just wasm-conformance-run "$lane" "$PWD/conformance-bin" "${{ matrix.version }}"
           done
+      - name: run focused Wasm conformance ${{ matrix.version }}
+        if: matrix.target == 'wasm'
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+        run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:
@@ -493,37 +524,34 @@ jobs:
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
   # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
-  # core CI, KLIB semantics, the complete conformance matrix, the plugin build, and the complete
-  # Gradle matrix succeeded. A failed shared build or version inventory skips a consumer, which
-  # fails this aggregate too.
+  # core CI, the complete conformance matrix (including KLIB semantics), the plugin build, and the
+  # complete Gradle matrix succeeded. A failed shared build or version inventory skips a consumer,
+  # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools]
+    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: require every merge gate to succeed
         env:
           CI_RESULT: ${{ needs.ci.result }}
-          KLIB_RESULT: ${{ needs.klib-semantics.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
         run: |
           echo "ci: $CI_RESULT"
-          echo "klib-semantics: $KLIB_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
           if [ "$CI_RESULT" != success ] \
-            || [ "$KLIB_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ]; then
-            echo "core CI, KLIB semantics, conformance, every Gradle gate, and every build-tools lane must succeed" >&2
+            echo "core CI, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed" >&2
             exit 1
           fi
 
@@ -736,7 +764,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]
+    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.

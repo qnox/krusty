@@ -24,7 +24,7 @@ pub(crate) use parameter_identities::{
     constructor_parameter_identities, function_parameter_identities, property_parameter_identities,
     FunctionParameterIdentities, PropertyParameterIdentities,
 };
-pub(crate) use type_alias_declarations::declared_type_alias;
+pub(crate) use type_alias_declarations::{declared_nested_type_alias, declared_type_alias};
 pub(crate) use type_parameter_identities::TypeParameterIdentities;
 pub(crate) use type_signatures::{
     function_generic_sig, only_input_type_formals, reified_type_parameter_ordinals, EnclosingBounds,

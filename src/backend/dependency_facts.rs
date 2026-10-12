@@ -20,7 +20,7 @@ use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 use crate::libraries::{
     DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, KlibDeclarationSignature,
-    MemberRealization, NonvirtualCallRealization,
+    KlibDependencyCallable, MemberRealization, NonvirtualCallRealization,
 };
 use crate::symbol_source::SymbolSource;
 pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
@@ -79,6 +79,9 @@ pub struct BackendCallableFact {
     pub generic_sig: Option<Box<GenericSig>>,
     /// Exact serialized-IR identity the provider published for this declaration, if any.
     pub declaration_signature: Option<KlibDeclarationSignature>,
+    /// Exact KLIB module and declaration identity for target linkage, if this declaration came
+    /// from a KLIB provider.
+    pub dependency_callable: Option<KlibDependencyCallable>,
 }
 
 impl BackendCallableFact {
@@ -106,7 +109,7 @@ impl BackendCallableFact {
             self.ret,
             &self.parameter_identities,
             self.context_count,
-            self.declaration_signature.as_ref(),
+            self.dependency_callable.as_ref(),
         )
     }
 }
@@ -249,6 +252,7 @@ impl CheckedBackendCallables {
                     provider(identity).ok_or(DependencyFactError::UnknownCallable(identity))?;
                 let parameter_identities = realization.parameter_identities;
                 let declaration_signature = realization.declaration_signature;
+                let dependency_callable = realization.dependency_callable;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -281,6 +285,7 @@ impl CheckedBackendCallables {
                     overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
                     declaration_signature,
+                    dependency_callable,
                 })
             }
         };

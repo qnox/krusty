@@ -257,9 +257,11 @@ pub struct FnParamInfo {
     /// The registered `defaults` serve only the `$default` stub. A call site must not reuse them to
     /// fill an omitted argument. This is set for extensions whose defaults are not all constant.
     pub stub_only: bool,
-    /// The `defaults` were inherited through an override edge, so the declaration itself declares
-    /// none: Kotlin forbids an override to write a default value.
-    pub defaults_inherited: bool,
+    /// The checked declaration whose default contract supplied at least one registered expression.
+    /// `None` means this declaration owns every default itself. Kotlin forbids an override to write
+    /// a default value, so consumers that emit declaration-owned entries must preserve this exact
+    /// identity rather than treating inherited defaults as if the implementation declared them.
+    pub inherited_default_provider: Option<crate::fir::ResolvedFunctionOverrideTarget>,
     /// Parallel to `identities` for a source declaration; empty for one the source did not write.
     pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
     /// Parallel to `identities`. Empty when the declaration did not publish an expansion mode;
@@ -275,7 +277,7 @@ impl FnParamInfo {
             identities: names.into_iter().map(IrParameterIdentity::source).collect(),
             defaults: None,
             stub_only: false,
-            defaults_inherited: false,
+            inherited_default_provider: None,
             inline_modifiers: Vec::new(),
             expansion_modes: Vec::new(),
             captured_receivers: Vec::new(),
@@ -287,7 +289,7 @@ impl FnParamInfo {
             identities,
             defaults: None,
             stub_only: false,
-            defaults_inherited: false,
+            inherited_default_provider: None,
             inline_modifiers: Vec::new(),
             expansion_modes: Vec::new(),
             captured_receivers: Vec::new(),
@@ -326,11 +328,19 @@ impl FnParamInfo {
 }
 
 impl IrFile {
+    /// The exact checked declaration that supplied inherited defaults for `fid`.
+    pub(crate) fn inherited_param_default_provider(
+        &self,
+        fid: u32,
+    ) -> Option<crate::fir::ResolvedFunctionOverrideTarget> {
+        self.fn_params.get(&fid)?.inherited_default_provider
+    }
+
     /// The defaults `fid` declares itself: none when they were inherited through an override.
     pub fn declared_param_defaults(&self, fid: u32) -> Option<&Vec<Option<ExprId>>> {
         self.fn_params
             .get(&fid)
-            .filter(|info| !info.defaults_inherited)?
+            .filter(|info| info.inherited_default_provider.is_none())?
             .defaults
             .as_ref()
     }
