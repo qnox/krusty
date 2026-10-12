@@ -119,6 +119,7 @@ const MODELED_FEATURES: &[&str] = &[
     "EnumEntries",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
+    "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",
     "JvmSupportRecursiveTypeOf",

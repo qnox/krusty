@@ -2,7 +2,9 @@
 //! modality a modifier list selects.
 
 use super::{Parser, TokenKind};
-use crate::ast::{AnnotationRef, DeclarationPrefix, ExprId};
+use crate::ast::{
+    AnnotationRef, DeclarationPrefix, ExprId, ExternalModifierTarget, ExternalModifierUse,
+};
 use crate::diag::Span;
 use crate::types::Visibility;
 
@@ -185,6 +187,9 @@ impl Parser<'_> {
                 if text == "value" {
                     self.value_modifier_span = Some(self.tok().span);
                 }
+                if text == "external" {
+                    self.external_modifier_span = Some(self.tok().span);
+                }
                 mods.push(text);
                 self.bump();
             } else {
@@ -219,6 +224,49 @@ impl Parser<'_> {
             .any(|modifier| modifier == "value")
             .then_some(span)
             .flatten()
+    }
+
+    /// Record the `external` keyword of a primary-constructor property whose prefix wrote
+    /// `modifiers`; kotlinc deprecates the modifier there.
+    pub(super) fn record_external_property_parameter(&mut self, modifiers: &[String]) {
+        let span = self.external_modifier_span.take();
+        if let Some(span) = span.filter(|_| modifiers.iter().any(|modifier| modifier == "external"))
+        {
+            self.file.external_modifier_uses.push(ExternalModifierUse {
+                target: ExternalModifierTarget::PropertyParameter,
+                span,
+            });
+        }
+    }
+
+    /// Whether an enum entry's prefix continues with an `external` modifier: the keyword followed,
+    /// past any line break, by an annotation or by the entry's name and what may follow an entry
+    /// name. An entry named `external`, and a member such as `external interface I` after the entry
+    /// list, are not entry modifiers.
+    pub(super) fn at_external_entry_modifier(&self) -> bool {
+        if !(self.at(TokenKind::Ident) && self.keyword_text("external")) {
+            return false;
+        }
+        let Some(next) =
+            (self.i + 1..self.t.len()).find(|&index| self.t[index].kind != TokenKind::Newline)
+        else {
+            return false;
+        };
+        match self.t[next].kind {
+            TokenKind::At => true,
+            TokenKind::Ident => matches!(
+                self.t.get(next + 1).map(|token| token.kind),
+                None | Some(
+                    TokenKind::LParen
+                        | TokenKind::LBrace
+                        | TokenKind::Comma
+                        | TokenKind::Newline
+                        | TokenKind::RBrace
+                        | TokenKind::Eof
+                )
+            ),
+            _ => false,
+        }
     }
 
     /// Start a declaration whose modifier list [`Parser::record_declaration_prefix`] will keep.

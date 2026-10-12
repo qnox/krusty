@@ -12,6 +12,7 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 use crate::plugins::registry::NativePlugins;
 
 mod explicit_api;
+mod external_modifier_targets;
 mod header_validation;
 mod inline_preparation;
 mod local_class_names;
@@ -1029,6 +1030,7 @@ where
         if source.kind == SourceKind::Kotlin {
             header_validation::validate(&file, diags);
             explicit_api::check(&file, &features, diags);
+            external_modifier_targets::check(&file, &features, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
             // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
             // written as an `invokestatic` of a method the facade does not declare, so the program

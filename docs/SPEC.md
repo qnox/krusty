@@ -12790,6 +12790,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return type, overrides included, are reported at the name. `strict` reports errors and
   `warning` warnings with the same text; a test selects the mode with `// EXPLICIT_API_MODE:`.
   Verified against kotlinc 2.4.20. (`tests/explicit_api_mode_e2e.rs`.)
+- **`external` on an enum entry or a primary-constructor property
+  (`ForbidExternalEnumEntriesAndPrimaryConstructorProperties`, KTLC-389).** kotlinc's
+  modifier-target table still accepts `external` on an enum entry and on a `val`/`var` constructor
+  parameter while the feature is off, with `modifier 'external' is deprecated for 'enum entry'.` or
+  `... for 'value parameter'.` as a warning at the keyword. With the feature on (language 2.5, or
+  `-progressive` on 2.4) each is the error `modifier 'external' is not applicable to '<target>'.`
+  The rule is a common modifier check, not a JS one: kotlinc-jvm and kotlinc-js report it
+  identically, and kotlinc-js has no separate checker for `external enum class` entries or
+  `external class` constructor properties (those keep only the existing "using enum classes with an
+  'external' qualifier becomes deprecated" warning). The parser accepts `external` before an enum
+  entry's name, among its annotations, and records each such keyword
+  (`File::external_modifier_uses`); `frontend::external_modifier_targets` reports it. `external`
+  on a plain (non-property) parameter, which kotlinc always rejects, is not modeled. Verified
+  against kotlinc 2.4.0, 2.4.10 and 2.4.20. (`tests/external_modifier_targets_e2e.rs`.)
 - **A type-parameter bound resolves in the declaration's lexical scope.** `fun <T : Own>` in a
   class body binds the nearest nested `Own` from the enclosing classifiers (or their companions,
   or classifiers they inherit) before the file's package and imports, the same scope tower as any
