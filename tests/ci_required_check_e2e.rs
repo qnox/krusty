@@ -136,22 +136,42 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
 
     let conformance = job(&workflow, "conformance");
     assert!(
-        conformance.contains("    needs: [build-shared-bins, versions]\n")
+        conformance.contains(
+            "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]\n"
+        )
             && conformance.contains("      fail-fast: false\n")
             && conformance
                 .contains("        version: ${{ fromJson(needs.versions.outputs.matrix) }}\n"),
         "conformance still expands every manifest version without cancelling siblings: {conformance}"
     );
-    let shared = job(&workflow, "build-shared-bins");
-    for needle in [
-        "scripts/cargo-test-binary.sh e2e --test e2e",
-        "scripts/cargo-test-binary.sh krusty --lib",
-        "klib-e2e-tests",
-        "klib-unit-tests",
-    ] {
+    let conformance_build = job(&workflow, "build-conformance-bin");
+    assert!(
+        conformance_build.contains("bin=$(just conformance-bin)")
+            && conformance_build.contains("name: conformance-bin\n")
+            && !conformance_build.contains("needs:"),
+        "one independent producer owns the shared conformance binary: {conformance_build}"
+    );
+    let klib_build = job(&workflow, "build-klib-test-bins");
+    assert!(
+        klib_build.contains("scripts/build-klib-test-binaries.sh \"$PWD\"")
+            && klib_build.contains("name: klib-test-bins\n")
+            && klib_build.contains("klib-e2e-tests")
+            && klib_build.contains("klib-unit-tests")
+            && !klib_build.contains("needs:"),
+        "one independent producer owns both focused KLIB binaries: {klib_build}"
+    );
+    let tool_build = job(&workflow, "build-tool-bins");
+    assert!(
+        tool_build.contains("cargo build --profile gate -p krusty-cli")
+            && tool_build.contains("bin=$(just krusty-build-tests)")
+            && tool_build.contains("name: tool-bins\n")
+            && !tool_build.contains("needs:"),
+        "one independent producer owns the compiler and Gradle test binaries: {tool_build}"
+    );
+    for artifact in ["conformance-bin", "klib-test-bins", "tool-bins"] {
         assert!(
-            shared.contains(needle),
-            "the shared build must publish the focused KLIB test binary ({needle}): {shared}"
+            conformance.contains(&format!("          name: {artifact}\n")),
+            "the conformance matrix consumes its three independently built artifact families ({artifact}): {conformance}"
         );
     }
     assert!(
