@@ -10,6 +10,11 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty_cli::{cli, kotlinc_arguments};
 
+/// The compiler's allocation pattern (many short-lived vectors and strings) runs markedly faster on
+/// mimalloc than on the platform allocator; see the dependency's note in `Cargo.toml`.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
