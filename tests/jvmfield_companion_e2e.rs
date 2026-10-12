@@ -102,9 +102,10 @@ fn jvmfield_internal_companion_val_owner_is_byte_identical() {
 }
 
 /// An enum uses the same hoisted-field path as a class: both `@JvmField` itself and a BINARY-retained
-/// field-targeted annotation remain on the public static field owned by the enum.
+/// field-targeted annotation remain on the public static field owned by the enum. An ordinary
+/// companion property carries its field-targeted annotation to the private hoisted field too.
 #[test]
-fn jvmfield_enum_companion_field_annotations_are_byte_identical() {
+fn enum_companion_field_annotations_are_byte_identical() {
     assert_byte_identical(
         "package demo\n\
          @Target(AnnotationTarget.FIELD)\n\
@@ -114,6 +115,7 @@ fn jvmfield_enum_companion_field_annotations_are_byte_identical() {
              A;\n\
              companion object {\n\
                  @JvmField @field:Marker val Named: String = \"x\"\n\
+                 @field:Marker val Ordinary: String = \"y\"\n\
              }\n\
          }\n",
         "demo/E",

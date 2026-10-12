@@ -509,12 +509,11 @@ pub(super) fn emit_class_static_fields(
         // A field carries its FIELD-targeted annotations as `RuntimeInvisibleAnnotations`, BEFORE
         // the nullability entry — kotlinc's attribute order.
         //
-        // They come from wherever the field's DECLARATION lives: a hoisted companion property
+        // They come from wherever the field's DECLARATION lives: every hoisted companion property
         // records them on the COMPANION, while a static this class owns outright — one a compiler
-        // plugin generated, say — records them on the class itself. The companion path keeps its
-        // `@JvmField` condition, which is what that annotation has always meant there: it is the
-        // reason the field is the property's whole JVM surface.
-        if let Some(annotations) = static_field_annotations(ir, c, &s.name, jvm_field) {
+        // plugin generated, say — records them on the class itself. `@JvmField` changes the
+        // property's JVM surface, not the ownership of its backing-field annotations.
+        if let Some(annotations) = static_field_annotations(ir, c, static_index) {
             cw.set_last_late_field_annotations(&annotations.annotations);
         }
     }
@@ -523,25 +522,24 @@ pub(super) fn emit_class_static_fields(
 fn static_field_annotations<'a>(
     ir: &'a IrFile,
     owner: &'a IrClass,
-    field: &str,
-    jvm_field: bool,
+    static_index: u32,
 ) -> Option<&'a crate::ir::FieldAnnotations> {
+    let field = &ir.statics[static_index as usize].name;
+    if ir.is_jvm_companion_hoisted_static(static_index) {
+        return owner
+            .companion_class
+            .and_then(|companion| ir.class_id_by_name(companion))
+            .and_then(|companion| {
+                ir.classes[companion as usize]
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == *field)
+            });
+    }
     owner
-        .companion_class
-        .and_then(|companion| ir.class_id_by_name(companion))
-        .filter(|_| jvm_field)
-        .and_then(|companion| {
-            ir.classes[companion as usize]
-                .field_annotations
-                .iter()
-                .find(|annotations| annotations.field == field)
-        })
-        .or_else(|| {
-            owner
-                .field_annotations
-                .iter()
-                .find(|annotations| annotations.field == field)
-        })
+        .field_annotations
+        .iter()
+        .find(|annotations| annotations.field == *field)
 }
 
 /// An enum class's own statics, after its property fields and before its entry constants: a
@@ -589,7 +587,7 @@ pub(super) fn emit_enum_static_fields(
             constant,
             ann,
         );
-        if let Some(annotations) = static_field_annotations(ir, c, &s.name, jvm_field) {
+        if let Some(annotations) = static_field_annotations(ir, c, index) {
             cw.set_last_late_field_annotations(&annotations.annotations);
         }
     }
