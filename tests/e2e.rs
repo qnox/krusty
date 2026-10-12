@@ -2799,6 +2799,8 @@ mod unit_vararg_e2e;
 mod unqualified_enum_entry_e2e;
 #[path = "unreachable_trailing_block_ty_e2e.rs"]
 mod unreachable_trailing_block_ty_e2e;
+#[path = "unread_field_annotation_order_e2e.rs"]
+mod unread_field_annotation_order_e2e;
 #[path = "unresolved_label_diagnostic_e2e.rs"]
 mod unresolved_label_diagnostic_e2e;
 #[path = "unresolved_supertype_diag_e2e.rs"]

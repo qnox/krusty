@@ -810,7 +810,11 @@ fn attach_synth_nullability(
                 continue;
             }
             if let Some(a) = ann(&f.name, f.ty) {
-                cw.set_field_nullability(&instance_field_jvm_name(ir, run, c, index), a);
+                cw.set_field_nullability(
+                    &instance_field_jvm_name(ir, run, c, index),
+                    &desc(jvm_value_ty(&f.ty)),
+                    a,
+                );
             }
         }
     }
@@ -819,6 +823,7 @@ fn attach_synth_nullability(
     if let Some(companion) = &c.companion_class {
         cw.set_field_nullability(
             companion.nested_segment_ref(),
+            &format!("L{};", companion.render()),
             "Lorg/jetbrains/annotations/NotNull;",
         );
         for s in ir
@@ -832,7 +837,7 @@ fn attach_synth_nullability(
             .filter(|s| !s.is_lateinit)
         {
             if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
-                cw.set_field_nullability(&s.name, a);
+                cw.set_field_nullability(&s.name, &desc(jvm_declared_ty(&s.ty)), a);
             }
         }
     }
