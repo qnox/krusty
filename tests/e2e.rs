@@ -1751,6 +1751,8 @@ mod expect_declaration_body_e2e;
 
 #[path = "all_tail_calls_e2e.rs"]
 mod all_tail_calls_e2e;
+#[path = "captured_var_not_null_cast_e2e.rs"]
+mod captured_var_not_null_cast_e2e;
 #[path = "classpath_tail_forward_e2e.rs"]
 mod classpath_tail_forward_e2e;
 #[path = "for_loop_iterable_slot_e2e.rs"]

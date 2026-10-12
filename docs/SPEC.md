@@ -634,6 +634,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type. The transformer declares the lambda's spill fields (in declaration order) and its
   `@DebugMetadata` while it writes `invokeSuspend`, so every pool entry they name for the first
   time leads that method's code. Test: `tests/suspend_lambda_shared_capture_e2e.rs`.
+- **`!!` on a captured `var`.** The variable's `Ref$ObjectRef` stores an `Object`. kotlinc's `!!`
+  checks that erased read (`getfield element; dup; checkNotNull`) and casts the checked value to
+  the variable's type afterwards, not before. Test: `tests/captured_var_not_null_cast_e2e.rs`.
 - **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
   `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
   inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the
