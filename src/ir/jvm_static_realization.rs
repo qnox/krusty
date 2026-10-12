@@ -92,6 +92,37 @@ impl IrFile {
             })
     }
 
+    /// The resolved annotations of the source property static `index` stores: a top-level
+    /// property, or a companion property hoisted onto its outer class. Other statics have none.
+    pub(crate) fn static_declaration_annotations(&self, index: u32) -> &[TypeName] {
+        let top_level = self.local_property_layouts.iter().find_map(|(property, layout)| {
+            matches!(
+                layout,
+                crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } if *storage == index
+            )
+            .then(|| {
+                self.package_properties
+                    .iter()
+                    .find(|declaration| declaration.property == *property)
+            })
+            .flatten()
+            .map(|declaration| &declaration.annotations[..])
+        });
+        let hoisted = || {
+            self.jvm_companion_property_statics
+                .iter()
+                .find(|(_, static_index)| **static_index == index)
+                .and_then(|((companion, property), _)| {
+                    let class = self
+                        .classes
+                        .iter()
+                        .find(|class| class.fq_name == *companion)?;
+                    Some(&class.properties.get(*property as usize)?.annotations[..])
+                })
+        };
+        top_level.or_else(hoisted).unwrap_or_default()
+    }
+
     pub(crate) fn has_jvm_default_static_getter(&self, index: u32) -> bool {
         self.publishes_jvm_default_static_accessors(index)
             && self.statics[index as usize].accessors.getter == IrStaticAccessor::Default

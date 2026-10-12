@@ -2,7 +2,7 @@
 //! `private`, and of the default setter whose visibility a `lateinit` field shares.
 
 use crate::ir::IrClass;
-use crate::types::Visibility;
+use crate::types::{TypeName, Visibility};
 
 /// Is this property declared `@JvmField`? The annotation replaces the property's JVM realization
 /// wholesale: kotlinc emits NO `getX()`/`setX()` for it and gives the backing field the PROPERTY's
@@ -53,6 +53,11 @@ pub(super) fn jvm_field_visibility(c: &IrClass, field_index: usize) -> Option<u1
 /// Compiler-generated storage is `ACC_SYNTHETIC`, as kotlinc marks `$$delegate_N`.
 pub(super) fn declared_field_access(c: &IrClass, field_index: usize, is_static: bool) -> u16 {
     let field = &c.fields[field_index];
+    let annotations = c
+        .properties
+        .iter()
+        .find(|declaration| declaration.backing_field == Some(field_index as u32))
+        .map_or(&[][..], |declaration| &declaration.annotations[..]);
     jvm_field_visibility(c, field_index).unwrap_or(if field.is_private() { 0x0002 } else { 0x0001 })
         | if field.is_final() { 0x0010 } else { 0 }
         | if is_static { 0x0008 } else { 0 }
@@ -61,6 +66,23 @@ pub(super) fn declared_field_access(c: &IrClass, field_index: usize, is_static: 
         } else {
             0
         }
+        | annotated_field_modifiers(annotations)
+}
+
+/// The field modifiers kotlinc's `computeFieldFlags` derives from the property's annotations:
+/// `@Volatile` makes the backing field `ACC_VOLATILE` and `@Transient` `ACC_TRANSIENT`. The
+/// application is a resolved identity, so `kotlin.concurrent.Volatile`, an alias of
+/// `kotlin.jvm.Volatile` on the JVM, is the same annotation.
+pub(super) fn annotated_field_modifiers(annotations: &[TypeName]) -> u16 {
+    annotations.iter().fold(0, |modifiers, annotation| {
+        if annotation.matches("kotlin/jvm/Volatile") {
+            modifiers | 0x0040
+        } else if annotation.matches("kotlin/jvm/Transient") {
+            modifiers | 0x0080
+        } else {
+            modifiers
+        }
+    })
 }
 
 /// A default accessor's JVM access. Visibility is an exact checked declaration fact; the backend

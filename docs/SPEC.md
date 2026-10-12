@@ -16974,6 +16974,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   field type's default (`0`, `false`, `'\u0000'`, `+0.0`, `null`). The class and enum
   `<clinit>`s apply the same elision the file facade already does, so a hoisted companion
   `var count = 0` has no store. Test: `tests/companion_default_initializer_e2e.rs`.
+- **`@Volatile` and `@Transient` are backing-field modifiers.** kotlinc's
+  `ClassCodegen.computeFieldFlags` sets `ACC_VOLATILE` on a field whose property carries
+  `kotlin.jvm.Volatile` and `ACC_TRANSIENT` for `kotlin.jvm.Transient`; both annotations have
+  SOURCE retention, so the flag is all that reaches the class file. The JVM backend reads the
+  property's resolved annotation identities for a class, constructor or object property, a
+  companion property hoisted to its outer class and a top-level property.
+  `kotlin.concurrent.Volatile` resolves to the same identity. Test:
+  `tests/volatile_field_e2e.rs`. Corpus: `volatile/volatileInt.kt` and its siblings.
 - **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
   kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
   `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and
