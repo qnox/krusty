@@ -1970,6 +1970,9 @@ impl BodyLowering<'_> {
             type_operand: receiver_type.non_null().canonical_semantic(),
         });
         self.set_expression_state(receiver.value, LoweringState::Lowered(selector_read));
+        // The selector reads the temporary, not the receiver expression: a constant receiver does
+        // not make the selected operation intrinsic-const.
+        self.constants.bind_temporary(receiver.value);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
         let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
