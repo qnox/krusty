@@ -28,7 +28,7 @@ use crate::types::{Ty, TypeName};
 use super::generics::{attach_accessor_type_parameters, declaration_type_parameters};
 use super::properties::{
     add_accessor_function, record_accessor_visibilities, set_accessor_parameter_identities,
-    setter_visibility, stamp_generated_property_nodes, AccessorResult,
+    setter_visibility, stamp_generated_property_nodes, AccessorFunctionInput, AccessorResult,
 };
 use super::FirFileLoweringFailure;
 
@@ -138,13 +138,13 @@ pub(super) fn materialize_top_level_delegate(
     at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
-        crate::names::property_getter_name(&property.name),
-        extension_receiver.into_iter().collect(),
-        property.ty,
-        read,
-        AccessorResult::Delegated(plan.get_value.result.get()),
-        true,
-        None,
+        AccessorFunctionInput::getter(
+            crate::names::property_getter_name(&property.name),
+            extension_receiver.into_iter().collect(),
+            property.ty,
+            read,
+            AccessorResult::Delegated(plan.get_value.result.get()),
+        ),
     );
     let setter = plan
         .set_value
@@ -176,16 +176,14 @@ pub(super) fn materialize_top_level_delegate(
             )?;
             Ok(add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                extension_receiver
-                    .into_iter()
-                    .chain(std::iter::once(property.ty))
-                    .collect(),
-                Ty::Unit,
-                write,
-                AccessorResult::AsDeclared,
-                false,
-                None,
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    extension_receiver
+                        .into_iter()
+                        .chain(std::iter::once(property.ty))
+                        .collect(),
+                    write,
+                ),
             ))
         })
         .transpose()?;
@@ -335,13 +333,14 @@ pub(super) fn materialize_member_delegate(
     at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
-        crate::names::property_getter_name(&property.name),
-        Vec::new(),
-        property.ty,
-        read,
-        AccessorResult::Delegated(plan.get_value.result.get()),
-        true,
-        Some(owner_type),
+        AccessorFunctionInput::getter(
+            crate::names::property_getter_name(&property.name),
+            Vec::new(),
+            property.ty,
+            read,
+            AccessorResult::Delegated(plan.get_value.result.get()),
+        )
+        .with_dispatch_receiver(owner_type),
     );
     let setter = plan
         .set_value
@@ -374,13 +373,12 @@ pub(super) fn materialize_member_delegate(
             )?;
             Ok(add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                vec![property.ty],
-                Ty::Unit,
-                write,
-                AccessorResult::AsDeclared,
-                false,
-                Some(owner_type),
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    vec![property.ty],
+                    write,
+                )
+                .with_dispatch_receiver(owner_type),
             ))
         })
         .transpose()?;
@@ -587,13 +585,14 @@ pub(super) fn materialize_member_extension_delegate(
     at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
-        crate::names::property_getter_name(&property.name),
-        vec![extension_receiver],
-        property.ty,
-        read,
-        AccessorResult::Delegated(plan.get_value.result.get()),
-        true,
-        Some(owner),
+        AccessorFunctionInput::getter(
+            crate::names::property_getter_name(&property.name),
+            vec![extension_receiver],
+            property.ty,
+            read,
+            AccessorResult::Delegated(plan.get_value.result.get()),
+        )
+        .with_dispatch_receiver(owner),
     );
     let setter = plan
         .set_value
@@ -626,13 +625,12 @@ pub(super) fn materialize_member_extension_delegate(
             )?;
             Ok(add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                vec![extension_receiver, property.ty],
-                Ty::Unit,
-                write,
-                AccessorResult::AsDeclared,
-                false,
-                Some(owner),
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    vec![extension_receiver, property.ty],
+                    write,
+                )
+                .with_dispatch_receiver(owner),
             ))
         })
         .transpose()?;

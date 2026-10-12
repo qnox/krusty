@@ -527,13 +527,14 @@ fn materialize_member_extension_property(
     let getter = match property.getter {
         Some(body) => add_accessor_function(
             ir,
-            crate::names::property_getter_name(&property.name),
-            getter_parameters,
-            property.ty,
-            body,
-            AccessorResult::AsDeclared,
-            true,
-            Some(owner),
+            AccessorFunctionInput::getter(
+                crate::names::property_getter_name(&property.name),
+                getter_parameters,
+                property.ty,
+                body,
+                AccessorResult::AsDeclared,
+            )
+            .with_dispatch_receiver(owner),
         ),
         None if is_abstract => add_abstract_accessor_function(
             ir,
@@ -558,13 +559,12 @@ fn materialize_member_extension_property(
     let setter = match property.setter {
         Some(body) => Some(add_accessor_function(
             ir,
-            crate::names::property_setter_name(&property.name),
-            setter_parameters(),
-            Ty::Unit,
-            body,
-            AccessorResult::AsDeclared,
-            false,
-            Some(owner),
+            AccessorFunctionInput::setter(
+                crate::names::property_setter_name(&property.name),
+                setter_parameters(),
+                body,
+            )
+            .with_dispatch_receiver(owner),
         )),
         None if is_abstract && mutable => Some(add_abstract_accessor_function(
             ir,
@@ -714,25 +714,23 @@ fn materialize_top_level_property(
         let getter = property.getter.map(|body| {
             add_accessor_function(
                 ir,
-                crate::names::property_getter_name(&property.name),
-                Vec::new(),
-                property.ty,
-                body,
-                AccessorResult::AsDeclared,
-                true,
-                None,
+                AccessorFunctionInput::getter(
+                    crate::names::property_getter_name(&property.name),
+                    Vec::new(),
+                    property.ty,
+                    body,
+                    AccessorResult::AsDeclared,
+                ),
             )
         });
         let setter = property.setter.map(|body| {
             add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                vec![property.ty],
-                Ty::Unit,
-                body,
-                AccessorResult::AsDeclared,
-                false,
-                None,
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    vec![property.ty],
+                    body,
+                ),
             )
         });
         for accessor in getter.into_iter().chain(setter) {
@@ -792,26 +790,24 @@ fn materialize_top_level_property(
     let declaration = property.declaration;
     let getter = add_accessor_function(
         ir,
-        crate::names::property_getter_name(&property.name),
-        receiver_parameters.clone(),
-        property.ty,
-        getter_body,
-        AccessorResult::AsDeclared,
-        true,
-        None,
+        AccessorFunctionInput::getter(
+            crate::names::property_getter_name(&property.name),
+            receiver_parameters.clone(),
+            property.ty,
+            getter_body,
+            AccessorResult::AsDeclared,
+        ),
     );
     let setter = property.setter.map(|body| {
         let mut parameters = receiver_parameters.clone();
         parameters.push(property.ty);
         add_accessor_function(
             ir,
-            crate::names::property_setter_name(&property.name),
-            parameters,
-            Ty::Unit,
-            body,
-            AccessorResult::AsDeclared,
-            false,
-            None,
+            AccessorFunctionInput::setter(
+                crate::names::property_setter_name(&property.name),
+                parameters,
+                body,
+            ),
         )
     });
     let type_params = declaration_type_parameters(index, declaration);
@@ -1285,13 +1281,14 @@ fn materialize_member_property(
     let mut getter = property.getter.map(|body| {
         let function = add_accessor_function(
             ir,
-            crate::names::property_getter_name(&property.name),
-            context_parameters.clone(),
-            property.ty,
-            body,
-            AccessorResult::AsDeclared,
-            true,
-            Some(owner),
+            AccessorFunctionInput::getter(
+                crate::names::property_getter_name(&property.name),
+                context_parameters.clone(),
+                property.ty,
+                body,
+                AccessorResult::AsDeclared,
+            )
+            .with_dispatch_receiver(owner),
         );
         ir.classes[class_id as usize].methods.push(function);
         function
@@ -1358,17 +1355,16 @@ fn materialize_member_property(
         .map(|body| {
             let function = add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                context_parameters
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(property.ty))
-                    .collect(),
-                Ty::Unit,
-                body,
-                AccessorResult::AsDeclared,
-                false,
-                Some(owner),
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    context_parameters
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(property.ty))
+                        .collect(),
+                    body,
+                )
+                .with_dispatch_receiver(owner),
             );
             ir.classes[class_id as usize].methods.push(function);
             function
@@ -1483,9 +1479,11 @@ pub(super) enum AccessorResult {
     Delegated(Ty),
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn add_accessor_function(
-    ir: &mut IrFile,
+/// The complete checked declaration consumed when materializing a concrete property accessor.
+///
+/// Getter and setter constructors preserve the distinct return contracts at this boundary, while
+/// the optional dispatch receiver records whether the accessor belongs to a class or a file.
+pub(super) struct AccessorFunctionInput {
     name: String,
     params: Vec<Ty>,
     ret: Ty,
@@ -1493,7 +1491,55 @@ pub(super) fn add_accessor_function(
     result: AccessorResult,
     returns_value: bool,
     dispatch_receiver: Option<TypeName>,
-) -> FunId {
+}
+
+impl AccessorFunctionInput {
+    pub(super) fn getter(
+        name: String,
+        params: Vec<Ty>,
+        ret: Ty,
+        value: ExprId,
+        result: AccessorResult,
+    ) -> Self {
+        Self {
+            name,
+            params,
+            ret,
+            value,
+            result,
+            returns_value: true,
+            dispatch_receiver: None,
+        }
+    }
+
+    pub(super) fn setter(name: String, params: Vec<Ty>, value: ExprId) -> Self {
+        Self {
+            name,
+            params,
+            ret: Ty::Unit,
+            value,
+            result: AccessorResult::AsDeclared,
+            returns_value: false,
+            dispatch_receiver: None,
+        }
+    }
+
+    pub(super) fn with_dispatch_receiver(mut self, owner: TypeName) -> Self {
+        self.dispatch_receiver = Some(owner);
+        self
+    }
+}
+
+pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInput) -> FunId {
+    let AccessorFunctionInput {
+        name,
+        params,
+        ret,
+        value,
+        result,
+        returns_value,
+        dispatch_receiver,
+    } = input;
     // A delegated getter returns the PROPERTY's type while the operator it calls returns the
     // declaration's. Cross that boundary here, where the accessor owns it, exactly when the two
     // CHECKED types differ — so the accessor carries one adaptation node and never one wrapping
