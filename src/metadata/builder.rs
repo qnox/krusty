@@ -791,6 +791,9 @@ pub struct PropMeta {
     /// id (kotlinc's `requiresSignature`): a value class's carrier (`UInt` stored as `I`), a boxed
     /// `Int?`, a reference array, or a delegate.
     pub field_desc: Option<String>,
+    /// `(name, descriptor)` of the `get<Name>$delegate` method returning a delegate the JVM
+    /// evaluates in place instead of storing (a singleton or a constant).
+    pub delegate_method: Option<(String, String)>,
 }
 
 /// A source typealias declaration in package or classifier metadata.
@@ -1108,13 +1111,17 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
 /// `JvmProtoBuf.propertySignature` (f100): the field and accessors a JVM facade realizes the
 /// property with.
 fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
-    // The annotation marker is f2 and kotlinc interns its signature before either accessor, even
-    // though the field (f1) is serialized first below. Build every nested method record in that
-    // visit order so the package string table matches the class-metadata builder.
+    // kotlinc interns the annotation marker and delegate method before either accessor, even though
+    // the field (f1) is serialized first below. Build every nested method record in that visit
+    // order so the package string table matches the class-metadata builder.
     let annotation_method = m
         .annotation_method
         .as_ref()
         .map(|(name, descriptor)| jvm_method_sig(st, name, descriptor));
+    let delegate_method = m
+        .delegate_method
+        .as_ref()
+        .map(|(name, desc)| jvm_method_sig(st, name, desc));
     // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
     // entry alone.
     let (getter, setter) = if m.is_const {
@@ -1146,6 +1153,9 @@ fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
     }
     if let Some(setter) = &setter {
         jvm.field_message(4, setter);
+    }
+    if let Some(delegate_method) = &delegate_method {
+        jvm.field_message(5, delegate_method); // JvmPropertySignature.delegateMethod = 5
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
 }
@@ -1415,6 +1425,7 @@ mod tests {
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
+                delegate_method: None,
                 field_desc: None,
                 decl_order: 0,
             }
@@ -1474,6 +1485,7 @@ mod tests {
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
+                delegate_method: None,
                 field_desc: None,
                 has_constant: false,
                 decl_order: 0,
@@ -1536,6 +1548,7 @@ mod tests {
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
+                delegate_method: None,
                 field_desc: None,
                 has_constant: false,
                 decl_order: 0,
@@ -1597,6 +1610,7 @@ mod tests {
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
+                delegate_method: None,
                 field_desc: None,
                 has_constant: false,
                 decl_order: 0,
@@ -1651,6 +1665,7 @@ mod tests {
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
+                delegate_method: None,
                 field_desc: None,
                 decl_order: 0,
             }],

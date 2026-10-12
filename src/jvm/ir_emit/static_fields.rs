@@ -92,6 +92,10 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     }
     delegated_property_array::declare(env, env.facade_class, cw);
     for &(static_index, s) in &facade_statics {
+        // A delegate evaluated in place has no storage.
+        if ir.is_retired_jvm_delegate_static(static_index) {
+            continue;
+        }
         // kotlinc: `const val` → `static final` at the DECLARATION's visibility; a plain `val` →
         // `private static final`; a `var` → `private static` (mutated through the synthesized
         // setter). The private field is read/written directly only from within the facade; other
@@ -188,6 +192,14 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     for &(index, s) in &facade_statics {
+        // A singleton delegate evaluated in place is still read where its storage was initialized;
+        // a constant one kept no initializer.
+        if ir.is_retired_jvm_delegate_static(index) {
+            if let Some(init) = s.init {
+                e.emit_discarding(init, &mut code);
+            }
+            continue;
+        }
         let Some(init) = stored_clinit_initializer(ir, s) else {
             continue;
         };

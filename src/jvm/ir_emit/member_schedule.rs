@@ -52,12 +52,15 @@ pub(super) fn facade_source_ordered_members(
                 .get(&function)
                 .copied()
                 .unwrap_or(u32::MAX);
-            let accessor = if declared_setters.contains(&function) {
-                StaticAccessor::Setter
+            // A property's `get<X>$delegate` follows both of its accessors.
+            let position = if ir.is_jvm_delegate_method(function) {
+                2
+            } else if declared_setters.contains(&function) {
+                slot(StaticAccessor::Setter)
             } else {
-                StaticAccessor::Getter
+                slot(StaticAccessor::Getter)
             };
-            ((order, slot(accessor)), FacadeMember::Function(function))
+            ((order, position), FacadeMember::Function(function))
         })
         .collect();
     for (index, property) in ir.statics.iter().enumerate() {

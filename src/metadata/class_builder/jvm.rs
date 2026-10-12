@@ -73,6 +73,9 @@ pub struct JvmPropertySignature {
     /// annotations — a Kotlin property has no class-file declaration of its own. `None` when the
     /// property has no property-targeted annotation.
     pub synthetic_method: Option<(String, String)>,
+    /// `(name, descriptor)` of the `get<Name>$delegate` method returning a delegate the JVM
+    /// evaluates in place instead of storing (a singleton or a constant).
+    pub delegate_method: Option<(String, String)>,
     /// kotlinc's `JvmFlags.IS_MOVED_FROM_INTERFACE_COMPANION` (`Property` extension f101 = 1): a
     /// `@JvmField` property of an INTERFACE's companion, whose backing field was hoisted onto the
     /// interface itself.
@@ -100,6 +103,7 @@ static NO_PROPERTY_SIGNATURE: JvmPropertySignature = JvmPropertySignature {
     setter: None,
     field: None,
     synthetic_method: None,
+    delegate_method: None,
     moved_from_interface_companion: false,
 };
 
@@ -205,6 +209,11 @@ pub(super) fn property_jvm_signature(st: &mut StringTable<'_>, p: &JvmPropertySi
         .synthetic_method
         .as_ref()
         .map(|(name, desc)| jvm_method_sig(st, Some(name), desc));
+    // The delegate method interns ahead of the getter too, though it serializes last (f5).
+    let delegate_method = p
+        .delegate_method
+        .as_ref()
+        .map(|(name, desc)| jvm_method_sig(st, Some(name), desc));
     let getter = p
         .getter
         .as_ref()
@@ -236,6 +245,9 @@ pub(super) fn property_jvm_signature(st: &mut StringTable<'_>, p: &JvmPropertySi
     }
     if let Some(setter) = &setter {
         jvm.field_message(4, setter); // JvmPropertySignature.setter = 4
+    }
+    if let Some(delegate_method) = &delegate_method {
+        jvm.field_message(5, delegate_method); // JvmPropertySignature.delegateMethod = 5
     }
     jvm
 }

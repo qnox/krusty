@@ -2075,7 +2075,13 @@ pub(super) fn accept_property_body(
             property_declaration,
         ))?
         .ty;
+    // A delegated property's body is its delegate, not an initializer: `val x: Int by 7` has no
+    // constant value of its own, and kotlinc never records `HAS_CONSTANT` for it.
+    let delegated = index
+        .declaration_header(property_declaration)
+        .is_some_and(|header| header.flags.has(DeclarationFlags::DELEGATED));
     let has_constant_initializer = anchor.kind == DeclarationKind::Property
+        && !delegated
         && index
             .property(property_id)
             .is_some_and(|property| !property.mutable)

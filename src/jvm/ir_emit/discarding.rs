@@ -22,6 +22,14 @@ impl Emitter<'_> {
         if self.emit_discarded_safe_call(expression, node, code) {
             return;
         }
+        // An in-place delegate evaluated where its field was initialized keeps its property's
+        // line even when the evaluation leaves no instruction (`Unit`): the next line's mark gives
+        // it a `nop` of its own.
+        if self.ir.is_jvm_delegate_evaluation(expression) {
+            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+                code.mark_line_occupied(line);
+            }
+        }
         if let IrExpr::BottomValue {
             producer,
             completion,
