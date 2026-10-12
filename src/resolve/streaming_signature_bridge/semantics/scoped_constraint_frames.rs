@@ -38,12 +38,17 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
         receiver: Ty,
+        context_parameter: bool,
     ) {
         self.scoped_receivers
             .borrow_mut()
             .entry(declaration)
             .or_default()
-            .push(receiver);
+            .push(if context_parameter {
+                SignatureImplicitReceiver::context_parameter(receiver)
+            } else {
+                SignatureImplicitReceiver::ordinary(receiver)
+            });
     }
 
     pub(super) fn pop_scoped_receiver(&self, declaration: crate::fir::DeclarationId) {

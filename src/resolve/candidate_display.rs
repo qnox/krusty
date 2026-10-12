@@ -56,6 +56,17 @@ impl Checker<'_> {
         )
     }
 
+    /// `fun <T : Bound, U> name`, used inside diagnostics that identify one callable-owned type
+    /// parameter without rendering its value parameters or result.
+    pub(super) fn generic_callable_header(
+        name: &str,
+        function: &crate::libraries::FunctionInfo,
+    ) -> String {
+        let signature = function.semantic_signature();
+        let type_parameters = type_parameters_display(&signature, function.flags.reified);
+        format!("fun {type_parameters}{name}")
+    }
+
     pub(super) fn library_member_candidate_display(
         name: &str,
         member: &crate::libraries::LibraryMember,
@@ -173,7 +184,8 @@ fn parameters_display(signature: &crate::libraries::GenericSig, call_sig: &CallS
                 .param_names
                 .get(index)
                 .map(String::as_str)
-                .unwrap_or("_");
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("p{index}"));
             let default = if call_sig.param_defaults.get(index).copied().unwrap_or(false) {
                 " = ..."
             } else {

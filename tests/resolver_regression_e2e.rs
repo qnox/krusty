@@ -2071,10 +2071,7 @@ class MutBox<T>(var v: T) {
     );
     assert_eq!(
         common::front_end_diagnostics_with_stdlib(source),
-        [krusty::diagnostic_wording::unresolved_reference_on(
-            "getOrDefault",
-            Some("MutBox<String>")
-        )]
+        ["null cannot be a value of a non-null type 'String'."]
     );
 }
 

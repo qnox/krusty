@@ -1761,7 +1761,7 @@ impl JvmLibraries {
                 } else if declaration.is_some() {
                     members.push(member);
                 } else if m.is_static() {
-                    companion.push(member);
+                    provider_normalization::publish_classifier_static(&mut companion, member);
                 } else {
                     // `java.lang.Number.intValue` and the other numeric conversions are Kotlin's
                     // `Number.toInt` declarations. The realization table records the classfile

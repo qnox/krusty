@@ -71,6 +71,7 @@ impl FunctionInfo {
             member.physical_ret,
             member.descriptor.clone(),
         );
+        callable.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(owner));
         callable.physical_name = member.physical_name.clone();
         callable.signature = member.signature.clone();
         callable.physical_params = member.physical_params.clone();
@@ -124,6 +125,7 @@ impl FunctionInfo {
         candidate.flags.deprecated_hidden = member.deprecated_hidden();
         candidate.flags.inherited_by_delegation = member.inherited_by_delegation();
         candidate.flags.return_value_status = member.return_value_status;
+        candidate.classifier_static = member.is_classifier_static();
         candidate.callable.annotations = member.annotations.clone();
         candidate.default_values = member.default_values.clone();
         candidate.stable_declaration = member.stable_declaration;

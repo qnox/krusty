@@ -956,7 +956,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             "enter contextual receiver declaration={declaration:?} receiver={:?}",
             receiver.get(),
         );
-        self.push_scoped_receiver(declaration, receiver.get());
+        self.push_scoped_receiver(declaration, receiver.get(), false);
         self.push_scoped_constraint_frame(declaration, vec![receiver.get()]);
     }
 
@@ -983,10 +983,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             receiver.map(crate::fir::ResolvedTy::get),
         );
         for context in context_receivers {
-            self.push_scoped_receiver(declaration, context.get());
+            self.push_scoped_receiver(declaration, context.get(), true);
         }
         if let Some(receiver) = receiver {
-            self.push_scoped_receiver(declaration, receiver.get());
+            self.push_scoped_receiver(declaration, receiver.get(), false);
         }
         self.push_scoped_constraint_frame(
             declaration,
@@ -4149,7 +4149,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             .map_err(|_| Self::failure());
                     }
                 }
-                let rejected = || {
+                let mut rejected = || {
                     self.rejected_member_call(
                         scope,
                         origin,
@@ -4158,6 +4158,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         arguments,
                         &type_arguments,
                         trailing_lambda,
+                        expected.map(crate::fir::ResolvedTy::get),
+                        demand,
                     )
                 };
                 let [argument] = ordinary_argument_types.as_slice() else {

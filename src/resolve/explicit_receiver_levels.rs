@@ -204,22 +204,34 @@ impl Checker<'_> {
         } = call_args;
         let argument_names = self.file.call_arg_names.get(&call.0).cloned();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let supplied_type_arguments = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(Vec::len)
+            .filter(|count| *count > 0);
         let mut nearest_value_pending = function_values == FunctionValueRungs::InTower;
         for rung in scope.ancestors() {
-            let selection = rung.own_binding(name, Ns::Function).map_or(
-                LocalExtensionSelection::None,
-                |binding| {
-                    self.select_local_extension_candidate_in_rung(
-                        scope,
-                        receiver,
-                        binding.funs(),
-                        args,
-                        arg_tys,
-                        argument_names.as_deref(),
-                        trailing_lambda,
-                    )
-                },
-            );
+            let local_rung = rung
+                .own_binding(name, Ns::Function)
+                .map(|binding| binding.funs().to_vec());
+            let selection =
+                local_rung
+                    .as_deref()
+                    .map_or(LocalExtensionSelection::None, |local_rung| {
+                        self.select_local_extension_candidate_in_rung(
+                            scope,
+                            local_rung,
+                            LocalExtensionSelectionRequest {
+                                receiver,
+                                args,
+                                arg_tys,
+                                argument_names: argument_names.as_deref(),
+                                trailing_lambda,
+                                supplied_type_arguments,
+                            },
+                        )
+                    });
             match selection {
                 LocalExtensionSelection::None => {}
                 LocalExtensionSelection::Ambiguous => {

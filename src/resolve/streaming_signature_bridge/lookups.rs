@@ -1283,13 +1283,17 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
     ) -> Vec<Ty> {
-        let mut receivers = self.implicit_receivers(scope);
+        let mut entries = self.signature_implicit_receivers(scope);
         for singleton in self.enclosing_lexical_singleton_receivers(scope) {
-            if !receivers.contains(&singleton) {
-                receivers.push(singleton);
+            if !entries.iter().any(|receiver| receiver.ty == singleton) {
+                entries.push(SignatureImplicitReceiver::ordinary(singleton));
             }
         }
-        receivers
+        // Match checked member-extension selection: every ordinary dispatch receiver precedes
+        // context-parameter receivers, including lexical singletons/companions; each group's
+        // nearest-first order remains stable.
+        entries.sort_by_key(|receiver| u8::from(receiver.context_parameter));
+        entries.into_iter().map(|receiver| receiver.ty).collect()
     }
 
     /// Classifier stub positions in one source. Built once: range containment is a per-declaration

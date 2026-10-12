@@ -182,6 +182,35 @@ fun box(): String {\n\
 }
 
 #[test]
+fn a_rejected_intersection_call_uses_the_canonical_component() {
+    const SRC: &str = "\
+interface Left { fun choose(value: String): Int = 1 }\n\
+interface Right { fun choose(value: String): Int = 2 }\n\
+class In<in K>\n\
+fun <E> intersect(vararg x: In<E>): E = TODO()\n\
+fun use() = intersect(In<Left>(), In<Right>()).choose(null).inc()\n";
+    let result = common::compiler_diagnostics(&[("IntersectionRejected.kt", SRC)], &[]);
+    let expected = [common::CompilerError {
+        file: "IntersectionRejected.kt".to_string(),
+        line: 5,
+        column: 55,
+        message: "null cannot be a value of a non-null type 'String'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the rejected intersection call"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the rejected intersection call"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
 fn a_canonical_component_can_inherit_the_selected_default() {
     // `Left` does not declare `choose`. Its nearest inherited slot still precedes `Right`'s
     // direct declaration, so the call takes Shared's default. The witness implements both
