@@ -12,7 +12,7 @@ use super::*;
 impl ProductionSignatureSemantics<'_> {
     /// The result of a member call that selection rejected, or the recorded failure. The call has
     /// a result only when exactly one candidate at the nearest scope rank maps every argument to a
-    /// parameter and its declared result needs no type argument.
+    /// parameter and its semantic result is fixed by the explicit type arguments alone.
     pub(super) fn rejected_member_call(
         &self,
         scope: crate::fir::SignatureScope,
@@ -20,6 +20,7 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        type_arguments: &[Ty],
         trailing_lambda: bool,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         let candidates = self
@@ -57,17 +58,40 @@ impl ProductionSignatureSemantics<'_> {
                 .is_some()
         });
         if let (Some(candidate), None) = (mapped.next(), mapped.next()) {
-            let result = candidate.callable.ret;
-            if !result.mentions_ty_param() {
-                if let Ok(ty) = crate::fir::ResolvedTy::new(result) {
-                    return Ok(crate::fir::ResolvedMemberCall {
-                        ty: Some(ty),
-                        declaration: None,
-                    });
-                }
+            if let Some(ty) = self.rejected_candidate_result(candidate, type_arguments) {
+                return Ok(crate::fir::ResolvedMemberCall {
+                    ty: Some(ty),
+                    declaration: None,
+                });
             }
         }
         Err(self.record_member_call_selection_failure(scope, origin, receiver, spelling))
+    }
+
+    /// The candidate's semantic result under the call's explicit type arguments. `None` when the
+    /// result still names a type parameter: one only argument or receiver inference could fix,
+    /// which a rejected call does not perform here.
+    fn rejected_candidate_result(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+        type_arguments: &[Ty],
+    ) -> Option<crate::fir::ResolvedTy> {
+        let signature = candidate.semantic_signature();
+        if !type_arguments.is_empty() && type_arguments.len() != signature.formals.len() {
+            return None;
+        }
+        let bindings = signature
+            .formals
+            .iter()
+            .cloned()
+            .zip(type_arguments.iter().copied())
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        let specialized = crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
+        let result = signature.apply_return_policy(&*self.table.libraries, specialized);
+        if result.mentions_ty_param() {
+            return None;
+        }
+        crate::fir::ResolvedTy::new(result).ok()
     }
 
     fn record_inapplicable_member_call(
