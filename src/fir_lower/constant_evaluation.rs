@@ -11,7 +11,7 @@
 //! An operation kotlinc's interpreter would reject is left alone: an integer division by zero or a
 //! referential comparison.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Ty;
@@ -19,7 +19,7 @@ use crate::types::Ty;
 use super::string_concatenation::ConcatenationPart;
 use crate::fir::{
     FirBinaryOperation, FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversion,
-    FirConversionKind, FirExprId, FirExprKind, FirIntrinsic, FirUnaryOperation,
+    FirConversionKind, FirExpr, FirExprId, FirExprKind, FirIntrinsic, FirUnaryOperation,
 };
 
 /// A constant value together with the type it has as a value, before any widening to a nullable
@@ -46,9 +46,13 @@ pub(super) enum TemplateRun {
 ///
 /// Lowering asks for the value of each operation it reaches, outermost first, so a subtree whose
 /// root is not constant is asked again for each of its operations; the memo keeps that linear.
+///
+/// An expression bound to a runtime temporary is opaque from then on: it has no value and no
+/// structure an operation reading it can fold through.
 #[derive(Default)]
 pub(super) struct ConstantEvaluation {
     values: HashMap<FirExprId, Option<EvaluatedConstant>>,
+    temporaries: HashSet<FirExprId>,
     depth: u32,
 }
 
@@ -110,7 +114,18 @@ impl ConstantEvaluation {
     /// `'1'`, even though the receiver itself is a constant (and is folded as the temporary's
     /// initializer, which lowering has already emitted by the time the receiver is bound).
     pub(super) fn bind_temporary(&mut self, expression: FirExprId) {
-        self.values.insert(expression, None);
+        self.temporaries.insert(expression);
+    }
+
+    /// The checked node an operation reads as its operand, unless the operand is bound to a
+    /// runtime temporary. Every fold that inspects an operand's shape rather than its value
+    /// (`Enum.name` on a direct entry) reads it through here, so a temporary hides the shape just
+    /// as it hides the value.
+    fn operand<'body>(&self, body: &'body FirBody, operand: FirExprId) -> Option<&'body FirExpr> {
+        if self.temporaries.contains(&operand) {
+            return None;
+        }
+        body.expr(operand)
     }
 
     /// A flattened concatenation's parts with each run of constant parts merged into one
@@ -155,6 +170,9 @@ impl ConstantEvaluation {
     }
 
     fn evaluate(&mut self, body: &FirBody, expression: FirExprId) -> Option<EvaluatedConstant> {
+        if self.temporaries.contains(&expression) {
+            return None;
+        }
         if let Some(known) = self.values.get(&expression) {
             return known.clone();
         }
@@ -217,7 +235,7 @@ impl ConstantEvaluation {
                 Some(string(text.finish()))
             }
             FirExprKind::Call(call) => {
-                if let Some(name) = enum_entry_name(body, call) {
+                if let Some(name) = self.enum_entry_name(body, call) {
                     return Some(name);
                 }
                 let FirCallTarget::Intrinsic { operation, .. } = &call.target else {
@@ -243,6 +261,31 @@ impl ConstantEvaluation {
         }
     }
 
+    /// `Enum.name` on a direct entry is that entry's declaration name. The entry expression is not
+    /// itself a constant: evaluating it would initialize the enum. A name read through any other
+    /// receiver, including a safe call's temporary, stays a call.
+    fn enum_entry_name(
+        &self,
+        body: &FirBody,
+        call: &crate::fir::FirCall,
+    ) -> Option<EvaluatedConstant> {
+        let FirCallTarget::Intrinsic {
+            operation: FirIntrinsic::EnumName,
+            ..
+        } = &call.target
+        else {
+            return None;
+        };
+        let receiver = call.dispatch_receiver?;
+        if receiver.conversion.is_some() {
+            return None;
+        }
+        let FirExprKind::EnumEntry { name, .. } = &self.operand(body, receiver.value)?.kind else {
+            return None;
+        };
+        Some(string(KtString::from(name.as_ref())))
+    }
+
     fn converted(
         &mut self,
         body: &FirBody,
@@ -255,27 +298,6 @@ impl ConstantEvaluation {
             None => Some(value),
         }
     }
-}
-
-/// `Enum.name` on a direct entry is that entry's declaration name. The entry expression is not
-/// itself a constant: evaluating it would initialize the enum. A name read through any other
-/// receiver stays a call.
-fn enum_entry_name(body: &FirBody, call: &crate::fir::FirCall) -> Option<EvaluatedConstant> {
-    let FirCallTarget::Intrinsic {
-        operation: FirIntrinsic::EnumName,
-        ..
-    } = &call.target
-    else {
-        return None;
-    };
-    let receiver = call.dispatch_receiver?;
-    if receiver.conversion.is_some() {
-        return None;
-    }
-    let FirExprKind::EnumEntry { name, .. } = &body.expr(receiver.value)?.kind else {
-        return None;
-    };
-    Some(string(KtString::from(name.as_ref())))
 }
 
 fn string(value: KtString) -> EvaluatedConstant {
