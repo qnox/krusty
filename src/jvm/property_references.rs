@@ -476,6 +476,7 @@ fn classifier_property(
             protected_getter_bridge: None,
             protected_setter_bridge: None,
             member_access_bridge: None,
+            hoisted_companion_static: None,
         },
     )
 }
@@ -667,6 +668,7 @@ fn external_property(
             protected_getter_bridge: None,
             protected_setter_bridge: None,
             member_access_bridge: None,
+            hoisted_companion_static: None,
         },
     ))
 }
@@ -993,6 +995,7 @@ fn module_property(
             protected_getter_bridge: None,
             protected_setter_bridge: None,
             member_access_bridge: access_bridge.then_some(target),
+            hoisted_companion_static: None,
         },
     ))
 }
@@ -1063,6 +1066,7 @@ pub(crate) fn retarget_hoisted_companion_references(
 ) {
     struct Retarget {
         class_index: usize,
+        static_index: u32,
         outer: TypeName,
         getter_call: String,
         getter_descriptor: String,
@@ -1126,6 +1130,7 @@ pub(crate) fn retarget_hoisted_companion_references(
             .map(|name| format!("access${name}$cp"));
         pending.push(Retarget {
             class_index,
+            static_index,
             outer,
             getter_call: format!("access${declared_getter}$cp"),
             getter_descriptor,
@@ -1157,6 +1162,7 @@ pub(crate) fn retarget_hoisted_companion_references(
         realization.getter_field = None;
         realization.setter_field = None;
         realization.member_access_bridge = None;
+        realization.hoisted_companion_static = Some(update.static_index);
         realization.accessor_names_are_physical = true;
         if update.setter_call.is_some() {
             realization.physical_setter_value = Some(update.physical);

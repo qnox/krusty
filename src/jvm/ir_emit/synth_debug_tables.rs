@@ -222,34 +222,6 @@ pub(super) fn attach_synth_debug_tables(
             );
         }
     }
-    // A companion OUTER's `access$…$cp` bridges: kotlinc maps each to the CLASS declaration line
-    // (getter bridges carry only the LineNumberTable; the setter bridge also names its `<set-?>`
-    // value parameter).
-    for s in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, s)| {
-            ir.is_jvm_companion_hoisted_static(*index as u32)
-                && !ir.is_jvm_field_static(*index as u32)
-                && s.owner_matches(&c.fq_name())
-        })
-        .map(|(_, s)| s)
-    {
-        let pd = crate::jvm::names::type_descriptor(jvm_declared_ty(&s.ty));
-        let getter_bridge = format!("access${}$cp", crate::names::property_getter_name(&s.name));
-        cw.set_method_debug(&getter_bridge, &format!("(){pd}"), Some((0, line)), &[]);
-        if s.is_var {
-            let setter_bridge =
-                format!("access${}$cp", crate::names::property_setter_name(&s.name));
-            cw.set_method_debug(
-                &setter_bridge,
-                &format!("({pd})V"),
-                Some((0, line)),
-                &[("<set-?>".to_string(), pd.clone(), 0)],
-            );
-        }
-    }
     // A `@JvmInline value class`'s synthesized members: the static `-impl` family (taking the erased
     // underlying) and their instance delegators. kotlinc gives each a LocalVariableTable but no
     // LineNumberTable; the static impls name their parameter positionally (`arg0`/`v`/`p1`/`p2`) except

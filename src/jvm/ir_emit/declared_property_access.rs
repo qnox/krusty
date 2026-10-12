@@ -248,67 +248,100 @@ impl Emitter<'_> {
         writable: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
-        let static_id = self.ir.jvm_companion_property_static(companion, property)?;
-        let storage = self.ir.statics.get(static_id as usize)?;
-        let owner = storage.owner?;
-        let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
-        let declared = self
-            .ir
-            .classes
-            .iter()
-            .find(|class| class.fq_name == companion)?
-            .properties
-            .get(property as usize)?;
-        // A declared accessor is user code. The outer `<clinit>` calls it (through
-        // `access$get…` / `access$set…` when it is private) instead of touching the field.
-        // The accessor body and the declaration initializer store are the field operations.
-        let calls_declared_accessor = if writable {
-            declared.modifiers.declared_setter
-        } else {
-            declared.modifiers.declared_getter
-        };
-        if calls_declared_accessor {
-            return None;
-        }
-        let private_property = declared.is_private;
-        let property_name = declared.name.clone();
-        let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
-        if emitted_by_owner || self.ir.is_jvm_field_static(static_id) {
+        let storage = hoisted_companion_storage(self.ir, companion, property, writable)?;
+        let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(storage.owner));
+        if emitted_by_owner || self.ir.is_jvm_field_static(storage.index) {
             return Some(PropertyAccess::Field {
-                owner,
-                name: self.ir.static_field_jvm_name(static_id).to_string(),
-                descriptor,
+                owner: storage.owner,
+                name: self.ir.static_field_jvm_name(storage.index).to_string(),
+                descriptor: storage.descriptor(self.ir),
                 is_static: true,
             });
         }
-        if !private_property {
+        if !storage.bridged {
             return None;
         }
-        let (name, descriptor) = if writable {
-            (
-                format!(
-                    "access${}$cp",
-                    crate::names::property_setter_name(&property_name)
-                ),
-                format!("({descriptor})V"),
-            )
-        } else {
-            (
-                format!(
-                    "access${}$cp",
-                    crate::names::property_getter_name(&property_name)
-                ),
-                format!("(){descriptor}"),
-            )
-        };
+        let (name, descriptor) = storage.bridge_shape(self.ir, writable);
         Some(PropertyAccess::AccessBridge {
-            owner,
+            owner: storage.owner,
             name,
             descriptor,
             takes_receiver: false,
             inline_uninitialized_guard: None,
         })
     }
+}
+
+/// The outer-class static field that holds a hoisted companion property, as one use reaches it.
+pub(super) struct HoistedCompanionStorage {
+    pub(super) index: u32,
+    /// The outer class that declares the field.
+    pub(super) owner: TypeName,
+    /// A class other than `owner` reaches the field through `access$get…$cp` / `access$set…$cp`:
+    /// the property is private, so it has no accessor of its own.
+    pub(super) bridged: bool,
+}
+
+impl HoistedCompanionStorage {
+    fn descriptor(&self, ir: &IrFile) -> String {
+        type_descriptor(jvm_declared_ty(&ir.statics[self.index as usize].ty))
+    }
+
+    /// The name and descriptor of the outer class's `$cp` bridge for a read, or a write.
+    pub(super) fn bridge_shape(&self, ir: &IrFile, writable: bool) -> (String, String) {
+        hoisted_bridge_shape(ir, self.index, writable)
+    }
+}
+
+/// `access$get<X>$cp` / `access$set<X>$cp` of hoisted static `index`, with its descriptor.
+pub(super) fn hoisted_bridge_shape(ir: &IrFile, index: u32, writable: bool) -> (String, String) {
+    let storage = &ir.statics[index as usize];
+    let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
+    if writable {
+        (
+            format!("access${}$cp", property_setter_name(&storage.name)),
+            format!("({descriptor})V"),
+        )
+    } else {
+        (
+            format!("access${}$cp", property_getter_name(&storage.name)),
+            format!("(){descriptor}"),
+        )
+    }
+}
+
+/// The hoisted field a read (or write) of companion property `property` uses, when the
+/// property's field moved to the outer class and the use is not a declared accessor's call: a
+/// declared accessor is user code, which the outer `<clinit>` calls too (through `access$get…` /
+/// `access$set…` when it is private). The accessor body and the declaration initializer store are
+/// the field operations.
+pub(super) fn hoisted_companion_storage(
+    ir: &IrFile,
+    companion: TypeName,
+    property: u32,
+    writable: bool,
+) -> Option<HoistedCompanionStorage> {
+    let index = ir.jvm_companion_property_static(companion, property)?;
+    let owner = ir.statics.get(index as usize)?.owner?;
+    let declared = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name == companion)?
+        .properties
+        .get(property as usize)?;
+    let calls_declared_accessor = if writable {
+        declared.modifiers.declared_setter
+    } else {
+        declared.modifiers.declared_getter
+    };
+    if calls_declared_accessor {
+        return None;
+    }
+    Some(HoistedCompanionStorage {
+        index,
+        owner,
+        bridged: declared.is_private && !ir.is_jvm_field_static(index),
+    })
 }
 
 /// Descriptor of an annotation-interface member. `KClass` is returned as `java.lang.Class`.

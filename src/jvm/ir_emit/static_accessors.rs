@@ -55,6 +55,10 @@ pub(super) enum StaticAccessor {
     /// `access$set<X>$p(<owner>, value)` that writes the backing field, including when the
     /// property declares a setter.
     FieldSetter { class: u32, property: u32 },
+    /// `access$get<X>$cp`, reading hoisted companion field `index` on the outer class that holds it.
+    HoistedGetter(u32),
+    /// `access$set<X>$cp`, writing hoisted companion field `index`.
+    HoistedSetter(u32),
     /// `access$get<Companion>$p()` (or `…$p$s<hash>()` on a class other than `holder`), reading
     /// `holder`'s `Companion` field that holds singleton `companion`.
     CompanionInstance {
@@ -381,6 +385,7 @@ pub(super) fn plan(
                 .map(|line| (*class, *line))
         })
         .collect::<HashMap<_, _>>();
+    let root_lines = synthesized_companion_accessor_lines(ir);
     let mut uses = Vec::new();
     // An inline declaration exports its private helper even when this module has no caller in
     // another class: compiled clients must have the same public synthetic access boundary.
@@ -409,7 +414,7 @@ pub(super) fn plan(
                     walk.collect(
                         context.owner,
                         root,
-                        0,
+                        root_lines.get(&root).copied().unwrap_or(0),
                         &carriers,
                         body_exports_private_access(ir, &exporting_private_access, root),
                         &mut uses,
@@ -442,6 +447,49 @@ pub(super) fn plan(
         }
     }
     plan
+}
+
+/// The line each synthesized accessor of a hoisted companion property takes as a whole, by body.
+///
+/// kotlinc creates synthetic accessors as it visits the file's declarations. A compiler-supplied
+/// accessor has no source line of its own; it stands at its property, after the accessor the
+/// source declared, whose uses kotlinc meets first.
+fn synthesized_companion_accessor_lines(ir: &IrFile) -> HashMap<crate::ir::ExprId, u32> {
+    let mut lines = HashMap::new();
+    for class in ir.classes.iter().filter(|class| class.is_companion) {
+        for (index, property) in class.properties.iter().enumerate() {
+            let Some(storage) = ir.jvm_companion_property_static(class.fq_name, index as u32)
+            else {
+                continue;
+            };
+            let declared_line = |declared: bool, accessor: Option<u32>| {
+                accessor
+                    .filter(|_| declared)
+                    .and_then(|function| ir.fn_decl_lines.get(&function).copied())
+            };
+            let line = [
+                Some(ir.statics[storage as usize].line),
+                declared_line(property.modifiers.declared_getter, property.getter),
+                declared_line(property.modifiers.declared_setter, property.setter),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(0);
+            let synthesized = [
+                (property.modifiers.declared_getter, property.getter),
+                (property.modifiers.declared_setter, property.setter),
+            ];
+            for (_, function) in synthesized.iter().filter(|(declared, _)| !declared) {
+                if let Some(body) =
+                    function.and_then(|function| ir.functions[function as usize].body)
+                {
+                    lines.insert(body, line);
+                }
+            }
+        }
+    }
+    lines
 }
 
 /// Whether `accessor` would emit the private-member bridge that already calls this getter or setter.
@@ -537,6 +585,30 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
         .flatten()
         {
             uses.push(walk.protected_use(0, ProtectedMemberAccessBridge::of_reference(bridge)));
+        }
+        // A private companion property whose field moved to the outer class is read, and by a
+        // mutable carrier written, through that class's `$cp` accessors.
+        if let Some(index) = realization.hoisted_companion_static {
+            let owner = ir.statics[index as usize]
+                .owner
+                .map(StaticOwner::Class)
+                .expect("a hoisted companion field has an outer class");
+            uses.push(Use {
+                line: 0,
+                owner,
+                accessor: StaticAccessor::HoistedGetter(index),
+            });
+            if class
+                .prop_ref
+                .as_ref()
+                .is_some_and(|reference| reference.mutable)
+            {
+                uses.push(Use {
+                    line: 0,
+                    owner,
+                    accessor: StaticAccessor::HoistedSetter(index),
+                });
+            }
         }
         // A private member property's carrier reads, and a mutable one writes, through the
         // owner's field accessors; a property without a field has no such accessor.
@@ -721,6 +793,11 @@ impl Walk<'_> {
                 | StaticAccessor::Setter(_)
                 | StaticAccessor::FieldGetter { .. }
                 | StaticAccessor::FieldSetter { .. } => context != owner || export_private,
+                // The outer class reads and writes its own field; every other class, the companion
+                // included, uses the bridge.
+                StaticAccessor::HoistedGetter(_) | StaticAccessor::HoistedSetter(_) => {
+                    context != owner
+                }
                 // Placed by `companion_field_accessor`, which already decided it is needed.
                 StaticAccessor::CompanionInstance { .. } => true,
                 StaticAccessor::Protected(_) => true,
@@ -760,20 +837,84 @@ impl Walk<'_> {
             )),
             IrExpr::GetStatic(index) => bridged_getter(self.ir, *index)
                 .or_else(|| declared_backing_getter(self.ir, *index))
-                .map(|storage| (storage.owner, StaticAccessor::Getter(*index))),
+                .map(|storage| (storage.owner, StaticAccessor::Getter(*index)))
+                .or_else(|| hoisted_field_accessor(self.ir, *index, false)),
             IrExpr::SetStatic { index, .. } => bridged_setter(self.ir, *index)
                 .or_else(|| declared_backing_setter(self.ir, *index))
-                .map(|storage| (storage.owner, StaticAccessor::Setter(*index))),
+                .map(|storage| (storage.owner, StaticAccessor::Setter(*index)))
+                .or_else(|| hoisted_field_accessor(self.ir, *index, true)),
             IrExpr::GetField { class, index, .. } => {
                 self.backing_field_accessor(*class, *index, false)
             }
             IrExpr::SetField { class, index, .. } => {
                 self.backing_field_accessor(*class, *index, true)
             }
-            IrExpr::PropertyRead { .. } => self.private_member_property(expression, true),
-            IrExpr::PropertyWrite { .. } => self.private_member_property(expression, false),
+            IrExpr::PropertyRead { .. } => self
+                .hoisted_companion_property(expression, false)
+                .or_else(|| self.private_member_property(expression, true)),
+            IrExpr::PropertyWrite { .. } => self
+                .hoisted_companion_property(expression, true)
+                .or_else(|| self.private_member_property(expression, false)),
             _ => None,
         }
+    }
+
+    /// The `$cp` accessor a read or write of a private companion property uses when its field
+    /// moved to the outer class: the property selected by the operation's own coordinate, or by
+    /// the active-source declaration it was realized against. A physically realized access names
+    /// its own member.
+    fn hoisted_companion_property(
+        &self,
+        expression: crate::ir::ExprId,
+        write: bool,
+    ) -> Option<(StaticOwner, StaticAccessor)> {
+        let (operation, owner, name) = match self.ir.expr(expression) {
+            IrExpr::PropertyRead {
+                operation,
+                owner,
+                name,
+                ..
+            }
+            | IrExpr::PropertyWrite {
+                operation,
+                owner,
+                name,
+                ..
+            } => (operation.unwrap_or(expression), *owner, name.as_str()),
+            _ => return None,
+        };
+        let (owner, name) = match self.property_realizations.get(operation) {
+            Some(crate::jvm::property_realizations::PropertyRealization::Physical(_)) => {
+                return None
+            }
+            Some(crate::jvm::property_realizations::PropertyRealization::Local(target)) => {
+                match self.ir.local_property_layouts.get(target)? {
+                    crate::ir::IrLocalPropertyLayout::Member { owner, name, .. } => {
+                        (*owner, name.as_str())
+                    }
+                    _ => return None,
+                }
+            }
+            None => (owner, name),
+        };
+        let property = self
+            .ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name == owner)?
+            .properties
+            .iter()
+            .position(|property| property.name == name)? as u32;
+        let storage = super::declared_property_access::hoisted_companion_storage(
+            self.ir, owner, property, write,
+        )
+        .filter(|storage| storage.bridged)?;
+        let accessor = if write {
+            StaticAccessor::HoistedSetter(storage.index)
+        } else {
+            StaticAccessor::HoistedGetter(storage.index)
+        };
+        Some((StaticOwner::Class(storage.owner), accessor))
     }
 
     /// The field accessor a read or write of a private member property uses, when common lowering
@@ -851,6 +992,25 @@ impl Walk<'_> {
     }
 }
 
+/// The outer class's `$cp` accessor for a `getstatic` / `putstatic` of hoisted companion field
+/// `index` emitted in another class. A `@JvmField` field is public and is reached directly.
+fn hoisted_field_accessor(
+    ir: &IrFile,
+    index: u32,
+    write: bool,
+) -> Option<(StaticOwner, StaticAccessor)> {
+    if !ir.is_jvm_companion_hoisted_static(index) || ir.is_jvm_field_static(index) {
+        return None;
+    }
+    let owner = ir.statics[index as usize].owner?;
+    let accessor = if write {
+        StaticAccessor::HoistedSetter(index)
+    } else {
+        StaticAccessor::HoistedGetter(index)
+    };
+    Some((StaticOwner::Class(owner), accessor))
+}
+
 /// Append `owner`'s planned accessors to its class, with kotlinc's debug tables: each maps its
 /// body to the line the owner is declared on (a facade's is the file's first) and names the
 /// parameters it forwards. An interface's accessors are `public static synthetic`, every other
@@ -881,6 +1041,8 @@ pub(super) fn emit(
             StaticAccessor::Function(function) => accessor.function(function, cw),
             StaticAccessor::Getter(index) => accessor.getter(index, cw),
             StaticAccessor::Setter(index) => accessor.setter(index, cw),
+            StaticAccessor::HoistedGetter(index) => accessor.hoisted_getter(index, cw),
+            StaticAccessor::HoistedSetter(index) => accessor.hoisted_setter(index, cw),
             StaticAccessor::MemberGetter { class, property } => {
                 accessor.member_getter(class, property, cw)
             }
@@ -1350,6 +1512,52 @@ impl Accessor<'_> {
         code.putstatic(field, words as i32);
         code.ret_void();
         cw.seed_utf8("<set-?>");
+        code.ensure_locals(words);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+        cw.set_method_debug(
+            &name,
+            &descriptor,
+            None,
+            &[("<set-?>".to_string(), type_descriptor(ty), 0)],
+        );
+    }
+
+    /// `access$get<X>$cp`: the outer class's read of a hoisted companion field. Its name and
+    /// descriptor intern before the body's field reference.
+    fn hoisted_getter(&self, index: u32, cw: &mut ClassWriter) {
+        let ty = jvm_declared_ty(&self.ir.statics[index as usize].ty);
+        let (name, descriptor) =
+            super::declared_property_access::hoisted_bridge_shape(self.ir, index, false);
+        cw.reserve_method_name(&name);
+        cw.seed_utf8(&descriptor);
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(self.declaration_line);
+        let field = self.field(index, ty, cw);
+        code.getstatic(field, slot_words(ty) as i32);
+        emit_return(ty, &mut code);
+        code.ensure_locals(0);
+        code.link();
+        cw.add_method(self.flags, &name, &descriptor, &code);
+    }
+
+    /// `access$set<X>$cp`: the outer class's write of a hoisted companion field. Its
+    /// `<set-?>` LocalVariableTable strings intern at the method visit, before the body.
+    fn hoisted_setter(&self, index: u32, cw: &mut ClassWriter) {
+        let ty = jvm_declared_ty(&self.ir.statics[index as usize].ty);
+        let (name, descriptor) =
+            super::declared_property_access::hoisted_bridge_shape(self.ir, index, true);
+        cw.reserve_method_name(&name);
+        cw.seed_utf8(&descriptor);
+        cw.seed_utf8("<set-?>");
+        cw.seed_utf8(&type_descriptor(ty));
+        let words = slot_words(ty);
+        let mut code = CodeBuilder::new(words);
+        code.mark_line(self.declaration_line);
+        load(ty, 0, &mut code);
+        let field = self.field(index, ty, cw);
+        code.putstatic(field, words as i32);
+        code.ret_void();
         code.ensure_locals(words);
         code.link();
         cw.add_method(self.flags, &name, &descriptor, &code);

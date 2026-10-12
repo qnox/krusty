@@ -3095,7 +3095,6 @@ fn emit_class(
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
-    static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
     static_accessors::emit(
         ir,
         env.run,
@@ -4139,7 +4138,15 @@ fn emit_enum_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
-    static_fields::emit_hoisted_companion_bridges(ir, &fq, &mut cw);
+    static_accessors::emit(
+        ir,
+        env.run,
+        &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Class(c.fq_name),
+        facade,
+        c.decl_start_line.max(c.decl_line),
+        &mut cw,
+    );
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.

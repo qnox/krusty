@@ -462,6 +462,7 @@ mod tests {
                 protected_getter_bridge: None,
                 protected_setter_bridge: None,
                 member_access_bridge: None,
+                hoisted_companion_static: None,
             },
         );
         let under = Under::from_iter([(vault, Ty::Int)]);
