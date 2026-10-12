@@ -514,25 +514,34 @@ pub(super) fn emit_class_static_fields(
         // plugin generated, say — records them on the class itself. The companion path keeps its
         // `@JvmField` condition, which is what that annotation has always meant there: it is the
         // reason the field is the property's whole JVM surface.
-        if let Some(annotations) = c
-            .companion_class
-            .and_then(|companion| ir.class_id_by_name(companion))
-            .filter(|_| jvm_field)
-            .and_then(|companion| {
-                ir.classes[companion as usize]
-                    .field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == s.name)
-            })
-            .or_else(|| {
-                c.field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == s.name)
-            })
-        {
+        if let Some(annotations) = static_field_annotations(ir, c, &s.name, jvm_field) {
             cw.set_last_late_field_annotations(&annotations.annotations);
         }
     }
+}
+
+fn static_field_annotations<'a>(
+    ir: &'a IrFile,
+    owner: &'a IrClass,
+    field: &str,
+    jvm_field: bool,
+) -> Option<&'a crate::ir::FieldAnnotations> {
+    owner
+        .companion_class
+        .and_then(|companion| ir.class_id_by_name(companion))
+        .filter(|_| jvm_field)
+        .and_then(|companion| {
+            ir.classes[companion as usize]
+                .field_annotations
+                .iter()
+                .find(|annotations| annotations.field == field)
+        })
+        .or_else(|| {
+            owner
+                .field_annotations
+                .iter()
+                .find(|annotations| annotations.field == field)
+        })
 }
 
 /// An enum class's own statics, after its property fields and before its entry constants: a
@@ -540,6 +549,7 @@ pub(super) fn emit_class_static_fields(
 /// $cachedSerializer$delegate, <entries>`), and its companion's hoisted properties.
 pub(super) fn emit_enum_static_fields(
     ir: &IrFile,
+    c: &IrClass,
     fq: &str,
     signature_formatter: &JvmSignatureFormatter<'_>,
     cw: &mut ClassWriter,
@@ -554,8 +564,9 @@ pub(super) fn emit_enum_static_fields(
         // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path). A hoisted
         // companion property's field is private unless `@JvmField` makes it the property's surface.
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
+        let jvm_field = ir.is_jvm_field_static(index);
         let private = s.visibility.is_private() || ir.is_jvm_companion_hoisted_static(index);
-        let acc = if private && !ir.is_jvm_field_static(index) {
+        let acc = if private && !jvm_field {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -578,6 +589,9 @@ pub(super) fn emit_enum_static_fields(
             constant,
             ann,
         );
+        if let Some(annotations) = static_field_annotations(ir, c, &s.name, jvm_field) {
+            cw.set_last_late_field_annotations(&annotations.annotations);
+        }
     }
 }
 

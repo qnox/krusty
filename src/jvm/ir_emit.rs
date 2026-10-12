@@ -3739,7 +3739,7 @@ fn emit_enum_class(
             nullability,
         );
     }
-    static_fields::emit_enum_static_fields(ir, &fq, &signature_formatter, &mut cw);
+    static_fields::emit_enum_static_fields(ir, c, &fq, &signature_formatter, &mut cw);
     // One static-final constant per entry, plus the private `$VALUES` array. kotlinc visits the
     // fields after the methods, so each name interns where a body first references it (`$values`
     // reads every entry), or at the field visit.

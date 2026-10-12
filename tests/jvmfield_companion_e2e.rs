@@ -101,6 +101,25 @@ fn jvmfield_internal_companion_val_owner_is_byte_identical() {
     );
 }
 
+/// An enum uses the same hoisted-field path as a class: both `@JvmField` itself and a BINARY-retained
+/// field-targeted annotation remain on the public static field owned by the enum.
+#[test]
+fn jvmfield_enum_companion_field_annotations_are_byte_identical() {
+    assert_byte_identical(
+        "package demo\n\
+         @Target(AnnotationTarget.FIELD)\n\
+         @Retention(AnnotationRetention.BINARY)\n\
+         annotation class Marker\n\
+         enum class E {\n\
+             A;\n\
+             companion object {\n\
+                 @JvmField @field:Marker val Named: String = \"x\"\n\
+             }\n\
+         }\n",
+        "demo/E",
+    );
+}
+
 // ---- Byte identity: interface owner --------------------------------------------------------------
 
 /// kotlinc hoists an interface companion's `@JvmField val` onto the INTERFACE as `public static
