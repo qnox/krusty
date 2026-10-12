@@ -141,18 +141,37 @@ fn default_check_selection(
 /// initial Pass-1 parser and compact header environment are still live. Only the detached checked
 /// FIR returned from this function survives consumption of `headers`; provider/root selection is
 /// transient stack state.
-#[allow(clippy::too_many_arguments)]
+pub(super) struct DefaultPreparationInputs<'a> {
+    pub(super) files: &'a [File],
+    pub(super) local_contexts: &'a [crate::resolve::PassOneLocalClassContext],
+    pub(super) skip: &'a [bool],
+    pub(super) checked_count: usize,
+}
+
+pub(super) struct DefaultPreparationState<'a> {
+    pub(super) headers: &'a mut crate::fir::StreamedHeaderModule,
+    pub(super) index: &'a mut crate::fir::ResolvedModuleIndex,
+    pub(super) symbols: &'a mut FrontendSymbols,
+    pub(super) diags: &'a mut crate::diag::DiagSink,
+}
+
 pub(super) fn defaults(
-    headers: &mut crate::fir::StreamedHeaderModule,
-    index: &mut crate::fir::ResolvedModuleIndex,
+    inputs: DefaultPreparationInputs<'_>,
+    state: DefaultPreparationState<'_>,
     mut providers: Vec<crate::fir::DefaultArgumentProvider>,
-    files: &[File],
-    local_contexts: &[crate::resolve::PassOneLocalClassContext],
-    skip: &[bool],
-    checked_count: usize,
-    symbols: &mut FrontendSymbols,
-    diags: &mut crate::diag::DiagSink,
 ) -> Option<crate::fir::DefaultArgumentStore> {
+    let DefaultPreparationInputs {
+        files,
+        local_contexts,
+        skip,
+        checked_count,
+    } = inputs;
+    let DefaultPreparationState {
+        headers,
+        index,
+        symbols,
+        diags,
+    } = state;
     providers.sort_by(|left, right| {
         (
             left.target,
@@ -186,17 +205,21 @@ pub(super) fn defaults(
         }
         diags.set_file(raw_source as u32);
         if !check_default_source(
-            &files[raw_source],
-            &local_contexts[raw_source],
-            raw_source,
-            &selection,
-            &mut providers,
-            symbols,
-            index,
-            &mut headers.sources,
-            &mut store,
-            &mut sessions[raw_source],
-            diags,
+            DefaultSourceInput {
+                file: &files[raw_source],
+                local_context: &local_contexts[raw_source],
+                raw_source,
+                selection: &selection,
+            },
+            DefaultSourceState {
+                providers: &mut providers,
+                symbols,
+                index,
+                sources: &mut headers.sources,
+                store: &mut store,
+                session: &mut sessions[raw_source],
+                diags,
+            },
         ) {
             return None;
         }
@@ -208,20 +231,39 @@ pub(super) fn defaults(
     Some(store)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn check_default_source(
-    file: &File,
-    local_context: &crate::resolve::PassOneLocalClassContext,
+struct DefaultSourceInput<'a> {
+    file: &'a File,
+    local_context: &'a crate::resolve::PassOneLocalClassContext,
     raw_source: usize,
-    selection: &DefaultCheckSelection,
-    providers: &mut Vec<crate::fir::DefaultArgumentProvider>,
-    symbols: &mut FrontendSymbols,
-    index: &mut crate::fir::ResolvedModuleIndex,
-    sources: &mut crate::fir::SourceMap,
-    store: &mut crate::fir::DefaultArgumentStore,
-    session: &mut crate::fir::BodyCheckSession,
-    diags: &mut crate::diag::DiagSink,
-) -> bool {
+    selection: &'a DefaultCheckSelection,
+}
+
+struct DefaultSourceState<'a> {
+    providers: &'a mut Vec<crate::fir::DefaultArgumentProvider>,
+    symbols: &'a mut FrontendSymbols,
+    index: &'a mut crate::fir::ResolvedModuleIndex,
+    sources: &'a mut crate::fir::SourceMap,
+    store: &'a mut crate::fir::DefaultArgumentStore,
+    session: &'a mut crate::fir::BodyCheckSession,
+    diags: &'a mut crate::diag::DiagSink,
+}
+
+fn check_default_source(input: DefaultSourceInput<'_>, state: DefaultSourceState<'_>) -> bool {
+    let DefaultSourceInput {
+        file,
+        local_context,
+        raw_source,
+        selection,
+    } = input;
+    let DefaultSourceState {
+        providers,
+        symbols,
+        index,
+        sources,
+        store,
+        session,
+        diags,
+    } = state;
     let source = crate::fir::SourceFileId::from_raw(raw_source as u32);
     let mut items = Vec::new();
     providers.retain(|provider| {
