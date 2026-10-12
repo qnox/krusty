@@ -28,7 +28,9 @@ mod tests;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
-use super::analysis::{analyze_with, opcode, AnalyzerError, AnalyzerOptions, Frame, PlainFrames};
+use super::analysis::{
+    analyze_with, opcode, AnalyzerError, AnalyzerOptions, FrameView, Frames, PlainFrames,
+};
 use super::opcodes::*;
 use super::optimization_limits::fits_source_interpreter;
 use super::redundant_boxing::is_primitive_boxing_insn;
@@ -96,7 +98,7 @@ fn longer_when_fused_with_pop(value: &SourceValue, nodes: &[Node]) -> bool {
 /// them; `None` when a value straddles either boundary or the stack is too shallow
 /// (`peekWords`).
 fn peek_words(
-    frame: &Frame<SourceValue>,
+    frame: FrameView<'_, SourceValue>,
     first: usize,
     second: usize,
 ) -> Option<Vec<&SourceValue>> {
@@ -119,7 +121,7 @@ fn peek_words(
 /// The transformations one run decides, by node index.
 struct Run<'a> {
     nodes: &'a [Node],
-    frames: &'a [Option<Frame<SourceValue>>],
+    frames: &'a Frames<SourceValue>,
     dont_touch: Vec<bool>,
 }
 
@@ -137,7 +139,7 @@ impl Run<'_> {
     /// The first walk: the `pop`s and stack shuffles that keep their operands' pushers.
     fn mark_hazards(&mut self) {
         for (index, node) in self.nodes.iter().enumerate() {
-            let (Node::Insn(insn), Some(frame)) = (node, &self.frames[index]) else {
+            let (Node::Insn(insn), Some(frame)) = (node, self.frames.get(index)) else {
                 continue;
             };
             let words = match opcode(insn) {
@@ -184,8 +186,9 @@ impl Run<'_> {
             return Ok(Transformation::ReplaceWithNop);
         }
         if is_primitive_boxing_insn(insn) || is_primitive_type_conversion(insn) {
-            let input = self.frames[source]
-                .as_ref()
+            let input = self
+                .frames
+                .get(source)
                 .ok_or_else(|| error("a dead instruction used by a live one"))?
                 .stack
                 .last()
@@ -207,7 +210,7 @@ impl Run<'_> {
     fn transformations(&self) -> Result<BTreeMap<usize, Transformation>, AnalyzerError> {
         let mut transformations = BTreeMap::new();
         for (index, node) in self.nodes.iter().enumerate() {
-            let (Node::Insn(Insn::Op(POP)), Some(frame)) = (node, &self.frames[index]) else {
+            let (Node::Insn(Insn::Op(POP)), Some(frame)) = (node, self.frames.get(index)) else {
                 continue;
             };
             let Some(top) = frame.stack.last() else {

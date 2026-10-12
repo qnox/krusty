@@ -175,9 +175,10 @@ fn constructor_arguments(insn: &Insn) -> Option<usize> {
 }
 
 /// `getUninitializedValueForConstructorCall`: the object a constructor call initializes, when it
-/// came from a `new` in this method: the `new`'s index and the value the object becomes.
+/// came from a `new` in this method: the `new`'s index and the value the object becomes. `stack` is
+/// the operand stack before the call.
 fn uninitialized_receiver(
-    frame: &Frame<NewValue>,
+    stack: &[NewValue],
     insn: &Insn,
     special_method: bool,
     index: usize,
@@ -188,11 +189,10 @@ fn uninitialized_receiver(
     // `peek(arguments + 1)`: the value under the receiver the call consumes, which stays behind as
     // the constructed object.
     let peek = |offset: usize| {
-        frame
-            .stack
+        stack
             .len()
             .checked_sub(offset + 1)
-            .and_then(|at| frame.stack.get(at))
+            .and_then(|at| stack.get(at))
     };
     match peek(arguments + 1) {
         Some(NewValue::Uninitialized { new, object }) => {
@@ -225,7 +225,8 @@ impl Executor<NewValueInterpreter> for NewValueFrames {
         at: &At,
         interpreter: &mut NewValueInterpreter,
     ) -> Result<(), AnalyzerError> {
-        let initializes = uninitialized_receiver(frame, at.insn, self.special_method, at.index)?;
+        let initializes =
+            uninitialized_receiver(&frame.stack, at.insn, self.special_method, at.index)?;
         frame.execute(at, interpreter)?;
         if let Some((_, object)) = initializes {
             frame.stack.pop();
@@ -291,7 +292,7 @@ pub(crate) fn process_uninitialized_stores(
         let Node::Insn(insn) = &snapshot.nodes[index] else {
             continue;
         };
-        let Some((new, _)) = uninitialized_receiver(frame, insn, special_method, index)
+        let Some((new, _)) = uninitialized_receiver(frame.stack, insn, special_method, index)
             .map_err(CoroutineError::Analysis)?
         else {
             continue;
