@@ -40,6 +40,17 @@ pub(super) fn clinit_initializer(
         .filter(|&init| !(s.is_const && const_value_idx_peek(ir, init)))
 }
 
+/// The store `<clinit>` emits for static `s`: [`clinit_initializer`], unless that initializer is
+/// the field's JVM default (`var count: Int = 0`), which kotlinc's `visitSetField` drops from a
+/// class initializer as the same elision instance fields get from `elide_default_property_stores`.
+pub(super) fn stored_clinit_initializer(
+    ir: &IrFile,
+    s: &crate::ir::IrStatic,
+) -> Option<crate::ir::ExprId> {
+    clinit_initializer(ir, s)
+        .filter(|&init| !crate::jvm::fresh_storage::holds_fresh_value(ir, s.ty, init))
+}
+
 pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) {
     // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
     // facade — see `emit_owned_consts`.
@@ -114,14 +125,6 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             field_ann,
         );
     }
-    // A store the JVM already performs is pure redundancy: kotlinc emits no `<clinit>` store for a
-    // `const val` folded into a `ConstantValue`, nor for an initializer that IS the field's default
-    // (`val absent: String? = null`, `var count: Int = 0`) — the same elision instance fields get
-    // from `elide_default_property_stores`.
-    let stored_initializer = |s: &crate::ir::IrStatic| {
-        clinit_initializer(ir, s)
-            .filter(|&init| !crate::jvm::fresh_storage::holds_fresh_value(ir, s.ty, init))
-    };
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
     // interns. Every initializer that is not folded into a `ConstantValue` gives the facade a
     // `<clinit>`, even when its store is elided above (`var x = 0` leaves a lone `return`); a
@@ -157,7 +160,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
     let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
     for &(index, s) in &facade_statics {
-        let Some(init) = stored_initializer(s) else {
+        let Some(init) = stored_clinit_initializer(ir, s) else {
             continue;
         };
         if s.line != 0 {
@@ -531,6 +534,52 @@ pub(super) fn emit_class_static_fields(
     }
 }
 
+/// An enum class's own statics, after its property fields and before its entry constants: a
+/// `@Serializable enum`'s `$cachedSerializer$delegate` (`Companion, value,
+/// $cachedSerializer$delegate, <entries>`), and its companion's hoisted properties.
+pub(super) fn emit_enum_static_fields(
+    ir: &IrFile,
+    fq: &str,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    cw: &mut ClassWriter,
+) {
+    // Declaration order, as in the class path: a companion `const val` among hoisted properties.
+    let mut owner_statics: Vec<_> = (ir.statics.iter().enumerate())
+        .filter(|(_, s)| s.owner_matches(fq))
+        .map(|(index, s)| (index as u32, s))
+        .collect();
+    owner_statics.sort_by_key(|(_, s)| s.line);
+    for (index, s) in owner_statics {
+        // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path). A hoisted
+        // companion property's field is private unless `@JvmField` makes it the property's surface.
+        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
+        let private = s.visibility.is_private() || ir.is_jvm_companion_hoisted_static(index);
+        let acc = if private && !ir.is_jvm_field_static(index) {
+            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
+        } else {
+            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
+        };
+        // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
+        // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
+        // annotation — the same treatment the class and facade field tables give their statics.
+        let signatures = property_jvm_signatures(signature_formatter, &s.ty, None);
+        let ann = nullability_annotation(field_nullability_kind(ir, fq, &s.name, s.ty))
+            .filter(|_| !s.is_lateinit);
+        // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
+        let constant = (s.init)
+            .filter(|_| s.is_const && !s.is_var && !ir.is_jvm_companion_hoisted_static(index))
+            .and_then(|init| constant_value(ir, init));
+        cw.add_field_late_sig(
+            acc,
+            ir.static_field_jvm_name(index),
+            &ir_type_desc(&s.ty),
+            signatures.field.as_deref().filter(|_| !s.property_delegate),
+            constant,
+            ann,
+        );
+    }
+}
+
 /// HOISTED companion properties: the private static field lives on THIS class, so the companion's
 /// delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
 /// bridges — emitted AFTER the instance methods, right before `<clinit>` (kotlinc's order).
@@ -715,7 +764,10 @@ pub(super) fn emit_class_static_initializer(
         // store's pc, mapping to the property's declaration line in the COMPANION source. The
         // `Companion` construction itself has no entry.
         let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
-        for &(static_index, s, init) in &clinit_statics {
+        for &(static_index, s, _) in &clinit_statics {
+            let Some(init) = stored_clinit_initializer(ir, s) else {
+                continue;
+            };
             let pc = clinit.bytes.len() as u16;
             // A hoisted companion property's line lives on the companion. A static a compiler
             // plugin generated has no property to look up and carries its own.
@@ -734,39 +786,7 @@ pub(super) fn emit_class_static_initializer(
             e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
         }
         if let Some(body) = companion_initializer {
-            // The companion constructor no longer runs this body. Value 0 is the companion
-            // instance, which `<clinit>` has already stored. Bind it only when emission loads
-            // that value. A property receiver that is a bare local is not loaded once the
-            // property is a static field, and storing it anyway becomes `getstatic`/`pop`.
-            if companion_initializer_loads_instance(ir, body) {
-                let companion = c
-                    .companion_class
-                    .expect("a companion initializer belongs to a class that declares one");
-                let companion_name = companion.render();
-                let descriptor = format!("L{companion_name};");
-                let field =
-                    e.cw.fieldref(fq_name, companion.nested_segment_ref(), &descriptor);
-                clinit.getstatic(field, 1);
-                let receiver_ty = Ty::obj_name(companion);
-                let existing = e.slots.get(&0).map(|(slot, _)| *slot);
-                let receiver = match existing {
-                    Some(slot) => slot,
-                    None => e
-                        .frame
-                        .enter(super::frame_map::FrameKey::Receiver, receiver_ty),
-                };
-                store(receiver_ty, receiver, &mut clinit);
-                e.slots.insert(0, (receiver, receiver_ty));
-            }
-            let first = clinit.line_marks().len();
-            e.render_initializer_boundaries = true;
-            e.emit(body, &mut clinit);
-            e.render_initializer_boundaries = false;
-            let marks = clinit.line_marks()[first..]
-                .iter()
-                .map(|&(pc, line)| (pc, u32::from(line)));
-            clinit_lines.extend(marks);
-            clinit_lines.dedup_by_key(|(_, line)| *line);
+            e.emit_companion_clinit_body(c, fq_name, body, &mut clinit, &mut clinit_lines);
         }
         clinit.ret_void();
         clinit.ensure_locals(e.frame.max());
@@ -775,6 +795,55 @@ pub(super) fn emit_class_static_initializer(
         if byte_parity && !clinit_lines.is_empty() {
             e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
         }
+    }
+}
+
+impl Emitter<'_> {
+    /// Emit a class companion's initializer body in the outer `<clinit>`, after the `Companion`
+    /// instance store, recording its line marks in `clinit_lines`.
+    pub(super) fn emit_companion_clinit_body(
+        &mut self,
+        c: &IrClass,
+        fq_name: &str,
+        body: crate::ir::ExprId,
+        clinit: &mut CodeBuilder,
+        clinit_lines: &mut Vec<(u16, u32)>,
+    ) {
+        let ir = self.ir;
+        // The companion constructor no longer runs this body. Value 0 is the companion
+        // instance, which `<clinit>` has already stored. Bind it only when emission loads
+        // that value. A property receiver that is a bare local is not loaded once the
+        // property is a static field, and storing it anyway becomes `getstatic`/`pop`.
+        if companion_initializer_loads_instance(ir, body) {
+            let companion = c
+                .companion_class
+                .expect("a companion initializer belongs to a class that declares one");
+            let companion_name = companion.render();
+            let descriptor = format!("L{companion_name};");
+            let field = self
+                .cw
+                .fieldref(fq_name, companion.nested_segment_ref(), &descriptor);
+            clinit.getstatic(field, 1);
+            let receiver_ty = Ty::obj_name(companion);
+            let existing = self.slots.get(&0).map(|(slot, _)| *slot);
+            let receiver = match existing {
+                Some(slot) => slot,
+                None => self
+                    .frame
+                    .enter(super::frame_map::FrameKey::Receiver, receiver_ty),
+            };
+            store(receiver_ty, receiver, clinit);
+            self.slots.insert(0, (receiver, receiver_ty));
+        }
+        let first = clinit.line_marks().len();
+        self.render_initializer_boundaries = true;
+        self.emit(body, clinit);
+        self.render_initializer_boundaries = false;
+        let marks = clinit.line_marks()[first..]
+            .iter()
+            .map(|&(pc, line)| (pc, u32::from(line)));
+        clinit_lines.extend(marks);
+        clinit_lines.dedup_by_key(|(_, line)| *line);
     }
 }
 
