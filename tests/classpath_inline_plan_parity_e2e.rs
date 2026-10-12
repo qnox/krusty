@@ -131,3 +131,24 @@ fn a_stack_saved_inside_an_inline_lambda_is_stored_below_its_marker() {
         &["PlanNestedStackKt"],
     );
 }
+
+/// An iteration plan over an array or a `CharSequence` reads its elements through the frame's
+/// `$this$forEach` local itself, as the library body reads its receiver parameter: the loop
+/// declares its index and then the array's length, with no copy of the receiver.
+const INDEXED_FOR_EACH: &str = r#"fun box(): String {
+    val sb = StringBuilder()
+    intArrayOf(1, 2).forEach { sb.append(it) }
+    charArrayOf('a', 'b').forEach { sb.append(it) }
+    "xy".forEach { sb.append(it) }
+    return sb.toString()
+}
+"#;
+
+#[test]
+fn an_indexed_iteration_reads_the_frames_receiver_local() {
+    common::assert_classes_identical_to_kotlinc_jdk(
+        "PlanIndexedForEach",
+        INDEXED_FOR_EACH,
+        &["PlanIndexedForEachKt"],
+    );
+}
