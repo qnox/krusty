@@ -80,9 +80,7 @@ fn realize_package_delegates(ir: &mut IrFile) {
     let candidates = ir
         .package_properties
         .iter()
-        .filter(|declaration| {
-            declaration.type_params.is_empty() && declaration.context_parameters.is_empty()
-        })
+        .filter(|declaration| declaration.context_parameters.is_empty())
         .filter_map(
             |declaration| match ir.local_property_layouts.get(&declaration.property) {
                 Some(IrLocalPropertyLayout::TopLevelAccessor {
@@ -90,7 +88,12 @@ fn realize_package_delegates(ir: &mut IrFile) {
                     delegate: Some(storage),
                     receiver,
                     ..
-                }) => Some((declaration.property, *getter, *storage, *receiver)),
+                }) => Some((
+                    declaration.property,
+                    *getter,
+                    *storage,
+                    receiver.map(delegate_method_receiver),
+                )),
                 _ => None,
             },
         )
@@ -135,6 +138,11 @@ fn realize_package_delegates(ir: &mut IrFile) {
 
 fn realize_member_delegates(ir: &mut IrFile) {
     let mut removed = HashMap::<ClassId, HashSet<u32>>::default();
+    let annotation_markers = ir
+        .property_annotation_markers
+        .values()
+        .copied()
+        .collect::<HashSet<_>>();
     for class in 0..ir.classes.len() {
         let class = class as ClassId;
         let owner = ir.classes[class as usize].fq_name;
@@ -142,9 +150,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
             .properties
             .iter()
             .enumerate()
-            .filter(|(_, declaration)| {
-                declaration.type_params.is_empty() && declaration.context_params.is_empty()
-            })
+            .filter(|(_, declaration)| declaration.context_params.is_empty())
             .filter_map(|(property, declaration)| {
                 Some(MemberDelegateCandidate {
                     declaration: MemberDelegateDeclaration::Property(property as u32),
@@ -161,14 +167,16 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 .into_iter()
                 .flatten()
                 .enumerate()
-                .filter(|(_, declaration)| declaration.type_params.is_empty())
                 .filter_map(|(property, declaration)| {
                     Some(MemberDelegateCandidate {
                         declaration: MemberDelegateDeclaration::Extension(property as u32),
                         field: declaration.delegate_field?,
                         getter: declaration.getter,
                         last_accessor: declaration.setter.unwrap_or(declaration.getter),
-                        receivers: vec![Ty::Obj(owner, &[]), declaration.receiver],
+                        receivers: vec![
+                            Ty::Obj(owner, &[]),
+                            delegate_method_receiver(declaration.receiver),
+                        ],
                     })
                 }),
         );
@@ -226,6 +234,15 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 .iter()
                 .position(|&function| function == last_accessor)
                 .map_or(methods.len(), |index| index + 1);
+            let position = if last_accessor == getter
+                && methods
+                    .get(position)
+                    .is_some_and(|method| annotation_markers.contains(method))
+            {
+                position + 1
+            } else {
+                position
+            };
             methods.insert(position, method);
             match declaration {
                 MemberDelegateDeclaration::Property(property) => {
@@ -238,6 +255,19 @@ fn realize_member_delegates(ir: &mut IrFile) {
         }
     }
     crate::jvm::field_compaction::remove_fields(ir, &removed);
+}
+
+/// A generated delegate method is not itself a generic declaration, so a type-parameter receiver
+/// takes its bound's JVM representation directly. Concrete receivers remain semantic until the
+/// later value-class pass selects their carrier.
+fn delegate_method_receiver(receiver: Ty) -> Ty {
+    match receiver {
+        Ty::TyParam(..) => crate::jvm::physical_type::ir_ty_to_jvm(&receiver),
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if matches!(*inner, Ty::TyParam(..)) => {
+            crate::jvm::physical_type::ir_ty_to_jvm(&receiver)
+        }
+        _ => receiver,
+    }
 }
 
 #[derive(Clone, Copy)]

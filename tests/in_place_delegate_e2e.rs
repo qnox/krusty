@@ -98,6 +98,61 @@ fn member_extension_delegate_is_byte_identical_to_kotlinc() {
     });
 }
 
+/// The generated delegate method is not generic: a property type parameter is erased to its bound
+/// in that method's receiver slot, both for a package extension and for a member extension.
+const GENERIC_EXTENSION_DELEGATES: &str = "package store\n\
+    \n\
+    import kotlin.reflect.KProperty\n\
+    \n\
+    operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
+    \n\
+    val <T> T.packageValue: Int by Unit\n\
+    \n\
+    class GenericHost {\n\
+    \x20   val <T> T.memberValue: Int by Unit\n\
+    }\n";
+
+#[test]
+fn generic_extension_delegate_methods_use_erased_receivers() {
+    for class in ["store/GenericExtensionDelegatesKt", "store/GenericHost"] {
+        common::byte_diff_against_kotlinc_cp(
+            "GenericExtensionDelegates",
+            GENERIC_EXTENSION_DELEGATES,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+}
+
+/// A retained property annotation's synthetic marker follows the getter and precedes the delegate
+/// method, matching kotlinc's declaration order.
+const ANNOTATED_MEMBER_DELEGATE: &str = "package store\n\
+    \n\
+    import kotlin.reflect.KProperty\n\
+    \n\
+    @Target(AnnotationTarget.PROPERTY)\n\
+    annotation class Marker\n\
+    \n\
+    operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
+    \n\
+    class AnnotatedHost {\n\
+    \x20   @Marker val value: Int by Unit\n\
+    }\n";
+
+#[test]
+fn annotated_member_marker_precedes_its_delegate_method() {
+    common::byte_diff_against_kotlinc_cp(
+        "AnnotatedMemberDelegate",
+        ANNOTATED_MEMBER_DELEGATE,
+        "store/AnnotatedHost",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("annotated member delegate differs from kotlinc: {diff}"));
+}
+
 /// The reported shape runs, and the JVM declares the `get<X>$delegate` methods in place of the
 /// delegate fields.
 const RUN: &str = "package store\n\

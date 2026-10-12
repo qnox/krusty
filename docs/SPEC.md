@@ -13105,7 +13105,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
    Tests: `tests/enum_entry_constructor_e2e.rs`.
 - **A singleton or constant delegate is evaluated in place, without a `$delegate` field.**
   kotlinc's `SingletonOrConstantDelegationLowering` applies when a delegated property's delegate is
-  `Unit`, an object, an enum entry or a (signed) literal, and the property has no type or context
+  `Unit`, an object, an enum entry or a (signed) literal, and the property has no context
   parameters. The JVM then declares no `x$delegate` field. Each accessor reads the delegate again
   where it would have read the field. A `private static Object get<X>$delegate([owner])` method
   follows the property's accessors and returns the delegate, with its line on its first
@@ -13124,9 +13124,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     JVM signature, because a reader would map `Unit` to `V`.
   - A delegated property never records `HAS_CONSTANT`, even when its delegate is a literal.
 
-  Not yet in place: member-extension and local delegated properties keep their storage, and a
-  non-singleton `Unit` delegate stored in a facade static (`by run { Unit }`) still has `void`
-  storage. Byte-identical to kotlinc 2.4.20 for package, member, companion and object shapes.
+  Not yet in place: local delegated properties keep their storage, and a non-singleton `Unit`
+  delegate stored in a facade static (`by run { Unit }`) still has `void` storage. Byte-identical
+  to kotlinc 2.4.20 for package, member, member-extension, companion and object shapes, including
+  generic extension receivers (whose generated delegate-method slots use their JVM erasure).
   Tests: `tests/in_place_delegate_e2e.rs`.
 
 ## 8. Success criteria for the PoC
