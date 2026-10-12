@@ -18,6 +18,8 @@ mod captured_ref_consumer_e2e;
 mod cast_operand_reread_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
+#[path = "default_impls_inherited_signature_e2e.rs"]
+mod default_impls_inherited_signature_e2e;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/compiler_plugin_fixture.rs"]

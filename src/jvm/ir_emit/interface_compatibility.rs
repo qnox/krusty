@@ -18,6 +18,7 @@ pub(super) fn emit_inherited_default_surface(
     cw: &mut ClassWriter,
     default_impls: &mut Option<ClassWriter>,
     callables: &crate::backend::CheckedBackendCallables,
+    signature_formatter: &JvmSignatureFormatter<'_>,
     opts: &EmitOptions,
 ) {
     let fq_name = c.fq_name();
@@ -181,6 +182,18 @@ pub(super) fn emit_inherited_default_surface(
         } else {
             Vec::new()
         };
+        // A suspend forwarder's `Continuation<? super R>` is not reconstructed (docs/SPEC.md).
+        let signature = (!default.suspend)
+            .then(|| {
+                inherited_holder_signature(
+                    signature_formatter,
+                    ir,
+                    c.fq_name,
+                    (&semantic_params, semantic_ret),
+                    (&param_tys, physical_ret),
+                )
+            })
+            .flatten();
         emit_holder_forward(
             di,
             HolderForward {
@@ -193,10 +206,7 @@ pub(super) fn emit_inherited_default_surface(
                 guards: &guards,
                 ret: physical_ret,
                 semantic_ret,
-                // The promoted generic signature of an inherited member is not reconstructed here
-                // (the declaring classifier's formals are not this interface's); a generic
-                // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
-                signature: None,
+                signature: signature.as_deref(),
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
                 // this interface.
                 lines: ForwardLines::default(),
@@ -205,6 +215,33 @@ pub(super) fn emit_inherited_default_surface(
             },
         );
     }
+}
+
+/// The generic signature of an inherited member's holder forwarder: the receiver is this
+/// interface's own type, so a generic interface declares its formals and takes `I<T…>` first, and
+/// a parameterized member type keeps its arguments. A member whose types name a type parameter
+/// would need the declaring interface's formals substituted by this interface's supertype
+/// arguments; that promoted signature is not reconstructed, and such a forwarder keeps the
+/// descriptor-only shape (docs/SPEC.md).
+fn inherited_holder_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    interface: TypeName,
+    (semantic_params, semantic_ret): (&[Ty], Ty),
+    (physical_params, physical_ret): (&[Ty], Ty),
+) -> Option<String> {
+    if semantic_params
+        .iter()
+        .chain(std::iter::once(&semantic_ret))
+        .any(|ty| ty.mentions_ty_param())
+    {
+        return None;
+    }
+    let descriptor = method_descriptor(physical_params, physical_ret);
+    let member = formatter
+        .method_positions(semantic_params, &semantic_ret)
+        .filter(|member| *member != descriptor);
+    default_impls::holder_method_signature(formatter, ir, interface, member.as_deref(), &descriptor)
 }
 
 /// Emit the `$DefaultImpls` forward kotlinc keeps under `enable` for the interface's own bodied

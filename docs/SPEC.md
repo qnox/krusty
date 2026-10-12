@@ -2026,9 +2026,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   pre-existing `disable`-mode forwarder shape for a suspend default member).
   Known remaining gaps, each measured: member ORDER diverges when a property precedes a function
   (krusty emits accessors after methods, in every mode); the interface's own `$default` stub does
-  not yet carry kotlinc's super-call guard; a REPUBLISHED (inherited) holder forward does not
-  reconstruct the declaring classifier's generic signature (and a suspend forwarder omits kotlinc's
-  `Signature` attribute); a suspend default method lacks kotlinc's `s$suspendImpl` static
+  not yet carry kotlinc's super-call guard; a REPUBLISHED (inherited) holder forward whose member
+  types name a type parameter does not reconstruct the declaring classifier's promoted generic
+  signature (and a suspend forwarder omits kotlinc's `Signature` attribute); a suspend default method lacks kotlinc's `s$suspendImpl` static
   indirection on the interface (a pre-existing suspend-lowering divergence); and interface member
   metadata does not yet carry kotlinc's open-modality and accessor flag bytes.
 
@@ -17024,6 +17024,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   drops it, so `get` is the bare static read. `set` still evaluates the bound receiver and pops
   it (`aload_0; getfield receiver; pop`), the field-store shape above. Test:
   `tests/bound_static_property_reference_get_e2e.rs`.
+- **A `$DefaultImpls` holder follows kotlinc's type-parameter nullability and republishes a
+  generic interface's receiver type.** A holder annotates `T?` `@Nullable`, a `T` over a non-null
+  bound `@NotNull` (with its `checkNotNullParameter` guard), and a `T` over a nullable bound not at
+  all. A generic interface that republishes an inherited member gives the forwarder a generic
+  signature declaring the interface's formals and taking `I<T…>` first:
+  `interface B<T> : A` writes `<T:Ljava/lang/Object;>(LB<TT;>;Ljava/lang/String;)Ljava/lang/String;`
+  for `A.foo(o: String)`. Test: `tests/default_impls_inherited_signature_e2e.rs`. Corpus:
+  `super/superCallToNonGenericImplThroughGenericDefaultImpls.kt`.
 - **A backing field's descriptor interns before its nullability annotation.** kotlinc's class
   writer visits the fields after the methods, each as its name, its descriptor and then its
   `@NotNull`/`@Nullable` annotation. A private field no method reads or writes therefore adds its

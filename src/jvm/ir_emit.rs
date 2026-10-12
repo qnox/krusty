@@ -3558,6 +3558,7 @@ fn emit_interface_class(
             &mut cw,
             &mut default_impls,
             env.dependency_callables,
+            &signature_formatter,
             opts,
         );
     }
@@ -4443,10 +4444,13 @@ fn emit_holder_method(
 /// same selection the implementing-class forwarders use: reference types only, and never a bare
 /// type variable (kotlinc leaves `T`-typed positions unannotated).
 fn jd_nullability_annotation(ty: &Ty) -> Option<&'static str> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(ty).is_reference() {
+    if !ir_ty_to_jvm(ty).is_reference() {
         None
     } else if ty.is_nullable() {
         Some("Lorg/jetbrains/annotations/Nullable;")
+    } else if ty.upper_bound_admits_null() {
+        // A bare `T` over a nullable bound may hold `null`; one over a non-null bound may not.
+        None
     } else {
         Some("Lorg/jetbrains/annotations/NotNull;")
     }
