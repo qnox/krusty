@@ -142,18 +142,6 @@ pub(super) fn generic_property_more_specific(
     left_at_least_as_specific && !right_at_least_as_specific
 }
 
-/// Extract the property half of a namespace record. The namespace arrives behind a shared memo
-/// handle, so candidates are cloned into the selection's owned working set; both top-level and
-/// extension-property selection consume this exact helper, preventing their `Properties`/`Both`
-/// handling from drifting when [`crate::libraries::Callables`] gains another mixed shape.
-pub(super) fn property_overloads(callables: &crate::libraries::Callables) -> Vec<PropertyInfo> {
-    match callables {
-        crate::libraries::Callables::Properties(properties)
-        | crate::libraries::Callables::Both { properties, .. } => properties.overloads.clone(),
-        crate::libraries::Callables::None | crate::libraries::Callables::Functions(_) => Vec::new(),
-    }
-}
-
 /// Source visibility for package-level properties, applied BEFORE ambiguity/receiver ranking. A JVM
 /// `internal`/private declaration may still have a public bytecode accessor, so accessor flags alone
 /// must never make it callable from another module. Module-origin facts remain governed by the
