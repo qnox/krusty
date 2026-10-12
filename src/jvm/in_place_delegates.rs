@@ -122,7 +122,7 @@ fn realize_package_delegates(ir: &mut IrFile) {
             ir,
             DelegateMethod {
                 name: format!("{}$delegate", ir.functions[getter as usize].name),
-                receiver,
+                receivers: receiver.into_iter().collect(),
                 delegate,
                 storage_ty,
                 line,
@@ -137,23 +137,55 @@ fn realize_member_delegates(ir: &mut IrFile) {
     let mut removed = HashMap::<ClassId, HashSet<u32>>::default();
     for class in 0..ir.classes.len() {
         let class = class as ClassId;
-        for property in 0..ir.classes[class as usize].properties.len() {
-            let declaration = &ir.classes[class as usize].properties[property];
-            let (Some(field), Some(getter)) = (declaration.delegate_field, declaration.getter)
-            else {
-                continue;
-            };
-            if !declaration.type_params.is_empty() || !declaration.context_params.is_empty() {
-                continue;
-            }
-            let last_accessor = declaration.setter.unwrap_or(getter);
+        let owner = ir.classes[class as usize].fq_name;
+        let mut candidates = ir.classes[class as usize]
+            .properties
+            .iter()
+            .enumerate()
+            .filter(|(_, declaration)| {
+                declaration.type_params.is_empty() && declaration.context_params.is_empty()
+            })
+            .filter_map(|(property, declaration)| {
+                Some(MemberDelegateCandidate {
+                    declaration: MemberDelegateDeclaration::Property(property as u32),
+                    field: declaration.delegate_field?,
+                    getter: declaration.getter?,
+                    last_accessor: declaration.setter.unwrap_or(declaration.getter?),
+                    receivers: vec![Ty::Obj(owner, &[])],
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.extend(
+            ir.member_ext_props
+                .get(&owner)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter(|(_, declaration)| declaration.type_params.is_empty())
+                .filter_map(|(property, declaration)| {
+                    Some(MemberDelegateCandidate {
+                        declaration: MemberDelegateDeclaration::Extension(property as u32),
+                        field: declaration.delegate_field?,
+                        getter: declaration.getter,
+                        last_accessor: declaration.setter.unwrap_or(declaration.getter),
+                        receivers: vec![Ty::Obj(owner, &[]), declaration.receiver],
+                    })
+                }),
+        );
+        for candidate in candidates {
+            let MemberDelegateCandidate {
+                declaration,
+                field,
+                getter,
+                last_accessor,
+                receivers,
+            } = candidate;
             let Some((store, delegate)) = delegate_store(ir, class, field) else {
                 continue;
             };
             let Some(kind) = in_place_delegate(ir, delegate) else {
                 continue;
             };
-            let owner = ir.classes[class as usize].fq_name;
             let stored = &ir.classes[class as usize].fields[field as usize];
             let (storage_ty, line) = (stored.ty, stored.constructor_store_line);
             replace_operations(
@@ -165,13 +197,24 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 delegate,
             );
             retire_store(ir, store, delegate, kind, line);
-            ir.classes[class as usize].properties[property].delegate_field = None;
+            match declaration {
+                MemberDelegateDeclaration::Property(property) => {
+                    ir.classes[class as usize].properties[property as usize].delegate_field = None;
+                }
+                MemberDelegateDeclaration::Extension(property) => {
+                    ir.member_ext_props
+                        .get_mut(&owner)
+                        .expect("a collected member extension keeps its owner")
+                        [property as usize]
+                        .delegate_field = None;
+                }
+            }
             removed.entry(class).or_default().insert(field);
             let method = add_delegate_method(
                 ir,
                 DelegateMethod {
                     name: format!("{}$delegate", ir.functions[getter as usize].name),
-                    receiver: Some(Ty::Obj(owner, &[])),
+                    receivers,
                     delegate,
                     storage_ty,
                     line,
@@ -184,10 +227,32 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 .position(|&function| function == last_accessor)
                 .map_or(methods.len(), |index| index + 1);
             methods.insert(position, method);
-            ir.record_jvm_member_delegate_method(class, property as u32, method, getter);
+            match declaration {
+                MemberDelegateDeclaration::Property(property) => {
+                    ir.record_jvm_member_delegate_method(class, property, method, getter);
+                }
+                MemberDelegateDeclaration::Extension(property) => {
+                    ir.record_jvm_member_extension_delegate_method(class, property, method, getter);
+                }
+            }
         }
     }
     crate::jvm::field_compaction::remove_fields(ir, &removed);
+}
+
+#[derive(Clone, Copy)]
+enum MemberDelegateDeclaration {
+    Property(u32),
+    Extension(u32),
+}
+
+struct MemberDelegateCandidate {
+    declaration: MemberDelegateDeclaration,
+    field: u32,
+    getter: FunId,
+    last_accessor: FunId,
+    /// Dispatch receiver followed by the extension receiver, when present.
+    receivers: Vec<Ty>,
 }
 
 /// The declaration store that initializes `class`'s delegate `field`, and the delegate it stores.
@@ -263,7 +328,7 @@ fn accessor_line(ir: &IrFile, getter: u32) -> u32 {
 struct DelegateMethod {
     name: String,
     /// The owner (a member property) or extension receiver the method takes as `<this>`.
-    receiver: Option<Ty>,
+    receivers: Vec<Ty>,
     delegate: ExprId,
     storage_ty: Ty,
     line: u32,
@@ -295,7 +360,7 @@ fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
         stmts: vec![returned],
         value: None,
     });
-    let params = method.receiver.into_iter().collect::<Vec<_>>();
+    let params = method.receivers;
     let parameter_count = params.len();
     let function = ir.add_fun(IrFunction {
         name: method.name,

@@ -71,6 +71,33 @@ fn in_place_delegates_are_byte_identical_to_kotlinc() {
     }
 }
 
+/// A member extension's delegate method carries both of its receivers: dispatch first, extension
+/// second. The exact class comparison also pins `JvmPropertySignature.delegateMethod` and the
+/// absence of `extension$delegate` storage.
+const MEMBER_EXTENSION_DELEGATE: &str = "package store\n\
+    \n\
+    import kotlin.reflect.KProperty\n\
+    \n\
+    operator fun Unit.getValue(thisRef: String, property: KProperty<*>): Int = 1\n\
+    \n\
+    class ExtensionHost {\n\
+    \x20   val String.extension: Int by Unit\n\
+    }\n";
+
+#[test]
+fn member_extension_delegate_is_byte_identical_to_kotlinc() {
+    common::byte_diff_against_kotlinc_cp(
+        "MemberExtensionDelegate",
+        MEMBER_EXTENSION_DELEGATE,
+        "store/ExtensionHost",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| {
+        panic!("member extension delegate is byte-identical to kotlinc: {diff}")
+    });
+}
+
 /// The reported shape runs, and the JVM declares the `get<X>$delegate` methods in place of the
 /// delegate fields.
 const RUN: &str = "package store\n\

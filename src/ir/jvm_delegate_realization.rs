@@ -19,6 +19,8 @@ pub(crate) struct JvmInPlaceDelegates {
     package_methods: HashMap<PropertyId, FunId>,
     /// `(declaring class, index into its properties)`.
     member_methods: HashMap<(ClassId, u32), FunId>,
+    /// `(declaring class, index into its member extension properties)`.
+    member_extension_methods: HashMap<(ClassId, u32), FunId>,
     /// Each generated method and the getter it is named after.
     methods: HashMap<FunId, FunId>,
     /// Constructor statements that evaluate such a delegate where its field was initialized.
@@ -58,6 +60,20 @@ impl IrFile {
         delegates.methods.insert(method, getter);
     }
 
+    pub(crate) fn record_jvm_member_extension_delegate_method(
+        &mut self,
+        class: ClassId,
+        property: u32,
+        method: FunId,
+        getter: FunId,
+    ) {
+        let delegates = &mut self.jvm_in_place_delegates;
+        delegates
+            .member_extension_methods
+            .insert((class, property), method);
+        delegates.methods.insert(method, getter);
+    }
+
     /// The `get<X>$delegate` method of package property `property`, when its delegate is
     /// evaluated in place.
     pub(crate) fn jvm_package_delegate_method(&self, property: PropertyId) -> Option<FunId> {
@@ -76,6 +92,18 @@ impl IrFile {
     ) -> Option<FunId> {
         self.jvm_in_place_delegates
             .member_methods
+            .get(&(class, property))
+            .copied()
+    }
+
+    /// The `get<X>$delegate` method of `class`'s member extension property at `property`.
+    pub(crate) fn jvm_member_extension_delegate_method(
+        &self,
+        class: ClassId,
+        property: u32,
+    ) -> Option<FunId> {
+        self.jvm_in_place_delegates
+            .member_extension_methods
             .get(&(class, property))
             .copied()
     }
