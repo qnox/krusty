@@ -1188,6 +1188,8 @@ mod inline_vc_suspend_coverage_e2e;
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
 mod inlined_lambda_stack_spill_e2e;
+#[path = "inlined_property_initializer_line_e2e.rs"]
+mod inlined_property_initializer_line_e2e;
 #[path = "inlined_result_narrow_line_e2e.rs"]
 mod inlined_result_narrow_line_e2e;
 #[path = "inner_class_construction_e2e.rs"]
@@ -1202,8 +1204,6 @@ mod inner_class_name_pool_order_e2e;
 mod inner_class_outer_tparam_e2e;
 #[path = "inner_secondary_constructor_line_e2e.rs"]
 mod inner_secondary_constructor_line_e2e;
-#[path = "inlined_property_initializer_line_e2e.rs"]
-mod inlined_property_initializer_line_e2e;
 #[path = "instant_builtin_serializer_e2e.rs"]
 mod instant_builtin_serializer_e2e;
 #[path = "integer_literal_branch_join_e2e.rs"]
