@@ -137,7 +137,7 @@ fn accessor_entries(
                     });
             let getter = getter.map(|getter| (getter, receiver.iter().cloned().collect()));
             let setter = setter
-                .filter(|_| edge.overridden_mutable && edge.implementation_mutable)
+                .filter(|_| edge.overridden_setter_value.is_some() && edge.implementation_mutable)
                 .map(|setter| {
                     let value = crate::ir::BridgeParameter {
                         identity: crate::fir::ResolvedParameterIdentity::PropertySetterValue,

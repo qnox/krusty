@@ -470,7 +470,7 @@ fn materialize_delegation(
                             implementation_type: ty,
                             declared_receiver: overridden.receiver.map(crate::fir::ResolvedTy::get),
                             implementation_receiver: extension_receiver,
-                            overridden_mutable: overridden.mutable,
+                            overridden_setter_value: overridden.setter_value.clone(),
                             implementation_mutable: setter.is_some(),
                             has_kotlin_superclass_override: false,
                             depth: overridden.depth,

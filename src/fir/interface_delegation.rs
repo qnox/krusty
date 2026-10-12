@@ -129,7 +129,7 @@ pub struct ResolvedDelegatedProperty {
     pub overridden: Box<[ResolvedDelegatedPropertyDeclaration]>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDelegatedPropertyDeclaration {
     pub target: ResolvedPropertyOverrideTarget,
     pub owner: TypeName,
@@ -139,7 +139,8 @@ pub struct ResolvedDelegatedPropertyDeclaration {
     pub applied_ty: ResolvedTy,
     /// Unsubstituted declared receiver of a member-extension property, erased likewise.
     pub receiver: Option<ResolvedTy>,
-    pub mutable: bool,
+    /// The overridden setter's value parameter, or `None` when the declaration is a `val`.
+    pub setter_value: Option<crate::fir::ResolvedParameterIdentity>,
     pub interface: bool,
     pub depth: u32,
 }

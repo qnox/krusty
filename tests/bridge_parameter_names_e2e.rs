@@ -2,7 +2,8 @@
 //! kotlinc's `BridgeLowering` copies them from the overridden function: `f(y: String)` over
 //! `I<T>.f(x: T)` has a bridge `f(Object)` whose parameter is `x`. A builtin supertype's names come
 //! from `.kotlin_builtins` (`MutableEntry.setValue(newValue)`, `Comparable.compareTo(other)`), and
-//! a function type's from its `FunctionN` (`p1`).
+//! a function type's from its `FunctionN` (`p1`). A property setter bridge likewise takes the
+//! overridden setter's declared value name (`set(given)`), or `<set-?>` when that setter is implicit.
 
 use super::common;
 
@@ -25,6 +26,28 @@ const SRC: &str = "interface Pick<T> { fun pick(first: T, count: Int): Int }\n\
     \x20   val length: (String) -> String = Length()\n\
     \x20   if (length(\"OK\") != \"OK\") return \"length\"\n\
     \x20   return \"OK\"\n\
+    }\n";
+
+const SETTERS: &str = "open class Slot<T>(init: T) {\n\
+    \x20   open var held: T = init\n\
+    \x20       set(given) { field = given }\n\
+    }\n\
+    class TextSlot : Slot<String>(\"\") {\n\
+    \x20   override var held: String = \"\"\n\
+    \x20       set(own) { field = own }\n\
+    }\n\
+    interface Cell<T> { var content: T }\n\
+    class TextCell : Cell<String> {\n\
+    \x20   override var content: String = \"\"\n\
+    \x20       set(own) { field = own }\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val slot: Slot<String> = TextSlot()\n\
+    \x20   slot.held = \"OK\"\n\
+    \x20   if (slot.held != \"OK\") return \"slot\"\n\
+    \x20   val cell: Cell<String> = TextCell()\n\
+    \x20   cell.content = \"OK\"\n\
+    \x20   return cell.content\n\
     }\n";
 
 /// The `LocalVariableTable` rows (`slot name signature`) of the method whose declaration line is
@@ -59,9 +82,13 @@ fn local_variables(disassembly: &str, member: &str) -> Vec<String> {
 }
 
 fn assert_same_locals(class: &str, member: &str) {
+    assert_same_locals_in("BridgeParameterNames", SRC, class, member);
+}
+
+fn assert_same_locals_in(file: &str, source: &str, class: &str, member: &str) {
     let built = common::compare_with_kotlinc_plugin(
-        "BridgeParameterNames",
-        SRC,
+        file,
+        source,
         class,
         &[common::stdlib_jar()],
         "25",
@@ -97,6 +124,31 @@ fn a_bridge_takes_a_function_types_parameter_names() {
         "Length",
         "public java.lang.Object invoke(java.lang.Object);",
     );
+}
+
+#[test]
+fn a_setter_bridge_takes_the_overridden_setters_value_name() {
+    assert_same_locals_in(
+        "SetterBridgeNames",
+        SETTERS,
+        "TextSlot",
+        "public void setHeld(java.lang.Object);",
+    );
+}
+
+#[test]
+fn a_setter_bridge_over_an_implicit_setter_keeps_the_synthetic_value_name() {
+    assert_same_locals_in(
+        "SetterBridgeNames",
+        SETTERS,
+        "TextCell",
+        "public void setContent(java.lang.Object);",
+    );
+}
+
+#[test]
+fn setter_bridges_named_after_the_overridden_setter_run() {
+    common::expect_box_same_as_kotlinc(SETTERS, "SetterBridgeNames");
 }
 
 /// A Java method publishes no parameter name. The erased bridge still names each parameter
