@@ -239,6 +239,38 @@ impl Parser<'_> {
         }
     }
 
+    /// An enum entry's annotations and modifiers, before its name. Annotations are kept so they
+    /// reach the enum's static field (`@SerialName("system") SYSTEM(...)`, common in
+    /// kotlinx.serialization enums). `external` is the one modifier an entry may still write, and
+    /// kotlinc deprecates it (`ForbidExternalEnumEntriesAndPrimaryConstructorProperties`).
+    pub(super) fn parse_enum_entry_prefix(&mut self) -> (Vec<AnnotationRef>, Vec<Vec<ExprId>>) {
+        let mut annotations = Vec::new();
+        let mut annotation_args = Vec::new();
+        let mut external = None;
+        loop {
+            if self.at(TokenKind::At) {
+                let (name, args) = self.parse_annotation();
+                if let Some(name) = name {
+                    annotations.push(name);
+                    annotation_args.push(args);
+                }
+            } else if self.at_external_entry_modifier() {
+                external.get_or_insert(self.tok().span);
+                self.bump();
+            } else {
+                break;
+            }
+            self.skip_newlines();
+        }
+        if let Some(span) = external {
+            self.file.external_modifier_uses.push(ExternalModifierUse {
+                target: ExternalModifierTarget::EnumEntry,
+                span,
+            });
+        }
+        (annotations, annotation_args)
+    }
+
     /// Whether an enum entry's prefix continues with an `external` modifier: the keyword followed,
     /// past any line break, by an annotation or by the entry's name and what may follow an entry
     /// name. An entry named `external`, and a member such as `external interface I` after the entry

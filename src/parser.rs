@@ -2235,37 +2235,7 @@ impl<'a> Parser<'a> {
             }
             if !members_only {
                 loop {
-                    // Enum constants may carry annotations (`@SerialName("system") SYSTEM(...)` — common
-                    // in kotlinx.serialization enums). Capture them so they can be emitted onto the enum's
-                    // static field (per JVM retention), matching kotlinc.
-                    let mut entry_ann_names: Vec<AnnotationRef> = Vec::new();
-                    let mut entry_ann_args: Vec<Vec<ExprId>> = Vec::new();
-                    // `external` is the one modifier an entry may still write; kotlinc deprecates
-                    // it (`ForbidExternalEnumEntriesAndPrimaryConstructorProperties`).
-                    let mut external_span = None;
-                    loop {
-                        if self.at(TokenKind::At) {
-                            let (name, args) = self.parse_annotation();
-                            if let Some(n) = name {
-                                entry_ann_names.push(n);
-                                entry_ann_args.push(args);
-                            }
-                        } else if self.at_external_entry_modifier() {
-                            external_span.get_or_insert(self.tok().span);
-                            self.bump();
-                        } else {
-                            break;
-                        }
-                        self.skip_newlines();
-                    }
-                    if let Some(span) = external_span {
-                        self.file
-                            .external_modifier_uses
-                            .push(crate::ast::ExternalModifierUse {
-                                target: crate::ast::ExternalModifierTarget::EnumEntry,
-                                span,
-                            });
-                    }
+                    let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
                     if !self.at(TokenKind::Ident) {
                         break;
                     }
