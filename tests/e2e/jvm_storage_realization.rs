@@ -14,6 +14,8 @@ mod delegate_field_signature_e2e;
 mod enum_companion_property_e2e;
 #[path = "../enum_init_block_line_e2e.rs"]
 mod enum_init_block_line_e2e;
+#[path = "../in_place_delegate_e2e.rs"]
+mod in_place_delegate_e2e;
 #[path = "../inner_outer_field_signature_e2e.rs"]
 mod inner_outer_field_signature_e2e;
 #[path = "../jvmfield_companion_e2e.rs"]
