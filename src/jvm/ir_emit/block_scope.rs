@@ -29,6 +29,7 @@ impl Emitter<'_> {
         let inline_stack_height = code.stack_height();
         let normalizes_inline_stack =
             self.ir.external_inline_expansions.contains(&block) && inline_stack_height != 0;
+        let within_inline_lambda = normalizes_inline_stack && self.within_inline_lambda_frame();
         // A spliced lambda's marker follows evaluation of the inline call's ordinary operands.
         // Preserve the caller stack there so argument temporaries keep kotlinc's slot order. An
         // expansion without a lambda marker (for example an iteration plan) still starts at the
@@ -41,7 +42,7 @@ impl Emitter<'_> {
                 )
             });
         if normalizes_inline_stack && !delays_stack_normalization {
-            code.inline_call_marker(true);
+            open_inline_stack(code);
         }
         self.link_safe_call_chain(block, code);
         let enclosing_statement_line = self.statement_line;
@@ -74,6 +75,7 @@ impl Emitter<'_> {
             let entry = InlineBodyEntry {
                 normalize_at_lambda_frame: delays_stack_normalization,
                 stack_height: inline_stack_height,
+                within_inline_lambda,
                 opening: self.external_inline_body_opening(block, &stmts),
                 discarded_frame_result: value
                     .and_then(|value| self.discarded_copied_frame_result(block, &stmts, value)),
@@ -104,7 +106,7 @@ impl Emitter<'_> {
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
-            code.inline_call_marker(false);
+            close_inline_stack(inline_stack_height, code);
         }
         // The lambda locals end at this `nop`. It returns to the inline body's line, and that
         // local-end label is what keeps it when the following instruction is the next debug point.
@@ -144,6 +146,7 @@ impl Emitter<'_> {
         let inline_stack_height = code.stack_height();
         let normalizes_inline_stack =
             self.ir.external_inline_expansions.contains(&block) && inline_stack_height != 0;
+        let within_inline_lambda = normalizes_inline_stack && self.within_inline_lambda_frame();
         let delays_stack_normalization = normalizes_inline_stack
             && stmts.iter().any(|&statement| {
                 matches!(
@@ -152,7 +155,7 @@ impl Emitter<'_> {
                 )
             });
         if normalizes_inline_stack && !delays_stack_normalization {
-            code.inline_call_marker(true);
+            open_inline_stack(code);
         }
         self.link_safe_call_chain(block, code);
         let enclosing_statement_line = self.statement_line;
@@ -178,8 +181,11 @@ impl Emitter<'_> {
                         Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
                     )
                 {
-                    reserved_inline_stack =
-                        Some(self.open_reserved_inline_stack(inline_stack_height, code));
+                    reserved_inline_stack = Some(self.open_inline_stack_at_lambda_frame(
+                        inline_stack_height,
+                        within_inline_lambda,
+                        code,
+                    ));
                     normalize_at_lambda_frame = false;
                 }
                 // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
@@ -213,7 +219,7 @@ impl Emitter<'_> {
                             if normalizes_inline_stack
                                 && (!delays_stack_normalization || reserved_inline_stack.is_some())
                             {
-                                code.inline_call_marker(false);
+                                close_inline_stack(inline_stack_height, code);
                             }
                             self.block_depth -= 1;
                             self.restore_slot_scope(saved);
@@ -268,7 +274,7 @@ impl Emitter<'_> {
         if normalizes_inline_stack
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
-            code.inline_call_marker(false);
+            close_inline_stack(inline_stack_height, code);
         }
         // After the lambda locals, including when this block is itself a callable scope and those
         // locals stay open through the return. The `nop` is the inline body's line, not the brace.
@@ -751,6 +757,7 @@ impl Emitter<'_> {
         let InlineBodyEntry {
             mut normalize_at_lambda_frame,
             stack_height: inline_stack_height,
+            within_inline_lambda,
             opening,
             discarded_frame_result,
         } = entry;
@@ -778,8 +785,11 @@ impl Emitter<'_> {
                     Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
                 )
             {
-                reserved_inline_stack =
-                    Some(self.open_reserved_inline_stack(inline_stack_height, code));
+                reserved_inline_stack = Some(self.open_inline_stack_at_lambda_frame(
+                    inline_stack_height,
+                    within_inline_lambda,
+                    code,
+                ));
                 normalize_at_lambda_frame = false;
             }
             let base = code.stack_height();
@@ -838,22 +848,37 @@ impl Emitter<'_> {
         }
     }
 
-    /// Claim the words FixStack will use before the inline lambda's own frame marker claims its
-    /// slot. `inline_stack_height` is captured at the expansion boundary: declarations before the
-    /// delayed marker are stack-neutral, while their nested emission may make the builder's linear
-    /// counter drift from that verified boundary. The emitted marker preserves the allocation
-    /// boundary until the finished method is normalized; the reservations themselves keep
-    /// subsequent frame-map entries above it.
-    fn open_reserved_inline_stack(
+    /// Open the bracket FixStack saves the caller's operand stack across, at the inline lambda's
+    /// frame marker, after the call's operands are stored.
+    ///
+    /// Where the saved words go follows where kotlinc's FixStack runs over the bracket. In the
+    /// method's own body it runs over the finished method, so the words go above every local the
+    /// method uses (`LocalVariablesManager`'s initial `maxLocals`): a plain opening marker. Within
+    /// an enclosing inline lambda's body (`within_inline_lambda`, read before this expansion enters
+    /// its own frame markers) it ran over that lambda's node before the node was copied here
+    /// (`MethodInliner.preprocessNodeBeforeInline`), which claimed them ahead of the lambda's own
+    /// frame marker: the words are reserved before that marker takes its slot.
+    /// `inline_stack_height` is captured at the expansion boundary: declarations before the delayed
+    /// marker are stack-neutral, while their nested emission may make the builder's linear counter
+    /// drift from that verified boundary. The emitted marker preserves the allocation boundary until
+    /// the finished method is normalized; the reservations themselves keep subsequent frame-map
+    /// entries above it.
+    fn open_inline_stack_at_lambda_frame(
         &mut self,
         inline_stack_height: i32,
+        within_inline_lambda: bool,
         code: &mut CodeBuilder,
     ) -> Vec<TempSlot> {
+        if !within_inline_lambda {
+            open_inline_stack(code);
+            return Vec::new();
+        }
         let Ok(words) = u16::try_from(inline_stack_height) else {
             self.run.set_emit_error(
                 "the operand stack at an inline lambda boundary exceeds the JVM limit".to_string(),
             );
             code.inline_call_marker_with_reserved_locals();
+            code.set_stack_height(0);
             return Vec::new();
         };
         let mut reserved = Vec::with_capacity(usize::from(words));
@@ -861,7 +886,19 @@ impl Emitter<'_> {
             reserved.push(self.frame.enter_temp(TempRole::InlineStackSpill, Ty::Int));
         }
         code.inline_call_marker_with_reserved_locals();
+        code.set_stack_height(0);
         reserved
+    }
+
+    /// Whether code emitted now belongs to an inline lambda's body: kotlinc builds that body as a
+    /// node of its own and normalizes its stack before copying it into the method.
+    fn within_inline_lambda_frame(&self) -> bool {
+        self.frame.open_inline_frames().any(|marker| {
+            matches!(
+                self.ir.debug_local_provenance(marker),
+                Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+            )
+        })
     }
 
     fn release_reserved_inline_stack(&mut self, reserved: Option<Vec<TempSlot>>) {
@@ -972,6 +1009,23 @@ impl Emitter<'_> {
     }
 }
 
+/// Open a bracket FixStack saves the caller's operand stack across. Its analysis clears the stack at
+/// the opening marker, so the expansion inside counts its operands from an empty stack, the way
+/// kotlinc's inliner sees the node it copies in: a bracket nested inside saves only what is pushed
+/// after this one.
+fn open_inline_stack(code: &mut CodeBuilder) {
+    code.inline_call_marker(true);
+    code.set_stack_height(0);
+}
+
+/// Close the bracket [`open_inline_stack`] opened when the caller had `saved` words on the stack:
+/// FixStack puts them back under the expansion's result.
+fn close_inline_stack(saved: i32, code: &mut CodeBuilder) {
+    let result = code.stack_height();
+    code.inline_call_marker(false);
+    code.set_stack((saved + result).max(0) as u16);
+}
+
 /// An open lexical slot scope; see [`Emitter::open_slot_scope`].
 pub(super) struct SlotScope {
     slots: HashMap<u32, (u16, Ty)>,
@@ -985,6 +1039,9 @@ pub(super) struct InlineBodyEntry {
     pub(super) normalize_at_lambda_frame: bool,
     /// The caller's operand stack height when the block began.
     pub(super) stack_height: i32,
+    /// Whether the block is emitted inside an enclosing inline lambda's body (see
+    /// [`Emitter::open_inline_stack_at_lambda_frame`]).
+    pub(super) within_inline_lambda: bool,
     opening: Option<InlineBodyOpening>,
     /// A discarded copied inline-function frame's result: its value is left on the stack and
     /// popped once the frame's locals have ended.

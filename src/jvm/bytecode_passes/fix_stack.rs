@@ -352,9 +352,17 @@ pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), 
                 let Some(reserved) = reserved_first_local(method, id, words) else {
                     return Err(FixStackError::ReservedLocalLayout(index));
                 };
-                if reserved < live_first_unused(&live)
-                    || reserved.checked_add(words).is_none()
-                    || reserved + words > initial_max_locals
+                // An enclosing stack saved in the method's own body lies above `maxLocals`, one
+                // saved inside an inline lambda below this reservation; neither may share a word.
+                let Some(end) = reserved.checked_add(words) else {
+                    return Err(FixStackError::ReservedLocalLayout(index));
+                };
+                if end > initial_max_locals
+                    || live.iter().any(|(_, saved)| {
+                        !saved.values.is_empty()
+                            && saved.first_local < end
+                            && reserved < saved.first_unused_local()
+                    })
                 {
                     return Err(FixStackError::ReservedLocalLayout(index));
                 }
@@ -500,6 +508,73 @@ mod tests {
                     slot: 1,
                 }),
                 Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+                Node::Insn(Insn::Op(IRETURN)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reserved_spill_nests_below_a_stack_saved_above_max_locals() {
+        let mut method = MethodNode::new(0x0008, "f", "()I");
+        method.max_locals = 3;
+        method.nodes = vec![
+            Node::Insn(Insn::Op(ICONST_1)),
+            marker("beforeInlineCall"),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 0,
+            }),
+            Node::Insn(Insn::Op(ICONST_5)),
+            marker("beforeInlineCallWithReservedLocals"),
+            Node::Insn(Insn::Op(ICONST_0)),
+            Node::Insn(Insn::Var {
+                op: ISTORE,
+                slot: 2,
+            }),
+            marker("afterInlineCall"),
+            marker("afterInlineCall"),
+            Node::Insn(Insn::Op(IADD)),
+            Node::Insn(Insn::Op(IRETURN)),
+        ];
+        let mut editable = EditableMethod::new(method);
+
+        fix_stack(&mut editable, "T")
+            .expect("the outer save above maxLocals does not overlap the inner reservation");
+        let finished = editable.finish();
+
+        assert_eq!(finished.max_locals, 5);
+        assert_eq!(
+            finished.nodes,
+            vec![
+                Node::Insn(Insn::Op(ICONST_1)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 3,
+                }),
+                Node::Insn(Insn::Op(ICONST_0)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 0,
+                }),
+                Node::Insn(Insn::Op(ICONST_5)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 1,
+                }),
+                Node::Insn(Insn::Op(ICONST_0)),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 2,
+                }),
+                Node::Insn(Insn::Var { op: ILOAD, slot: 1 }),
+                Node::Insn(Insn::Var {
+                    op: ISTORE,
+                    slot: 4,
+                }),
+                Node::Insn(Insn::Var { op: ILOAD, slot: 3 }),
+                Node::Insn(Insn::Var { op: ILOAD, slot: 4 }),
+                Node::Insn(Insn::Op(IADD)),
                 Node::Insn(Insn::Op(IRETURN)),
             ]
         );

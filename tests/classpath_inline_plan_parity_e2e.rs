@@ -99,3 +99,35 @@ const FOR_EACH: &str = r#"fun box(): String {
 fn an_inline_iteration_is_the_reference_compilers_class() {
     common::assert_classes_identical_to_kotlinc_jdk("PlanForEach", FOR_EACH, &["PlanForEachKt"]);
 }
+
+/// An inline-only call made with the caller's operands on the stack (`"O" + "x".let { … }`) saves
+/// them across the lambda body. In the method's own body kotlinc's FixStack runs over the finished
+/// method, so the saved words go above every local the method uses, after the lambda's `$i$a$`
+/// marker, and the next such call reuses them.
+const ROOT_STACK: &str = r#"fun box(): String = { "O" }.let { it() } + "x".let { it.drop(1) + "K" }
+"#;
+
+#[test]
+fn a_stack_saved_in_the_methods_own_body_is_stored_above_its_locals() {
+    common::assert_classes_identical_to_kotlinc_jdk(
+        "PlanRootStack",
+        ROOT_STACK,
+        &["PlanRootStackKt"],
+    );
+}
+
+/// Inside an inline lambda's body kotlinc saved the stack while it built that lambda's node, so the
+/// words are claimed ahead of the inner lambda's own marker. What lies below the enclosing bracket
+/// is that bracket's to save: the inner call saves only what was pushed inside the lambda, while
+/// the outer call's words go above every local of the method.
+const NESTED_STACK: &str = r#"fun box(): String = "O" + run { "" + "x".let { it.drop(1) + "K" } }
+"#;
+
+#[test]
+fn a_stack_saved_inside_an_inline_lambda_is_stored_below_its_marker() {
+    common::assert_classes_identical_to_kotlinc_jdk(
+        "PlanNestedStack",
+        NESTED_STACK,
+        &["PlanNestedStackKt"],
+    );
+}
