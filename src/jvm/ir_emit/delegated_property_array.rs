@@ -31,15 +31,22 @@ pub(super) fn declare_in_interface(env: &EmitEnv<'_>, owner: TypeName, cw: &mut 
 
 fn declare_with(env: &EmitEnv<'_>, owner: TypeName, cw: &mut ClassWriter, access: u16) {
     if exists(env, owner) {
-        let field = (access, array::FIELD, array::DESCRIPTOR);
+        let field = (
+            access,
+            env.property_reference_realizations
+                .delegated_arrays
+                .field_name(owner),
+            array::DESCRIPTOR,
+        );
         cw.add_field_late_leading(field, Some(array::SIGNATURE), None);
     }
 }
 
 impl Emitter<'_> {
     /// Fill `owner`'s array, as kotlinc's `<clinit>` does before anything else: build it through a
-    /// local, one element per slot, then store it. Such a `<clinit>` has no line table in kotlinc.
-    /// `internal_name` is `owner`'s class-file spelling, which the field reference names.
+    /// local, one element per slot, then store it. The owning initializer decides whether kotlinc
+    /// retains those instruction line marks; `internal_name` is `owner`'s class-file spelling,
+    /// which the field reference names.
     pub(super) fn emit_delegated_property_array(
         &mut self,
         env: &EmitEnv<'_>,
@@ -51,11 +58,14 @@ impl Emitter<'_> {
             return;
         };
         super::vararg::emit_packed_array(self, &array::array_type(), elements, code);
-        let reference = self
-            .cw
-            .fieldref(internal_name, array::FIELD, array::DESCRIPTOR);
+        let reference = self.cw.fieldref(
+            internal_name,
+            env.property_reference_realizations
+                .delegated_arrays
+                .field_name(owner),
+            array::DESCRIPTOR,
+        );
         code.putstatic(reference, 1);
-        self.cw.omit_method_lines("<clinit>", "()V");
     }
 }
 

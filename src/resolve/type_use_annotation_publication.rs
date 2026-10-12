@@ -216,9 +216,9 @@ impl Checker<'_> {
             let arguments = application_arguments(file, &annotation);
             self.check_annotation_application(scope, &annotation, arguments);
             let key = (annotation.span.lo, annotation.span.hi);
-            if let Some(mut applied) = self.applied_annotations.remove(&key) {
+            if let Some(mut applied) = self.applied_annotations.take_checked(&key) {
                 self.order_as_written(applied.internal, &mut applied.values, arguments, None);
-                self.applied_annotations.insert(key, applied);
+                self.applied_annotations.record(key, applied);
             }
         }
     }

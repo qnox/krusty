@@ -378,7 +378,7 @@ impl<'a> JvmClassRealization<'a> {
         let delegate = property
             .delegate_field
             .and_then(|i| c.fields.get(i as usize));
-        let hoisted = static_fields::hoisted_static_for(ir, c, property_index);
+        let hoisted = static_fields::hoisted_static_declaration_for(ir, c, property_index);
         let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
         // A getter's descriptor is its physical one: a scalar getter result over a reference-returning
         // overridden property returns the wrapper (see `jvm::override_results`).
@@ -451,11 +451,14 @@ impl<'a> JvmClassRealization<'a> {
                 .filter(|_| backing.is_some())
                 .or(property.delegate_field.filter(|_| delegate.is_some()))
                 .map(|index| instance_field_jvm_name(ir, self.run, c, index as usize))
+                .or_else(|| {
+                    hoisted.map(|(static_id, _)| ir.static_field_jvm_name(static_id).to_string())
+                })
                 .filter(|physical| *physical != property.name),
             desc: backing
                 .map(|field| field.ty)
                 .or(delegate.map(|field| field.ty))
-                .or_else(|| hoisted.map(|storage| storage.ty))
+                .or_else(|| hoisted.map(|(_, storage)| storage.ty))
                 .map(desc)
                 .filter(|physical| self.requires_field_signature(property.ty, physical)),
         });

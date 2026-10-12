@@ -39,9 +39,11 @@ pub(crate) fn field(name: &str, ty: Ty) -> IrField {
 pub(crate) fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
     IrProperty {
         name: name.to_string(),
+        diagnostic_span: None,
         context_params: Vec::new(),
         source_order: 0,
         decl_line: 0,
+        accessor_lines: crate::ir::IrAccessorLines::default(),
         ty,
         type_params: Vec::new(),
         visibility: crate::types::Visibility::Public,

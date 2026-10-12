@@ -231,6 +231,7 @@ mod tests {
     fn entry() -> crate::ir::IrEnumEntry {
         crate::ir::IrEnumEntry {
             name: "ENTRY".to_string(),
+            diagnostic_span: None,
             argument_prelude: Vec::new(),
             args: Vec::new(),
             constructor_parameter_types: Vec::new(),

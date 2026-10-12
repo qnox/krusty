@@ -249,6 +249,38 @@ impl Emitter<'_> {
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let storage = hoisted_companion_storage(self.ir, companion, property, writable)?;
+        let declaration = self
+            .ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name == companion)?
+            .properties
+            .get(property as usize)?;
+        // A source assignment retained in the companion initializer still calls a visible default
+        // `lateinit` setter. The outer `<clinit>` owns storage initialization, but that must not
+        // erase the source accessor boundary (`Companion.setText(value)`).
+        if writable
+            && self.render_initializer_boundaries
+            && self.ir.statics[storage.index as usize].is_lateinit
+            && matches!(
+                declaration.setter_visibility,
+                crate::types::Visibility::Public | crate::types::Visibility::Internal
+            )
+        {
+            let setter = declaration.setter?;
+            let function = &self.ir.functions[setter as usize];
+            return Some(PropertyAccess::Accessor {
+                owner: companion,
+                name: declaration
+                    .setter_jvm_name
+                    .clone()
+                    .unwrap_or_else(|| function.name.clone()),
+                descriptor: method_descriptor(&[jvm_declared_ty(&function.params[0])], Ty::Unit),
+                is_static: false,
+                is_interface: false,
+                static_receiver: None,
+            });
+        }
         let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(storage.owner));
         if emitted_by_owner || self.ir.is_jvm_field_static(storage.index) {
             return Some(PropertyAccess::Field {
@@ -267,7 +299,12 @@ impl Emitter<'_> {
             name,
             descriptor,
             takes_receiver: false,
-            inline_uninitialized_guard: None,
+            // The `$cp` bridge exposes raw hoisted storage. A normal private `lateinit` read owns
+            // the guard at this use site; `::property.isInitialized` is a distinct IR operation
+            // and never selects this property-access realization.
+            inline_uninitialized_guard: (!writable
+                && self.ir.statics[storage.index as usize].is_lateinit)
+                .then(|| self.ir.statics[storage.index as usize].name.clone()),
         })
     }
 }

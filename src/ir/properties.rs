@@ -24,9 +24,8 @@ pub(crate) struct IrInlinePropertyAccess {
     pub(crate) splices: crate::fx_hash::HashMap<ExprId, IrInlinePropertySplice>,
 }
 
-/// Where a property's accessors written with a body start and end, each a 1-based line (0 when
-/// the accessor has no body of its own). Such an accessor is a declaration of its own and anchors
-/// on its own line; any other accessor anchors on the property's line.
+/// Where a property's written accessor headers start, and where accessor bodies end, each a
+/// 1-based line. A visibility-only accessor retains its header with a zero body end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IrAccessorLines {
     pub getter: u32,
@@ -41,6 +40,9 @@ pub struct IrAccessorLines {
 #[derive(Clone, Debug)]
 pub struct IrCheckedProperty {
     pub declaration: crate::fir::DeclarationId,
+    /// Exact source name span retained for diagnostics that can only be classified after a backend
+    /// has selected the declaration's physical representation.
+    pub diagnostic_span: Option<crate::diag::Span>,
     /// The declaration's stable source position, the key its accessors take in `fn_source_order`.
     pub source_order: u32,
     /// Source declaration line accepted while the bounded Pass-2 syntax unit is live. This is
@@ -149,13 +151,20 @@ pub enum IrPropertyModality {
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    /// Exact source property span for a representation-dependent declaration diagnostic. Generated
+    /// properties have no source declaration and leave this absent.
+    pub diagnostic_span: Option<crate::diag::Span>,
     /// Named context parameters in source order. Metadata records these separately from ordinary
     /// value parameters, and checked call sites supply their operands implicitly.
     pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
-    /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
-    /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
+    /// Stable source declaration order and 1-based declaration line. These remain attached to the
+    /// declaration so a backend can order/debug synthesized accessors without rebinding the
+    /// property by spelling.
     pub source_order: u32,
     pub decl_line: u32,
+    /// Source lines retained for backend-synthesized accessors after their functions have been
+    /// materialized. In particular, a bodiless private setter can delimit a `lateinit` getter.
+    pub accessor_lines: IrAccessorLines,
     /// The property's language-level type. This is also the type exposed by its accessors.
     pub ty: Ty,
     /// Type parameters this property declares (`var <X, Y> ctx: Map<X, Y>`). They are not the

@@ -22,11 +22,17 @@ impl ClassWriter {
             return;
         }
         let name = self.cp.utf8(name);
-        self.cp.utf8(desc);
+        let desc = self.cp.utf8(desc);
         let annotation_type = self.cp.utf8(ann_type);
         let annotation = vec![(annotation_type >> 8) as u8, annotation_type as u8, 0, 0];
-        if let Some(field) = self.fields.iter_mut().find(|field| field.name == name) {
-            field.invisible_anns = vec![annotation];
+        if let Some(field) = self
+            .fields
+            .iter_mut()
+            .find(|field| field.name == name && field.desc == desc)
+        {
+            if !field.invisible_anns.contains(&annotation) {
+                field.invisible_anns.push(annotation);
+            }
         }
     }
 }

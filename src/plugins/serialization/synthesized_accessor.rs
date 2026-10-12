@@ -77,9 +77,11 @@ mod tests {
     fn property(field: u32) -> IrProperty {
         IrProperty {
             name: "result".to_string(),
+            diagnostic_span: None,
             context_params: Vec::new(),
             source_order: 0,
             decl_line: 0,
+            accessor_lines: crate::ir::IrAccessorLines::default(),
             ty: Ty::obj("kotlin/Result"),
             type_params: Vec::new(),
             visibility: Visibility::Public,

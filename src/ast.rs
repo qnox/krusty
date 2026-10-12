@@ -89,11 +89,18 @@ pub fn is_computed_member_prop(p: &PropDecl) -> bool {
 
 /// Whether this member-property declaration contributes one instance-storage slot.
 pub fn has_instance_backing_field(p: &PropDecl) -> bool {
-    !p.is_const
-        && !is_computed_member_prop(p)
+    !p.is_const && has_backing_field(p)
+}
+
+/// Whether this property declaration can own the backing field selected by an explicit `@field:`
+/// annotation. Static `const` storage counts; delegates and computed/extension/context properties
+/// have other realizations and therefore do not.
+pub fn has_backing_field(p: &PropDecl) -> bool {
+    !is_computed_member_prop(p)
         && !p.is_abstract
         && p.delegate.is_none()
         && p.receiver.is_none()
+        && p.context_params.is_empty()
 }
 
 pub fn setter_param_or_value(param: Option<&String>) -> String {
@@ -574,8 +581,14 @@ pub struct TypeRef {
 pub struct AnnotationRef {
     /// Source spelling used only as input to name resolution.
     pub name: String,
+    /// The `@` that begins this application. Target diagnostics cover the complete `@site:Name`
+    /// prefix while semantic occurrence identity remains keyed by the classifier span below.
+    pub at: u32,
     /// Exact classifier-reference span; resolved identities are keyed by this occurrence.
     pub span: Span,
+    /// An explicit property use-site target retained with the semantic annotation occurrence.
+    /// Other use-site targets belong to accessors/parameters and are stored by those declarations.
+    pub property_site: Option<crate::types::PropertyAnnotationSite>,
 }
 
 /// Source annotations on one declaration type parameter (`<@Ann("x") T>`). The parameter and every
@@ -1287,7 +1300,8 @@ pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
 }
 
-/// Where a property's accessors written with a body start and end, each a 1-based line (0 = none).
+/// Where a property's written accessor headers start, and where accessor bodies end, each a
+/// 1-based line (0 = none). A visibility-only accessor has a header and no body end.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AccessorLines {
     pub getter: u32,

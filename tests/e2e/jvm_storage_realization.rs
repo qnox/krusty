@@ -16,5 +16,13 @@ mod enum_companion_property_e2e;
 mod enum_init_block_line_e2e;
 #[path = "../inner_outer_field_signature_e2e.rs"]
 mod inner_outer_field_signature_e2e;
+#[path = "../jvmfield_companion_e2e.rs"]
+mod jvmfield_companion_e2e;
+#[path = "../metadata_jvm_field_e2e.rs"]
+mod metadata_jvm_field_e2e;
+#[path = "../property_accessor_annotation_e2e.rs"]
+mod property_accessor_annotation_e2e;
+#[path = "../unread_field_annotation_order_e2e.rs"]
+mod unread_field_annotation_order_e2e;
 #[path = "../volatile_field_e2e.rs"]
 mod volatile_field_e2e;

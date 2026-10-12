@@ -393,6 +393,41 @@ fn block_property_beside_companion_object_property_keeps_its_field_name() {
 }
 
 #[test]
+fn value_class_erasure_disambiguates_companion_object_storage() {
+    const SRC: &str = "@JvmInline value class V(val value: Int)\n\
+        class E {\n\
+        \x20   companion { val x: Int = 1 }\n\
+        \x20   companion object { val x: V = V(2) }\n\
+        }\n\
+        fun box(): String =\n\
+        \x20   if (E.x == 1 && E.Companion.x.value == 2) \"OK\" else \"fail\"\n";
+    assert_members_and_metadata_match_kotlinc("ErasedFieldNames", SRC, &["E"]);
+    assert_eq!(run(SRC).expect("erased companion field names"), "OK");
+}
+
+#[test]
+fn disambiguated_companion_storage_keeps_its_own_nullability() {
+    const SRC: &str = "class C {\n\
+        \x20   companion { val x: String? = null }\n\
+        \x20   companion object { val x: String = \"K\" }\n\
+        }\n\
+        fun box(): String = if (C.x == null && C.Companion.x == \"K\") \"OK\" else \"fail\"\n";
+    for comparison in assert_members_and_metadata_match_kotlinc_on(
+        "DisambiguatedFieldNullability",
+        SRC,
+        &["C"],
+        &[common::stdlib_jar()],
+    ) {
+        assert_eq!(
+            common::member_blocks(&comparison.krusty),
+            common::member_blocks(&comparison.reference),
+            "C: disambiguated field annotations must match kotlinc's"
+        );
+    }
+    assert_eq!(run(SRC).expect("disambiguated nullability"), "OK");
+}
+
+#[test]
 fn property_reference_to_block_property_reads_its_class() {
     const SRC: &str = "class C {\n\
         \x20   companion { var p = \"FAIL\" }\n\

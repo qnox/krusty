@@ -411,9 +411,11 @@ pub(super) fn materialize_member_delegate(
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
+        diagnostic_span: property.diagnostic_span,
         context_params: Vec::new(),
         source_order,
         decl_line: 0,
+        accessor_lines: property.accessor_lines,
         ty: property.ty,
         type_params,
         visibility: property.visibility,

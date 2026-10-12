@@ -131,6 +131,53 @@ fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
     })
 }
 
+/// Whether a synthetic field that class emission adds after JVM storage realization reserves this
+/// spelling. Ordinary private storage yields by name; a public source field may share the name at
+/// a distinct descriptor. A displaced delegated-property array's exact collision is the exception:
+/// it stays physical so declaration-collision validation can report the two source declarations.
+fn synthetic_owner_static_field(
+    ir: &IrFile,
+    delegated_arrays: &crate::jvm::property_references::DelegatedPropertyArrays,
+    owner: ClassId,
+    name: &str,
+    descriptor: &str,
+    public_source_field: bool,
+) -> bool {
+    let class = &ir.classes[owner as usize];
+    let companion_field = class.companion_class.is_some_and(|companion| {
+        name == companion.nested_segment_ref()
+            && (!public_source_field || descriptor == format!("L{};", companion.render()))
+    });
+    if companion_field {
+        return true;
+    }
+    let array_name = delegated_arrays.field_name(class.fq_name);
+    if name == array_name && delegated_arrays.elements(class.fq_name).is_some() {
+        let exact_array_signature =
+            descriptor == crate::jvm::property_references::delegated_arrays::DESCRIPTOR;
+        if public_source_field {
+            return exact_array_signature;
+        }
+        if array_name == crate::jvm::property_references::delegated_arrays::FIELD {
+            return true;
+        }
+        // An ordinary field at a displaced `$N` spelling yields when its descriptor differs. An
+        // exact signature stays in place so declaration-collision validation can reject the two
+        // source declarations instead of silently suffixing the private storage.
+        return !exact_array_signature;
+    }
+    if !class.is_enum {
+        return false;
+    }
+    // Entry constants keep their ABI names, so ordinary private storage with the same source name
+    // receives `$N` even when its descriptor differs. A public `@JvmField` is itself source ABI,
+    // though, and the classfile admits it beside an entry when their full signatures differ.
+    // `$VALUES` and `$ENTRIES` are different: kotlinc preserves a source property's spelling and
+    // suffixes the generated enum storage instead (selected by `enum_synthetic_fields`).
+    class.enum_entries.iter().any(|entry| entry.name == name)
+        && (!public_source_field || descriptor == format!("L{};", class.fq_name.render()))
+}
+
 /// Realize the JVM's companion-property storage layout from semantic common IR.
 pub(crate) fn lower_companion_properties(
     ir: &mut IrFile,
@@ -338,6 +385,17 @@ pub(crate) fn lower_companion_properties(
             });
         }
     }
+    // Ordinary backing fields and delegate storage are discovered in separate shape-specific
+    // passes above. Rejoin them at the recorded declaration boundary before assigning global
+    // static identities: class and enum `<clinit>` consume those identities in insertion order.
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.outer,
+            candidate.source_order,
+            candidate.property,
+            candidate.delegate_storage,
+        )
+    });
     if candidates.is_empty() {
         schedule_class_companion_initializers(ir, realizations);
         return;
@@ -383,26 +441,6 @@ pub(crate) fn lower_companion_properties(
         // hoisted companion property (the declaration belongs to the companion's metadata alone).
         // Emission finds the physical field through `IrStatic.owner`.
         ir.mark_jvm_companion_hoisted_static(index);
-        // The outer class's own static fields keep their names; a hoisted companion property that
-        // meets one (a same-named `companion { … }` property) takes the next free `$N` suffix, as
-        // kotlinc names it. Its accessors and bridges keep the property's name.
-        let owner = ir.classes[candidate.outer as usize].fq_name;
-        let descriptor = crate::jvm::names::type_descriptor(candidate.ty);
-        let occupied = |ir: &IrFile, name: &str| {
-            ir.statics.iter().enumerate().any(|(other, property)| {
-                other as u32 != index
-                    && property.owner == Some(owner)
-                    && ir.static_field_jvm_name(other as u32) == name
-                    && crate::jvm::names::type_descriptor(property.ty) == descriptor
-            })
-        };
-        if occupied(ir, &candidate.name) {
-            let physical = (1usize..)
-                .map(|suffix| format!("{}${suffix}", candidate.name))
-                .find(|physical| !occupied(ir, physical))
-                .expect("an unused JVM static field suffix always exists");
-            ir.set_jvm_static_field_name(index, physical);
-        }
         if candidate.is_jvm_field {
             ir.mark_jvm_field_static(index);
         }
@@ -515,6 +553,28 @@ pub(crate) fn lower_companion_properties(
                     })
                 } else {
                     Some(write)
+                }
+            }
+            IrExpr::LateinitInitialized {
+                receiver,
+                class,
+                index,
+            } if static_for_field.contains_key(&(class, index)) => {
+                let read = IrExpr::GetStatic(static_for_field[&(class, index)]);
+                // Keep the raw-read identity when the canonical singleton still has to trigger
+                // companion initialization. The nested read, rather than its wrapping block, is
+                // the expression emitted as getstatic and therefore owns the no-guard marker.
+                if redundant_companion_receiver(ir, class, receiver)
+                    && !crate::ir::expr_runs_no_code(ir, receiver)
+                {
+                    let read = ir.add_expr(read);
+                    ir.lateinit_initialization_probes.insert(read);
+                    Some(IrExpr::Block {
+                        stmts: vec![receiver],
+                        value: Some(read),
+                    })
+                } else {
+                    Some(read)
                 }
             }
             _ => None,
@@ -691,6 +751,145 @@ pub(crate) fn lower_companion_properties(
         }
     }
     schedule_class_companion_initializers(ir, realizations);
+}
+
+/// Allocate the final JVM names of companion fields hoisted onto their enclosing classes.
+///
+/// This runs after value-class lowering because a field's descriptor participates in its JVM
+/// identity. Two source-distinct properties can acquire the same descriptor only after one has
+/// been replaced by its carrier. The enclosing class's own fields retain their names except for
+/// private companion-block storage that collides with a public `@JvmField`; that public ABI keeps
+/// its source name and the private storage receives kotlinc's next free `$N` suffix. Other colliding
+/// hoisted fields receive the suffix instead. Accessors and bridges retain the source property name.
+pub(crate) fn finalize_hoisted_static_field_names(
+    ir: &mut IrFile,
+    delegated_arrays: &crate::jvm::property_references::DelegatedPropertyArrays,
+) {
+    let jvm_field_signatures = ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            ir.is_jvm_companion_hoisted_static(*index as u32)
+                && ir.is_jvm_field_static(*index as u32)
+        })
+        .filter_map(|(index, field)| {
+            Some((
+                field.owner?,
+                ir.static_field_jvm_name(index as u32).to_string(),
+                crate::jvm::names::type_descriptor(field.ty),
+            ))
+        })
+        .collect::<HashSet<_>>();
+    let mut declared_signatures = ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            Some((
+                field.owner?,
+                ir.static_field_jvm_name(index as u32).to_string(),
+                crate::jvm::names::type_descriptor(field.ty),
+            ))
+        })
+        .collect::<HashSet<_>>();
+    let displaced_block_storage = (0..ir.statics.len() as u32)
+        .filter(|&index| {
+            !ir.is_jvm_companion_hoisted_static(index)
+                && ir.companion_blocks.is_storage(index)
+                && !ir.statics[index as usize].is_const
+        })
+        .filter(|&index| {
+            let field = &ir.statics[index as usize];
+            field.owner.is_some_and(|owner| {
+                jvm_field_signatures.contains(&(
+                    owner,
+                    ir.static_field_jvm_name(index).to_string(),
+                    crate::jvm::names::type_descriptor(field.ty),
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    for index in displaced_block_storage {
+        let field = &ir.statics[index as usize];
+        let owner = field
+            .owner
+            .expect("companion-block static storage has its declaring class as owner");
+        let class = ir
+            .class_id_by_name(owner)
+            .expect("companion-block static storage owner is declared in this file");
+        let descriptor = crate::jvm::names::type_descriptor(field.ty);
+        let physical = (1usize..)
+            .map(|suffix| format!("{}${suffix}", field.name))
+            .find(|candidate| {
+                !synthetic_owner_static_field(
+                    ir,
+                    delegated_arrays,
+                    class,
+                    candidate,
+                    &descriptor,
+                    false,
+                ) && !declared_signatures.contains(&(owner, candidate.clone(), descriptor.clone()))
+            })
+            .expect("an unused companion-block field suffix always exists");
+        declared_signatures.insert((owner, physical.clone(), descriptor));
+        ir.set_jvm_static_field_name(index, physical);
+    }
+
+    let mut occupied = HashSet::default();
+    for (index, field) in ir.statics.iter().enumerate() {
+        if ir.is_jvm_companion_hoisted_static(index as u32) {
+            continue;
+        }
+        let Some(owner) = field.owner else {
+            continue;
+        };
+        occupied.insert((
+            owner,
+            ir.static_field_jvm_name(index as u32).to_string(),
+            crate::jvm::names::type_descriptor(field.ty),
+        ));
+    }
+
+    let hoisted = (0..ir.statics.len() as u32)
+        .filter(|&index| ir.is_jvm_companion_hoisted_static(index))
+        .collect::<Vec<_>>();
+    for index in hoisted {
+        let field = &ir.statics[index as usize];
+        let owner = field
+            .owner
+            .expect("a companion-hoisted static has an enclosing class owner");
+        let class = ir
+            .class_id_by_name(owner)
+            .expect("a companion-hoisted static owner is declared in this file");
+        let descriptor = crate::jvm::names::type_descriptor(field.ty);
+        let current = ir.static_field_jvm_name(index).to_string();
+        // Ordinary private storage yields to every generated owner-field spelling by name.
+        // A public `@JvmField` owns source ABI and may coexist at a distinct descriptor.
+        let public_source_field = ir.is_jvm_field_static(index);
+        let is_occupied = |name: &str| {
+            synthetic_owner_static_field(
+                ir,
+                delegated_arrays,
+                class,
+                name,
+                &descriptor,
+                public_source_field,
+            ) || occupied.contains(&(owner, name.to_string(), descriptor.clone()))
+        };
+        let physical = if is_occupied(&current) {
+            (1usize..)
+                .map(|suffix| format!("{}${suffix}", field.name))
+                .find(|candidate| !is_occupied(candidate))
+                .expect("an unused JVM static field suffix always exists")
+        } else {
+            current
+        };
+        occupied.insert((owner, physical.clone(), descriptor));
+        if physical != ir.static_field_jvm_name(index) {
+            ir.set_jvm_static_field_name(index, physical);
+        }
+    }
 }
 
 /// A class companion's initializer runs in the enclosing class `<clinit>`, after that class has

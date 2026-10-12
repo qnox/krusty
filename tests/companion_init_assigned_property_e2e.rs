@@ -92,6 +92,14 @@ class RetainedInitializer {\n\
 fun box(): String = RetainedInitializer.shown()\n\
 ";
 
+const SAME_LINE_COMPANION_PROPERTIES: &str = "\
+package store
+
+class SameLine {
+    companion object { internal val first = 1; const val second = 2 }
+}
+";
+
 #[test]
 fn an_init_assigned_companion_property_is_an_outer_static() {
     for class in [
@@ -153,4 +161,18 @@ fn a_non_hoisted_field_keeps_the_companion_initializer_in_source_order() {
         .as_deref(),
         Some("OK")
     );
+}
+
+#[test]
+fn same_line_companion_statics_keep_source_order() {
+    for class in ["store/SameLine", "store/SameLine$Companion"] {
+        common::byte_diff_against_kotlinc_cp(
+            "SameLineCompanionProperties",
+            SAME_LINE_COMPANION_PROPERTIES,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
 }

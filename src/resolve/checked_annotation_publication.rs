@@ -305,19 +305,30 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         function: &FunDecl,
         include_value_parameters: bool,
+        declaration_target: &'static str,
     ) -> usize {
         let suppression_depth =
             self.push_declaration_policies(scope, &function.annotations, &function.annotation_args);
         self.check_declaration_type_parameter_annotations(scope, function.signature_span.lo);
         for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
-            self.check_annotation_application(scope, annotation, arguments);
+            self.check_non_property_annotation_application(
+                scope,
+                annotation,
+                arguments,
+                declaration_target,
+            );
         }
         if include_value_parameters {
             for parameter in &function.params {
                 for (annotation, arguments) in
                     parameter.annotations.iter().zip(&parameter.annotation_args)
                 {
-                    self.check_annotation_application(scope, annotation, arguments);
+                    self.check_non_property_annotation_application(
+                        scope,
+                        annotation,
+                        arguments,
+                        "value parameter",
+                    );
                 }
             }
         }
@@ -361,6 +372,7 @@ impl Checker<'_> {
             &method_scope,
             function,
             include_value_parameters,
+            "function",
         );
         self.active_lexical_policies.truncate(suppression_depth);
     }

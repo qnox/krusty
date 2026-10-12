@@ -847,9 +847,11 @@ mod tests {
         ir.classes[a as usize].fields = vec![field("v", Ty::Int)];
         ir.classes[a as usize].properties = vec![IrProperty {
             name: "v".to_string(),
+            diagnostic_span: None,
             context_params: Vec::new(),
             source_order: 0,
             decl_line: 1,
+            accessor_lines: crate::ir::IrAccessorLines::default(),
             ty: Ty::Int,
             type_params: Vec::new(),
             visibility: crate::types::Visibility::Public,

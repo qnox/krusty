@@ -91,6 +91,9 @@ pub(super) fn emit(
     emitter.record_locals = true;
     let mut clinit = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
+    if delegated_property_array::exists(env, c.fq_name) {
+        emitter.cw.omit_method_lines("<clinit>", "()V");
+    }
     let ci = emitter.cw.class_ref(fq_name);
     let init = emitter.cw.methodref(fq_name, "<init>", "()V");
     let fref = emitter.cw.fieldref(fq_name, instance_name, &self_desc);

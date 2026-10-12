@@ -23,13 +23,15 @@ pub(super) fn declaration_annotations(
     annotations: &[ast::AnnotationRef],
     info: &TypeInfo,
 ) -> crate::ir::DeclarationAnnotations {
-    checked_annotations(annotations.iter().map(|annotation| {
-        info.applied_annotation(annotation).unwrap_or_else(|| {
-            panic!(
+    checked_annotations(annotations.iter().filter_map(|annotation| {
+        match info.applied_annotation(annotation) {
+            Some(applied) => Some(applied),
+            None if info.discarded_annotation_application(annotation) => None,
+            None => panic!(
                 "frontend did not record checked annotation application at {}..{}",
                 annotation.span.lo, annotation.span.hi
-            )
-        })
+            ),
+        }
     }))
 }
 
@@ -39,17 +41,24 @@ fn property_site_annotations(
     on_constructor_parameter: bool,
     site: crate::types::PropertyAnnotationSite,
 ) -> crate::ir::DeclarationAnnotations {
-    checked_annotations(
-        declared
-            .iter()
-            .filter_map(|annotation| info.applied_annotation(annotation))
-            .filter(|applied| {
+    // Kotlin lowers explicit use-site applications before annotations whose declaration target
+    // defaults to that site, even when the defaulted annotation was written first. Preserve source
+    // order inside each group; this is the annotation order emitted on the physical declaration.
+    let applications = [true, false].into_iter().flat_map(|explicit| {
+        declared.iter().filter_map(move |annotation| {
+            if annotation.property_site.is_some() != explicit {
+                return None;
+            }
+            let applied = info.applied_annotation(annotation)?;
+            let selected = annotation.property_site.or_else(|| {
                 applied
                     .targets
                     .property_declaration_site(on_constructor_parameter)
-                    == Some(site)
-            }),
-    )
+            });
+            (selected == Some(site)).then_some(applied)
+        })
+    });
+    checked_annotations(applications)
 }
 
 fn checked_annotations<'a>(

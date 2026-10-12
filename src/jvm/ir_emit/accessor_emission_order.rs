@@ -1,0 +1,75 @@
+//! Relative classfile order of constructor and static accessors.
+//!
+//! A companion's synthetic marker constructor splits its ordinary property/static accessors from
+//! companion-instance accessors. Other classes emit all static accessors together, while a hidden
+//! value-class primary can still place its marker constructor after them.
+
+use super::{
+    class_ctor_jvm_tys, constructor_accessors, constructor_defaults, has_ctor_marker_accessor,
+    marker_accessor_emitted_last, static_accessors, ClassWriter, EmitEnv, StaticOwner,
+};
+use crate::ir::{IrClass, IrFile};
+
+pub(super) fn emit(
+    ir: &IrFile,
+    class: &IrClass,
+    fq_name: &str,
+    facade: &str,
+    env: &EmitEnv<'_>,
+    writer: &mut ClassWriter,
+) {
+    constructor_accessors::emit_accessors(ir, class, fq_name, writer);
+    let marker_accessor = class.has_primary_ctor
+        && marker_accessor_emitted_last(ir, class)
+        && has_ctor_marker_accessor(ir, class);
+    let companion_marker = class.is_companion && marker_accessor;
+    if companion_marker {
+        static_accessors::emit_before_companion_marker(
+            ir,
+            env.run,
+            &env.run.static_accessor_plan.borrow(),
+            StaticOwner::Class(class.fq_name),
+            facade,
+            class.decl_start_line.max(class.decl_line),
+            writer,
+        );
+    } else {
+        static_accessors::emit(
+            ir,
+            env.run,
+            &env.run.static_accessor_plan.borrow(),
+            StaticOwner::Class(class.fq_name),
+            facade,
+            class.decl_start_line.max(class.decl_line),
+            writer,
+        );
+    }
+    // A companion's marker constructor follows property/static accessors but precedes a
+    // companion-instance accessor. A class hiding a value-class primary places the marker after
+    // all of its static accessors.
+    if marker_accessor {
+        let physical_parameters = class_ctor_jvm_tys(class);
+        let parameter_identities = crate::jvm::method_parameters::primary_constructor_identities(
+            ir,
+            class,
+            &physical_parameters,
+        );
+        constructor_defaults::emit_ctor_marker_accessor(
+            fq_name,
+            &physical_parameters,
+            &parameter_identities,
+            writer,
+        );
+    }
+    if companion_marker {
+        static_accessors::emit_after_companion_marker(
+            ir,
+            env.run,
+            &env.run.static_accessor_plan.borrow(),
+            StaticOwner::Class(class.fq_name),
+            facade,
+            class.decl_start_line.max(class.decl_line),
+            writer,
+        );
+    }
+}

@@ -1111,7 +1111,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc-built `@JvmField var`. Hoisted companion statics are no longer registered in
   `declared_class_statics[owner]`: kotlinc's OWNER metadata carries NO record for a hoisted
   companion property (the declaration belongs to the companion's metadata alone), and the bogus
-  const-flavored owner record was the last owner-class byte divergence. Byte-identical to kotlinc
+  const-flavored owner record was the last owner-class byte divergence. The public `@JvmField` ABI
+  spelling also takes priority over same-signature private storage from a `companion { ... }` block:
+  the private field receives the next `$N` suffix. A same-signature block `const val` is itself a
+  public owner field, so neither declaration can be renamed and kotlinc reports a platform
+  declaration clash at both properties. A field named `Companion` that instead collides
+  with the owner's synthetic companion alias is rejected with kotlinc's two exact platform-
+  declaration-clash diagnostics; the backend must not silently make that invalid source legal by
+  renaming the public field. Byte-identical to kotlinc
   for owner + companion in the class-owner (val + var), internal-val, and interface-owner shapes
   (also under `-jvm-default=no-compatibility`); runtime round-trips same-file, cross-file, and
   cross-module (`tests/jvmfield_companion_e2e.rs`). Ineligible placements FALL BACK TOGETHER: the
@@ -7376,7 +7383,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   WRONG_ANNOTATION_TARGET at the `@`: `this annotation is not applicable to target 'getter'.
   Applicable targets: <list>`, the Kotlin `@Target` entries in declared order without duplicates, or
   for a Java `@Target` the union of each `ElementType`'s Kotlin targets in Kotlin target order
-  followed by `expression` (identical on 2.4.0, 2.4.10 and 2.4.20). Retained applications are
+  followed by `expression` (identical on 2.4.0, 2.4.10 and 2.4.20). An explicit property
+  `@field:A` application is checked against `field` at the complete `@field:A` prefix before its
+  checked application is published; the use-site cannot override an annotation class whose
+  declared targets exclude `FIELD`. Argument checking remains independent and precedes this site
+  check, so one invalid application reports both diagnostics in kotlinc's order. Retained applications are
   written on the getter/setter method (and the setter's parameter) by retention, for member,
   top-level and companion properties, declared or default accessors alike. `@Metadata` sets
   `HAS_ANNOTATIONS` on the accessor's flags word (`getter_flags` f7, `setter_flags` f8) and on the
@@ -17095,7 +17106,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property stores and `init` blocks in source order. A hoisted store's line entry does not add
   the closing-line entry a generated static's store does. The enum's static fields are emitted in
   declaration order, and a companion `const val` is a `ConstantValue` field the `<clinit>` does
-  not store. Test: `tests/enum_companion_property_e2e.rs`. Corpus:
+  not store. An `@JvmField` whose name and descriptor collide with an enum entry is a platform
+  declaration clash: both are public ABI fields, so neither may take the private-storage `$N`
+  suffix. Tests: `tests/enum_companion_property_e2e.rs`, `tests/jvmfield_companion_e2e.rs`. Corpus:
   `enum/companionAccessingEnumValue.kt`, `enum/enumEntriesInCompanion.kt`,
   `enum/initEntriesInCompanionObject.kt`.
 - **A class initializer does not store a static's JVM default value.** kotlinc's
@@ -17109,7 +17122,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   SOURCE retention, so the flag is all that reaches the class file. The JVM backend reads the
   property's resolved annotation identities for a class, constructor or object property, a
   companion property hoisted to its outer class and a top-level property.
-  `kotlin.concurrent.Volatile` resolves to the same identity. Test:
+  `kotlin.concurrent.Volatile` resolves to the same identity. An immutable property never publishes
+  the volatile modifier, even when `VOLATILE_ON_VALUE` is suppressed, because a JVM field cannot be
+  both final and volatile. Test:
   `tests/volatile_field_e2e.rs`. Corpus: `volatile/volatileInt.kt` and its siblings.
 - **An outer class bridges a hoisted companion field only for another class's use.** kotlinc's
   `SyntheticAccessorLowering` creates `access$get…$cp` / `access$set…$cp` when code outside the

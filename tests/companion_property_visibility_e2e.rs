@@ -115,9 +115,16 @@ fn an_explicit_companion_receiver_is_only_a_lookup_coordinate() {
         .expect("reference kotlinc is provisioned")
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert_eq!(
-        common::compile_and_run_with_stdlib(EFFECTFUL_RECEIVER, "EffectfulCompanionReceiver")
-            .as_deref(),
+        common::compile_and_run_box(
+            EFFECTFUL_RECEIVER,
+            "EffectfulCompanionReceiver",
+            &[stdlib],
+            Some(jdk.as_path()),
+        )
+        .as_deref(),
         Some("fail:0")
     );
 }

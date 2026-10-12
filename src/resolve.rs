@@ -7633,7 +7633,7 @@ pub struct TypeInfo {
     class_literal_targets: HashMap<ExprId, TypeName>,
     /// Fully checked annotation applications keyed by their classifier-reference occurrence.
     /// Lowering consumes these values directly and never reopens source scope or providers.
-    applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
+    applied_annotations: annotation_applications::CheckedAnnotationApplications,
     pub anonymous_object_captures_by_class: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     pub anonymous_object_captures_by_construction: HashMap<ExprId, Vec<AnonymousObjectCapture>>,
     /// Anonymous-object super-constructor arguments the resolver evaluated at the construction
@@ -8617,14 +8617,6 @@ impl TypeInfo {
 
     pub fn class_literal_target(&self, expression: ExprId) -> Option<TypeName> {
         self.class_literal_targets.get(&expression).copied()
-    }
-
-    pub fn applied_annotation(
-        &self,
-        annotation: &AnnotationRef,
-    ) -> Option<&crate::types::AppliedAnnotation> {
-        self.applied_annotations
-            .get(&(annotation.span.lo, annotation.span.hi))
     }
 
     /// Whether a checked call selected a class/object member rather than a top-level, extension, or
@@ -23428,18 +23420,7 @@ impl<'a> Checker<'a> {
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
         self.local_function_receivers
             .extend(f.receiver.as_ref().map(|receiver| receiver.span));
-        let suppression_depth =
-            self.push_declaration_policies(scope, &f.annotations, &f.annotation_args);
-        for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
-        for parameter in &f.params {
-            for (annotation, arguments) in
-                parameter.annotations.iter().zip(&parameter.annotation_args)
-            {
-                self.check_annotation_application(scope, annotation, arguments);
-            }
-        }
+        let suppression_depth = self.check_local_function_annotation_applications(scope, f);
         self.check_infix_declaration(f, false);
         // A LOCAL function's type-parameter bounds scope over the enclosing declaration's type
         // parameters (`fun <T> outer(..) { fun <S : T> h(..) }`), so the bound resolver must consult
@@ -33388,7 +33369,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_declaration_types: HashMap::default(),
         resolved_declaration_type_parameters: HashMap::default(),
         class_literal_targets: HashMap::default(),
-        applied_annotations: HashMap::default(),
+        applied_annotations: Default::default(),
         bound_annotation_identities: HashMap::default(),
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
@@ -35895,7 +35876,7 @@ struct Checker<'a> {
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
     class_literal_targets: HashMap<ExprId, TypeName>,
-    applied_annotations: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
+    applied_annotations: annotation_applications::CheckedAnnotationApplications,
     /// Exact Pass-1 binding for each annotation occurrence owned by a bounded metadata fragment.
     /// The fragment consumes this handoff directly instead of reopening the temporary module
     /// provider or resolving the source spelling a second time.
@@ -47971,6 +47952,14 @@ impl<'a> Checker<'a> {
                     )
                 }
                 _ => {
+                    // A call selected as part of Kotlin's compile-time constant language (for
+                    // example, `'8'.toByte()`) is an annotation value in its own right. Only a
+                    // call that does not fold through its selected callable can be a nested
+                    // annotation construction. Trying the checked constant first keeps callable
+                    // identity authoritative and avoids reinterpreting an intrinsic by syntax.
+                    if let Some(value) = self.folded_library_constant(e, expected) {
+                        return Some(value);
+                    }
                     let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
                     let (values, _) = self.fold_annotation_values(internal, args, Some(e))?;
                     AnnotationValue::Annotation { internal, values }
@@ -48094,7 +48083,7 @@ impl<'a> Checker<'a> {
             .map(|(annotation, arguments)| (annotation.clone(), arguments.clone()))
             .collect::<Vec<_>>();
         for (annotation, arguments) in applications {
-            self.check_annotation_application(scope, &annotation, &arguments);
+            self.check_type_parameter_annotation_application(scope, &annotation, &arguments);
         }
     }
 
@@ -48313,7 +48302,8 @@ impl<'a> Checker<'a> {
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
         let public_api_inline = self.enter_public_api_inline(scope, f);
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
-        let suppression_depth = self.check_function_annotation_applications(scope, f);
+        let suppression_depth =
+            self.check_function_annotation_applications(scope, f, "top level function");
         self.check_infix_declaration(f, false);
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
         for (_, bound) in &f.type_param_bounds {
@@ -48794,8 +48784,7 @@ impl<'a> Checker<'a> {
             .as_ref()
             .is_none_or(|selected| selected.contains(&p.span));
         self.check_accessor_annotations(scope, p);
-        let suppression_depth =
-            self.push_declaration_policies(scope, &p.annotations, &p.annotation_args);
+        let suppression_depth = self.check_top_level_property_annotation_applications(scope, p);
         // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
         // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
         // `T` resolves rather than reading as an unresolved reference.
@@ -49551,7 +49540,9 @@ impl<'a> Checker<'a> {
                     .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
                     .is_some()
                 {
-                    self.check_annotation_application(scope, annotation, arguments);
+                    self.check_non_property_annotation_application(
+                        scope, annotation, arguments, "class",
+                    );
                 }
             }
             // Method annotations are declaration facts for later candidate collection. Fold only
@@ -49683,42 +49674,41 @@ impl<'a> Checker<'a> {
             self.check_classifier_own_annotations(scope, cl, current_owner);
             self.check_supertype_opt_in(cl, current_owner);
             for entry in &cl.enum_entries {
-                self.check_annotation_applications_in_declaration_scope(
+                self.check_non_property_annotation_applications_in_declaration_scope(
                     scope,
                     &entry.annotations,
                     &entry.annotation_args,
+                    "enum entry",
                 );
             }
             for constructor in &cl.secondary_ctors {
-                self.check_annotation_applications_in_declaration_scope(
+                self.check_non_property_annotation_applications_in_declaration_scope(
                     scope,
                     &constructor.annotations,
                     &constructor.annotation_args,
+                    "constructor",
                 );
             }
             // Property and primary-constructor annotations are ordinary checked applications. Their
             // selected targets and folded arguments are the same payload handed to lowering.
             for property in cl.body_props.iter() {
-                self.check_annotation_applications_in_declaration_scope(
+                self.check_member_property_annotation_applications(
                     scope,
-                    &property.annotations,
-                    &property.annotation_args,
+                    property,
+                    cl.is_interface(),
                 );
                 self.check_accessor_annotations(scope, property);
             }
             for parameter in &cl.props {
-                self.check_annotation_applications_in_declaration_scope(
-                    scope,
-                    &parameter.annotations,
-                    &parameter.annotation_args,
-                );
+                self.check_constructor_parameter_annotations(scope, parameter, cl.is_annotation());
             }
             // The primary constructor's own annotations (`class C @Mark constructor(…)`).
             if let Some(annotations) = &cl.primary_ctor_annotations {
-                self.check_annotation_applications_in_declaration_scope(
+                self.check_non_property_annotation_applications_in_declaration_scope(
                     scope,
                     annotations,
                     &cl.primary_ctor_annotation_args,
+                    "constructor",
                 );
             }
             // Compiler plugins' own class rules read the applications checked just above.
@@ -52784,7 +52774,7 @@ impl<'a> Checker<'a> {
             f.reified_type_params.contains(name)
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
-        let suppression_depth = self.check_function_annotation_applications(scope, f);
+        let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
         for (_, bound) in &f.type_param_bounds {
             self.check_type_parameter_bound(scope, bound);
         }
@@ -67863,8 +67853,9 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         function: &FunDecl,
+        declaration_target: &'static str,
     ) -> usize {
-        self.fold_function_annotation_applications(scope, function, true)
+        self.fold_function_annotation_applications(scope, function, true, declaration_target)
     }
 
     /// Materialize only declaration annotations for a class method whose checked body was retained

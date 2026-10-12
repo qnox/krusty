@@ -163,6 +163,104 @@ fn jvmfield_interface_companion_class_is_byte_identical() {
     assert_byte_identical(IFACE_OWNER, "demo/I$Companion");
 }
 
+#[test]
+fn jvmfield_cannot_rename_away_a_companion_alias_clash() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "class C {\n\
+             \x20   companion object {\n\
+             \x20       @JvmField val Companion: C.Companion = this\n\
+             \x20   }\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn ordinary_storage_yields_a_companion_alias_spelling_at_a_distinct_descriptor() {
+    assert_byte_identical(
+        "package demo\n\
+         class C { companion object { val Companion: Int = 1 } }\n",
+        "demo/C",
+    );
+}
+
+#[test]
+fn jvmfield_keeps_a_companion_alias_spelling_at_a_distinct_descriptor() {
+    assert_byte_identical(
+        "package demo\n\
+         class C { companion object { @JvmField val Companion: Int = 1 } }\n",
+        "demo/C",
+    );
+}
+
+#[test]
+fn jvmfield_cannot_rename_away_an_enum_entry_clash() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "enum class E {
+             \x20   A;
+             \x20   companion object {
+             \x20       @JvmField val A: E = E.A
+             \x20   }
+             }
+",
+        )],
+        &[],
+    );
+}
+
+/// JVM fields are identified by name AND descriptor. An enum entry occupies `A:LE;`, so a public
+/// companion `@JvmField` with the same name and a different descriptor keeps its source ABI name
+/// instead of receiving the private-storage `$N` disambiguation.
+#[test]
+fn jvmfield_keeps_its_name_beside_a_distinct_enum_entry_signature() {
+    assert_byte_identical(
+        "package demo\n\
+         enum class E {\n\
+         \x20   A;\n\
+         \x20   companion object { @JvmField val A: String = \"x\" }\n\
+         }\n",
+        "demo/E",
+    );
+}
+
+/// A companion block's ordinary property uses private owner storage. When it has the same erased
+/// signature as a public companion-object `@JvmField`, kotlinc preserves the public ABI spelling
+/// and suffixes the private implementation field.
+#[test]
+fn jvmfield_keeps_its_name_over_private_companion_block_storage() {
+    common::assert_class_code_matches_kotlinc(
+        "CompanionBlockJvmField",
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         package demo\n\
+         class C {\n\
+         \x20   companion { val value: Int = 1 }\n\
+         \x20   companion object { @JvmField val value: Int = 2 }\n\
+         }\n",
+        "demo/C",
+    );
+}
+
+/// Neither of two public owner fields may be renamed. A companion-block `const val` and a
+/// companion-object `@JvmField` with one physical signature are therefore a declaration clash.
+#[test]
+fn jvmfield_clashing_with_companion_block_const_is_rejected_like_kotlinc() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "class C {\n\
+             \x20   companion { const val value: Int = 1 }\n\
+             \x20   companion object { @JvmField val value: Int = 2 }\n\
+             }\n",
+        )],
+        &["-Xcompanion-blocks-and-extensions".to_string()],
+    );
+}
+
 // ---- Runtime: same-module reads ------------------------------------------------------------------
 
 /// Same-file reads (and a write through the companion `var`) resolve against the hoisted public

@@ -203,6 +203,169 @@ fn an_annotation_on_a_wrong_accessor_target_is_rejected_like_kotlinc() {
     common::assert_errors_match_kotlinc(&sources, &[]);
 }
 
+/// An explicit property use-site is a semantic target selection, not an emission hint. The
+/// annotation class must allow that exact target before the checked application is published.
+#[test]
+fn an_explicit_field_site_requires_a_field_target() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class PropertyOnly\n\
+             class C {\n\
+             \x20   @field:PropertyOnly val value: Int = 1\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Target applicability is independent of argument typing. kotlinc reports the bad argument first
+/// and the explicit-site error second; neither failure suppresses the other.
+#[test]
+fn an_explicit_field_site_is_checked_after_invalid_arguments() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class PropertyOnly(val number: Int)\n\
+             class C {\n\
+             \x20   @field:PropertyOnly(\"bad\") val value: Int = 1\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Allowing `FIELD` on the annotation class is not enough: an explicit `@field:` still requires
+/// the annotated property declaration to own a backing field.
+#[test]
+fn an_explicit_field_site_rejects_a_computed_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             class C {\n\
+             \x20   @field:FieldOnly val value: Int get() = 1\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Interface ownership makes a body-less property implicitly abstract; the absence of a written
+/// `abstract` modifier does not give an explicit `@field:` application storage to target.
+#[test]
+fn an_explicit_field_site_rejects_an_implicit_abstract_interface_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             interface I {\n\
+             \x20   @field:FieldOnly val value: Int\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// An annotation-class constructor `val` declares an annotation element on an interface, not a
+/// backing field that can receive an explicit `@field:` application.
+#[test]
+fn an_explicit_field_site_rejects_an_annotation_class_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             annotation class Token(@field:FieldOnly val value: Int)\n",
+        )],
+        &[],
+    );
+}
+
+/// A use-site target is constrained by its declaration host even when the annotation class permits
+/// both the declaration's ordinary target and `FIELD`.
+#[test]
+fn an_explicit_field_site_rejects_a_non_property_declaration() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.CLASS, AnnotationTarget.FIELD)\n\
+             annotation class ClassOrField\n\
+             @field:ClassOrField class C\n",
+        )],
+        &[],
+    );
+}
+
+/// Suppression silences the invalid-site diagnostic but cannot retarget the checked application to
+/// the class declaration. The retained classfile annotations still match kotlinc exactly.
+#[test]
+fn a_suppressed_field_site_on_a_class_is_not_published() {
+    assert_module_matches_kotlinc(&[(
+        "FieldSite.kt",
+        "@Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.CLASS, AnnotationTarget.FIELD)\n\
+         annotation class ClassOrField\n\
+         @Suppress(\"WRONG_ANNOTATION_TARGET_WITH_USE_SITE_TARGET\")\n\
+         @field:ClassOrField class C\n",
+    )]);
+}
+
+/// Function declarations use the same host-aware rejection rather than treating `FIELD` in the
+/// annotation class's own target set as permission for an invalid use-site prefix.
+#[test]
+fn an_explicit_field_site_rejects_a_function_declaration() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FUNCTION, AnnotationTarget.FIELD)\n\
+             annotation class FunctionOrField\n\
+             @field:FunctionOrField fun call() {}\n",
+        )],
+        &[],
+    );
+}
+
+/// A field-only annotation defaults to the backing-field site, which is still invalid when the
+/// property is computed and has no field to receive it.
+#[test]
+fn an_implicit_field_site_rejects_a_computed_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             class C {\n\
+             \x20   @FieldOnly\n\
+             \x20   var value: Int\n\
+             \x20       get() = 1\n\
+             \x20       set(value) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// An annotation retained on a transient local-declaration statement still rejects the property
+/// use-site prefix against the local-variable host.
+#[test]
+fn an_explicit_field_site_rejects_a_local_declaration() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Retention(AnnotationRetention.SOURCE)\n\
+             @Target(AnnotationTarget.FIELD, AnnotationTarget.LOCAL_VARIABLE)\n\
+             annotation class FieldOrLocal\n\
+             fun call() { @field:FieldOrLocal val value = 1 }\n",
+        )],
+        &[],
+    );
+}
+
 /// A Java `@Target` maps each `ElementType` to its Kotlin targets; the diagnostic lists their
 /// union in Kotlin target order, then `expression`.
 #[test]

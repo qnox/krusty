@@ -1335,8 +1335,6 @@ mod jvm_default_mode_e2e;
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
-#[path = "jvmfield_companion_e2e.rs"]
-mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
@@ -1547,8 +1545,6 @@ mod metadata_field_signature_e2e;
 mod metadata_function_flags_e2e;
 #[path = "metadata_inline_parameter_modifiers_e2e.rs"]
 mod metadata_inline_parameter_modifiers_e2e;
-#[path = "metadata_jvm_field_e2e.rs"]
-mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]
 mod metadata_kept_params;
 #[path = "metadata_language_version_e2e.rs"]
@@ -1623,8 +1619,6 @@ mod override_formal_identity_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
-#[path = "property_accessor_annotation_e2e.rs"]
-mod property_accessor_annotation_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
@@ -2799,8 +2793,6 @@ mod unit_vararg_e2e;
 mod unqualified_enum_entry_e2e;
 #[path = "unreachable_trailing_block_ty_e2e.rs"]
 mod unreachable_trailing_block_ty_e2e;
-#[path = "unread_field_annotation_order_e2e.rs"]
-mod unread_field_annotation_order_e2e;
 #[path = "unresolved_label_diagnostic_e2e.rs"]
 mod unresolved_label_diagnostic_e2e;
 #[path = "unresolved_supertype_diag_e2e.rs"]

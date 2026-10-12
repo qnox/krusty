@@ -886,6 +886,9 @@ pub struct IrFunction {
 pub struct IrEnumEntry {
     /// Entry name (`RED`).
     pub name: String,
+    /// Exact source span of the entry declaration for diagnostics about its physical JVM surface.
+    /// Dependency and synthesized entries have no source location.
+    pub diagnostic_span: Option<crate::diag::Span>,
     /// Checked source-order evaluation that must run before the physical constructor is entered.
     /// Argument mapping spills operands here so named/reordered arguments preserve Kotlin evaluation
     /// order without asking a backend to reconstruct the source call.
@@ -1735,6 +1738,9 @@ pub struct IrFile {
     /// consumes this semantic order directly; a backend must not reconstruct it from debug lines,
     /// arena layout, or classifier spelling.
     class_source_orders: crate::fx_hash::HashMap<ClassId, u32>,
+    /// Exact source declaration span for each source classifier. This survives the bounded parser
+    /// unit only for diagnostics classified after representation selection.
+    class_diagnostic_spans: crate::fx_hash::HashMap<ClassId, crate::diag::Span>,
     /// Stable `(classifier declaration, interface-delegation ordinal)` to its generated storage
     /// field. Common lowering predeclares this source-ordered layout once and both checked
     /// constructor initializers and forwarding-plan materialization consume the exact coordinate.
@@ -2743,6 +2749,21 @@ impl IrFile {
 
     pub(crate) fn class_source_order(&self, class: ClassId) -> Option<u32> {
         self.class_source_orders.get(&class).copied()
+    }
+
+    pub(crate) fn record_class_diagnostic_span(&mut self, class: ClassId, span: crate::diag::Span) {
+        if let Some(recorded) = self.class_diagnostic_spans.get(&class) {
+            assert_eq!(
+                *recorded, span,
+                "a source classifier has one exact diagnostic span"
+            );
+        } else {
+            self.class_diagnostic_spans.insert(class, span);
+        }
+    }
+
+    pub(crate) fn class_diagnostic_span(&self, class: ClassId) -> Option<crate::diag::Span> {
+        self.class_diagnostic_spans.get(&class).copied()
     }
 
     pub fn with_package(package: Option<String>) -> Self {

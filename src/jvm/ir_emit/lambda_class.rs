@@ -242,6 +242,9 @@ fn emit_initialization(
     );
     let mut code = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, class.fq_name, internal, &mut code);
+    if delegated_property_array::exists(env, class.fq_name) {
+        emitter.cw.omit_method_lines("<clinit>", "()V");
+    }
     if singleton {
         // Retained typed operations still require class reification. A concrete call-site copy
         // contains ordinary specialized operations and therefore has no declaration marker.

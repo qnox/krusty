@@ -140,7 +140,7 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         if let Some(annotations) = self.file.statement_annotations.get(&statement).cloned() {
-            self.open_use_site_policies(scope, &annotations);
+            self.open_use_site_policies(scope, &annotations, "local variable");
         }
         depth
     }
@@ -154,7 +154,7 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         if let Some(annotations) = self.file.expression_annotations.get(&expression).cloned() {
-            self.open_use_site_policies(scope, &annotations);
+            self.open_use_site_policies(scope, &annotations, "expression");
         }
         depth
     }
@@ -186,6 +186,7 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         annotations: &[UseSiteAnnotation],
+        declaration_target: &'static str,
     ) {
         for annotation in annotations {
             let policies =
@@ -194,19 +195,30 @@ impl Checker<'_> {
                 .extend(policies.iter().cloned());
         }
         for annotation in annotations {
-            self.check_annotation_application(scope, &annotation.annotation, &annotation.arguments);
+            self.check_non_property_annotation_application(
+                scope,
+                &annotation.annotation,
+                &annotation.arguments,
+                declaration_target,
+            );
         }
     }
 
-    pub(super) fn check_annotation_applications_in_declaration_scope(
+    pub(super) fn check_non_property_annotation_applications_in_declaration_scope(
         &mut self,
         scope: &CheckerScope<'_>,
         annotations: &[AnnotationRef],
         arguments: &[Vec<ExprId>],
+        declaration_target: &'static str,
     ) {
         let policy_depth = self.push_declaration_policies(scope, annotations, arguments);
         for (annotation, arguments) in annotations.iter().zip(arguments) {
-            self.check_annotation_application(scope, annotation, arguments);
+            self.check_non_property_annotation_application(
+                scope,
+                annotation,
+                arguments,
+                declaration_target,
+            );
         }
         self.active_lexical_policies.truncate(policy_depth);
     }

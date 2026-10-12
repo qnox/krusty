@@ -82,6 +82,14 @@ pub(super) fn accept_active_debug_metadata(
     for declaration in active.stable_declarations() {
         if let Some((_, classifier)) = active.class(file, declaration) {
             if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
+                ir.record_class_diagnostic_span(class, classifier.span);
+                for (entry, source) in ir.classes[class as usize]
+                    .enum_entries
+                    .iter_mut()
+                    .zip(&classifier.enum_entries)
+                {
+                    entry.diagnostic_span = Some(source.span);
+                }
                 ir.classes[class as usize].decl_line = classifier.decl_line;
                 ir.classes[class as usize].decl_start_line = classifier.decl_start_line;
                 ir.classes[class as usize].decl_end_line = classifier.decl_end_line;
@@ -152,9 +160,12 @@ pub(super) fn accept_active_debug_metadata(
             .map(|property| property.decl_line)
             .or_else(|| constructor_parameter.map(|property| property.decl_line));
         let accessor_lines = body_property.map(|property| property.accessor_lines);
-        if let Some(line) = property_line.filter(|line| *line != 0) {
-            if let Some(property) = index.property_for_declaration(declaration) {
-                if let Some(property) = ir.checked_properties.get_mut(&property) {
+        if let Some(property) = index.property_for_declaration(declaration) {
+            if let Some(property) = ir.checked_properties.get_mut(&property) {
+                property.diagnostic_span = body_property
+                    .map(|property| property.span)
+                    .or_else(|| constructor_parameter.map(|property| property.span));
+                if let Some(line) = property_line.filter(|line| *line != 0) {
                     property.decl_line = line;
                     let accessor_lines = accessor_lines.unwrap_or_default();
                     property.accessor_lines = crate::ir::IrAccessorLines {

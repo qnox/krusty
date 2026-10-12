@@ -28,6 +28,7 @@ use field_visibility::{declared_field_access, default_accessor_access, is_jvm_fi
 use inherited_default_forwarders::emit_default_impls_forwarders;
 
 mod access_bridges;
+mod accessor_emission_order;
 mod annotation_impl;
 mod annotation_interface;
 mod array_elements;
@@ -76,6 +77,7 @@ mod emit_options;
 pub(super) mod enclosure;
 mod enum_entry_subclass;
 mod enum_reflection_call;
+mod enum_synthetic_fields;
 pub use emit_options::{EmitOptions, DEFAULT_METADATA_VERSION};
 mod explicit_backing_fields;
 mod field_read;
@@ -826,18 +828,21 @@ fn attach_synth_nullability(
             &format!("L{};", companion.render()),
             "Lorg/jetbrains/annotations/NotNull;",
         );
-        for s in ir
+        for (index, s) in ir
             .statics
             .iter()
             .enumerate()
             .filter(|(index, s)| {
                 ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
             })
-            .map(|(_, s)| s)
-            .filter(|s| !s.is_lateinit)
+            .filter(|(_, s)| !s.is_lateinit)
         {
             if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
-                cw.set_field_nullability(&s.name, &desc(jvm_declared_ty(&s.ty)), a);
+                cw.set_field_nullability(
+                    ir.static_field_jvm_name(index as u32),
+                    &desc(jvm_declared_ty(&s.ty)),
+                    a,
+                );
             }
         }
     }
@@ -1030,6 +1035,9 @@ fn emit_jvm_interface_companion_surface(
         emitter.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
+        if array {
+            emitter.cw.omit_method_lines("<clinit>", "()V");
+        }
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
         for &(static_index, s, init) in &clinit_statics {
@@ -3093,58 +3101,7 @@ fn emit_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
-    constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
-    let companion_marker = c.is_companion
-        && c.has_primary_ctor
-        && marker_accessor_emitted_last(ir, c)
-        && has_ctor_marker_accessor(ir, c);
-    if companion_marker {
-        static_accessors::emit_before_companion_marker(
-            ir,
-            env.run,
-            &env.run.static_accessor_plan.borrow(),
-            StaticOwner::Class(c.fq_name),
-            facade,
-            c.decl_start_line.max(c.decl_line),
-            &mut cw,
-        );
-    } else {
-        static_accessors::emit(
-            ir,
-            env.run,
-            &env.run.static_accessor_plan.borrow(),
-            StaticOwner::Class(c.fq_name),
-            facade,
-            c.decl_start_line.max(c.decl_line),
-            &mut cw,
-        );
-    }
-    // A companion's synthetic `(…, DefaultConstructorMarker)` ctor goes AFTER the accessors —
-    // kotlinc's companion member order (private <init>, accessors, marker <init>). A class hiding a
-    // value-class-parameter primary puts its accessor after `equals` the same way.
-    if c.has_primary_ctor && marker_accessor_emitted_last(ir, c) && has_ctor_marker_accessor(ir, c)
-    {
-        let physical_parameters = class_ctor_jvm_tys(c);
-        let parameter_identities =
-            super::method_parameters::primary_constructor_identities(ir, c, &physical_parameters);
-        constructor_defaults::emit_ctor_marker_accessor(
-            &fq_name,
-            &physical_parameters,
-            &parameter_identities,
-            &mut cw,
-        );
-    }
-    if companion_marker {
-        static_accessors::emit_after_companion_marker(
-            ir,
-            env.run,
-            &env.run.static_accessor_plan.borrow(),
-            StaticOwner::Class(c.fq_name),
-            facade,
-            c.decl_start_line.max(c.decl_line),
-            &mut cw,
-        );
-    }
+    accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,
@@ -3667,6 +3624,7 @@ fn emit_enum_class(
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let self_desc = format!("L{fq};");
     let arr_desc = format!("[{self_desc}");
+    let synthetic_enum_fields = enum_synthetic_fields::names(ir, c);
     // An enum extends the PARAMETERIZED `java.lang.Enum<E>`, so it carries a class `Signature` —
     // whose value interns between the class and superclass names, as ASM visits them.
     let mut cw = new_classifier_writer(ir, c, "java/lang/Enum", env, opts);
@@ -3792,7 +3750,7 @@ fn emit_enum_class(
     }
     cw.add_field_late(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
-        "$VALUES",
+        &synthetic_enum_fields.values,
         &arr_desc,
         None,
         None,
@@ -3801,7 +3759,7 @@ fn emit_enum_class(
     // `kotlin/enums/EnumEntries`, initialized in `<clinit>` from `EnumEntriesKt.enumEntries($VALUES)`.
     cw.add_field_late(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
-        "$ENTRIES",
+        &synthetic_enum_fields.entries,
         "Lkotlin/enums/EnumEntries;",
         None,
         None,
@@ -4064,9 +4022,9 @@ fn emit_enum_class(
     // `$ENTRIES`. Only after all of them does kotlinc reach the entry constants themselves.
     cw.reserve_method_name("values");
     cw.reserve_descriptor(&format!("(){arr_desc}"));
-    cw.reserve_method_name("$VALUES");
+    cw.reserve_method_name(&synthetic_enum_fields.values);
     cw.reserve_descriptor(&arr_desc);
-    cw.fieldref(&fq, "$VALUES", &arr_desc);
+    cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
     cw.class_ref("java/lang/Object");
     cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
     // `values()` casts the `clone()` result back: `checkcast [LE;`.
@@ -4095,13 +4053,17 @@ fn emit_enum_class(
     cw.reserve_descriptor("()Lkotlin/enums/EnumEntries;");
     cw.reserve_descriptor(&format!("()Lkotlin/enums/EnumEntries<{self_desc}>;"));
     cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
-    cw.reserve_method_name("$ENTRIES");
+    cw.reserve_method_name(&synthetic_enum_fields.entries);
     cw.reserve_descriptor("Lkotlin/enums/EnumEntries;");
-    cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    cw.fieldref(
+        &fq,
+        &synthetic_enum_fields.entries,
+        "Lkotlin/enums/EnumEntries;",
+    );
     cw.reserve_method_name("$values");
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
-    let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
+    let valref = cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
     vals.getstatic(valref, 1);
     // kotlinc invokes `clone()` via `java/lang/Object` (not the `[LE;` array type).
     let clone_m = cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
@@ -4130,7 +4092,11 @@ fn emit_enum_class(
     // getEntries(): the `entries` property accessor → `return $ENTRIES`. Carries the generic
     // `Signature` `()Lkotlin/enums/EnumEntries<LSelf;>;` kotlinc emits.
     let mut gent = CodeBuilder::new(0);
-    let entref = cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    let entref = cw.fieldref(
+        &fq,
+        &synthetic_enum_fields.entries,
+        "Lkotlin/enums/EnumEntries;",
+    );
     gent.getstatic(entref, 1);
     gent.areturn();
     gent.ensure_locals(0);
@@ -4219,6 +4185,9 @@ fn emit_enum_class(
         e.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
+        if delegated_property_array::exists(env, c.fq_name) {
+            e.cw.omit_method_lines("<clinit>", "()V");
+        }
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
         // Consecutive enum entries on one source line share one LNT entry.
         for (i, entry) in c.enum_entries.iter().enumerate() {
@@ -4312,7 +4281,7 @@ fn emit_enum_class(
         // `$VALUES = $values()` — kotlinc factors the array build into a private `$values()` helper.
         let vfn = e.cw.methodref(&fq, "$values", &format!("(){arr_desc}"));
         clinit.invokestatic(vfn, 0, 1);
-        let valref = e.cw.fieldref(&fq, "$VALUES", &arr_desc);
+        let valref = e.cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
         clinit.putstatic(valref, 1);
         // `$ENTRIES = EnumEntriesKt.enumEntries((Enum[]) $VALUES)`.
         clinit.getstatic(valref, 1);
@@ -4324,7 +4293,11 @@ fn emit_enum_class(
             "([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;",
         );
         clinit.invokestatic(entries_fn, 1, 1);
-        let entref = e.cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+        let entref = e.cw.fieldref(
+            &fq,
+            &synthetic_enum_fields.entries,
+            "Lkotlin/enums/EnumEntries;",
+        );
         clinit.putstatic(entref, 1);
         // An ENUM initializes its `Companion` FIRST, then the serializer statics that read through
         // it (`$cachedSerializer$delegate`) — the reverse of a plain class's `<clinit>` order, and
@@ -4560,6 +4533,7 @@ fn emit_placed_method(
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
     let mut e = Emitter::new(ir, cw, env, static_owner, owner, facade, ret, [body]);
+    e.function = Some(fid);
     e.method_exports_private_access = static_accessors::method_exports_private_calls(
         ir,
         &env.run.static_accessor_plan.borrow(),
@@ -5383,6 +5357,8 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// Source or backend-generated function whose body is currently being emitted.
+    function: Option<u32>,
     export_private_calls: bool,
     method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
@@ -5568,6 +5544,7 @@ impl<'a> Emitter<'a> {
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
+            function: None,
             export_private_calls: false,
             method_exports_private_access: false,
             finally_markers: false,
@@ -6221,6 +6198,13 @@ impl<'a> Emitter<'a> {
             | PropertyAccess::AccessBridge { owner, .. } => *owner,
         };
         let takes_receiver = accessor_takes_receiver(&access);
+        let writes_static_field = matches!(
+            &access,
+            PropertyAccess::Field {
+                is_static: true,
+                ..
+            }
+        );
         // A value that cannot carry the operand stack (a handler, suspension, or loop transfer)
         // spills BOTH operands in source order (receiver, then value), then reloads them. Spilling
         // only the value would reverse observable side effects. An ordinary branchy value keeps the
@@ -6250,7 +6234,24 @@ impl<'a> Emitter<'a> {
             );
         } else if let Some(receiver) = operation.receiver {
             let receiver_ty = accessor_receiver_ty(&access, access_owner);
-            self.emit_property_receiver(receiver, access_owner, takes_receiver, &receiver_ty, code);
+            if writes_static_field
+                && self.static_property_write_evaluates_receiver(operation.expression)
+            {
+                // Unlike a read through a static `@JvmField` qualifier, a write evaluates its
+                // explicit receiver even when companion lookup retargeted storage to the outer.
+                self.emit_value(receiver, code);
+                code.pop();
+            } else {
+                self.emit_property_receiver(
+                    receiver,
+                    operation.owner,
+                    access_owner,
+                    takes_receiver,
+                    &receiver_ty,
+                    property_access::PropertyReceiverUse::Write,
+                    code,
+                );
+            }
         } else if takes_receiver {
             self.run.set_emit_error(format!(
                 "receiver-less property realization requires an instance receiver: {}",
@@ -6361,47 +6362,6 @@ impl<'a> Emitter<'a> {
                 self.mark_dispatch_line(operation.expression, code);
                 code.invokestatic(m, words, 0);
             }
-        }
-    }
-
-    /// Emit the source receiver according to an already-selected property realization. Instance
-    /// accessors/fields consume it; a static realization still evaluates and drops an effectful receiver.
-    /// Reads and writes share this exact rule so `side().p` and `side().p = v` cannot diverge.
-    fn emit_property_receiver(
-        &mut self,
-        receiver: crate::ir::ExprId,
-        access_owner: TypeName,
-        takes_receiver: bool,
-        expected: &Ty,
-        code: &mut CodeBuilder,
-    ) {
-        if takes_receiver {
-            self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), *expected, code);
-            return;
-        }
-        // A receiverless realization does not make the receiver expression disappear. Elide only an
-        // expression that runs no code, or a singleton/static read of the very owner whose static access
-        // initializes it anyway; every other receiver is evaluated and popped.
-        let initializes_owner = match self.ir.expr(receiver) {
-            IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
-                self.ir,
-                *classifier,
-                crate::jvm::singleton_storage::of(self.classifiers, *classifier),
-            )
-            .is_some_and(|published| published.owner == access_owner),
-            IrExpr::ExternalStaticField { owner, .. }
-            | IrExpr::ExternalStaticInstance { owner, .. } => *owner == access_owner,
-            IrExpr::StaticInstance { owner, .. } => self
-                .ir
-                .classes
-                .get(*owner as usize)
-                .is_some_and(|class| class.fq_name == access_owner),
-            _ => false,
-        };
-        if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
-            self.emit_value(receiver, code);
-            code.pop();
         }
     }
 

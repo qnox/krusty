@@ -423,7 +423,9 @@ pub(super) fn plan(
             }
         }
     }
-    // A stable sort keeps the traversal order among uses on one line.
+    // The sort is stable, so uses on one source line retain the lowering walk's order. In
+    // particular, `collect` places an assignment target before its value without moving that
+    // setter ahead of unrelated reads elsewhere on the line.
     uses.sort_by_key(|found| found.line);
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
@@ -737,10 +739,39 @@ impl Walk<'_> {
                 .copied()
                 .unwrap_or(inherited);
             if !expanded {
-                stack.push((expression, inherited, true));
-                let mut children = Vec::new();
-                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-                stack.extend(children.into_iter().rev().map(|child| (child, line, false)));
+                // Kotlin discovers a store's target after its receiver but before its assigned
+                // value. Keep that local lowering order instead of globally preferring every
+                // same-line setter, which would reorder independent expressions.
+                match ir.expr(expression) {
+                    IrExpr::PropertyWrite {
+                        receiver, value, ..
+                    } => {
+                        stack.push((*value, line, false));
+                        stack.push((expression, inherited, true));
+                        if let Some(receiver) = receiver {
+                            stack.push((*receiver, line, false));
+                        }
+                    }
+                    IrExpr::SetField {
+                        receiver, value, ..
+                    } => {
+                        stack.push((*value, line, false));
+                        stack.push((expression, inherited, true));
+                        stack.push((*receiver, line, false));
+                    }
+                    IrExpr::SetStatic { value, .. } => {
+                        stack.push((*value, line, false));
+                        stack.push((expression, inherited, true));
+                    }
+                    _ => {
+                        stack.push((expression, inherited, true));
+                        let mut children = Vec::new();
+                        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                            children.push(child)
+                        });
+                        stack.extend(children.into_iter().rev().map(|child| (child, line, false)));
+                    }
+                }
                 continue;
             }
             let carrier = match ir.expr(expression) {
@@ -984,6 +1015,20 @@ fn hoisted_field_accessor(
 ) -> Option<(StaticOwner, StaticAccessor)> {
     if !ir.is_jvm_companion_hoisted_static(index) || ir.is_jvm_field_static(index) {
         return None;
+    }
+    if ir.statics[index as usize].is_lateinit {
+        // A hoisted lateinit property has one physical outer field. Its JVM visibility follows
+        // the setter, so reads need the same bridge decision as writes even when the Kotlin getter
+        // is public (for example, `public lateinit var value private set`).
+        let visibility = super::static_fields::hoisted_lateinit_field_visibility(ir, index)?;
+        if matches!(
+            visibility,
+            crate::types::Visibility::Public
+                | crate::types::Visibility::Internal
+                | crate::types::Visibility::Protected
+        ) {
+            return None;
+        }
     }
     let owner = ir.statics[index as usize].owner?;
     let accessor = if write {

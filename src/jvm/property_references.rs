@@ -300,8 +300,9 @@ pub(super) fn realize(
 }
 
 /// Choose each class's `$$delegatedProperties` for the delegated operands [`realize`] found, once
-/// dependency calls are realized: an operand an inline operator never reads is `null` instead and
-/// takes no slot.
+/// dependency calls and companion storage are realized: an operand an inline operator never reads
+/// is `null` instead and takes no slot. Waiting for companion storage makes the owner's complete
+/// static-field namespace available before the generated array receives its physical name.
 pub(crate) fn place_delegated_arrays(
     ir: &mut IrFile,
     realizations: &mut PropertyReferenceRealizations,

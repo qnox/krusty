@@ -10,9 +10,14 @@ use crate::ir::{FunId, IrFile};
 pub(super) fn validate(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
+    delegated_arrays: &crate::jvm::property_references::DelegatedPropertyArrays,
     diags: &mut DiagSink,
 ) -> Result<(), ()> {
-    let platform_clash = report_platform_declaration_clashes(ir, override_results, diags);
+    let platform_clash = report_platform_declaration_clashes(ir, override_results, diags)
+        | report_jvm_field_companion_alias_clashes(ir, diags)
+        | report_jvm_field_enum_entry_clashes(ir, diags)
+        | report_jvm_field_companion_block_const_clashes(ir, diags)
+        | report_delegated_property_array_clashes(ir, delegated_arrays, diags);
     for class in &ir.classes {
         if let Err(message) = reject_duplicate_constructors(class) {
             diags.error(Span::new(0, 0), message);
@@ -48,6 +53,256 @@ pub(super) fn validate(
     } else {
         Ok(())
     }
+}
+
+/// A generated delegated-property array is itself a physical field declaration. Once a public
+/// source field has displaced it to `$N`, an ordinary companion property with that exact allocated
+/// signature is a platform clash; private-storage suffixing must not silently erase the source
+/// declaration Kotlin reports.
+fn report_delegated_property_array_clashes(
+    ir: &IrFile,
+    delegated_arrays: &crate::jvm::property_references::DelegatedPropertyArrays,
+    diags: &mut DiagSink,
+) -> bool {
+    let mut clashes = Vec::new();
+    for (class_id, class) in ir.classes.iter().enumerate() {
+        if delegated_arrays.elements(class.fq_name).is_none() {
+            continue;
+        }
+        let field_name = delegated_arrays.field_name(class.fq_name);
+        for (index, field) in ir.statics.iter().enumerate() {
+            if field.owner != Some(class.fq_name)
+                || ir.static_field_jvm_name(index as u32) != field_name
+                || crate::jvm::names::type_descriptor(field.ty)
+                    != crate::jvm::property_references::delegated_arrays::DESCRIPTOR
+                || ir.is_jvm_field_static(index as u32)
+            {
+                continue;
+            }
+            let Some((_, property)) = ir.jvm_companion_static_declaration(index as u32) else {
+                continue;
+            };
+            let (Some(class_span), Some(property_span)) = (
+                ir.class_diagnostic_span(class_id as u32),
+                property.diagnostic_span,
+            ) else {
+                continue;
+            };
+            let Ok(property_ty) = source_type_name(property.ty) else {
+                continue;
+            };
+            let owner = class.fq_name.render().replace(['/', '$'], ".");
+            let kind = if property.is_var { "var" } else { "val" };
+            let declaration = format!(
+                "{kind} `{}`: {property_ty} defined in {owner}",
+                property.name
+            );
+            let generated =
+                format!("val `{field_name}`: Array<out KProperty<out Any?>> defined in {owner}");
+            let message = clash_message(
+                field_name,
+                crate::jvm::property_references::delegated_arrays::DESCRIPTOR,
+                &[declaration, generated],
+            );
+            clashes.push((class_span.lo, message.clone()));
+            clashes.push((property_span.lo, message));
+        }
+    }
+    clashes.sort_by_key(|(offset, _)| *offset);
+    let found = !clashes.is_empty();
+    for (offset, message) in clashes {
+        diags.error(Span::new(offset, offset), message);
+    }
+    found
+}
+
+/// A companion property's public `@JvmField` surface cannot be renamed away from an enclosing
+/// class's synthetic `Companion` alias. A same-signature declaration is therefore a platform
+/// declaration clash, unlike ordinary private companion backing storage, which kotlinc is free to
+/// disambiguate with a `$N` physical name.
+fn report_jvm_field_companion_alias_clashes(ir: &IrFile, diags: &mut DiagSink) -> bool {
+    let mut clashes = Vec::new();
+    for (class_id, class) in ir.classes.iter().enumerate() {
+        let Some(companion) = class.companion_class else {
+            continue;
+        };
+        let name = companion.nested_segment_ref();
+        let descriptor = format!("L{};", companion.render());
+        for (index, _) in ir.statics.iter().enumerate().filter(|(_, storage)| {
+            storage.owner == Some(class.fq_name)
+                && storage.name == name
+                && crate::jvm::names::type_descriptor(storage.ty) == descriptor
+        }) {
+            if !ir.is_jvm_field_static(index as u32) {
+                continue;
+            }
+            let Some((_, property)) = ir.jvm_companion_static_declaration(index as u32) else {
+                continue;
+            };
+            let Ok(ty) = source_type_name(property.ty) else {
+                continue;
+            };
+            let owner = class.fq_name.render().replace(['/', '$'], ".");
+            let kind = if property.is_var { "var" } else { "val" };
+            let declaration = format!("{kind} {}: {ty} defined in {owner}", property.name);
+            let message = format!(
+                "platform declaration clash: The following declarations have the same JVM signature ({name}{descriptor}):\n    {declaration}\n    {declaration}"
+            );
+            let class_span = ir
+                .class_diagnostic_span(class_id as u32)
+                .expect("a source class with a companion retains its exact diagnostic span");
+            clashes.push((class_span.lo, message.clone()));
+            let span = property
+                .diagnostic_span
+                .expect("a source companion @JvmField retains its exact diagnostic span");
+            clashes.push((span.lo, message));
+        }
+    }
+    clashes.sort_by_key(|(offset, _)| *offset);
+    let found = !clashes.is_empty();
+    for (offset, message) in clashes {
+        diags.error(Span::new(offset, offset), message);
+    }
+    found
+}
+
+/// An enum entry and a companion `@JvmField` are both public static fields on the enum class. When
+/// their full JVM signatures match, neither declaration may receive the private-storage `$N`
+/// disambiguation: both spellings are part of the Java-facing ABI.
+fn report_jvm_field_enum_entry_clashes(ir: &IrFile, diags: &mut DiagSink) -> bool {
+    let mut clashes = Vec::new();
+    for class in ir.classes.iter().filter(|class| class.is_enum) {
+        let descriptor = format!("L{};", class.fq_name.render());
+        let owner = class.fq_name.render().replace(['/', '$'], ".");
+        for (index, field) in ir.statics.iter().enumerate().filter(|(_, field)| {
+            field.owner == Some(class.fq_name)
+                && crate::jvm::names::type_descriptor(field.ty) == descriptor
+        }) {
+            if !ir.is_jvm_field_static(index as u32) {
+                continue;
+            }
+            let Some((_, property)) = ir.jvm_companion_static_declaration(index as u32) else {
+                continue;
+            };
+            let Some(entry) = class
+                .enum_entries
+                .iter()
+                .find(|entry| entry.name == field.name)
+            else {
+                continue;
+            };
+            let (Some(entry_span), Some(property_span)) =
+                (entry.diagnostic_span, property.diagnostic_span)
+            else {
+                continue;
+            };
+            let Ok(ty) = source_type_name(property.ty) else {
+                continue;
+            };
+            let kind = if property.is_var { "var" } else { "val" };
+            let mut declarations = vec![
+                (
+                    entry_span,
+                    format!("val {}: {ty} defined in {owner}", entry.name),
+                ),
+                (
+                    property_span,
+                    format!("{kind} {}: {ty} defined in {owner}", property.name),
+                ),
+            ];
+            declarations.sort_by_key(|(span, _)| span.lo);
+            let rendered = declarations
+                .iter()
+                .map(|(_, declaration)| declaration.clone())
+                .collect::<Vec<_>>();
+            let message = clash_message(&field.name, &descriptor, &rendered);
+            clashes.extend(
+                declarations
+                    .into_iter()
+                    .map(|(span, _)| (span.lo, message.clone())),
+            );
+        }
+    }
+    clashes.sort_by_key(|(offset, _)| *offset);
+    let found = !clashes.is_empty();
+    for (offset, message) in clashes {
+        diags.error(Span::new(offset, offset), message);
+    }
+    found
+}
+
+/// A companion-block `const val` and a companion-object `@JvmField` are both public fields on the
+/// enclosing class. Neither public ABI may receive the backing-storage `$N` disambiguation used
+/// for an ordinary private block field, so an exact physical-signature collision is rejected.
+fn report_jvm_field_companion_block_const_clashes(ir: &IrFile, diags: &mut DiagSink) -> bool {
+    let mut clashes = Vec::new();
+    for (jvm_field_index, jvm_field) in ir.statics.iter().enumerate() {
+        if !ir.is_jvm_field_static(jvm_field_index as u32) {
+            continue;
+        }
+        let Some(owner) = jvm_field.owner else {
+            continue;
+        };
+        let descriptor = crate::jvm::names::type_descriptor(jvm_field.ty);
+        let Some((_, property)) = ir.jvm_companion_static_declaration(jvm_field_index as u32)
+        else {
+            continue;
+        };
+        let Some(property_span) = property.diagnostic_span else {
+            continue;
+        };
+        let Some(block) = ir.companion_blocks.properties_of(owner).find(|block| {
+            block.is_const
+                && block.storage.is_some_and(|storage| {
+                    let storage = &ir.statics[storage as usize];
+                    storage.name == jvm_field.name
+                        && crate::jvm::names::type_descriptor(storage.ty) == descriptor
+                })
+        }) else {
+            continue;
+        };
+        let Some(block_span) = block.diagnostic_span else {
+            continue;
+        };
+        let (Ok(block_ty), Ok(property_ty)) =
+            (source_type_name(block.ty), source_type_name(property.ty))
+        else {
+            continue;
+        };
+        let outer = owner.render().replace(['/', '$'], ".");
+        let block_kind = if block.is_var { "var" } else { "val" };
+        let property_kind = if property.is_var { "var" } else { "val" };
+        let mut declarations = vec![
+            (
+                block_span,
+                format!("{block_kind} {}: {block_ty} defined in {outer}", block.name),
+            ),
+            (
+                property_span,
+                format!(
+                    "{property_kind} {}: {property_ty} defined in {outer}",
+                    property.name
+                ),
+            ),
+        ];
+        declarations.sort_by_key(|(span, _)| span.lo);
+        let rendered = declarations
+            .iter()
+            .map(|(_, declaration)| declaration.clone())
+            .collect::<Vec<_>>();
+        let message = clash_message(&jvm_field.name, &descriptor, &rendered);
+        clashes.extend(
+            declarations
+                .into_iter()
+                .map(|(span, _)| (span.lo, message.clone())),
+        );
+    }
+    clashes.sort_by_key(|(offset, _)| *offset);
+    let found = !clashes.is_empty();
+    for (offset, message) in clashes {
+        diags.error(Span::new(offset, offset), message);
+    }
+    found
 }
 
 /// Source methods whose physical JVM name and descriptor are identical. Kotlin already rejected

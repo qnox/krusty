@@ -27,6 +27,8 @@ pub struct IrCompanionBlocks {
 pub struct IrCompanionBlockProperty {
     pub class: TypeName,
     pub name: String,
+    /// Exact source name span for representation-level declaration-clash diagnostics.
+    pub diagnostic_span: Option<crate::diag::Span>,
     pub ty: Ty,
     pub is_var: bool,
     pub is_const: bool,

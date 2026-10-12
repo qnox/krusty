@@ -515,9 +515,11 @@ fn materialize_delegation(
                 }
                 ir.classes[class as usize].properties.push(IrProperty {
                     name,
+                    diagnostic_span: None,
                     context_params,
                     source_order: u32::MAX,
                     decl_line: 0,
+                    accessor_lines: crate::ir::IrAccessorLines::default(),
                     ty,
                     type_params,
                     visibility: crate::types::Visibility::Public,

@@ -88,7 +88,9 @@ pub(in crate::resolve) fn compact_source_type_annotations(
             .filter(|&&span| {
                 let reference = AnnotationRef {
                     name: String::new(),
+                    at: span.lo,
                     span,
+                    property_site: None,
                 };
                 table
                     .resolved_annotation(source.raw(), &reference)

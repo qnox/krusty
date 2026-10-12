@@ -987,6 +987,10 @@ impl<'a> CommonIrBodySink<'a> {
                     .enum_entries
                     .push(crate::ir::IrEnumEntry {
                         name,
+                        // Source coordinates are transferred while the bounded Pass-2 classifier
+                        // syntax is live; the finalized declaration index intentionally retains
+                        // only structural identity here.
+                        diagnostic_span: None,
                         argument_prelude: Vec::new(),
                         args: Vec::new(),
                         constructor_parameter_types: Vec::new(),
@@ -1097,19 +1101,22 @@ impl<'a> CommonIrBodySink<'a> {
             // The stable lexical owner may be an enum-entry declaration rather than a classifier
             // header. Pass 1 has already made that ownership exact; map it to the entry subclass
             // skeleton created above instead of walking out to the parent enum or guessing by name.
-            let outer_ty = if let Some(outer) = index.classifier_header(outer) {
-                crate::types::Ty::obj_name(outer.classifier)
+            // kotlinc types the field as the outer class's default type, its own type parameters
+            // applied, so a generic outer gives it a `Signature`. A published classifier header
+            // without that semantic self type is an incomplete frontend contract, not a raw-type
+            // fallback. Enum-entry subclasses are the explicit alternate owner shape here.
+            let (outer_ty, field_ty) = if let Some(outer_header) = index.classifier_header(outer) {
+                let outer_ty = crate::types::Ty::obj_name(outer_header.classifier);
+                let field_ty = index
+                    .classifier_self_type(outer)
+                    .ok_or(FirFileLoweringFailure::MissingClassifier(outer))?;
+                (outer_ty, field_ty)
             } else if let Some(outer) = self.ir.checked_enum_entry_classes.get(&outer).copied() {
-                crate::types::Ty::obj_name(self.ir.classes[outer as usize].fq_name)
+                let outer_ty = crate::types::Ty::obj_name(self.ir.classes[outer as usize].fq_name);
+                (outer_ty.clone(), outer_ty)
             } else {
                 return Err(FirFileLoweringFailure::MissingClassifier(outer));
             };
-            // kotlinc types the field as the outer class's default type, its own type parameters
-            // applied, so a generic outer gives it a `Signature`.
-            let field_ty = index
-                .classifier_header(outer)
-                .and_then(|_| index.classifier_self_type(outer))
-                .unwrap_or(outer_ty);
             let class = &mut self.ir.classes[class as usize];
             for argument in &mut class.ctor_args {
                 if let Some(field) = &mut argument.field_index {

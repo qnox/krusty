@@ -65,3 +65,70 @@ fn an_enum_companion_property_is_an_enum_static() {
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
 }
+
+#[test]
+fn enum_companion_fields_do_not_shadow_synthetic_storage() {
+    const COLLISIONS: &str = r#"
+enum class E {
+    A;
+
+    companion object {
+        val `$VALUES`: Array<E> = arrayOf(E.A)
+        val `$ENTRIES`: kotlin.enums.EnumEntries<E> = E.entries
+        val A: E = E.A
+        val Companion: E.Companion = this
+    }
+}
+
+fun box(): String {
+    val companion = E.Companion
+    return if (
+        E.`$VALUES`[0] == E.A &&
+        E.`$ENTRIES`.first() == E.A &&
+        companion.A == E.A &&
+        companion.Companion === companion
+    ) "OK" else "fail"
+}
+"#;
+
+    for class in ["E", "E$Companion"] {
+        common::byte_diff_against_kotlinc_cp(
+            "EnumCompanionSyntheticFieldCollision",
+            COLLISIONS,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+    common::expect_box_same_as_kotlinc(COLLISIONS, "EnumCompanionSyntheticFieldCollisionRun");
+}
+
+/// Ordinary companion storage remains private implementation state: unlike a public `@JvmField`,
+/// it receives `$N` when its source name matches an enum entry even if the descriptors differ.
+#[test]
+fn an_ordinary_enum_companion_field_yields_its_name_to_an_entry() {
+    const SOURCE: &str = r#"
+enum class E {
+    A;
+
+    companion object {
+        val A: String = "x"
+    }
+}
+
+fun box(): String = if (E.Companion.A == "x") "OK" else "fail"
+"#;
+
+    for class in ["E", "E$Companion"] {
+        common::byte_diff_against_kotlinc_cp(
+            "EnumCompanionDistinctDescriptorCollision",
+            SOURCE,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+    common::expect_box_same_as_kotlinc(SOURCE, "EnumCompanionDistinctDescriptorCollisionRun");
+}
