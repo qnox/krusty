@@ -188,7 +188,7 @@ impl Parser<'_> {
                     self.value_modifier_span = Some(self.tok().span);
                 }
                 if text == "external" {
-                    self.external_modifier_span = Some(self.tok().span);
+                    self.external_modifier_spans.push(self.tok().span);
                 }
                 mods.push(text);
                 self.bump();
@@ -226,16 +226,23 @@ impl Parser<'_> {
             .flatten()
     }
 
-    /// Record the `external` keyword of a primary-constructor property whose prefix wrote
-    /// `modifiers`; kotlinc deprecates the modifier there.
+    /// Record the `external` keywords of a primary-constructor property whose prefix wrote
+    /// `modifiers`; kotlinc deprecates the first and rejects every repetition.
     pub(super) fn record_external_property_parameter(&mut self, modifiers: &[String]) {
-        let span = self.external_modifier_span.take();
-        if let Some(span) = span.filter(|_| modifiers.iter().any(|modifier| modifier == "external"))
-        {
-            self.file.external_modifier_uses.push(ExternalModifierUse {
-                target: ExternalModifierTarget::PropertyParameter,
-                span,
-            });
+        let spans = std::mem::take(&mut self.external_modifier_spans);
+        if modifiers.iter().any(|modifier| modifier == "external") {
+            self.file
+                .external_modifier_uses
+                .extend(
+                    spans
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, span)| ExternalModifierUse {
+                            target: ExternalModifierTarget::PropertyParameter,
+                            span,
+                            repeated: index > 0,
+                        }),
+                );
         }
     }
 
@@ -246,7 +253,7 @@ impl Parser<'_> {
     pub(super) fn parse_enum_entry_prefix(&mut self) -> (Vec<AnnotationRef>, Vec<Vec<ExprId>>) {
         let mut annotations = Vec::new();
         let mut annotation_args = Vec::new();
-        let mut external = None;
+        let mut external = Vec::new();
         loop {
             if self.at(TokenKind::At) {
                 let (name, args) = self.parse_annotation();
@@ -255,19 +262,25 @@ impl Parser<'_> {
                     annotation_args.push(args);
                 }
             } else if self.at_external_entry_modifier() {
-                external.get_or_insert(self.tok().span);
+                external.push(self.tok().span);
                 self.bump();
             } else {
                 break;
             }
             self.skip_newlines();
         }
-        if let Some(span) = external {
-            self.file.external_modifier_uses.push(ExternalModifierUse {
-                target: ExternalModifierTarget::EnumEntry,
-                span,
-            });
-        }
+        self.file
+            .external_modifier_uses
+            .extend(
+                external
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, span)| ExternalModifierUse {
+                        target: ExternalModifierTarget::EnumEntry,
+                        span,
+                        repeated: index > 0,
+                    }),
+            );
         (annotations, annotation_args)
     }
 
@@ -284,6 +297,11 @@ impl Parser<'_> {
         else {
             return false;
         };
+        if self.t[next].kind == TokenKind::Ident
+            && self.token_keyword_text(self.t[next], "external")
+        {
+            return true;
+        }
         match self.t[next].kind {
             TokenKind::At => true,
             TokenKind::Ident => matches!(
@@ -304,6 +322,7 @@ impl Parser<'_> {
     /// Start a declaration whose modifier list [`Parser::record_declaration_prefix`] will keep.
     pub(super) fn begin_declaration_prefix(&mut self) {
         self.declaration_prefix = PrefixInProgress::default();
+        self.external_modifier_spans.clear();
     }
 
     /// Note a token of the modifier list being consumed; the first one starts the list as kotlinc

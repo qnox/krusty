@@ -71,3 +71,25 @@ fn an_entry_named_external_is_not_a_modifier() {
         &[],
     );
 }
+
+fn assert_repeated_external_like_kotlinc(source: &str) {
+    assert_reported_like_kotlinc(source, &[]);
+    assert_reported_like_kotlinc(
+        &format!("// LANGUAGE: +{FEATURE}\n{source}"),
+        &[format!("-XXLanguage:+{FEATURE}")],
+    );
+}
+
+/// The first keyword receives the target diagnostic and the second is the repeated modifier;
+/// neither keyword may be reinterpreted as the enum entry's name.
+#[test]
+fn repeated_external_on_an_enum_entry_is_reported_in_modifier_order() {
+    assert_repeated_external_like_kotlinc("enum class E { external external A }\n");
+}
+
+/// Constructor-property modifier occurrences retain their individual spans: the feature applies
+/// to the first keyword and the repeated-modifier diagnostic to the second.
+#[test]
+fn repeated_external_on_a_constructor_property_is_reported_in_modifier_order() {
+    assert_repeated_external_like_kotlinc("class K(external external val x: Int)\n");
+}

@@ -25,9 +25,12 @@ impl ExternalModifierTarget {
     }
 }
 
-/// One `external` keyword on a deprecated target, with the keyword's own span.
+/// One `external` keyword on a deprecated target, with the keyword's own span and its position in
+/// that declaration's modifier list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExternalModifierUse {
     pub target: ExternalModifierTarget,
     pub span: Span,
+    /// Another `external` preceded this one in the same modifier list.
+    pub repeated: bool,
 }

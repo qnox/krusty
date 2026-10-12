@@ -18,13 +18,16 @@ pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut Diag
             continue;
         }
         reported.push(modifier.span);
-        let target = modifier.target.description();
-        if forbidden {
+        if modifier.repeated {
+            diagnostics.error(modifier.span, "repeated 'external'.");
+        } else if forbidden {
+            let target = modifier.target.description();
             diagnostics.error(
                 modifier.span,
                 format!("modifier 'external' is not applicable to '{target}'."),
             );
         } else {
+            let target = modifier.target.description();
             diagnostics.warning(
                 modifier.span,
                 format!("modifier 'external' is deprecated for '{target}'."),

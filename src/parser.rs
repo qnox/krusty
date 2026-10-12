@@ -654,8 +654,9 @@ struct Parser<'a> {
     /// Span of a `value` modifier consumed by the most recent declaration prefix. Class registration
     /// takes it before the class body is parsed, so a nested `value class` cannot overwrite it.
     value_modifier_span: Option<Span>,
-    /// Span of an `external` modifier consumed by the most recent declaration prefix.
-    external_modifier_span: Option<Span>,
+    /// Spans of the `external` modifiers consumed by the current declaration prefix, in source
+    /// order.
+    external_modifier_spans: Vec<Span>,
     /// Type parameters visible to hoisted anonymous classifiers in the current parser context.
     lexical_type_parameters: LexicalTypeParameters,
     /// Simple names of annotations consumed by the most recent `skip_decl_prefix`, awaiting attachment
@@ -801,7 +802,7 @@ impl<'a> Parser<'a> {
             no_trailing_lambda: false,
             block_trailing_is_value: false,
             value_modifier_span: None,
-            external_modifier_span: None,
+            external_modifier_spans: Vec::new(),
             lexical_type_parameters: LexicalTypeParameters::default(),
             pending_annotations: Vec::new(),
             pending_annotation_args: Vec::new(),
