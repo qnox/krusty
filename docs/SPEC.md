@@ -1943,6 +1943,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generic receiver signatures, parameter annotations, local-variable slots, `InnerClasses`, and
   synthetic Kotlin metadata.
 
+  A holder forward of the interface's own member spans that member's declaration, as kotlinc's
+  `InterfaceLowering` builds it with the member's offsets: the call is marked on the declaration's
+  start line (the `fun` line even when an expression body starts later; an accessor's header line)
+  and the return on the line the declaration ends on (a block body's `}`, an expression body's last
+  line, an accessor body's end), which codegen marks before the return of a body that does not end
+  in an explicit `return`. The parser records each body's end line beside its closing brace
+  (`FunBodyLines`, `AccessorLines::{getter_end, setter_end}`), and lowering publishes it as
+  `IrFile::fn_end_lines`. When a bodied suspend member splits, that declaration-owned end line
+  moves to the source trampoline; the body-owned close line stays on the `$suspendImpl` carrier.
+  A republished inherited member has no source here and keeps no line.
+  Test: `tests/default_impls_forward_lines_e2e.rs`.
+
   `enable` (krusty's default) emits the full measured compatibility surface: a `public static
   synthetic access$<name>$jd` bridge on the interface per non-private body (an `invokespecial` on
   the interface's own default method; `LineNumberTable` = one entry at the invoke pc on the
@@ -4066,7 +4078,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`LineNumberTable` for regular function bodies** (kotlinc parity, byte-verified): one entry per
   STATEMENT at its first pc (a block's TRAILING expression counts as a statement); an expression
   body maps to the expression's line; a `Unit` fn's implicit `return` maps to the closing-`}` line
-  (`FunDecl::body_close_line` → `IrFile::fn_close_lines`); the first entry of a guarded function
+  (`FunDecl::body_lines.close` → `IrFile::fn_close_lines`); the first entry of a guarded function
   starts where kotlinc's does relative to the `checkNotNullParameter` prologue. Plumbed as parser
   line vecs (`File::{expr,stmt}_lines`) → sparse `IrFile::expr_lines` noted on each statement's
   FIRST lowered root (`append_stmt`) and on trailing values (`note_expr_line`) → `CodeBuilder::
@@ -4076,6 +4088,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **An enum entry's class body has the same lines as a class body.** Its methods and
+  properties are members of the entry's own class, so the parser's line pass walks them as it walks
+  a class's members: an empty `fun foo() {}` in `A { … }` maps its `return` to the declaration
+  line, and a property accessor written there anchors on its own line, where krusty emitted no
+  `LineNumberTable` for them. Test: `tests/enum_entry_member_lines_e2e.rs`.
 - **An `init` block opens on `init` and closes on `}`.** Each of those lines is its own
   `LineNumberTable` entry, with a `nop` when no instruction of the block sits on that line. A
   property assigned inside the block is marked on the assignment statement, including the receiver
@@ -4150,6 +4167,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   to link. The same site covers a secondary constructor. Test:
   `tests/constructor_continuation_e2e.rs`; corpus
   `coroutines/featureIntersection/callableReference/function/adapted.kt`.
+- **A declared `try` reloads its value on the initializer's line.** kotlinc's `visitVariable`
+  visits the initializer, marks the initializer's start line, materializes the value, then marks
+  the declaration and stores. A `try` is the one initializer whose value is still unread at that
+  point: its promised value loads the result temporary in `materializeAt`. So
+  `val x = try { … } catch (…) { … }` marks the `try`'s line on the `iload`/`aload` of the
+  temporary (after the catch body's line), and `val y =\n try { … }` marks the store on `y`'s
+  line after it. Only a `try` that is the initializer itself counts; an assignment
+  (`visitSetValue` marks before visiting its value) and any other consumer read the temporary on
+  the line already in effect. Test: `tests/declared_try_line_e2e.rs`.
 - **A local variable's slot is entered before its initializer**, as kotlinc's `visitVariable`
   enters it before visiting the initializer: every local and temporary the initializer declares
   sits above the variable and is free again for the statements after it
@@ -6518,6 +6544,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
   argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
   a leaf there (varargs recurse into their elements). Test: `tests/suspend_collection_hof_e2e.rs`.
+- **A synthetic accessor's name and descriptor are interned before its body.** kotlinc's class
+  writer visits a method (its name and descriptor join the pool) before it writes the code, so a
+  protected member's `access$<name>` bridge and a private property's `access$get<X>$p` /
+  `access$set<X>$p` accessor have their name and descriptor ahead of the field or method reference
+  their body makes, and a setter's `<set-?>` after that body. krusty built those bodies before
+  naming the method. Test: `tests/synthetic_accessor_pool_e2e.rs`.
+- **A top-level default setter interns `<set-?>` as it finishes its body.** kotlinc writes each
+  method's `LocalVariableTable` as the method ends, so a static default setter's value-parameter
+  name joins the constant pool right after the body's own constants (the `putstatic` field
+  reference) and before the next method's name. A primitive setter has no `checkNotNullParameter`
+  that would intern it earlier, and the name had gone to the end of the pool. Test:
+  `tests/top_level_setter_pool_e2e.rs`.
 - **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
   List<String>` becomes a static field of the FILE FACADE, whose field table is built by
   `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
@@ -6582,13 +6620,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/method_pool_order_e2e.rs::an_inherited_forwarder_interns_its_annotations_before_its_body`,
   `::an_anonymous_object_constructor_interns_this_before_its_members` and
   `::a_sealed_class_interns_its_nested_subclasses_with_its_inner_classes`.
-- **A constructor owns the locals seeded after its method is added.** `add_method_sig` closes the
-  constructor's constant-pool range before `seed_plain_constructor_tail` interns `this`, the
-  constructor's type, and each parameter local (`$receiver`, `$super_call_param$N`). Those strings
-  are the constructor's: the range is extended through them. Otherwise the next method's range
-  begins in that gap, and a rewrite of that method (a safe call such as `eldest?.value?.close()`)
-  owns the locals. The layout then moves one the rewritten body no longer names to that method's
-  first remaining use, after `LocalVariableTable`. Test:
+- **A constructor's locals intern before its frames' classes.** kotlinc's class writer interns a
+  method's `LocalVariableTable` strings as the method ends, and only then computes its
+  `StackMapTable`, whose frames intern each `Class` they name. A constructor whose super argument
+  or property initializer branches (`Base("O" + if (i == 23) "K" else "fail")`) therefore lists
+  `this`, the constructor's type and each parameter local (`$receiver`, `$super_call_param$N`)
+  before a frame's `java/lang/String`. An `init` block's own locals (`val x = seed()`) are written
+  as their scope closes, so they come first, ahead of `this`. krusty seeded the constructor's locals
+  after `add_method_sig`, which had already written the frames. They are now seeded
+  (`seed_plain_constructor_locals`, the body's block locals first) after the body and before
+  `add_method_sig`, inside the constructor's constant-pool range; only the `$default`
+  marker descriptor is left to `seed_plain_constructor_tail`, which extends that range through it.
+  Otherwise the next method's range would begin in that gap, and a rewrite of that method (a safe
+  call such as `eldest?.value?.close()`) would own the strings and move one its body no longer names
+  after its own `LocalVariableTable`. Tests:
+  `tests/constructor_locals_pool_e2e.rs::constructor_locals_precede_frame_classes_in_the_pool` and
   `tests/method_pool_order_e2e.rs::an_anonymous_object_keeps_constructor_locals_when_the_next_method_is_rewritten`.
 - **A synthesized data-class member writes its locals with its body.** kotlinc gives `equals`,
   `hashCode`, `toString`, `componentN` and `copy` a `LocalVariableTable` (receiver and parameters)
@@ -6822,6 +6868,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/method_pool_order_e2e.rs::a_class_an_elided_type_check_named_interns_where_a_later_body_names_it`,
   `::a_field_an_elided_read_named_interns_after_the_next_body_s_header` and
   `::an_object_s_elided_instance_read_interns_its_name_at_the_static_initializer`.
+- **A removed instruction's constant interns at the header or code that names it again.** A
+  step loop over a non-constant step checks the step (`Step must be positive, was: …`) and the
+  rewrite removes that check once the step is known positive. The check had interned
+  `StringBuilder.<init>()V`, which the file's `<clinit>` names again. kotlinc interns `()V` with
+  the `<clinit>` header, right after its name, and the constructor reference with that body, before
+  `@Metadata`. The relayout settled a header's orphan at the previous method's end, which kept
+  `()V` ahead of `<clinit>`, and left a code orphan of the last method to the next fresh class
+  attribute (`SourceFile`). A code orphan now goes right after its method's last entry as soon as
+  that code ends, a header orphan right after the header's last entry, and orphans sharing an anchor
+  keep their visit order. Test:
+  `tests/rewritten_orphan_pool_e2e.rs::a_static_initializer_reinterns_what_a_removed_step_check_named`.
+  Corpus: `controlflow/for_loops.kt`, `controlflow/for_loops_overflow.kt`.
 - **Inherited forwarders and bridges precede `<clinit>`.** kotlinc appends a class's
   default-method forwarders and then its bridges to the lowered declarations, and writes the
   static initializer last, so an object's forwarder and an enum's erased bridge come before
@@ -11431,6 +11489,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   separates nothing. Tests: the unit tests beside the pass, and
   `tests/redundant_checkcasts_before_aastore_e2e.rs` (the three methods' instructions against kotlinc,
   and the uncast store at run time).
+- **A type check used as a condition jumps on its `instanceof`, a primitive target included.**
+  kotlinc's `IrTypeOperatorCall` condition is `instanceof` followed directly by the branch, never a
+  materialized `0`/`1` tested again. `if (x !is Int) return …` is `instanceof java/lang/Integer;
+  ifne`, as `!is String` was already: the fused condition names the primitive's wrapper class
+  exactly as the value-producing check does. A nullable target still materializes its
+  null-accepting check. Test: `tests/primitive_type_check_condition_e2e.rs`.
 - **A null jump or `instanceof` on a value known to be `null`, or known not to be, folds as
   kotlinc's `RedundantNullCheckMethodTransformer` does.** The pass runs at kotlinc's position
   (step `RedundantNullCheck`, `bytecode_passes/redundant_null_checks/`). A value is known non-null
@@ -11496,6 +11560,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and records it (`IrFile::replace_with_negation`) together, so no consumer reads a negation back
   from the comparison's shape. Tests: `tests/boolean_literal_equality_e2e.rs`,
   `tests/boolean_not_call_e2e.rs` (`if (b.not())` and `Boolean::not`).
+- **A discarded call result is popped as the call leaves it.** kotlinc materializes a call at
+  its callee's JVM return type and discards that value directly, so a statement-position
+  `AtomicReference<String>.getAndSet(…)`, `ArrayList<String>.set(…)` or `HashMap<K, Int>.put(…)`
+  is `invokevirtual; pop` with no `checkcast` or unboxing. Checked IR narrows a source
+  declaration's result with a marked declaration-result coercion, and the JVM realization of a
+  dependency call places the same kind of boundary over the provider's erased result (the call
+  records its physical type); statement emission recognizes both, emits the call and pops the
+  words it pushed. Tests: `tests/discarded_generic_result_e2e.rs`,
+  `tests/discarded_dependency_result_e2e.rs`.
 - **A discarded value whose pushers are all loads or constants is not pushed, as kotlinc's
   `PopBackwardPropagationTransformer` does, and dead code goes before the `goto` and `nop` steps.**
   The pass runs after StackPeephole (step `PopBackwardPropagation`,
@@ -13931,6 +14004,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is `@NotNull` and guarded, an unbounded `<T>` is unannotated. Test:
   `tests/type_parameter_nullability_e2e.rs`. Corpus:
   `inference/capturedTypeAsLambdaInputType.kt`.
+
+- **A type-parameter accessor's annotation interns with its header.** kotlinc visits a getter's
+  `@Nullable` right after its name, descriptor and `Signature`, before the body's field reference,
+  so `open var x: T? = null` lists `Lorg/jetbrains/annotations/Nullable;` ahead of the `x` field's
+  entries. krusty reserved a declared accessor's header without an annotation whenever the field was
+  typed by a type parameter, and the class-wide accessor pass interned it after the setter. The
+  header now takes the field's own classification (`field_nullability_kind`), the one that pass
+  attaches: `T?` is `@Nullable`, a non-null-bounded `T` is `@NotNull`, an unbounded `T` has none.
+  Test: `tests/type_parameter_accessor_pool_e2e.rs::a_nullable_type_parameter_getter_interns_its_annotation_with_its_header`.
+  Corpus: `bridges/test21.kt`.
 
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a

@@ -566,6 +566,7 @@ fn copy_function_implementation_facts(
     copy_map!(fn_varargs);
     copy_map!(fn_decl_lines);
     copy_map!(fn_close_lines);
+    copy_map!(fn_end_lines);
     copy_map!(fn_sig_lines);
     copy_map!(fn_signature_offsets);
     copy_map!(fn_source_order);

@@ -86,6 +86,7 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
     );
     move_fact(&mut ir.fn_varargs, implementation, declaration);
     move_fact(&mut ir.fn_sig_lines, implementation, declaration);
+    move_fact(&mut ir.fn_end_lines, implementation, declaration);
 
     move_marker(&mut ir.extension_receiver_fns, implementation, declaration);
     move_marker(&mut ir.inline_fns, implementation, declaration);

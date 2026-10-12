@@ -24,6 +24,17 @@ pub(crate) struct IrInlinePropertyAccess {
     pub(crate) splices: std::collections::HashMap<ExprId, IrInlinePropertySplice>,
 }
 
+/// Where a property's accessors written with a body start and end, each a 1-based line (0 when
+/// the accessor has no body of its own). Such an accessor is a declaration of its own and anchors
+/// on its own line; any other accessor anchors on the property's line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IrAccessorLines {
+    pub getter: u32,
+    pub setter: u32,
+    pub getter_end: u32,
+    pub setter_end: u32,
+}
+
 /// One source property declaration and the checked bodies that realize its language semantics.
 /// Storage and accessor naming remain backend choices; stable property/class identities and final
 /// types are already fixed here.
@@ -40,11 +51,8 @@ pub struct IrCheckedProperty {
     /// included, else 0. Accepted like [`Self::decl_line`] and kept apart from it: the constructor's
     /// store of the property maps here, its accessors to `decl_line`.
     pub decl_start_line: u32,
-    /// Lines of the getter and setter headers when each was written with a body (else 0), accepted
-    /// like [`Self::decl_line`]. Such an accessor is a declaration of its own and anchors on its
-    /// own line; any other accessor anchors on [`Self::decl_line`].
-    pub getter_decl_line: u32,
-    pub setter_decl_line: u32,
+    /// Lines of the getter and setter written with a body, accepted like [`Self::decl_line`].
+    pub accessor_lines: IrAccessorLines,
     /// Exact semantic position among the owning class's property initializers and `init` blocks.
     /// This is copied from the stable FIR declaration header, never reconstructed from source.
     pub initialization_order: Option<u32>,

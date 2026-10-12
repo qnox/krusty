@@ -534,6 +534,8 @@ mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
+#[path = "constructor_locals_pool_e2e.rs"]
+mod constructor_locals_pool_e2e;
 #[path = "constructor_signature_e2e.rs"]
 mod constructor_signature_e2e;
 #[path = "consumer_materialized_result_e2e.rs"]
@@ -706,6 +708,8 @@ mod diagnostics_parity_support;
 mod diagnostics_receiver_reference_cases_e2e;
 #[path = "diagnostics_type_inference_cases_e2e.rs"]
 mod diagnostics_type_inference_cases_e2e;
+#[path = "discarded_dependency_result_e2e.rs"]
+mod discarded_dependency_result_e2e;
 #[path = "discarded_generic_result_e2e.rs"]
 mod discarded_generic_result_e2e;
 #[path = "discarded_read_statement_e2e.rs"]
@@ -782,6 +786,8 @@ mod enum_entry_body_enclosure_e2e;
 mod enum_entry_constructor_e2e;
 #[path = "enum_entry_deferred_val_e2e.rs"]
 mod enum_entry_deferred_val_e2e;
+#[path = "enum_entry_member_lines_e2e.rs"]
+mod enum_entry_member_lines_e2e;
 #[path = "enum_entry_named_arg_e2e.rs"]
 mod enum_entry_named_arg_e2e;
 #[path = "enum_entry_property_e2e.rs"]
@@ -2216,6 +2222,8 @@ mod primitive_operator_extension_e2e;
 mod primitive_spread_e2e;
 #[path = "primitive_to_string_e2e.rs"]
 mod primitive_to_string_e2e;
+#[path = "primitive_type_check_condition_e2e.rs"]
+mod primitive_type_check_condition_e2e;
 #[path = "private_classifier_access_e2e.rs"]
 mod private_classifier_access_e2e;
 #[path = "private_constructor_access_e2e.rs"]
@@ -2332,6 +2340,8 @@ mod result_companion_targs_e2e;
 mod result_e2e;
 #[path = "result_property_carrier_e2e.rs"]
 mod result_property_carrier_e2e;
+#[path = "rewritten_orphan_pool_e2e.rs"]
+mod rewritten_orphan_pool_e2e;
 #[path = "root_package_cast_message_e2e.rs"]
 mod root_package_cast_message_e2e;
 #[path = "run_catching_inline_e2e.rs"]
@@ -2653,6 +2663,8 @@ mod suspend_when_branch_spill_e2e;
 mod suspend_withlock_nonlocal_return_e2e;
 #[path = "synthetic_accessor_e2e.rs"]
 mod synthetic_accessor_e2e;
+#[path = "synthetic_accessor_pool_e2e.rs"]
+mod synthetic_accessor_pool_e2e;
 #[path = "tailrec_e2e.rs"]
 mod tailrec_e2e;
 #[path = "test_harness_sharding_e2e.rs"]
@@ -2673,6 +2685,8 @@ mod top_level_generic_property_inference_e2e;
 mod top_level_lateinit_e2e;
 #[path = "top_level_property_e2e.rs"]
 mod top_level_property_e2e;
+#[path = "top_level_setter_pool_e2e.rs"]
+mod top_level_setter_pool_e2e;
 #[path = "toplevel_array_inference_e2e.rs"]
 mod toplevel_array_inference_e2e;
 #[path = "toplevel_default_multimask_e2e.rs"]
@@ -2726,6 +2740,8 @@ mod type_argument_serializer_e2e;
 mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
+#[path = "type_parameter_accessor_pool_e2e.rs"]
+mod type_parameter_accessor_pool_e2e;
 #[path = "type_parameter_bound_erasure_e2e.rs"]
 mod type_parameter_bound_erasure_e2e;
 #[path = "type_parameter_invoke_e2e.rs"]
@@ -2920,6 +2936,10 @@ mod reified_value_class_splice_e2e;
 
 #[path = "conditional_branch_expectation_e2e.rs"]
 mod conditional_branch_expectation_e2e;
+#[path = "declared_try_line_e2e.rs"]
+mod declared_try_line_e2e;
+#[path = "default_impls_forward_lines_e2e.rs"]
+mod default_impls_forward_lines_e2e;
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
 #[path = "finally_gap_ranges_e2e.rs"]

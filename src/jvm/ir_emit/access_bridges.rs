@@ -807,6 +807,9 @@ pub(super) fn emit_protected_member_access_bridge(
     if cw.declares_method(&bridge_name, &bridge_descriptor) {
         return;
     }
+    // A method's name and descriptor join the pool as it is visited, before its body.
+    cw.reserve_method_name(&bridge_name);
+    cw.reserve_descriptor(&bridge_descriptor);
     let mut code = CodeBuilder::new(
         bridge_parameters
             .iter()

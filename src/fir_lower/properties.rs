@@ -180,8 +180,7 @@ pub(super) fn predeclare_properties(
                         source_order,
                         decl_line: 0,
                         decl_start_line: 0,
-                        getter_decl_line: 0,
-                        setter_decl_line: 0,
+                        accessor_lines: crate::ir::IrAccessorLines::default(),
                         initialization_order: header.initialization_order,
                         class,
                         name,
@@ -321,7 +320,7 @@ pub(super) fn finalize_properties(
         let declaration = property.declaration;
         let decl_line = property.decl_line;
         let decl_start_line = property.decl_start_line;
-        let accessor_lines = (property.getter_decl_line, property.setter_decl_line);
+        let accessor_lines = property.accessor_lines;
         let shape = index
             .property(property_id)
             .ok_or(FirFileLoweringFailure::MissingProperty(
@@ -423,12 +422,12 @@ pub(super) fn finalize_properties(
 }
 
 /// Anchor `layout`'s storage and accessors on the property's line, and an accessor written with a
-/// body of its own on that accessor's line (`accessor_lines`, getter then setter; 0 when none).
+/// body of its own on that accessor's line, ending on its body's last line.
 pub(super) fn apply_property_decl_line(
     ir: &mut IrFile,
     layout: &IrLocalPropertyLayout,
     line: u32,
-    accessor_lines: (u32, u32),
+    accessor_lines: crate::ir::IrAccessorLines,
 ) {
     let (getter, setter) = match layout {
         IrLocalPropertyLayout::TopLevelStorage {
@@ -470,9 +469,15 @@ pub(super) fn apply_property_decl_line(
             accessor_line
         }
     };
-    for (function, accessor_line) in [(getter, accessor_lines.0), (setter, accessor_lines.1)] {
+    for (function, accessor_line, end_line) in [
+        (getter, accessor_lines.getter, accessor_lines.getter_end),
+        (setter, accessor_lines.setter, accessor_lines.setter_end),
+    ] {
         if let Some(function) = function {
             ir.fn_decl_lines.insert(function, own(accessor_line));
+            if end_line != 0 {
+                ir.fn_end_lines.insert(function, end_line);
+            }
         }
     }
 }

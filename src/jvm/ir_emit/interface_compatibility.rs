@@ -199,7 +199,7 @@ pub(super) fn emit_inherited_default_surface(
                 signature: None,
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
                 // this interface.
-                decl_line: 0,
+                lines: ForwardLines::default(),
                 varargs,
                 target,
             },
@@ -286,18 +286,29 @@ pub(super) fn emit_own_member_forward(
             ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
             semantic_ret,
             signature: signature.as_deref(),
-            // A property accessor has no `fn_decl_lines` entry — its line lives on the
-            // property declaration it realizes.
-            decl_line: ir.fn_decl_lines.get(&fid).copied().unwrap_or_else(|| {
-                c.properties
-                    .iter()
-                    .find(|property| {
-                        let (getter, setter) = accessor_jvm_names(c, &property.name);
-                        getter == f.name || setter == f.name
-                    })
-                    .map(|property| property.decl_line)
-                    .unwrap_or(0)
-            }),
+            lines: ForwardLines {
+                // The forward spans the declaration it stands for: kotlinc calls on the
+                // declaration's start line, then returns on its end line. A function records its
+                // signature line; an accessor's header line is its declaration line. A property
+                // accessor has no `fn_decl_lines` entry — its line lives on the property
+                // declaration it realizes.
+                start: ir
+                    .fn_sig_lines
+                    .get(&fid)
+                    .or_else(|| ir.fn_decl_lines.get(&fid))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        c.properties
+                            .iter()
+                            .find(|property| {
+                                let (getter, setter) = accessor_jvm_names(c, &property.name);
+                                getter == f.name || setter == f.name
+                            })
+                            .map(|property| property.decl_line)
+                            .unwrap_or(0)
+                    }),
+                end: ir.fn_end_lines.get(&fid).copied().unwrap_or(0),
+            },
             varargs: method_access::varargs_access(ir, fid),
             target: JdHolderTarget::AccessBridge,
         },
@@ -318,10 +329,17 @@ struct HolderForward<'a> {
     ret: Ty,
     semantic_ret: Ty,
     signature: Option<&'a str>,
-    decl_line: u32,
+    lines: ForwardLines,
     /// The member's own `ACC_VARARGS` when its last physical parameter is the declared vararg.
     varargs: u16,
     target: JdHolderTarget<'a>,
+}
+
+/// The source lines of the declaration a forward stands for; 0 when it has none.
+#[derive(Clone, Copy, Default)]
+struct ForwardLines {
+    start: u32,
+    end: u32,
 }
 
 /// Emit one receiver-first `$DefaultImpls` forward to an interface bridge or dependency holder.
@@ -337,7 +355,7 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         ret,
         semantic_ret,
         signature,
-        decl_line,
+        lines,
         varargs,
         target,
     } = forward;
@@ -394,8 +412,8 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         }
         slot += slot_words(param_tys[index]);
     }
-    if decl_line != 0 {
-        code.mark_line(decl_line);
+    if lines.start != 0 {
+        code.mark_line(lines.start);
     }
     code.aload(0);
     if let JdHolderTarget::DependencyHolder { declaring, .. } = &target {
@@ -418,6 +436,9 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
             let target = cw.methodref(&holder.render(), member_name, descriptor);
             code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
         }
+    }
+    if lines.end != 0 {
+        code.mark_line(lines.end);
     }
     emit_return(ret, &mut code);
     code.ensure_locals(argument_words);
