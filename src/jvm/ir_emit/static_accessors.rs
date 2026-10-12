@@ -492,7 +492,9 @@ fn synthesized_companion_accessor_lines(ir: &IrFile) -> HashMap<crate::ir::ExprI
     lines
 }
 
-/// Whether `accessor` would emit the private-member bridge that already calls this getter or setter.
+/// Whether another identity-based bridge inventory already emits the private-member bridge that
+/// calls this getter or setter. Ordinary cross-owner calls and value-class property references
+/// record the same accessor function in separate inventories; neither needs a second static plan.
 fn declared_member_accessor_is_bridged(
     ir: &IrFile,
     bridged: &HashSet<u32>,
@@ -515,7 +517,9 @@ fn declared_member_accessor_is_bridged(
     } else {
         declared.getter
     };
-    function.is_some_and(|function| bridged.contains(&function))
+    function.is_some_and(|function| {
+        bridged.contains(&function) || ir.function_reference_access_bridges.contains(&function)
+    })
 }
 
 /// One use of another class's private static declaration: the accessor it needs and its line.
@@ -1246,27 +1250,16 @@ impl Accessor<'_> {
         let owner = &ir.classes[class as usize];
         let property = &owner.properties[property as usize];
         let internal = owner.fq_name.render();
-        let name = member_property_accessor_name(&property_getter_name(&property.name), true);
-        let getter = &ir.functions[property
+        let getter = property
             .getter
-            .expect("a member getter bridge calls a declared getter")
-            as usize];
-        let ty = jvm_declared_ty(&getter.ret);
-        let descriptor = format!("(L{internal};){}", type_descriptor(ty));
-        let mut code = CodeBuilder::new(1);
-        code.mark_line(self.declaration_line);
-        code.aload(0);
-        let method = cw.methodref(&internal, &getter.name, &ir_method_desc(&[], &getter.ret));
-        code.invokevirtual(method, 0, slot_words(ty) as i32);
-        emit_return(ty, &mut code);
-        code.ensure_locals(1);
-        code.link();
-        cw.add_method(self.flags, &name, &descriptor, &code);
-        cw.set_method_debug(
-            &name,
-            &descriptor,
-            None,
-            &[("$this".to_string(), format!("L{internal};"), 0)],
+            .expect("a member getter bridge calls a declared getter");
+        super::access_bridges::emit_private_member_access_bridge(
+            ir,
+            getter,
+            &internal,
+            cw,
+            owner.is_interface,
+            self.declaration_line,
         );
     }
 
@@ -1276,33 +1269,16 @@ impl Accessor<'_> {
         let owner = &ir.classes[class as usize];
         let property = &owner.properties[property as usize];
         let internal = owner.fq_name.render();
-        let name = member_property_accessor_name(&property_setter_name(&property.name), true);
-        let setter = &ir.functions[property
+        let setter = property
             .setter
-            .expect("a member setter bridge calls a declared setter")
-            as usize];
-        let ty = jvm_declared_ty(&setter.params[0]);
-        let descriptor = format!("(L{internal};{})V", type_descriptor(ty));
-        let words = slot_words(ty);
-        let mut code = CodeBuilder::new(1 + words);
-        code.mark_line(self.declaration_line);
-        code.aload(0);
-        load(ty, 1, &mut code);
-        let setter_descriptor = method_descriptor(&[jvm_declared_ty(&setter.params[0])], Ty::Unit);
-        let method = cw.methodref(&internal, &setter.name, &setter_descriptor);
-        code.invokevirtual(method, words as i32, 0);
-        code.ret_void();
-        code.ensure_locals(1 + words);
-        code.link();
-        cw.add_method(self.flags, &name, &descriptor, &code);
-        cw.set_method_debug(
-            &name,
-            &descriptor,
-            None,
-            &[
-                ("$this".to_string(), format!("L{internal};"), 0),
-                ("<set-?>".to_string(), type_descriptor(ty), 1),
-            ],
+            .expect("a member setter bridge calls a declared setter");
+        super::access_bridges::emit_private_member_access_bridge(
+            ir,
+            setter,
+            &internal,
+            cw,
+            owner.is_interface,
+            self.declaration_line,
         );
     }
 
