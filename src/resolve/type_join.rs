@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::assignable::TypeOracle;
 use crate::symbol_source::SymbolSource;

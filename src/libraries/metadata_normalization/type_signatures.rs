@@ -1,6 +1,6 @@
 //! Declared type signatures of decoded Kotlin declarations, in semantic types.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::libraries::GenericSig;
 use crate::metadata::semantic::{
@@ -118,7 +118,7 @@ fn declared_generic_sig_with_source_names(
     ret: &KotlinType,
 ) -> GenericSig {
     let bounds =
-        crate::metadata::semantic::semantic_bounds(formals, &std::collections::HashMap::new());
+        crate::metadata::semantic::semantic_bounds(formals, &crate::fx_hash::HashMap::default());
     GenericSig {
         formals: formals
             .iter()

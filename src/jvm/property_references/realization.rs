@@ -13,7 +13,7 @@
 //! [`super::realize`], at the moment the reference is realized; nothing else can produce another
 //! with it, and it survives every later pass because the class it names does.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::FunId;
 use crate::types::{Ty, TypeName};
@@ -185,7 +185,7 @@ pub(crate) struct PropertyReferenceRealizations {
 impl PropertyReferenceRealizations {
     pub(crate) fn remap_delegated_owners(
         &mut self,
-        names: &std::collections::HashMap<TypeName, TypeName>,
+        names: &crate::fx_hash::HashMap<TypeName, TypeName>,
     ) {
         self.delegated_arrays.remap_owners(names);
     }

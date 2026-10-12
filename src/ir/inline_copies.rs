@@ -9,7 +9,7 @@
 //! An operand the inlined body never reads is still evaluated, but its value has no use. A target
 //! decides from that fact whether the value needs materializing at all.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{ExprId, IrFile};
 use crate::types::{Ty, TypeName};
@@ -186,7 +186,7 @@ impl IrFile {
 
     pub(crate) fn remap_inline_copy_owners(
         &mut self,
-        names: &std::collections::HashMap<TypeName, TypeName>,
+        names: &crate::fx_hash::HashMap<TypeName, TypeName>,
     ) {
         for provenance in self.inline_expansions.provenance.values_mut() {
             for frame in provenance {

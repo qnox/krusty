@@ -18,11 +18,11 @@ fn identity_evidence_is_published_without_changing_ordinary_unification() {
     let t = Ty::ty_param("owner:T", any);
     let function = Ty::fun(vec![t], t);
 
-    let mut ordinary = GSigBinds::new();
+    let mut ordinary = GSigBinds::default();
     unify_ty(function, function, &mut ordinary);
     assert!(ordinary.is_empty());
 
-    let mut identity = GSigBinds::new();
+    let mut identity = GSigBinds::default();
     collect_generic_identity_bindings(function, function, &["owner:T".to_string()], &mut identity);
     assert_eq!(identity.get("owner:T"), Some(&t));
 }
@@ -32,7 +32,7 @@ fn identity_evidence_does_not_bind_a_different_declaration_variable() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let declared = Ty::ty_param("callee:T", any);
     let actual = Ty::ty_param("caller:T", any);
-    let mut identity = GSigBinds::new();
+    let mut identity = GSigBinds::default();
 
     collect_generic_identity_bindings(declared, actual, &["callee:T".to_string()], &mut identity);
 
@@ -47,12 +47,12 @@ fn provisional_error_result_does_not_bind_a_generic_formal() {
     let declared = Ty::fun(vec![t], r);
     let provisional = Ty::fun(vec![Ty::String], Ty::Error);
 
-    let mut ordinary = GSigBinds::new();
+    let mut ordinary = GSigBinds::default();
     unify_ty(declared, provisional, &mut ordinary);
     assert_eq!(ordinary.get("T"), Some(&Ty::String));
     assert!(!ordinary.contains_key("R"));
 
-    let mut inferred = GSigBinds::new();
+    let mut inferred = GSigBinds::default();
     unify_inferred_ty(declared, provisional, &mut inferred);
     assert_eq!(inferred.get("T"), Some(&Ty::String));
     assert!(!inferred.contains_key("R"));
@@ -143,14 +143,14 @@ fn selected_bindings_publish_formals_implied_by_dependent_bounds() {
         ret: Ty::Unit,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
 
     merge_generic_bindings_from(
         None,
         &signature,
         0,
         &mut bindings,
-        GSigBinds::from([("T2".to_string(), c)]),
+        GSigBinds::from_iter([("T2".to_string(), c)]),
     );
 
     assert_eq!(bindings.get("T1"), Some(&c));
@@ -171,15 +171,15 @@ fn argument_merge_completes_dependent_formal_before_intersection_bounds() {
         ret: Ty::Boolean,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
 
     merge_call_argument_bindings(
         &crate::libraries::EmptySymbolSource,
         &signature,
         0,
-        &GSigBinds::new(),
+        &GSigBinds::default(),
         &mut bindings,
-        GSigBinds::from([("T".to_string(), uint)]),
+        GSigBinds::from_iter([("T".to_string(), uint)]),
     );
 
     assert_eq!(bindings.get("T"), Some(&uint));
@@ -198,7 +198,7 @@ fn projected_receiver_binding_can_widen_to_a_nullable_argument_constraint() {
         ret: k,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let receiver_bindings = GSigBinds::from([("K".to_string(), Ty::String)]);
+    let receiver_bindings = GSigBinds::from_iter([("K".to_string(), Ty::String)]);
     let mut bindings = receiver_bindings.clone();
 
     assert_eq!(
@@ -216,7 +216,7 @@ fn projected_receiver_binding_can_widen_to_a_nullable_argument_constraint() {
         0,
         &receiver_bindings,
         &mut bindings,
-        GSigBinds::from([("K".to_string(), Ty::nullable(Ty::String))]),
+        GSigBinds::from_iter([("K".to_string(), Ty::nullable(Ty::String))]),
     );
 
     assert_eq!(bindings.get("K"), Some(&Ty::nullable(Ty::String)));
@@ -241,7 +241,7 @@ fn partially_specified_type_arguments_fix_only_written_positions() {
         &signature,
         written_then_hole.as_slice(),
         &mut bindings,
-        GSigBinds::from([("K".to_string(), Ty::String), ("T".to_string(), Ty::Float)]),
+        GSigBinds::from_iter([("K".to_string(), Ty::String), ("T".to_string(), Ty::Float)]),
     );
     assert_eq!(bindings.get("K"), Some(&Ty::Int));
     assert_eq!(bindings.get("T"), Some(&Ty::Float));
@@ -252,7 +252,7 @@ fn partially_specified_type_arguments_fix_only_written_positions() {
         &signature,
         hole_then_written.as_slice(),
         &mut bindings,
-        GSigBinds::from([("K".to_string(), Ty::Int), ("T".to_string(), Ty::Float)]),
+        GSigBinds::from_iter([("K".to_string(), Ty::Int), ("T".to_string(), Ty::Float)]),
     );
     assert_eq!(bindings.get("K"), Some(&Ty::Int));
     assert_eq!(bindings.get("T"), Some(&Ty::String));
@@ -263,7 +263,7 @@ fn constructor_result_inference_ignores_trailing_captured_arguments() {
     let owner = crate::types::type_name("sample/Outer$Inner");
     let formals = vec!["Own".to_string()];
     let expected = Ty::obj_args_name(owner, &[Ty::String, Ty::Int]);
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
 
     constrain_constructor_result(owner, &formals, Some(expected), &mut bindings);
 
@@ -278,7 +278,7 @@ fn constructor_result_seed_preserves_enclosing_declaration_type_variables() {
     let caller_s = Ty::ty_param("class:S", any);
     let method_b = Ty::ty_param("method:B", any);
     let expected = Ty::obj_args_name(owner, &[caller_s, method_b]);
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
 
     seed_unbound_constructor_result_from_symbols(
         &crate::libraries::EmptySymbolSource,
@@ -296,7 +296,7 @@ fn constructor_result_seed_preserves_enclosing_declaration_type_variables() {
 #[test]
 fn null_argument_materializes_the_bottom_of_a_nullable_generic_parameter() {
     let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
 
     unify_inferred_ty(Ty::nullable(formal), Ty::Null, &mut bindings);
 
@@ -315,7 +315,8 @@ fn callable_reference_expectation_keeps_inputs_fixed_and_postpones_results() {
         ret: Ty::Unit,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let bindings = GSigBinds::from([("T".to_string(), Ty::String), ("R".to_string(), Ty::String)]);
+    let bindings =
+        GSigBinds::from_iter([("T".to_string(), Ty::String), ("R".to_string(), Ty::String)]);
 
     let expected = callable_reference_expected_bindings(
         &crate::libraries::EmptySymbolSource,
@@ -323,13 +324,13 @@ fn callable_reference_expectation_keeps_inputs_fixed_and_postpones_results() {
         0,
         0,
         &bindings,
-        &std::collections::HashSet::new(),
+        &crate::fx_hash::HashSet::default(),
     );
 
     assert_eq!(expected.get("T"), Some(&Ty::String));
     assert!(!expected.contains_key("R"));
 
-    let selected = std::collections::HashSet::from(["R".to_string()]);
+    let selected = crate::fx_hash::HashSet::from_iter(["R".to_string()]);
     let expected = callable_reference_expected_bindings(
         &crate::libraries::EmptySymbolSource,
         &signature,
@@ -352,7 +353,7 @@ fn callable_reference_expectation_keeps_invariant_expected_result_equalities() {
         ret: Ty::fun(vec![r], r),
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let bindings = GSigBinds::from([("R".to_string(), Ty::String)]);
+    let bindings = GSigBinds::from_iter([("R".to_string(), Ty::String)]);
     let fixed = invariant_expected_result_formals(
         &crate::libraries::EmptySymbolSource,
         &signature,
@@ -385,8 +386,8 @@ fn projected_expected_result_does_not_widen_an_argument_binding() {
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
     let expected = Ty::obj_args("test/Box", &[Ty::out_projection(nullable_any)]);
-    let expected_bindings = GSigBinds::from([("X".to_string(), nullable_any)]);
-    let mut bindings = GSigBinds::from([("X".to_string(), any)]);
+    let expected_bindings = GSigBinds::from_iter([("X".to_string(), nullable_any)]);
+    let mut bindings = GSigBinds::from_iter([("X".to_string(), any)]);
 
     widen_invariant_expected_bindings(
         &crate::libraries::EmptySymbolSource,
@@ -458,7 +459,7 @@ fn inferred_dependency_materializes_an_otherwise_unobserved_bound_formal() {
         ret: Ty::obj_args("kotlin/Pair", &[Ty::String, e]),
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let mut bindings = GSigBinds::from([("E".to_string(), any)]);
+    let mut bindings = GSigBinds::from_iter([("E".to_string(), any)]);
 
     complete_dependency_instantiated_bound_bindings(&signature, &mut bindings, 0);
 
@@ -475,7 +476,7 @@ fn inferred_dependency_materializes_an_otherwise_unobserved_bound_formal() {
         ret: Ty::Unit,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let mut unconstrained = GSigBinds::new();
+    let mut unconstrained = GSigBinds::default();
     complete_dependency_instantiated_bound_bindings(&plain, &mut unconstrained, 0);
     assert!(unconstrained.is_empty());
 }
@@ -505,11 +506,11 @@ fn captured_self_bound_keeps_denotable_caller_type_parameters() {
         ret: method,
         return_policy: crate::libraries::GenericReturnPolicy::Exact,
     };
-    let receiver_bindings = GSigBinds::from([
+    let receiver_bindings = GSigBinds::from_iter([
         ("owner:D".to_string(), data),
         ("owner:S".to_string(), captured_self),
     ]);
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
 
     complete_return_only_captured_receiver_bindings(
         &signature,
@@ -606,7 +607,7 @@ fn expected_result_can_intersect_an_independent_declared_bound() {
 
     assert_eq!(
         infer_generic_return_bindings(&signature, expected, |actual, bound| actual == bound),
-        Some(GSigBinds::from([(
+        Some(GSigBinds::from_iter([(
             "T".to_string(),
             Ty::obj("test/Expected")
         )]))
@@ -621,7 +622,7 @@ fn flexible_member_return_seeds_the_receivers_symbolic_argument() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let caller_value = Ty::ty_param("caller:Y", any);
     let flexible = Ty::platform_nullable(caller_value);
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
 
     seed_undeclared_return_bindings(flexible, flexible, &[], &mut bindings);
 

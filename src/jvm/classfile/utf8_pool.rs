@@ -4,8 +4,8 @@
 //! `String` key. Repeated class names, descriptors, and method names are looked up far more often
 //! than they are inserted. This index hashes the borrowed text and owns a spelling only on insert.
 
+use crate::fx_hash::HashMap;
 use std::borrow::Borrow;
-use std::collections::HashMap;
 
 #[derive(Eq, PartialEq, Hash)]
 pub(super) struct Utf8Key(Box<str>);

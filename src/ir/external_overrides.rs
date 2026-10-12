@@ -10,7 +10,7 @@ use super::IrFile;
 /// copy of a call (an inlined body, a cloned lambda) shares it; the backend handoff freezes it into
 /// that declaration's [`crate::backend::BackendCallableFact`].
 pub type ExternalOverriddenDeclarations =
-    std::collections::HashMap<ExternalCallableId, Box<[OverriddenDeclaration]>>;
+    crate::fx_hash::HashMap<ExternalCallableId, Box<[OverriddenDeclaration]>>;
 
 impl IrFile {
     /// Join one checked call's overridden declarations into its selected declaration's record.

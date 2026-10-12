@@ -20,8 +20,8 @@ pub struct IrInlineTypeSubstitution {
 /// Property-owned index used while checked inline accessors are materialized and spliced.
 #[derive(Default)]
 pub(crate) struct IrInlinePropertyAccess {
-    pub(crate) accessor_functions: std::collections::HashMap<crate::fir::DeclarationId, FunId>,
-    pub(crate) splices: std::collections::HashMap<ExprId, IrInlinePropertySplice>,
+    pub(crate) accessor_functions: crate::fx_hash::HashMap<crate::fir::DeclarationId, FunId>,
+    pub(crate) splices: crate::fx_hash::HashMap<ExprId, IrInlinePropertySplice>,
 }
 
 /// Where a property's accessors written with a body start and end, each a 1-based line (0 when

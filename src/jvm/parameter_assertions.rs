@@ -5,9 +5,9 @@
 //! erasure. Value-class lowering may subsequently remove a guard when the selected carrier is a
 //! primitive. No frontend phase records an intrinsic name or makes a JVM representation decision.
 
+use crate::fx_hash::HashSet;
 use crate::ir::{FunId, IrFile, IrLambdaForm, IrParameterRole};
 use crate::types::Ty;
-use std::collections::HashSet;
 
 /// kotlinc guards a parameter whose type is non-null and whose JVM type is not primitive, which
 /// includes `Unit` (`kotlin.Unit`) and `Nothing` (`java.lang.Void`).

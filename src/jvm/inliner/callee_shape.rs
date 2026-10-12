@@ -1,6 +1,6 @@
 //! Questions the call site asks of a callee body before inlining it.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::jvm::method_node::{Category, Insn, MethodNode, Node};
 

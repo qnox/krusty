@@ -334,7 +334,7 @@ impl DelegateGetValueTarget {
         else {
             return None;
         };
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_inferred_ty(*declared_ret, expected, &mut bindings);
         (!bindings.is_empty())
             .then(|| crate::symbol_resolver::ty_subst_keep_unbound(*declared_receiver, &bindings))
@@ -1179,7 +1179,7 @@ impl Checker<'_> {
             if delegate_ty.type_args().is_empty() && !receiver.type_args().is_empty() {
                 return true;
             }
-            let mut bindings = crate::symbol_resolver::GSigBinds::new();
+            let mut bindings = crate::symbol_resolver::GSigBinds::default();
             crate::symbol_resolver::unify_ty(delegate_ty, *receiver, &mut bindings);
             !bindings.is_empty()
                 && crate::symbol_resolver::ty_subst_keep_unbound(delegate_ty, &bindings)
@@ -1209,7 +1209,7 @@ impl Checker<'_> {
                     return DelegateGetValueAttempt::RetryWithReceiver(refined);
                 }
             }
-            let mut bindings = crate::symbol_resolver::GSigBinds::new();
+            let mut bindings = crate::symbol_resolver::GSigBinds::default();
             crate::symbol_resolver::unify_ty(ret, expected, &mut bindings);
             let refined = crate::symbol_resolver::ty_subst_keep_unbound(delegate_ty, &bindings);
             let refined = match refined {
@@ -1267,7 +1267,7 @@ impl Checker<'_> {
             return receiver;
         };
         let mut refined = arguments.to_vec();
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         for (index, formal) in class.type_params().iter().enumerate() {
             let Some(argument) = refined.get(index).copied() else {
                 break;

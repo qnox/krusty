@@ -190,7 +190,7 @@ impl IrFile {
         owner: TypeName,
         publication: IrGeneratedMemberPublication,
     ) {
-        let mut identities = std::collections::HashSet::new();
+        let mut identities = crate::fx_hash::HashSet::default();
         for member in &publication.functions {
             assert!(
                 identities.insert(member.function),

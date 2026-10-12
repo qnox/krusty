@@ -5,7 +5,7 @@
 //! here knows about layout or symbols, which is what lets the per-architecture encoders be tested
 //! byte for byte on their own.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::super::target::Arch;
 use super::ProgramLinkError;
@@ -246,7 +246,7 @@ fn fits_hi_lo(value: i128) -> bool {
 /// this linker performs no relaxation, so every instruction stays where the assembler put it.
 fn relocate_riscv64(image: &mut [u8], relocations: &[Reloc]) -> Result<(), ProgramLinkError> {
     // Value `X = S + A - P` of every PCREL_HI20, keyed by the address of its `auipc`.
-    let mut hi20_at: HashMap<u64, i128> = HashMap::new();
+    let mut hi20_at: HashMap<u64, i128> = HashMap::default();
     let mut deferred = Vec::new();
     for r in relocations {
         let (x, rel) = expressions(r);

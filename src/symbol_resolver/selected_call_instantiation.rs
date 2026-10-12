@@ -116,7 +116,7 @@ impl<'a> SymbolResolver<'a> {
         }
         let receiver_bindings = bindings.clone();
         let value_params = &semantic.params[selected.context_count.min(semantic.params.len())..];
-        let mut argument_bindings = GSigBinds::new();
+        let mut argument_bindings = GSigBinds::default();
         for (index, (&parameter, argument)) in value_params.iter().zip(args).enumerate() {
             let parameter_index = selected.context_count + index;
             if selected

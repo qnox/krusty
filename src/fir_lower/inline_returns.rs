@@ -33,7 +33,7 @@ pub(super) struct ReachableReturn {
 /// [`reachable_checked_returns`], with whether each return sits in a nested lambda's template.
 pub(super) fn returns_by_body(ir: &IrFile, root: ExprId) -> Vec<ReachableReturn> {
     let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut pending = vec![(root, false)];
     while let Some((expression, nested)) = pending.pop() {
         if !seen.insert(expression) {

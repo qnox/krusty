@@ -1,6 +1,6 @@
 //! Packed stable and body-local identities shared across FIR lifetime boundaries.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::diag::Span;
 

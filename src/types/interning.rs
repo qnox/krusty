@@ -6,7 +6,7 @@
 //! lookup after acquiring exclusivity because another worker may have inserted the value between
 //! the two locks.
 
-use crate::name_tree::{FxBuildHasher, FxHasher};
+use crate::fx_hash::{FxBuildHasher, FxHasher};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::RwLock;

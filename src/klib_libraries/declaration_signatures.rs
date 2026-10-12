@@ -1,5 +1,6 @@
 //! Exact public `IdSignature`s of the declarations a KLIB provider publishes.
 
+use crate::fx_hash::HashMap;
 use crate::libraries::{
     associated_function_parameter_identities, associated_property_parameter_identities,
     function_parameter_identities, property_parameter_identities, FunctionParameterIdentities,
@@ -10,7 +11,6 @@ use crate::metadata::id_signature::{
     KlibAccessorIdSignature, KlibPublicIdSignature, MetadataAccessor, MetadataContainer,
 };
 use crate::metadata::semantic::{KotlinFunction, KotlinProperty};
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 static TYPE_PARAMETER_IDENTITIES: OnceLock<
@@ -23,7 +23,7 @@ pub(super) fn type_parameter_identities(
     enclosing: Option<&TypeParameterIdentities>,
 ) -> TypeParameterIdentities {
     let mut identities = TYPE_PARAMETER_IDENTITIES
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()
         .unwrap();
     TypeParameterIdentities::from_provider_with_enclosing(

@@ -4,7 +4,7 @@
 //! order. Checked FIR lowering publishes every read of a `val` as a stable binding read and every
 //! read of a `var` as a mutable one; the serialized variable's flags say which it is.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::decline::KlibBodyDeclineReason;
 use crate::ir::IrBindingStability;
@@ -51,7 +51,7 @@ impl LocalValues {
     /// No locals yet: the first one takes the slot after the function's `parameters`.
     pub(super) fn after(parameters: usize) -> Self {
         Self {
-            values: HashMap::new(),
+            values: HashMap::default(),
             next: u32::try_from(parameters).expect("a parameter list fits u32"),
         }
     }

@@ -125,7 +125,7 @@ use scope_level_callables::{
 pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
 pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
-pub(crate) type GSigBinds = std::collections::HashMap<String, Ty>;
+pub(crate) type GSigBinds = crate::fx_hash::HashMap<String, Ty>;
 
 /// [`crate::assignable::TypeOracle`] over a federated [`SymbolSource`] (module ∪ classpath): the class
 /// hierarchy walk the one assignability relation needs. Kotlin-name supertypes, no JVM canonicalization —
@@ -875,7 +875,7 @@ impl<'a> SymbolResolver<'a> {
                 // Once the compact expression has produced the lambda's checked shape, collect its
                 // result constraint as well. Keep already-selected/explicit bindings authoritative:
                 // this second channel fills only formals that the selection shape left unresolved.
-                let mut completed_argument_bindings = GSigBinds::new();
+                let mut completed_argument_bindings = GSigBinds::default();
                 for ((declared, applied), argument) in
                     signature.params.iter().zip(&declaration.params).zip(args)
                 {
@@ -987,7 +987,7 @@ impl<'a> SymbolResolver<'a> {
     /// whose supertype is not in the same file: an override is emitted without `ACC_FINAL` (kotlinc).
     pub fn declares_member(&self, internal: &str, name: &str) -> bool {
         let mut work = vec![crate::types::type_name(internal)];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(cur) = work.pop() {
             if cur == crate::types::wk::any() || !seen.insert(cur) {
                 continue;
@@ -1281,7 +1281,10 @@ impl<'a> SymbolResolver<'a> {
                     bindings,
                 )
             } else if selected.is_extension() {
-                (selected.ret.apply(selected.callable.ret), GSigBinds::new())
+                (
+                    selected.ret.apply(selected.callable.ret),
+                    GSigBinds::default(),
+                )
             } else {
                 let (member, bindings) = resolved_member_from_info_tracking(
                     self.lib,
@@ -1508,7 +1511,7 @@ impl<'a> SymbolResolver<'a> {
             .into_iter()
             .map(|(shape, _)| shape)
             .find(|shape| shape.obj_internal() == Some(constrained_owner))?;
-        let mut bindings = GSigBinds::new();
+        let mut bindings = GSigBinds::default();
         unify_inferred_ty_with_source(&self.src, declared_shape, constraint, &mut bindings);
         let applied = classifier
             .type_params
@@ -1634,7 +1637,7 @@ impl<'a> SymbolResolver<'a> {
                             )
                     })
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             candidates = candidates
                 .into_iter()
                 .enumerate()
@@ -1763,7 +1766,7 @@ impl<'a> SymbolResolver<'a> {
                     .map(|member| FunctionInfo::classifier_member(FnKind::Member, internal, member))
                     .collect::<Vec<_>>();
                 if candidates.is_empty() && self.lib.inherits_classifier_callables(internal) {
-                    let mut seen = std::collections::HashSet::from([internal]);
+                    let mut seen = crate::fx_hash::HashSet::from_iter([internal]);
                     let mut frontier = direct_supertypes(&self.src, Ty::obj_name(internal));
                     let mut rank = 1;
                     while !frontier.is_empty() {
@@ -3221,7 +3224,7 @@ impl<'a> SymbolResolver<'a> {
         // the explicit import), so resolve each mangled synthetic directly in its base candidate's
         // facade package. Probed LAST: an unmangled name never reaches this (the common case pays no
         // extra scope query).
-        let mut seen_spellings = std::collections::HashSet::new();
+        let mut seen_spellings = crate::fx_hash::HashSet::default();
         let mut mangled_default_records = Vec::new();
         for base in base_records
             .iter()
@@ -3763,7 +3766,7 @@ fn resolved_member_from_info_tracking(
     o: FunctionInfo,
 ) -> (ResolvedMember, GSigBinds) {
     let (ret, bindings) = o.generic_sig.as_ref().map_or_else(
-        || (o.callable.ret, GSigBinds::new()),
+        || (o.callable.ret, GSigBinds::default()),
         |gsig| {
             bind_member_return_from_call_args_tracking(
                 source,
@@ -3981,7 +3984,7 @@ mod tests {
             vec![Ty::obj_args("fixtures/Box", &[owner]), method],
             Ty::obj_args("fixtures/Result", &[method]),
         ));
-        let bindings = GSigBinds::from([("Owner".to_string(), Ty::String)]);
+        let bindings = GSigBinds::from_iter([("Owner".to_string(), Ty::String)]);
 
         assert_eq!(
             ty_subst_keep_unbound(signature, &bindings),
@@ -4005,18 +4008,18 @@ mod tests {
         let output = Ty::ty_param("R", any);
 
         assert_eq!(
-            specialize_signature_output_type(&EMPTY_SOURCE, output, &GSigBinds::new()),
+            specialize_signature_output_type(&EMPTY_SOURCE, output, &GSigBinds::default()),
             output
         );
         assert_eq!(
-            specialize_final_signature_output_type(&EMPTY_SOURCE, output, &GSigBinds::new()),
+            specialize_final_signature_output_type(&EMPTY_SOURCE, output, &GSigBinds::default()),
             any
         );
         assert_eq!(
             specialize_final_signature_output_type(
                 &EMPTY_SOURCE,
                 output,
-                &GSigBinds::from([("R".to_string(), Ty::out_projection(Ty::String),)]),
+                &GSigBinds::from_iter([("R".to_string(), Ty::out_projection(Ty::String),)]),
             ),
             Ty::String
         );
@@ -4035,7 +4038,7 @@ mod tests {
             specialize_signature_output_type(
                 &VarianceSource,
                 output,
-                &GSigBinds::from([("R".to_string(), Ty::star_projection(nullable_any),)]),
+                &GSigBinds::from_iter([("R".to_string(), Ty::star_projection(nullable_any),)]),
             ),
             Ty::obj_args("fixtures/Producer", &[nullable_any])
         );
@@ -4044,13 +4047,13 @@ mod tests {
     #[test]
     fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
-        let mut inferred = GSigBinds::new();
+        let mut inferred = GSigBinds::default();
         unify_inferred_ty(parameter, Ty::Int, &mut inferred);
         unify_inferred_ty(parameter, Ty::Null, &mut inferred);
         unify_inferred_ty(parameter, Ty::Int, &mut inferred);
         assert_eq!(inferred.get("T"), Some(&Ty::nullable(Ty::Int)));
 
-        let mut explicit = GSigBinds::from([("T".to_string(), Ty::Int)]);
+        let mut explicit = GSigBinds::from_iter([("T".to_string(), Ty::Int)]);
         unify_ty(parameter, Ty::Null, &mut explicit);
         assert_eq!(explicit.get("T"), Some(&Ty::Int));
     }
@@ -4073,7 +4076,7 @@ mod tests {
     #[test]
     fn bottom_bindings_complete_transitively_in_the_real_binding_map() {
         let signature = subtype_chain_signature();
-        let mut bindings = GSigBinds::from([
+        let mut bindings = GSigBinds::from_iter([
             ("C".to_string(), Ty::String),
             ("R".to_string(), Ty::Nothing),
             ("Q".to_string(), Ty::Null),
@@ -4088,7 +4091,7 @@ mod tests {
     #[test]
     fn explicitly_written_bottom_binding_is_not_completed() {
         let signature = subtype_chain_signature();
-        let mut bindings = GSigBinds::from([
+        let mut bindings = GSigBinds::from_iter([
             ("C".to_string(), Ty::String),
             ("R".to_string(), Ty::Nothing),
             ("Q".to_string(), Ty::Null),
@@ -4152,7 +4155,7 @@ mod tests {
     #[test]
     fn diverging_constraint_does_not_freeze_an_ordinary_generic_binding() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
-        let mut bindings = GSigBinds::new();
+        let mut bindings = GSigBinds::default();
 
         unify_ty(parameter, Ty::Nothing, &mut bindings);
         unify_ty(parameter, Ty::String, &mut bindings);
@@ -4163,7 +4166,7 @@ mod tests {
     #[test]
     fn postponed_identity_constraint_does_not_hide_later_concrete_evidence() {
         let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
-        let mut inferred = GSigBinds::new();
+        let mut inferred = GSigBinds::default();
 
         unify_inferred_ty(parameter, parameter, &mut inferred);
         assert!(inferred.is_empty());
@@ -4308,7 +4311,7 @@ mod tests {
     #[test]
     fn generic_unification_requires_matching_outer_classifiers() {
         let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
-        let mut bindings = GSigBinds::new();
+        let mut bindings = GSigBinds::default();
 
         unify_inferred_ty(
             Ty::array(parameter),
@@ -4345,7 +4348,7 @@ mod tests {
             Ty::nullable(Ty::ty_param("R", Ty::obj("kotlin/Any"))),
         );
         let argument = Ty::fun(vec![Ty::String], Ty::nullable(Ty::Int));
-        let mut bindings = GSigBinds::new();
+        let mut bindings = GSigBinds::default();
 
         unify_ty(parameter, argument, &mut bindings);
 
@@ -4357,7 +4360,7 @@ mod tests {
         let function = Ty::nullable(Ty::fun(vec![Ty::String], Ty::String));
 
         assert_eq!(
-            function_input_types(&VarianceSource, function, &GSigBinds::new()),
+            function_input_types(&VarianceSource, function, &GSigBinds::default()),
             vec![Ty::String]
         );
     }
@@ -4368,7 +4371,7 @@ mod tests {
         let function = Ty::fun(vec![parameter], Ty::Unit);
 
         assert_eq!(
-            function_input_types(&VarianceSource, function, &GSigBinds::new()),
+            function_input_types(&VarianceSource, function, &GSigBinds::default()),
             vec![parameter]
         );
     }
@@ -4534,7 +4537,7 @@ mod tests {
     }
 
     struct SamHierarchySource {
-        classifiers: std::collections::HashMap<TypeName, std::sync::Arc<LibraryType>>,
+        classifiers: crate::fx_hash::HashMap<TypeName, std::sync::Arc<LibraryType>>,
     }
 
     impl SymbolSource for SamHierarchySource {
@@ -4607,7 +4610,8 @@ mod tests {
                     std::sync::Arc::new(operation),
                 ),
             ]
-            .into(),
+            .into_iter()
+            .collect(),
         };
 
         let signature =
@@ -4654,7 +4658,8 @@ mod tests {
                     std::sync::Arc::new(both),
                 ),
             ]
-            .into(),
+            .into_iter()
+            .collect(),
         };
 
         assert!(semantic_sam_signature(&source, Ty::obj("test/Both")).is_none());
@@ -4697,7 +4702,8 @@ mod tests {
                     std::sync::Arc::new(mixed),
                 ),
             ]
-            .into(),
+            .into_iter()
+            .collect(),
         };
 
         let signature = semantic_sam_signature(&source, Ty::obj("test/MixedGet"))
@@ -4719,7 +4725,8 @@ mod tests {
                 crate::types::type_name("test/SomeFun"),
                 std::sync::Arc::new(some_fun),
             )]
-            .into(),
+            .into_iter()
+            .collect(),
         };
 
         let signature = semantic_sam_signature(&source, Ty::obj("test/SomeFun"))
@@ -4752,7 +4759,8 @@ mod tests {
                 crate::types::type_name("test/Comparator"),
                 std::sync::Arc::new(comparator),
             )]
-            .into(),
+            .into_iter()
+            .collect(),
         };
 
         let signature =
@@ -4778,7 +4786,8 @@ mod tests {
                 crate::types::type_name("test/Function"),
                 std::sync::Arc::new(function),
             )]
-            .into(),
+            .into_iter()
+            .collect(),
         };
         let t = Ty::ty_param("T", any);
         let u = Ty::ty_param("U", any);
@@ -4958,9 +4967,9 @@ mod tests {
         explicit_type_argument_count: usize,
     ) -> Option<Ty> {
         let signature = expected_result_signature(owner);
-        let mut bindings = GSigBinds::new();
+        let mut bindings = GSigBinds::default();
         bindings.insert("T".to_string(), inferred);
-        let mut expected_bindings = GSigBinds::new();
+        let mut expected_bindings = GSigBinds::default();
         expected_bindings.insert("T".to_string(), expected_argument);
         widen_invariant_expected_bindings(
             &VarianceSource,
@@ -5450,7 +5459,7 @@ mod tests {
         let owner = type_name("demo/Box");
         let formal = "T".to_string();
         let outer = Ty::ty_param("OuterT", Ty::nullable(Ty::obj("kotlin/Any")));
-        let mut bindings = GSigBinds::from([(formal.clone(), Ty::Int)]);
+        let mut bindings = GSigBinds::from_iter([(formal.clone(), Ty::Int)]);
 
         constrain_constructor_result(
             owner,

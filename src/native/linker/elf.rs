@@ -15,7 +15,7 @@
 //! some of them, and a bug there must surface as an error naming the object, never as a panic or a
 //! write outside the section a relocation belongs to.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use object::read::elf::{ElfFile64, SectionHeader};
 use object::read::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
@@ -67,7 +67,7 @@ const IMAGE_LIMIT: u64 = 1 << 32;
 /// written down beside them would not. A runtime object that cannot be read is an error rather
 /// than a shorter list.
 pub fn runtime_symbols(target: NativeTarget) -> Result<HashSet<String>, ProgramLinkError> {
-    let mut names = HashSet::new();
+    let mut names = HashSet::default();
     for (name, bytes) in prebuilt::runtime_objects(target).unwrap_or_default() {
         let file = parse(&format!("runtime object `{name}`"), bytes, target.arch)?;
         for symbol in file.symbols() {
@@ -278,7 +278,7 @@ impl Layout {
             }
         }
         let mut layout = Self {
-            placed: HashMap::new(),
+            placed: HashMap::default(),
             page,
             text_end: 0,
             data_file_start: 0,
@@ -409,9 +409,9 @@ struct Symbols {
 impl Symbols {
     fn new(files: &[Elf], layout: &Layout) -> Result<Self, ProgramLinkError> {
         let mut symbols = Self {
-            strong: HashMap::new(),
-            weak: HashMap::new(),
-            locals: HashMap::new(),
+            strong: HashMap::default(),
+            weak: HashMap::default(),
+            locals: HashMap::default(),
         };
         for (file_index, file) in files.iter().enumerate() {
             for symbol in file.symbols() {

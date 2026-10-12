@@ -61,7 +61,7 @@ impl InlineBodyStore {
             if self.bodies.contains_key(callable) {
                 self.defaults.insert(*callable, fragments.clone());
             }
-            let mut referenced = std::collections::HashSet::new();
+            let mut referenced = crate::fx_hash::HashSet::default();
             for body in fragments {
                 body.collect_referenced_module_callables(&mut referenced);
             }

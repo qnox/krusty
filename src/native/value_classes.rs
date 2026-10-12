@@ -17,7 +17,7 @@
 //! `V?` is a BOX, one object of `V`'s own type holding the value. So is `V` wherever a position
 //! does not know it holds a `V` at all: `Any`, a type parameter, an interface.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::IrFile;
 use crate::types::{ClassifierFactSource, Ty, TypeName};
@@ -109,7 +109,7 @@ impl NativeValueClasses {
             (class.is_value && class.ctor_param_count == 1).then_some(class.fq_name)
         }));
         let mut inventory = Self::default();
-        let mut probed = HashSet::new();
+        let mut probed = HashSet::default();
         while let Some(classifier) = pending.pop() {
             if !probed.insert(classifier) || is_builtin(classifier) {
                 continue;

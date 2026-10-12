@@ -16,7 +16,7 @@
 //! from it. A local class's annotations resolve only in its body
 //! pass, after headers are published, so a local class never matches here.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, NoArgSuperConstructor, ResolvedModuleIndex,

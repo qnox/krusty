@@ -2747,7 +2747,7 @@ fn production_pass_one_publishes_checked_const_expression_payloads_only_for_cons
             crate::ast::Decl::Property(property) => Some((property.name.as_str(), *declaration)),
             crate::ast::Decl::Fun(_) | crate::ast::Decl::Class(_) => None,
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     let constant = |name: &str| {
         analysis.symbols.source_props[&(0, properties[name].0)]
             .compile_time_constant

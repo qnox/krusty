@@ -1423,8 +1423,8 @@ pub(crate) fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
 /// Instruction indices consumed by a parameter null-check triplet (`aload`/`ldc`/`invokestatic
 /// Intrinsics.checkNotNullParameter`), which the splice deletes. A lambda's `aload` inside one is not a
 /// use.
-pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> std::collections::HashSet<usize> {
-    let mut deleted = std::collections::HashSet::new();
+pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> crate::fx_hash::HashSet<usize> {
+    let mut deleted = crate::fx_hash::HashSet::default();
     for (index, insn) in insns.iter().enumerate() {
         let Insn::Plain { op: 0xb8, operands } = insn else {
             continue;
@@ -1453,7 +1453,7 @@ pub fn lambda_invoke_sites(
     insns: &[Insn],
     src_cp: &[C],
     lambda_slots: &[(usize, u16)],
-    deleted: &std::collections::HashSet<usize>,
+    deleted: &crate::fx_hash::HashSet<usize>,
 ) -> Option<Vec<(usize, usize, usize)>> {
     let mut found = Vec::new();
     for (load_idx, instruction) in insns.iter().enumerate() {
@@ -1673,7 +1673,7 @@ pub(super) fn splice_unified(
         })
         .count();
     // Indices already consumed by a null-check deletion (its `aload <lambda>` doesn't count as a use).
-    let deleted: std::collections::HashSet<usize> =
+    let deleted: crate::fx_hash::HashSet<usize> =
         edits.iter().flat_map(|e| e.at..e.at + e.len).collect();
     let lambda_slots = lambdas
         .iter()
@@ -1960,7 +1960,7 @@ pub(super) fn splice_unified(
 
     // Prologue: store each NON-lambda argument (already on the stack, top = last) into its slot.
     let stores = param_store_ops(descriptor, 0)?;
-    let lambda_slots: std::collections::HashSet<u16> = offsets_of_param
+    let lambda_slots: crate::fx_hash::HashSet<u16> = offsets_of_param
         .iter()
         .copied()
         .filter(|&slot| compaction.is_removed(slot))
@@ -2255,7 +2255,7 @@ mod tests {
             },
         ];
         assert!(
-            lambda_invoke_sites(&insns, &cp, &[(0, 2)], &std::collections::HashSet::new(),)
+            lambda_invoke_sites(&insns, &cp, &[(0, 2)], &crate::fx_hash::HashSet::default(),)
                 .is_none()
         );
     }
@@ -2296,7 +2296,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            lambda_invoke_sites(&insns, &cp, &[(0, 2)], &std::collections::HashSet::new()),
+            lambda_invoke_sites(&insns, &cp, &[(0, 2)], &crate::fx_hash::HashSet::default()),
             Some(vec![(0, 0, 4)]),
         );
     }

@@ -21,7 +21,7 @@ pub(super) fn facade_source_ordered_members(
 ) -> Vec<FacadeMember> {
     use super::static_fields::StaticAccessor;
     // A property's getter precedes its setter, whichever of them source declared.
-    let declared_setters: std::collections::HashSet<u32> = ir
+    let declared_setters: crate::fx_hash::HashSet<u32> = ir
         .local_property_layouts
         .values()
         .filter_map(|layout| match layout {
@@ -131,7 +131,7 @@ pub(super) fn source_ordered_members<'a>(
     };
     // A stored block property's accessors are one unit at the property's position, getter before
     // setter, whichever of them source declared.
-    let block_accessor_slots: std::collections::HashMap<u32, (u32, u8)> = ir
+    let block_accessor_slots: crate::fx_hash::HashMap<u32, (u32, u8)> = ir
         .companion_blocks
         .properties_of(class.fq_name_id())
         .filter(|property| property.storage.is_some())
@@ -439,7 +439,7 @@ fn popup_body_order(
 pub(super) fn property_annotation_marker_fids(
     ir: &IrFile,
     c: &IrClass,
-) -> std::collections::HashSet<u32> {
+) -> crate::fx_hash::HashSet<u32> {
     c.properties
         .iter()
         .filter_map(|property| {

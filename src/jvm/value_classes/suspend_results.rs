@@ -10,9 +10,9 @@
 
 use super::{erase, is_ref, nullable_is_boxed, Under};
 use crate::fir::ResolvedFunctionOverrideTarget;
+use crate::fx_hash::HashSet;
 use crate::ir::{IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult};
 use crate::types::{Ty, TypeName};
-use std::collections::HashSet;
 
 /// Record the representation of every suspend function's result and of every suspend call's
 /// result. Returns the suspend functions whose value-class result an override forces into its box.

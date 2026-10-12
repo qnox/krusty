@@ -632,8 +632,8 @@ fn module_inner_class_resolver_from_shapes<'a>(
     let module_names = classes
         .iter()
         .map(|class| class.classifier)
-        .collect::<std::collections::HashSet<_>>();
-    let mut source = std::collections::HashMap::new();
+        .collect::<crate::fx_hash::HashSet<_>>();
+    let mut source = crate::fx_hash::HashMap::default();
     for class in classes {
         let internal = class.classifier.render();
         // Only MEMBER-nested classes get snapshot entries, and the outer boundary is NOT the last

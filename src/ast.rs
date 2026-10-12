@@ -756,10 +756,10 @@ pub struct FunDecl {
     /// value class's underlying type — see `ClassDecl::type_param_bounds`.
     pub type_param_bounds: Vec<(String, TypeRef)>,
     /// Subset of `type_params` that carry an `Any` upper bound (`T: Any`) — non-nullable on JVM.
-    pub non_null_type_params: std::collections::HashSet<String>,
+    pub non_null_type_params: crate::fx_hash::HashSet<String>,
     /// Subset of `type_params` declared `reified` (only meaningful on an `inline` function): the body
     /// may use them concretely (`is T`, `as T`, `T::class`) and codegen specializes them per call.
-    pub reified_type_params: std::collections::HashSet<String>,
+    pub reified_type_params: crate::fx_hash::HashSet<String>,
     pub span: Span,
     /// Exact span of the declaration's NAME. Kotlin diagnostics about a declaration as a whole
     /// point here, not at its keyword.
@@ -1328,7 +1328,7 @@ pub struct PropDecl {
     pub type_param_bounds: Vec<(String, TypeRef)>,
     /// Property type parameters declared `reified`. Their inline accessor bodies may use concrete
     /// type operations such as `T::class`, exactly like an inline function body.
-    pub reified_type_params: std::collections::HashSet<String>,
+    pub reified_type_params: crate::fx_hash::HashSet<String>,
     /// Extension-property receiver type (`val String.foo: T` → `Some("String")`). The getter/setter
     /// are emitted as static `getFoo(Recv)`/`setFoo(Recv, T)` methods, like an extension function.
     pub receiver: Option<TypeRef>,
@@ -1571,11 +1571,11 @@ pub struct File {
     /// Suppression names in force for a declaration annotation reference, keyed by its source offset.
     /// This keeps access diagnostics attached to the exact annotation occurrence instead of treating
     /// one declaration's `@Suppress` as file-wide.
-    pub detached_type_ref_suppressions: std::collections::HashMap<u32, Vec<String>>,
+    pub detached_type_ref_suppressions: crate::fx_hash::HashMap<u32, Vec<String>>,
     /// Annotations on one executable statement or expression. This remains transient parse state
     /// and is discarded with the active body AST after checking.
-    pub statement_annotations: std::collections::HashMap<StmtId, Vec<UseSiteAnnotation>>,
-    pub expression_annotations: std::collections::HashMap<ExprId, Vec<UseSiteAnnotation>>,
+    pub statement_annotations: crate::fx_hash::HashMap<StmtId, Vec<UseSiteAnnotation>>,
+    pub expression_annotations: crate::fx_hash::HashMap<ExprId, Vec<UseSiteAnnotation>>,
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,
@@ -1612,30 +1612,30 @@ pub struct File {
     pub expr_arena: Vec<Expr>,
     pub stmt_arena: Vec<Stmt>,
     pub expr_spans: Vec<Span>,
-    pub(crate) retained_expr_spans: std::collections::HashMap<ExprId, Span>,
-    pub(crate) local_declarations: std::collections::HashSet<DeclId>,
+    pub(crate) retained_expr_spans: crate::fx_hash::HashMap<ExprId, Span>,
+    pub(crate) local_declarations: crate::fx_hash::HashSet<DeclId>,
     pub stmt_spans: Vec<Span>,
     /// Sparse source locations for the value-introducing `=` associated with an expression: property
     /// and local initializers, parameter defaults, and assignment RHS expressions. Diagnostics point
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
     /// node. Keyed by the value expression's `ExprId`; absent for expression bodies and synthetic values.
-    pub value_operator_spans: std::collections::HashMap<u32, Span>,
+    pub value_operator_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Assignment lvalue spans keyed by statement ID.
-    pub assignment_target_spans: std::collections::HashMap<u32, Span>,
+    pub assignment_target_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
     /// expression [`ClassInit::Block`] records. A diagnostic about an `init` block points at the
     /// keyword, which the block expression's own span (the `{`) does not cover.
-    pub init_block_keywords: std::collections::HashMap<ExprId, Span>,
+    pub init_block_keywords: crate::fx_hash::HashMap<ExprId, Span>,
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
-    pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
+    pub statement_labels: crate::fx_hash::HashMap<StmtId, (String, Span)>,
     /// `@` token spans of this file's `return@label`s.
     pub(crate) return_label_spans: ReturnLabelSpans,
     /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
     /// shared between the read and write. Lowering spills the operands that semantic resolution
     /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay
     /// attached to both accesses.
-    pub incdec_access_operands: std::collections::HashMap<ExprId, Vec<ExprId>>,
+    pub incdec_access_operands: crate::fx_hash::HashMap<ExprId, Vec<ExprId>>,
     /// 1-based source line of each expression's start (parallel to `expr_spans`; 0 = unknown).
     /// Filled by the parser post-pass for the `LineNumberTable`.
     pub expr_lines: Vec<u32>,
@@ -1650,45 +1650,45 @@ pub struct File {
     /// the member being written is named on, which is where the write's accessor dispatch belongs
     /// when the assignment spans several lines. Parallel to `assignment_target_spans`, and absent
     /// for every other statement form.
-    pub assignment_target_lines: std::collections::HashMap<u32, u32>,
+    pub assignment_target_lines: crate::fx_hash::HashMap<u32, u32>,
     /// Name of each NAMED annotation argument, keyed by that argument's own `ExprId`
     /// (`@Deprecated("gone", level = HIDDEN)` → the `HIDDEN` expression maps to `"level"`).
     /// Sparse: a positional argument has no entry. Annotation elements have defaults and may be
     /// written in any order, so folding an applied annotation must bind by NAME where one is
     /// given — a positional zip would attach the value to the wrong element.
-    pub annotation_arg_names: std::collections::HashMap<u32, String>,
+    pub annotation_arg_names: crate::fx_hash::HashMap<u32, String>,
     /// Per-`Expr::Call` argument names: keyed by the call's `ExprId`, parallel to its `args`
     /// (`None` = positional, `Some(name)` = `name = expr`). Absent ⇒ all positional.
-    pub call_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
+    pub call_arg_names: crate::fx_hash::HashMap<u32, Vec<Option<String>>>,
     /// Calls produced by collection-literal syntax (`[a, b]`). The parser keeps the ordinary call
     /// operand layout so every expression walker remains uniform, while resolution replaces the
     /// provisional array-factory spelling with the expected classifier's selected `operator fun
     /// of`. This sparse marker is transient AST state and is discarded with the active parse unit.
-    pub collection_literal_calls: std::collections::HashSet<u32>,
+    pub collection_literal_calls: crate::fx_hash::HashSet<u32>,
     /// Source span of each named argument's label, parallel to `call_arg_names`. Stored only for calls
     /// that have named arguments, so diagnostics can match Kotlin's label location without retaining
     /// source text or adding metadata to positional calls.
-    pub call_arg_name_spans: std::collections::HashMap<u32, Vec<Option<Span>>>,
+    pub call_arg_name_spans: crate::fx_hash::HashMap<u32, Vec<Option<Span>>>,
     /// Exact `(` locations for syntactically empty calls. For non-empty calls, diagnostics can point at
     /// the first argument; keeping this map sparse avoids adding location fields to every call node.
-    pub empty_call_open_paren_spans: std::collections::HashMap<u32, Span>,
+    pub empty_call_open_paren_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Exact raw name locations when a member name cannot be recovered from the expression end:
     /// backticked members and safe calls with argument lists. Kept sparse rather than widening every
     /// expression node.
-    pub exact_member_name_spans: std::collections::HashMap<u32, Span>,
+    pub exact_member_name_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
     /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
     /// sparse rather than widening those expression nodes.
-    pub operator_token_spans: std::collections::HashMap<u32, Span>,
+    pub operator_token_spans: crate::fx_hash::HashMap<u32, Span>,
     /// The assignment tokens kotlinc's binary-expression diagnostic positioning searches.
     pub binary_reference_tokens: BinaryReferenceTokens,
     /// Callable references whose classifier receiver was written nullable (`A?::member`). The
     /// receiver expression still names classifier `A`; this sparse marker preserves the source type
     /// so extension-reference selection does not silently narrow it to `A`.
-    pub nullable_callable_ref_receivers: std::collections::HashSet<u32>,
+    pub nullable_callable_ref_receivers: crate::fx_hash::HashSet<u32>,
     /// Exact parser identities of `::class` expressions. A backticked callable named `class` is a
     /// different syntax form and is intentionally absent.
-    pub class_literal_references: std::collections::HashSet<u32>,
+    pub class_literal_references: crate::fx_hash::HashSet<u32>,
     /// Dot spans for member expressions with trivia between `.` and the member name.
     pub non_adjacent_member_dot_spans: Vec<(u32, Span)>,
     /// `ExprId`s of `Expr::Call`s whose LAST argument is a SYNTACTIC trailing lambda (`f(a) { … }` /
@@ -1696,23 +1696,23 @@ pub struct File {
     /// without a positional argument take their defaults — so default-omission lowering must place it in
     /// the last slot, not the next free positional one (`f("x") { }` on `f(a, m = d, builder)` ⇒ `m`
     /// defaults, the lambda fills `builder`).
-    pub call_has_trailing_lambda: std::collections::HashSet<u32>,
+    pub call_has_trailing_lambda: crate::fx_hash::HashSet<u32>,
     /// End offset of the parenthesized portion of calls with trailing lambdas.
-    pub trailing_call_close_paren_ends: std::collections::HashMap<u32, u32>,
+    pub trailing_call_close_paren_ends: crate::fx_hash::HashMap<u32, u32>,
     /// `ExprId`s of `Expr::Call`s produced from infix-call syntax (`a foo b`). The callee is still the
     /// ordinary `Member { receiver: a, name: "foo" }`, but resolver/lowering need the source form for
     /// primitive builtin names where Kotlin treats `a rem b` differently from `a.rem(b)`.
-    pub infix_calls: std::collections::HashSet<u32>,
+    pub infix_calls: crate::fx_hash::HashSet<u32>,
     /// Explicit type arguments on a call (`Foo<Int>()`, `listOf<String>(…)`), keyed by the call's
     /// `ExprId`. Lets a constructor call carry its instantiation (`ArrayList<Int>()` → `ArrayList<Int>`)
     /// so member/element types resolve. Absent ⇒ no explicit type arguments.
-    pub call_type_args: std::collections::HashMap<u32, Vec<TypeRef>>,
-    pub anonymous_object_classes: std::collections::HashMap<ExprId, DeclId>,
+    pub call_type_args: crate::fx_hash::HashMap<u32, Vec<TypeRef>>,
+    pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
-        std::collections::HashMap<DeclId, AnonymousEnclosingFunction>,
+        crate::fx_hash::HashMap<DeclId, AnonymousEnclosingFunction>,
     /// Local/anonymous classifier declaration → backend-neutral lexical naming provenance.
-    pub local_class_name_provenance: std::collections::HashMap<DeclId, LocalClassNameProvenance>,
+    pub local_class_name_provenance: crate::fx_hash::HashMap<DeclId, LocalClassNameProvenance>,
     /// Each `suspend` function → the position its continuation takes in the generated-class
     /// sequence its enclosing scope numbers, 1-based in declaration order.
     ///
@@ -1720,125 +1720,125 @@ pub struct File {
     /// that numbers them can say which positions are left over. This is that pass's answer, carried
     /// as source provenance: a position in a declaration order, keyed by the declaration itself.
     /// The spelling built from it belongs to a backend.
-    pub suspend_continuation_ordinals: std::collections::HashMap<AnonymousEnclosingFunction, u32>,
+    pub suspend_continuation_ordinals: crate::fx_hash::HashMap<AnonymousEnclosingFunction, u32>,
     /// The hoisted `Decl::Class` of each statement-position local class (`Stmt::LocalClass`). The
     /// declaration carries the class for signature collection and lowering; the STATEMENT is where
     /// the checker enters it, so that it is checked in the lexical scope it was written in rather
     /// than at file level.
-    pub local_class_decls: std::collections::HashMap<StmtId, DeclId>,
+    pub local_class_decls: crate::fx_hash::HashMap<StmtId, DeclId>,
     /// Hoisted local classifier declaration -> the source declaration whose lexical subtree
     /// contains it. This is a transient AST edge used while compact headers are built; it is not a
     /// parser coordinate or a Pass-2 body locator. Nested local functions remain part of their
     /// enclosing source declaration's bounded parse unit.
-    pub local_class_enclosing_declarations: std::collections::HashMap<DeclId, DeclId>,
+    pub local_class_enclosing_declarations: crate::fx_hash::HashMap<DeclId, DeclId>,
     /// Hoisted local class declaration -> exact non-declaration classifier scope that owns it.
     /// Enum entries have anonymous subclass scope (`Enum.ENTRY`) but no standalone `Decl`; retaining
     /// that parser-known owner lets signature resolution include entry-local nested classifiers.
-    pub local_class_lexical_classifier_owners: std::collections::HashMap<DeclId, String>,
+    pub local_class_lexical_classifier_owners: crate::fx_hash::HashMap<DeclId, String>,
     /// Parser-hoisted nested classifier declared directly in an enum-entry body -> that entry's
     /// stable source range. This transient structural edge is consumed while declaration headers
     /// receive stable identities; it never survives Pass 1 or becomes semantic identity itself.
-    pub enum_entry_nested_classifier_owners: std::collections::HashMap<DeclId, Span>,
+    pub enum_entry_nested_classifier_owners: crate::fx_hash::HashMap<DeclId, Span>,
     /// Nested types hoisted out of a local class during its parse, named by the path from that
     /// class (`Local.Inner`). They are requalified with it when it is given its final name.
-    pub local_class_nested: std::collections::HashMap<StmtId, Vec<DeclId>>,
+    pub local_class_nested: crate::fx_hash::HashMap<StmtId, Vec<DeclId>>,
     /// Written simple name of each parser-hoisted nested classifier. Ownership is carried by
     /// declaration identities separately; consumers never split the hoisted qualified spelling.
-    pub hoisted_classifier_source_names: std::collections::HashMap<DeclId, String>,
+    pub hoisted_classifier_source_names: crate::fx_hash::HashMap<DeclId, String>,
     /// Lexical owner of each classifier hoisted out of a classifier body (see `classifier_owners`).
-    pub(crate) hoisted_classifier_owners: std::collections::HashMap<DeclId, DeclId>,
+    pub(crate) hoisted_classifier_owners: crate::fx_hash::HashMap<DeclId, DeclId>,
     /// Explicit parameter type annotations on a lambda literal (`{ x: Int, y -> … }`), keyed by the
     /// lambda's `ExprId`, parallel to its `params`. `None` for an unannotated parameter. Lets the
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
     /// when no expected function type drives them.
-    pub lambda_param_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
+    pub lambda_param_types: crate::fx_hash::HashMap<u32, Vec<Option<TypeRef>>>,
     /// Source spans of lambda value parameters, keyed by the lambda expression and parallel to
     /// `Expr::Lambda::params`. Diagnostics for an expectation-free lambda belong to the written
     /// parameter, not to the whole literal.
-    pub lambda_param_spans: std::collections::HashMap<u32, Vec<Span>>,
+    pub lambda_param_spans: crate::fx_hash::HashMap<u32, Vec<Span>>,
     /// How each parameter of a lambda literal was written, keyed by the lambda's `ExprId` and
     /// parallel to its `params`. Recorded only for a lambda with an `_` or a destructuring
     /// parameter; every other lambda's parameters are all [`LambdaParameterRole::Named`].
-    pub lambda_parameter_roles: std::collections::HashMap<u32, Vec<LambdaParameterRole>>,
+    pub lambda_parameter_roles: crate::fx_hash::HashMap<u32, Vec<LambdaParameterRole>>,
     /// Lambda literals with a source `->`, including the arity-zero form `{ -> body }`. An empty
     /// `params` vector otherwise means `{ body }`, which may acquire the implicit unary `it` from an
     /// expected function type; the explicit-arrow form must remain zero-arity.
-    pub lambda_explicit_arrows: std::collections::HashSet<u32>,
+    pub lambda_explicit_arrows: crate::fx_hash::HashSet<u32>,
     /// `ExprId.0` of each lambda that originated from an ANONYMOUS FUNCTION expression
     /// (`fun (x: Int): Int = …`). Unlike a plain lambda, a bare `return` inside an anonymous function is
     /// a LOCAL return (from the anonymous function itself), so the lowerer must compile its body's
     /// `return` as the closure method's own return rather than a non-local return of the enclosing fn.
-    pub anon_fun_lambdas: std::collections::HashSet<u32>,
+    pub anon_fun_lambdas: crate::fx_hash::HashSet<u32>,
     /// Number of leading named context parameters on an anonymous function expression
     /// (`context(x: C) fun () = …`). They are physical leading parameters and ordinary named values
     /// in the body, while this count preserves the function type's context-receiver shape.
-    pub anon_fun_context_count: std::collections::HashMap<u32, u32>,
+    pub anon_fun_context_count: crate::fx_hash::HashMap<u32, u32>,
     /// Backend-neutral naming provenance of each callable reference and each lambda, by expression
     /// id, from the file's local-class naming walk. A backend that realizes one as a class of its
     /// own (a suspend lambda's `SuspendLambda`) names it from this.
-    pub callable_reference_provenance: std::collections::HashMap<u32, LocalClassNameProvenance>,
+    pub callable_reference_provenance: crate::fx_hash::HashMap<u32, LocalClassNameProvenance>,
     /// The value each generated-class sequence the naming walk touched had before this file (or
     /// declaration unit) numbered anything in it. Settling the walk after resolution replays the
     /// same sequences from these positions.
-    pub generated_class_sequence_starts: std::collections::HashMap<Vec<String>, u32>,
+    pub generated_class_sequence_starts: crate::fx_hash::HashMap<Vec<String>, u32>,
     /// Lifting provenance of each lambda literal, by expression id, from the file's local-function
     /// naming walk.
-    pub lambda_lifting_sites: std::collections::HashMap<u32, LiftingSite>,
+    pub lambda_lifting_sites: crate::fx_hash::HashMap<u32, LiftingSite>,
     /// Lifting provenance of each local function declaration, by statement id.
-    pub local_function_lifting_sites: std::collections::HashMap<StmtId, LiftingSite>,
+    pub local_function_lifting_sites: crate::fx_hash::HashMap<StmtId, LiftingSite>,
     /// Generation provenance of each local delegated property, by statement id.
-    pub local_delegates: std::collections::HashMap<StmtId, LocalDelegateProvenance>,
+    pub local_delegates: crate::fx_hash::HashMap<StmtId, LocalDelegateProvenance>,
     /// Declared receiver type of an anonymous extension function (`fun R.(x: A) { … }`), keyed by
     /// the desugared lambda's `ExprId.0`.
-    pub anon_fun_receivers: std::collections::HashMap<u32, TypeRef>,
+    pub anon_fun_receivers: crate::fx_hash::HashMap<u32, TypeRef>,
     /// `ExprId.0` of each lambda literal carrying the `suspend` modifier (`suspend { … }`). The
     /// checker types it as a `suspend (…) -> …` function type; the lowerer builds a
     /// `SuspendLambda` state machine for it instead of a plain `FunctionN` closure.
-    pub suspend_lambdas: std::collections::HashSet<u32>,
+    pub suspend_lambdas: crate::fx_hash::HashSet<u32>,
     /// The EXPLICIT label a lambda literal was written with (`list.forEach outer@{ … }`), keyed by the
     /// lambda's `ExprId.0`. A labelled lambda REPLACES the implicit label (the callee's name) a
     /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
     /// the lambda is unlabelled and keeps the implicit callee-name label.
-    pub lambda_labels: std::collections::HashMap<u32, String>,
+    pub lambda_labels: crate::fx_hash::HashMap<u32, String>,
     /// kotlinc's implicit label of a lambda literal, keyed by the lambda's `ExprId.0`: the name of
     /// the innermost call it is written in (`parser::lambda_literals`). Absent for a lambda in a
     /// scope that names none. An explicit label in `lambda_labels` replaces it.
-    pub lambda_call_labels: std::collections::HashMap<u32, String>,
+    pub lambda_call_labels: crate::fx_hash::HashMap<u32, String>,
     /// Parser-owned destructuring syntax retained for checking, lowering, and source diagnostics.
     pub destructuring: DestructuringSyntax,
     /// Context parameters written on a local property declaration, keyed by that declaration's
     /// statement id. Later semantic phases may reject the ownership form, but syntax and spans are
     /// retained by the parser.
-    pub local_property_context_params: std::collections::HashMap<StmtId, Vec<Param>>,
+    pub local_property_context_params: crate::fx_hash::HashMap<StmtId, Vec<Param>>,
     /// NAMED super-constructor arguments (`class D : Base(name = …, addr = …)`): the per-argument name
     /// (parallel to the class's `base_args`; `None` for a positional arg), keyed by the FIRST base
     /// argument's `ExprId.0`. The checker/lowerer reorder the base args to the base constructor's
     /// parameter order before use. Absent ⇒ all base args are positional.
-    pub base_arg_names: std::collections::HashMap<u32, Vec<Option<String>>>,
+    pub base_arg_names: crate::fx_hash::HashMap<u32, Vec<Option<String>>>,
     /// The callee name of a superclass constructor call (`Base` in `: pkg.Base(args)`), keyed by
     /// the start offset of the class's `base_class_span`. The call's access diagnostic is reported
     /// there, apart from the type reference's own.
-    pub base_class_callee_spans: std::collections::HashMap<u32, Span>,
+    pub base_class_callee_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Declared return type of an anonymous function (`fun (…): T = …`), keyed by the desugared
     /// lambda's `ExprId.0`. A block body that ends in `return` has body type `Nothing`, so the checker
     /// must take the function's type from this annotation, not from the (diverging) body value.
-    pub anon_fun_ret: std::collections::HashMap<u32, TypeRef>,
+    pub anon_fun_ret: crate::fx_hash::HashMap<u32, TypeRef>,
     /// `typealias Name = Target` — maps alias simple name → target simple name.
     /// Generic type aliases are stored with the raw target name (type args erased).
     pub type_aliases: Vec<(String, String)>,
     /// Declared visibility of a `typealias` when NON-public (`internal typealias A = …`) — public
     /// aliases are absent. Feeds `@Metadata` `TypeAlias.flags`.
-    pub type_alias_visibility: std::collections::HashMap<String, Visibility>,
+    pub type_alias_visibility: crate::fx_hash::HashMap<String, Visibility>,
     /// The `typealias` spelling recorded for a rewritten reference, keyed by that reference's span.
     /// Resolution does not consult this map: a use stays written, and the checker applies the alias
     /// selected by the classifier tower. Metadata abbreviation still accepts a spelling parked here
     /// when a later pass rewrites a target for its own template. A reference with no entry keeps
     /// [`TypeRef::name`].
-    pub alias_spellings: std::collections::HashMap<Span, TypeRef>,
+    pub alias_spellings: crate::fx_hash::HashMap<Span, TypeRef>,
     /// Exact `in`/`out` keyword span for a projected type argument, keyed by that argument's type
     /// span. Diagnostics consume this parser-owned source fact instead of guessing an offset from
     /// the referenced type, which may be separated from the keyword by trivia.
-    pub type_projection_spans: std::collections::HashMap<Span, Span>,
+    pub type_projection_spans: crate::fx_hash::HashMap<Span, Span>,
     /// Every `typealias Name<T…> = Target`: the alias name, its declared type-parameter names, and
     /// the complete source target shape. Resolution binds this once for semantic use and metadata.
     pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,
@@ -1852,7 +1852,7 @@ pub struct File {
     /// `ExprId`s of call arguments written with the spread operator (`*arr`). The marked id is the
     /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
     /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.
-    pub spread_arg_ids: std::collections::HashSet<u32>,
+    pub spread_arg_ids: crate::fx_hash::HashSet<u32>,
     /// Annotations written on a TYPE (`@Composable () -> Unit`, `@UnsafeVariance T`), keyed by the
     /// type's start offset (`TypeRef.span.lo`). The parser consumes leading `@Foo` before a type and
     /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
@@ -1860,27 +1860,27 @@ pub struct File {
     /// Annotation references applied to a type, keyed by the annotated type's start offset. Each
     /// reference retains its complete source spelling and own span until name resolution commits it
     /// to a canonical classifier identity.
-    pub type_annotations: std::collections::HashMap<u32, Vec<AnnotationRef>>,
+    pub type_annotations: crate::fx_hash::HashMap<u32, Vec<AnnotationRef>>,
     /// Argument expressions of the type-use annotations in [`Self::type_annotations`] written with
     /// a non-empty argument list, keyed by the annotation reference's span.
-    pub type_annotation_arguments: std::collections::HashMap<(u32, u32), Vec<ExprId>>,
+    pub type_annotation_arguments: crate::fx_hash::HashMap<(u32, u32), Vec<ExprId>>,
     /// Names written on function-type parameters (`(count: Int) -> Unit`), keyed by the parameter
     /// type's start offset like [`Self::type_annotations`]. `@Metadata` records each as a
     /// `@ParameterName` annotation on that parameter's type.
-    pub function_type_parameter_names: std::collections::HashMap<u32, String>,
+    pub function_type_parameter_names: crate::fx_hash::HashMap<u32, String>,
     /// Declaration type parameters carrying annotations, keyed by the exact start of their owning
     /// declaration's signature and then kept in source order. This is distinct from
     /// [`Self::type_annotations`]: `class C<@Ann T>` annotates the declaration of `T`, not a type use.
     pub declaration_type_parameter_annotations:
-        std::collections::HashMap<u32, Vec<AnnotatedTypeParameter>>,
+        crate::fx_hash::HashMap<u32, Vec<AnnotatedTypeParameter>>,
     /// The declaring type parameter of each upper bound, keyed by the start of the bound's type
     /// reference: `<T : B>` and `where T : B` both map `B` to the parameter as `<…>` wrote it,
     /// annotations and inline bound included, which is where kotlinc reports about the parameter.
-    pub type_parameter_bound_owners: std::collections::HashMap<u32, crate::diag::Span>,
+    pub type_parameter_bound_owners: crate::fx_hash::HashMap<u32, crate::diag::Span>,
     /// Signature starts for typealiases with declaration type parameters. Typealiases currently live
     /// in the structural alias tables rather than `Decl`; this exact owner set lets semantic annotation
     /// resolution use file scope without guessing from names or source text.
-    pub type_alias_declaration_starts: std::collections::HashSet<u32>,
+    pub type_alias_declaration_starts: crate::fx_hash::HashSet<u32>,
     /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
     /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
     pub assert_always_enabled: bool,
@@ -1940,7 +1940,7 @@ pub struct File {
 impl File {
     /// Release body arenas while retaining declaration metadata.
     pub fn release_body_arenas(&mut self) {
-        let mut retained_expr_spans = std::collections::HashMap::new();
+        let mut retained_expr_spans = crate::fx_hash::HashMap::default();
         for declaration in &self.decl_arena {
             match declaration {
                 Decl::Fun(function) => retain_param_default_spans(
@@ -2345,36 +2345,36 @@ impl File {
     }
 
     pub fn expr_uses_name(&self, e: ExprId, name: &str) -> bool {
-        let names: std::collections::HashSet<&str> = std::iter::once(name).collect();
+        let names: crate::fx_hash::HashSet<&str> = std::iter::once(name).collect();
         expr_refs_name(self, e, &names)
     }
 
-    pub fn expr_uses_any_name(&self, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
+    pub fn expr_uses_any_name(&self, e: ExprId, names: &crate::fx_hash::HashSet<&str>) -> bool {
         expr_refs_name(self, e, names)
     }
 
     pub fn expr_uses_name_deep(&self, e: ExprId, name: &str) -> bool {
-        let names: std::collections::HashSet<&str> = std::iter::once(name).collect();
+        let names: crate::fx_hash::HashSet<&str> = std::iter::once(name).collect();
         expr_refs_name_inner(self, e, &names, true)
     }
 
     pub fn expr_uses_any_name_deep(
         &self,
         e: ExprId,
-        names: &std::collections::HashSet<&str>,
+        names: &crate::fx_hash::HashSet<&str>,
     ) -> bool {
         expr_refs_name_inner(self, e, names, true)
     }
 }
 
-fn expr_refs_name(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {
+fn expr_refs_name(file: &File, e: ExprId, names: &crate::fx_hash::HashSet<&str>) -> bool {
     expr_refs_name_inner(file, e, names, false)
 }
 
 fn stmt_refs_name(
     file: &File,
     s: StmtId,
-    names: &std::collections::HashSet<&str>,
+    names: &crate::fx_hash::HashSet<&str>,
     into_lambdas: bool,
 ) -> bool {
     match file.stmt(s) {
@@ -2387,12 +2387,12 @@ fn stmt_refs_name(
                 .params
                 .iter()
                 .map(|parameter| parameter.name.as_str())
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             shadowed.insert(function.name.as_str());
             let remaining = names
                 .difference(&shadowed)
                 .copied()
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             !remaining.is_empty()
                 && matches!(
                     &function.body,
@@ -2410,18 +2410,18 @@ fn stmt_refs_name(
 fn expr_refs_name_inner(
     file: &File,
     e: ExprId,
-    names: &std::collections::HashSet<&str>,
+    names: &crate::fx_hash::HashSet<&str>,
     into_lambdas: bool,
 ) -> bool {
     match file.expr(e) {
         Expr::Name(n) => names.contains(n.as_str()),
         Expr::Lambda { params, body } if into_lambdas => {
-            let mut shadowed: std::collections::HashSet<&str> =
+            let mut shadowed: crate::fx_hash::HashSet<&str> =
                 params.iter().map(String::as_str).collect();
             if params.is_empty() {
                 shadowed.insert("it");
             }
-            let remaining: std::collections::HashSet<&str> =
+            let remaining: crate::fx_hash::HashSet<&str> =
                 names.difference(&shadowed).copied().collect();
             !remaining.is_empty() && expr_refs_name_inner(file, *body, &remaining, true)
         }

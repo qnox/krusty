@@ -4,7 +4,7 @@
 //! declaration identity and cross-file lookup still belong to the same finalized index consumed by
 //! production Pass 2. This module owns that narrow adapter; it does not restore legacy lookup.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::sync::Arc;
 
 use crate::ast::{DeclId, ExprId, File};
@@ -107,7 +107,7 @@ pub(crate) fn inspection_source_declaration_keys(
     files: &[File],
     index: &crate::fir::ResolvedModuleIndex,
 ) -> HashMap<crate::fir::DeclarationId, (u32, u32)> {
-    let mut keys = HashMap::new();
+    let mut keys = HashMap::default();
     for (source, file) in files.iter().enumerate() {
         let source = u32::try_from(source).expect("too many inspection sources");
         let Ok(active) = crate::fir::ActiveSourceDeclarations::bind_complete_source(

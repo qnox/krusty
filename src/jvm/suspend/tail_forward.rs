@@ -6,9 +6,9 @@ use super::{
     value_class_suspension_result,
 };
 use crate::backend::coroutines::unwrap_suspend_cast;
+use crate::fx_hash::HashSet;
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult};
 use crate::types::Ty;
-use std::collections::HashSet;
 
 /// Whether exactly one suspension point is reachable from `expression`.
 ///
@@ -18,7 +18,7 @@ fn exactly_one_suspension_point(
     expression: ExprId,
     suspend_functions: &HashSet<u32>,
 ) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut pending = vec![expression];
     let mut count = 0usize;
     while let Some(current) = pending.pop() {
@@ -395,7 +395,7 @@ fn make_forward_body(ir: &mut IrFile, body: ExprId, call: ExprId) -> Option<Expr
 /// can share or deeply nest nodes, so this is iterative; a node shared inside and outside a `try`
 /// is reported both ways.
 fn reachable(ir: &IrFile, root: ExprId) -> Vec<(ExprId, bool)> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut pending = vec![(root, false)];
     let mut reached = Vec::new();
     while let Some((current, in_try)) = pending.pop() {
@@ -484,7 +484,7 @@ fn all_returned_tail_calls(
         return None;
     }
     let reached = reachable(ir, body);
-    let mut points = HashSet::new();
+    let mut points = HashSet::default();
     for &(expression, in_try) in &reached {
         if is_suspension_point(ir, expression, suspend_functions) {
             if in_try {
@@ -497,7 +497,7 @@ fn all_returned_tail_calls(
         return None;
     }
     let mut calls = Vec::new();
-    let mut returns = HashSet::new();
+    let mut returns = HashSet::default();
     for &(expression, _) in &reached {
         let IrExpr::Return(Some(value)) = ir.exprs[expression as usize] else {
             continue;
@@ -511,7 +511,7 @@ fn all_returned_tail_calls(
     // Common IR is a DAG: two distinct returns may reference the same physical call expression.
     // Threading `$completion` twice into that one call would corrupt its operand list, so keep each
     // selected suspension point exactly once while preserving the first traversal order.
-    let mut forwarded = HashSet::new();
+    let mut forwarded = HashSet::default();
     calls.retain(|call| forwarded.insert(*call));
     (forwarded == points).then_some(calls)
 }

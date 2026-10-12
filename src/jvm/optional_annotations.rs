@@ -7,7 +7,7 @@
 //! publishes the classes below the class-file provider, so a real class of the same identity always
 //! wins. The checker then restricts their use to common sources.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::libraries::TypeKind;
@@ -72,8 +72,8 @@ impl OptionalAnnotationIndex {
     /// `classes` in classpath order. kotlinc keys its provider map by class id while walking the
     /// loaded modules in that order, so a later module's class replaces an earlier one.
     pub(super) fn new(classes: impl IntoIterator<Item = OptionalAnnotationClass>) -> Self {
-        let mut classifiers = HashMap::new();
-        let mut packages = HashSet::new();
+        let mut classifiers = HashMap::default();
+        let mut packages = HashSet::default();
         for class in classes {
             let mut package = class.identity.parent();
             while let Some(current) = package {
@@ -107,7 +107,7 @@ impl OptionalAnnotationIndex {
 }
 
 fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
-    let bounds = semantic::semantic_bounds(&declaration.type_params, &HashMap::new());
+    let bounds = semantic::semantic_bounds(&declaration.type_params, &HashMap::default());
     let type_parameters = TypeParameters::new(
         declaration
             .type_params
@@ -194,11 +194,11 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         constructors,
         hidden_member_properties: Default::default(),
         hidden_deprecated_callables: Default::default(),
-        declared_callables: HashMap::new(),
+        declared_callables: HashMap::default(),
         declared_callable_order: Vec::new(),
         members: Vec::new(),
         companion: Vec::new(),
-        constants: HashMap::new(),
+        constants: HashMap::default(),
         sam_eligible: false,
         callable_signature: None,
         callable_signatures: Vec::new(),
@@ -223,7 +223,7 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use crate::fx_hash::HashSet;
 
     use crate::jvm::classpath::Classpath;
     use crate::types::{type_name, AnnotationTargets, KotlinTarget};

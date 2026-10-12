@@ -3,7 +3,7 @@
 //! The checker records the accessor declaration and its type arguments on the use. This module
 //! clones that accessor's body into the use. It does not look declarations up.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::DeclarationId;
 use crate::ir::{
@@ -36,7 +36,7 @@ pub(super) fn splice_inline_property_accessors(
     // Hash iteration must not decide whether an already-expanded accessor is cloned into a later
     // use. Consumed records are removed; sorting keeps the rest deterministic.
     sites.sort_unstable();
-    let mut stack = HashSet::new();
+    let mut stack = HashSet::default();
     for site in sites {
         splice_property_access(ir, site, &mut next_temporary, &mut stack)?;
     }
@@ -518,9 +518,9 @@ fn access_operands(
 }
 
 fn protected_lambda_bodies(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
-    let mut protected = HashSet::new();
+    let mut protected = HashSet::default();
     let mut pending = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;

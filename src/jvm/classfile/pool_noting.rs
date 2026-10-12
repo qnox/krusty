@@ -21,7 +21,7 @@ impl super::ConstPool {
             .noted
             .take()
             .expect("constant-pool noting must be started before it is taken");
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         noted.retain(|&index| seen.insert(index));
         noted
     }

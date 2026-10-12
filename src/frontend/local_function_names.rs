@@ -21,7 +21,7 @@
 //!   a position after the delegate expression, like a lambda.
 //! - A local class or an anonymous object starts sequences of its own.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, Expr, ExprId, File, FunBody, FunDecl, LiftingSite,
@@ -89,7 +89,7 @@ pub(super) fn record(file: &File, counters: &mut LiftingCounters) -> LiftingSite
         .anonymous_object_classes
         .values()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     for &declaration in &file.decls {
         if anonymous.contains(&declaration) || file.is_local_declaration(declaration) {
             continue;

@@ -297,7 +297,7 @@ fn nested_delegate_plans_retain_the_containing_checked_inline_declaration() {
                 plan.inline_declaration.map(|inline| inline.declaration),
             )
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     assert_eq!(
         declarations.len(),
         4,
@@ -312,7 +312,7 @@ fn nested_delegate_plans_retain_the_containing_checked_inline_declaration() {
         .into_iter()
         .zip(plans)
         .map(|((name, _), plan)| (name, plan.declaration_lambda))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     let first = lambdas["firstValue"].expect("first exact source lambda");
     let second = lambdas["secondValue"].expect("second exact source lambda");
     assert_ne!(first, second);

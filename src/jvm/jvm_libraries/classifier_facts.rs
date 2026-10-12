@@ -65,7 +65,7 @@ pub(super) fn align_mapped_owner_type_parameters(
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
             (physical.clone(), Ty::ty_param(semantic, bound))
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     for member in members {
         let Some(signature) = &mut member.generic_sig else {
             continue;

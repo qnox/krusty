@@ -64,8 +64,8 @@ use self::value_class_erasure::{
     value_class_return_type,
 };
 
+use crate::fx_hash::{HashMap, HashSet};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -118,11 +118,11 @@ pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
 /// Interned ids for the names the hot `@Metadata` alignment paths test against, so per-parameter
 /// checks are id compares instead of per-string name-tree walks.
 struct MetaNameIds {
-    prim: crate::name_tree::FxHashMap<crate::types::TypeName, Ty>,
+    prim: crate::fx_hash::HashMap<crate::types::TypeName, Ty>,
     /// A Kotlin primitive's BOXED class, by name. A nullable primitive is that box in the JVM
     /// descriptor while `@Metadata` keeps the primitive's own name, and the alignment path compares
     /// the two — keyed by `TypeName` so the comparison stays a pointer compare.
-    prim_wrapper: crate::name_tree::FxHashMap<crate::types::TypeName, crate::types::TypeName>,
+    prim_wrapper: crate::fx_hash::HashMap<crate::types::TypeName, crate::types::TypeName>,
     array: crate::types::TypeName,
     any: crate::types::TypeName,
     object: crate::types::TypeName,
@@ -323,7 +323,7 @@ fn global_type_cache(
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<HashMap<Vec<EntryKey>, std::sync::Arc<TypeIndex>>>,
     > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::default()))
 }
 
 /// Record a classpath-cache hit (`true`) or miss (`false`) for the named counter. Compiled out ENTIRELY
@@ -441,7 +441,7 @@ struct EntryCache<T> {
 impl<T> EntryCache<T> {
     fn new() -> Self {
         EntryCache {
-            map: std::sync::RwLock::new(HashMap::new()),
+            map: std::sync::RwLock::new(HashMap::default()),
         }
     }
     /// The entry's cached value, built once via `build` on first request. The map lock is held across
@@ -583,7 +583,7 @@ fn global_jar_pkg_members(
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<HashMap<(EntryKey, TypeName), JarPkgMembers>>,
     > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::default()))
 }
 
 /// Process-global composed package table, keyed by the classpath entry set — like [`global_type_cache`],
@@ -593,7 +593,7 @@ type PkgTreeSlot = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<Package
 fn global_pkg_tree_cache() -> &'static std::sync::Mutex<HashMap<Vec<EntryKey>, PkgTreeSlot>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<EntryKey>, PkgTreeSlot>>> =
         std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::default()))
 }
 
 /// Process-global composed trees for the FILE (jar/jimage) entries of a classpath, keyed by those
@@ -609,7 +609,7 @@ type PkgTreeBaseMap = HashMap<PkgTreeBaseKey, PkgTreeSlot>;
 fn global_pkg_tree_base_cache() -> &'static std::sync::Mutex<PkgTreeBaseMap> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<PkgTreeBaseMap>> =
         std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::default()))
 }
 
 /// The rebuilt candidates for ONE method name, grouped for O(1) receiver lookup so `find_extensions`
@@ -685,11 +685,11 @@ fn global_ext_candidates(key: &[EntryKey]) -> ExtCandCache {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<EntryKey>, ExtCandCache>>> =
         std::sync::OnceLock::new();
     CACHE
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .get_or_init(|| std::sync::Mutex::new(HashMap::default()))
         .lock()
         .unwrap()
         .entry(key.to_vec())
-        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())))
+        .or_insert_with(|| std::sync::Arc::new(std::sync::RwLock::new(HashMap::default())))
         .clone()
 }
 
@@ -708,8 +708,8 @@ struct ClassCacheData {
 impl Default for ClassCacheData {
     fn default() -> Self {
         ClassCacheData {
-            classes: std::sync::RwLock::new(HashMap::new()),
-            build_locks: std::sync::Mutex::new(HashMap::new()),
+            classes: std::sync::RwLock::new(HashMap::default()),
+            build_locks: std::sync::Mutex::new(HashMap::default()),
         }
     }
 }
@@ -758,7 +758,7 @@ type ClassCache = std::sync::Arc<ClassCacheData>;
 fn global_entry_class_cache(key: &EntryKey) -> ClassCache {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<EntryKey, ClassCache>>> =
         std::sync::OnceLock::new();
-    let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let m = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::default()));
     let mut g = m.lock().unwrap();
     g.entry(key.clone())
         .or_insert_with(|| std::sync::Arc::new(ClassCacheData::default()))
@@ -876,8 +876,8 @@ struct EntryExt {
     by_recv_raw: HashMap<String, Vec<(String, NameId)>>,
     /// JVM names this entry marks as genuine top-level, and as extensions (unioned across the cp at
     /// compose to decide `toplevel_only = union(top) - union(ext)`).
-    toplevel_names: std::collections::HashSet<String>,
-    ext_names: std::collections::HashSet<String>,
+    toplevel_names: crate::fx_hash::HashSet<String>,
+    ext_names: crate::fx_hash::HashSet<String>,
 }
 
 /// Classpath Kotlin type aliases (`typealias X = Y` in a library), simple alias name → target-name ID.
@@ -979,7 +979,7 @@ impl ClassMeta {
 /// data, so the dependency-lean hand-rolled hasher (see `name_tree`) is the right tool.
 fn jvm_name_hash(name: &str) -> u64 {
     use std::hash::Hasher;
-    let mut h = crate::name_tree::FxHasher::default();
+    let mut h = crate::fx_hash::FxHasher::default();
     h.write(name.as_bytes());
     h.finish()
 }
@@ -1118,7 +1118,7 @@ impl BuiltinsFile {
                 .map(|name| type_name(name))
                 .collect::<Vec<_>>()
                 .into();
-            let class_bounds = builtin_bounds(&class.type_params, &HashMap::new());
+            let class_bounds = builtin_bounds(&class.type_params, &HashMap::default());
             let supertype_tys = class
                 .supertype_tys
                 .iter()
@@ -1448,7 +1448,7 @@ fn metadata_declared_params(function: &super::metadata::MetaFn) -> Option<Vec<Ty
 /// Per-class `@Metadata` cache: class internal name → Kotlin function names that participate in
 /// `@OverloadResolutionByLambdaReturnType` (`sumOf`, …). The resolver derives and verifies the concrete
 /// JVM method (`sumOfInt`/`sumOfLong`/…) from the lambda return type, so the cache only needs membership.
-type LambdaReturnOverloads = std::collections::HashSet<String>;
+type LambdaReturnOverloads = crate::fx_hash::HashSet<String>;
 type MetaOverloadCache =
     RefCell<crate::lru::LruCache<TypeName, std::rc::Rc<LambdaReturnOverloads>>>;
 
@@ -1762,21 +1762,21 @@ impl Classpath {
             inline_plans: RefCell::new(PlanMemo::new(META_CAP)),
             meta_fns: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             meta_overloads: RefCell::new(crate::lru::LruCache::new(META_CAP)),
-            resolved_types: RefCell::new(HashMap::new()),
-            builtins: RefCell::new(HashMap::new()),
+            resolved_types: RefCell::new(HashMap::default()),
+            builtins: RefCell::new(HashMap::default()),
             builtins_validated: Cell::new(false),
             builtin_members: RefCell::new(crate::lru::LruCache::new(META_CAP)),
             ext_l1: RefCell::new(crate::lru::LruCache::new(FN_CAP)),
             ext_candidates: global_ext_candidates(&cache_key),
             facade_statics_memo: RefCell::new(crate::lru::LruCache::new(META_CAP)),
-            package_facades_memo: RefCell::new(HashMap::new()),
-            symbols_memo: RefCell::new(HashMap::new()),
+            package_facades_memo: RefCell::new(HashMap::default()),
+            symbols_memo: RefCell::new(HashMap::default()),
             external_callables: RefCell::new(Vec::new()),
-            external_callable_ids: RefCell::new(HashMap::new()),
+            external_callable_ids: RefCell::new(HashMap::default()),
             external_properties: RefCell::new(Vec::new()),
-            external_property_ids: RefCell::new(HashMap::new()),
+            external_property_ids: RefCell::new(HashMap::default()),
             id,
-            stub_overlay: RefCell::new(HashMap::new()),
+            stub_overlay: RefCell::new(HashMap::default()),
         }
     }
 
@@ -2267,9 +2267,9 @@ impl Classpath {
         // `Int`/`Long`/`Double` `sumOf` in one part, `UInt`/`ULong` in another). The facade EXTENDS its
         // parts, so union every class's own metadata up the superclass chain — exactly how the extension
         // index reaches the part methods (a part isn't listed in the facade's `d1`).
-        let mut names = LambdaReturnOverloads::new();
+        let mut names = LambdaReturnOverloads::default();
         let mut cur = Some(internal_id);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(cn) = cur {
             if !seen.insert(cn) {
                 break;
@@ -2331,7 +2331,7 @@ impl Classpath {
         };
         let root_public = root_ci.is_public();
         let mut cur = Some((root, root_ci));
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = crate::fx_hash::HashSet::default();
         visited.insert(root);
         while let Some((current, ci)) = cur.take() {
             let paired_common = self.common_metadata_owns(current);
@@ -3561,7 +3561,7 @@ impl Classpath {
         };
         let root_public = root_ci.is_public();
         let mut cur = Some(root);
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = crate::fx_hash::HashSet::default();
         while let Some(cn) = cur {
             if !visited.insert(cn) {
                 break;
@@ -3615,7 +3615,7 @@ impl Classpath {
         }
         let mut m = PkgMembers::default();
         if let Some(pe) = jp.entry_name(pkg) {
-            let mut seen_facade = std::collections::HashSet::new();
+            let mut seen_facade = crate::fx_hash::HashSet::default();
             let mut roots: Vec<String> = Vec::new();
             for &part_id in &pe.facades {
                 let part = jp.names.render(part_id);
@@ -3718,8 +3718,8 @@ impl Classpath {
     ) -> Vec<TypeName> {
         let tree = self.package_tree();
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut seen_owner = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
+        let mut seen_owner = crate::fx_hash::HashSet::default();
         for &pkg in packages {
             if !seen.insert(pkg) {
                 continue;
@@ -4002,7 +4002,7 @@ fn directory_stamp(root: &Path) -> EntryStamp {
     const METADATA_FAILED: &[u8] = b"\0metadata-failed";
     let mut hash = FNV_OFFSET;
     let mut total_len = 0u64;
-    let mut stack = vec![(root.to_path_buf(), HashSet::new())];
+    let mut stack = vec![(root.to_path_buf(), HashSet::default())];
     while let Some((directory, mut ancestors)) = stack.pop() {
         match enter_directory(&directory, &mut ancestors) {
             Ok(Some(_)) => {}
@@ -4158,7 +4158,7 @@ pub struct PackageTree {
     /// while `java` — which owns none — is not; name resolution walking `java.util.ArrayList` segment
     /// by segment must still be able to answer "`java` is a package". Ancestors are folded in once at
     /// compose time rather than re-derived per query.
-    package_prefixes: std::collections::HashSet<NameId>,
+    package_prefixes: crate::fx_hash::HashSet<NameId>,
     /// Exact class owners, sorted by name and classpath order.
     classes: Vec<(NameId, JarId)>,
     incomplete_entries: Vec<JarId>,
@@ -4358,7 +4358,7 @@ fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
 }
 
 fn build_jar_packages_dir(root: &Path, dir: &Path, jp: &mut JarPackages) -> bool {
-    let mut ancestors = HashSet::new();
+    let mut ancestors = HashSet::default();
     build_jar_packages_dir_visited(root, dir, jp, &mut ancestors)
 }
 

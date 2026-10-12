@@ -1,6 +1,6 @@
 //! JVM emission for common-IR lexical blocks and their local-slot lifetimes.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::frame_map::{FrameKey, Mark, TempRole, TempSlot};
 use super::{CodeBuilder, Emitter, Label, Ty};

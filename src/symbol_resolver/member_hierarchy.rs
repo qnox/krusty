@@ -387,7 +387,7 @@ pub(crate) fn has_hidden_deprecated_member(
     name: &str,
 ) -> bool {
     let mut queue = std::collections::VecDeque::from([receiver.non_null()]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(current) = queue.pop_front() {
         if let Some(parts) = super::hierarchy_projection::intersection_components(current) {
             queue.extend(parts.iter().copied());
@@ -468,7 +468,7 @@ fn members_in_hierarchy_for(
     let mut functions = FunctionSet::default();
     let mut properties = PropertySet::default();
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some((current, depth)) = queue.pop_front() {
         if let Some(parts) = super::hierarchy_projection::intersection_components(current) {
             queue.extend(parts.iter().copied().map(|part| (part, depth)));
@@ -726,11 +726,11 @@ fn declaration_identity(declaration: &FunctionInfo) -> crate::types::OverriddenD
 pub(crate) fn supertype_preorder(
     source: &dyn SymbolSource,
     root: TypeName,
-) -> std::collections::HashMap<TypeName, u32> {
-    let mut order = std::collections::HashMap::new();
+) -> crate::fx_hash::HashMap<TypeName, u32> {
+    let mut order = crate::fx_hash::HashMap::default();
     let mut next = 0u32;
     let mut pending = vec![root];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(current) = pending.pop() {
         if !seen.insert(current) {
             continue;
@@ -1018,7 +1018,7 @@ pub(crate) fn imported_object_member_symbols(
     // table. This includes inherited declarations such as `object C : I<String>` importing an
     // `I`-declared extension, and specializes any owner type parameters before applicability runs.
     let mut extension_queue = std::collections::VecDeque::from([(Ty::obj_name(owner), 0)]);
-    let mut extension_seen = std::collections::HashSet::new();
+    let mut extension_seen = crate::fx_hash::HashSet::default();
     while let Some((current, depth)) = extension_queue.pop_front() {
         let Some(current_owner) = current.kotlin_class_internal() else {
             continue;
@@ -1307,9 +1307,9 @@ pub(crate) fn inherited_nested_classifier_name(
         return InheritedNestedClassifier::NotFound;
     }
     let mut level = roots;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while !level.is_empty() {
-        let mut matches = std::collections::HashSet::new();
+        let mut matches = crate::fx_hash::HashSet::default();
         let mut next = Vec::new();
         for owner in level {
             if !seen.insert(owner) {

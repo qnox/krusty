@@ -65,7 +65,7 @@ impl ExistingLibrary {
             if internal.matches("support/Target") {
                 supertypes.push("support/BaseTarget");
             }
-            let mut declared_callables = std::collections::HashMap::new();
+            let mut declared_callables = crate::fx_hash::HashMap::default();
             if internal.matches("fixture/Container$Labels") {
                 let receiver = Ty::obj_name(internal);
                 declared_callables.insert(
@@ -191,7 +191,7 @@ impl ExistingLibrary {
                 declared_callable_order: Vec::new(),
                 members: Vec::new(),
                 companion: Vec::new(),
-                constants: std::collections::HashMap::new(),
+                constants: crate::fx_hash::HashMap::default(),
                 sam_eligible: false,
                 callable_signature: None,
                 callable_signatures: Vec::new(),

@@ -8,7 +8,7 @@
 use super::*;
 
 struct HeaderModuleClassifiers<'a> {
-    declarations: &'a std::collections::HashSet<TypeName>,
+    declarations: &'a crate::fx_hash::HashSet<TypeName>,
 }
 
 impl SymbolSource for HeaderModuleClassifiers<'_> {
@@ -86,7 +86,7 @@ impl ResolverInputs<'_> {
 fn resolver_inputs<'a>(
     headers: &crate::fir::StreamedHeaderModule,
     platform: &'a dyn SemanticPlatform,
-    declarations: &'a std::collections::HashSet<TypeName>,
+    declarations: &'a crate::fx_hash::HashSet<TypeName>,
 ) -> ResolverInputs<'a> {
     let module = HeaderModuleClassifiers { declarations };
     let source = crate::symbol_source::CompositeSource::new(vec![
@@ -194,7 +194,7 @@ enum LexicalClassifierLookup {
 }
 
 fn lexically_nested_classifier(
-    declarations: &std::collections::HashSet<TypeName>,
+    declarations: &crate::fx_hash::HashSet<TypeName>,
     owners: &[TypeName],
     segments: &[&str],
 ) -> LexicalClassifierLookup {
@@ -229,7 +229,7 @@ fn bind_type(
     bindings: &mut crate::fir::ActualizationTypeBindings,
     context: &TypeContext<'_>,
     syntax: crate::fir::HeaderTypeId,
-    visited: &mut std::collections::HashSet<(crate::fir::SourceFileId, crate::fir::HeaderTypeId)>,
+    visited: &mut crate::fx_hash::HashSet<(crate::fir::SourceFileId, crate::fir::HeaderTypeId)>,
 ) {
     let source = context.source;
     if !visited.insert((source, syntax)) {
@@ -296,10 +296,10 @@ pub(crate) fn actualization_type_bindings(
                 .then(|| compact_classifier_identity(headers, stub).map(|(_, identity)| identity))
                 .flatten()
         }))
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let resolver = resolver_inputs(headers, platform, &declarations);
     let mut bindings = crate::fir::ActualizationTypeBindings::default();
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::fx_hash::HashSet::default();
     let is_classifier = |stub: &&crate::fir::DeclarationStub| {
         matches!(
             stub.kind,
@@ -351,7 +351,7 @@ pub(crate) fn resolve_actualization_classifier_for_test(
                 .then(|| compact_classifier_identity(headers, stub).map(|(_, identity)| identity))
                 .flatten()
         }))
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let platform = crate::libraries::EmptySymbolSource;
     resolver_inputs(headers, &platform, &declarations).resolve(source, spelling)
 }
@@ -381,7 +381,7 @@ mod tests {
         );
     }
 
-    struct DependencyClassifiers(std::collections::HashSet<TypeName>);
+    struct DependencyClassifiers(crate::fx_hash::HashSet<TypeName>);
 
     impl SymbolSource for DependencyClassifiers {
         fn symbols(

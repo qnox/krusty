@@ -40,13 +40,13 @@ use super::classfile::{
 };
 use super::classreader::ClassInfo;
 use super::names::method_descriptor;
+use crate::fx_hash::HashMap;
 use crate::libraries::{GenericSig, ParamList, TypeKind};
 use crate::metadata::decode::{
     packed_varints, parse_type_node, parse_type_param, parse_value_parameter, ParameterDecodeError,
     ParsedProjection, ParsedTypeArgument, ParsedTypeParam, ParsedValueParam, ParsedVariance, Pb,
 };
 use crate::types::{intern, type_name, Ty, TypeName, Visibility};
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MetadataDecodeError {
@@ -73,7 +73,7 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
         name: &str,
         direct: &HashMap<String, Ty>,
         resolved: &mut HashMap<String, Ty>,
-        visiting: &mut std::collections::HashSet<String>,
+        visiting: &mut crate::fx_hash::HashSet<String>,
     ) -> Ty {
         if let Some(bound) = resolved.get(name) {
             return *bound;
@@ -96,13 +96,13 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
         .zip(formal_bounds)
         .filter_map(|(name, bounds)| bounds.first().map(|bound| (name.clone(), *bound)))
         .collect::<HashMap<_, _>>();
-    let mut resolved = HashMap::new();
+    let mut resolved = HashMap::default();
     for name in formals {
         resolve(
             name,
             &direct,
             &mut resolved,
-            &mut std::collections::HashSet::new(),
+            &mut crate::fx_hash::HashSet::default(),
         );
     }
     resolved
@@ -779,7 +779,7 @@ fn type_parameter_context(
                 records,
                 d2,
                 &names,
-                &HashMap::new(),
+                &HashMap::default(),
                 false,
                 0,
             )
@@ -792,7 +792,7 @@ fn type_parameter_context(
                 records,
                 d2,
                 &names,
-                &HashMap::new(),
+                &HashMap::default(),
                 nullable,
                 0,
             )
@@ -2638,7 +2638,7 @@ pub struct BuiltinMember {
 
 #[derive(Default)]
 pub struct BuiltinPackage {
-    pub classes: std::collections::HashMap<String, BuiltinClass>,
+    pub classes: crate::fx_hash::HashMap<String, BuiltinClass>,
     /// Top-level functions in their common semantic shape. A builtin function has no JVM facade
     /// method; resolution consumes this complete declaration and the backend supplies its physical
     /// realization.
@@ -2993,9 +2993,9 @@ mod module_reader_tests {
         primary_erasure_bounds, read_kotlin_module, value_parameter_type, MetaCtx,
         ParsedValueParam,
     };
+    use crate::fx_hash::HashMap;
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
-    use std::collections::HashMap;
 
     /// The decoded contract of a stdlib function, or `None` when the stdlib jar is not
     /// provisioned in this environment (the test then vacuously passes).
@@ -3257,8 +3257,8 @@ mod module_reader_tests {
                 Some(&table),
                 &[],
                 &["kotlin/String".to_string()],
-                &HashMap::new(),
-                &HashMap::new(),
+                &HashMap::default(),
+                &HashMap::default(),
                 false,
                 0,
             ),
@@ -3269,7 +3269,7 @@ mod module_reader_tests {
     #[test]
     fn metadata_type_preserves_nullable_type_parameters() {
         let type_parameter = [0x38, 0x00, 0x18, 0x01];
-        let parameters = HashMap::from([(0, "T".to_string())]);
+        let parameters = HashMap::from_iter([(0, "T".to_string())]);
 
         assert_eq!(
             decode_metadata_type(
@@ -3278,7 +3278,7 @@ mod module_reader_tests {
                 &[],
                 &[],
                 &parameters,
-                &HashMap::new(),
+                &HashMap::default(),
                 false,
                 0,
             ),
@@ -3324,8 +3324,8 @@ mod module_reader_tests {
                     None,
                     &[],
                     &d2,
-                    &HashMap::new(),
-                    &HashMap::new(),
+                    &HashMap::default(),
+                    &HashMap::default(),
                     false,
                     0,
                 ),
@@ -3363,8 +3363,8 @@ mod module_reader_tests {
                 None,
                 &[],
                 &d2,
-                &HashMap::new(),
-                &HashMap::new(),
+                &HashMap::default(),
+                &HashMap::default(),
                 false,
                 0,
             ),
@@ -3387,8 +3387,8 @@ mod module_reader_tests {
                 None,
                 &[],
                 &["kotlin/String".to_string()],
-                &HashMap::new(),
-                &HashMap::new(),
+                &HashMap::default(),
+                &HashMap::default(),
                 false,
                 0,
             ),
@@ -3414,8 +3414,8 @@ mod module_reader_tests {
                 None,
                 &[],
                 &names,
-                &HashMap::new(),
-                &HashMap::new(),
+                &HashMap::default(),
+                &HashMap::default(),
                 false,
                 0,
             )

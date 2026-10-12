@@ -14,7 +14,7 @@
 //! `toString` have none until the library's own bodies are compiled into the module, and a class
 //! that does not override them gets the trap every abstract slot gets.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::encode::{
     CompositeType, FieldType, Function, HeapType, Module, StorageType, SubType, ValType,
@@ -78,7 +78,7 @@ impl ObjectRoot {
             object,
             any_slot_types,
             identity_equals,
-            traps: HashMap::new(),
+            traps: HashMap::default(),
         }
     }
 

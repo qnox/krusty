@@ -269,7 +269,7 @@ fn named_constructor_candidates(
             AnnotationValue::Class(ty) => ty.kotlin_class_internal(),
             _ => None,
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     classifiers
         .into_iter()
         .filter_map(|classifier| named_constructor_candidate(table, classifier))

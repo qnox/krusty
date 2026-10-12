@@ -38,7 +38,7 @@ fn receiver_type_args_match(
     let cx = crate::assignable::TyCtx::new();
     let oracle = SourceOracle(src);
     if decl_recv.mentions_ty_param() {
-        let mut bindings = GSigBinds::new();
+        let mut bindings = GSigBinds::default();
         unify_ty_from_symbols(src, decl_recv, recv, &mut bindings);
         let specialized = ty_subst_keep_unbound(decl_recv, &bindings);
         // A callee-owned receiver variable may bind to a still-symbolic variable owned by the
@@ -117,7 +117,7 @@ fn bind_receiver_type_variables(
     if !crate::types::ty_mentions_param(recv, type_variables) {
         return recv;
     }
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     unify_ty_from_symbols(src, recv, decl_recv, &mut bindings);
     bindings
         .retain(|variable, value| type_variables.contains(variable) && !value.mentions_ty_param());
@@ -132,7 +132,7 @@ pub(crate) fn function_shape_matches(src: &dyn SymbolSource, actual: Ty, declare
     let (Ty::Fun(actual), Ty::Fun(declared)) = (actual.non_null(), declared.non_null()) else {
         return false;
     };
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     let component_matches = |declared: Ty, actual: Ty, bindings: &mut GSigBinds| {
         if declared.is_erased_top() {
             return true;
@@ -160,7 +160,7 @@ impl ReceiverMro {
                 Ty::obj_name(internal)
             };
             let mut frontier = vec![root];
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             let mut rung = 0u32;
             while !frontier.is_empty() {
                 let mut next = Vec::new();

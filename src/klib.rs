@@ -698,7 +698,7 @@ fn reject_duplicate_zip_entries(
             path: archive.to_path_buf(),
             source,
         })?;
-    let mut names = std::collections::HashSet::<Vec<u8>>::new();
+    let mut names = crate::fx_hash::HashSet::<Vec<u8>>::default();
     for index in 0..directory.entry_count {
         let mut signature = [0u8; 4];
         file.read_exact(&mut signature).map_err(|_| {

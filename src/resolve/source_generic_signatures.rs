@@ -4,7 +4,7 @@
 //! bounds, receiver types, and vararg element wrapping cannot diverge between inspection and the
 //! streaming compiler.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{Expr, File, FunBody, FunDecl};
 use crate::diag::DiagSink;

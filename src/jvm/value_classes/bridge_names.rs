@@ -4,9 +4,9 @@
 //! mangled when the member's signature mentions a value class.
 
 use super::{bridge_returns::mentions_value_class, erase, member_names::vc_mangle, Under};
+use crate::fx_hash::HashSet;
 use crate::ir::Bridge;
 use crate::types::{Ty, TypeName};
-use std::collections::HashSet;
 
 pub(super) struct BridgeNaming<'a> {
     pub(super) owner: TypeName,

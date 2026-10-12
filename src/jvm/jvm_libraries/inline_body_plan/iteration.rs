@@ -1465,7 +1465,7 @@ mod tests {
                     .iter()
                     .copied()
                     .flatten()
-                    .collect::<std::collections::HashSet<_>>()
+                    .collect::<crate::fx_hash::HashSet<_>>()
                     .len(),
                 identities.len()
             );

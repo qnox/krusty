@@ -13,7 +13,7 @@
 //! or no instruction at all is a JVM representation question that the backend answers when it
 //! emits the `ImplicitCoercion`; common lowering only states that the two semantic types differ.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{
     DeclarationFlags, DeclarationId, FirCallTarget, FirCallableReferenceBinding, FirDelegateCall,

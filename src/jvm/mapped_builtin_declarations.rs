@@ -461,7 +461,7 @@ mod tests {
         let rows = special_realizations()
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         assert_eq!(special_realizations().len(), 16);
         assert_eq!(rows.len(), special_realizations().len());
 

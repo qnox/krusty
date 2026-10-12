@@ -18,9 +18,9 @@ pub(crate) struct HeaderVisibilitySuppressionApplication {
 /// `kotlin.Suppress`.
 #[derive(Default)]
 pub(super) struct HeaderVisibilitySuppressionArena {
-    files: std::collections::HashMap<SourceFileId, Vec<HeaderVisibilitySuppressionApplication>>,
+    files: crate::fx_hash::HashMap<SourceFileId, Vec<HeaderVisibilitySuppressionApplication>>,
     declarations:
-        std::collections::HashMap<DeclarationId, Vec<HeaderVisibilitySuppressionApplication>>,
+        crate::fx_hash::HashMap<DeclarationId, Vec<HeaderVisibilitySuppressionApplication>>,
 }
 
 impl HeaderVisibilitySuppressionArena {

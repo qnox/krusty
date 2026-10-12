@@ -7,7 +7,7 @@
 //! contract from the declarations they selected before it enters `ResolvedModuleIndex`. Spelling
 //! is only lookup input; no parser id, source range, or unresolved `TypeRef` crosses into Pass 2.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{Decl, Expr, File, FunBody, Stmt, TypeRef};
 use crate::contracts::{
@@ -153,7 +153,7 @@ impl ProductionSignatureSemantics<'_> {
                 params: &candidate.params,
                 param_types: candidate.param_types.iter().map(resolve_type).collect(),
                 receiver: candidate.receiver.as_ref().and_then(resolve_type),
-                selections: HashMap::new(),
+                selections: HashMap::default(),
             };
             // A description kotlinc rejects declares no contract; Pass 2 reports its findings
             // from the checked body.

@@ -108,7 +108,7 @@ pub(crate) fn complete_return_only_captured_receiver_bindings(
             continue;
         };
         let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
-        let mut recursive_approximation = GSigBinds::new();
+        let mut recursive_approximation = GSigBinds::default();
         for (receiver_formal, captured) in receiver_bindings {
             if captured.projection_inner().is_some()
                 && crate::types::ty_mentions_param(*bound, std::slice::from_ref(receiver_formal))
@@ -264,8 +264,8 @@ pub(crate) fn resolve_bound_violating_bindings(
     // class graph, not subtype guessing: the provider supplies the exact applied supertype and the
     // normal unifier extracts only declaration-owned variables from matching positions.
     loop {
-        let mut additions = GSigBinds::new();
-        let mut widening_inputs = std::collections::HashMap::<String, Vec<Ty>>::new();
+        let mut additions = GSigBinds::default();
+        let mut widening_inputs = crate::fx_hash::HashMap::<String, Vec<Ty>>::default();
         for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
             let Some(actual) = bindings.get(formal).copied() else {
                 continue;
@@ -279,7 +279,7 @@ pub(crate) fn resolve_bound_violating_bindings(
                 else {
                     continue;
                 };
-                let mut inferred = GSigBinds::new();
+                let mut inferred = GSigBinds::default();
                 unify_ty_from_symbols(source, *bound, applied, &mut inferred);
                 for (candidate, solution) in inferred {
                     let Some(index) = generic_sig

@@ -2,9 +2,9 @@
 
 use super::ProductionSignatureSemantics;
 use crate::fir::{DiagnosticId, SourceFileId};
+use crate::fx_hash::HashMap;
 use crate::symbol_resolver::FunctionImportScope;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Imports resolved once per stable source-file identity. The header inventory and classpath are

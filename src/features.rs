@@ -3,7 +3,8 @@
 //! the reference release's own `LanguageFeature` table ([`FeatureTable`]); directives and
 //! command-line flags apply ordered overrides on top of them.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use crate::fx_hash::HashSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;

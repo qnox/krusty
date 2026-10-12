@@ -1299,7 +1299,7 @@ impl BodyFirChecker<'_> {
         let Some(generic) = getter.generic_sig.as_deref() else {
             return Ok(Box::new([]));
         };
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         if let (Some(declared), Some(actual)) = (generic.receiver, selected_receiver) {
             crate::symbol_resolver::unify_inferred_ty(declared, actual, &mut bindings);
         }

@@ -1,7 +1,7 @@
 //! Bucket first-error failures by the source line at the error span.
 use krusty::diag::{line_col, DiagSink};
 use krusty::frontend::analyze_source_standalone;
-use std::collections::HashMap;
+use krusty::fx_hash::HashMap;
 
 fn first_error(src: &str) -> Option<(String, u32)> {
     let mut d = DiagSink::new();
@@ -45,7 +45,7 @@ fn main() {
         .expect("usage: blockers <box_dir> [msg-substring]");
     let filter = args.next();
     let files = krusty::conformance::kotlin_files(std::path::Path::new(&box_dir));
-    let mut buckets: HashMap<String, (u32, Vec<String>)> = HashMap::new();
+    let mut buckets: HashMap<String, (u32, Vec<String>)> = HashMap::default();
     for f in &files {
         let src = std::fs::read_to_string(f).unwrap_or_default();
         if src.contains("// FILE:") || src.contains("// MODULE:") {

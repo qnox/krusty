@@ -10,7 +10,7 @@
 //! `i16`, `Int` → `i32`, `Long` → `i64`, `Float`/`Double` → `f32`/`f64`. Every reference —
 //! including a boxed `Int?` — is an `i64` pointer, exactly the `KRef` the runtime traces.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 mod arithmetic;
 mod arrays;
@@ -190,15 +190,15 @@ pub struct FileInput<'a> {
     pub callables: &'a crate::backend::CheckedBackendCallables,
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
     /// once per build by the backend rather than once per file.
-    pub runtime_symbols: &'a std::collections::HashSet<String>,
+    pub runtime_symbols: &'a crate::fx_hash::HashSet<String>,
     /// C export symbols already claimed by earlier files in this module.
-    pub abi_symbols: &'a mut std::collections::HashSet<String>,
+    pub abi_symbols: &'a mut crate::fx_hash::HashSet<String>,
     /// This file's identity in the module. Its initializer is exported under it.
     pub source: crate::fir::SourceFileId,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
-        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+        &'a crate::fx_hash::HashMap<u32, super::super::dependency_references::DependencyProperty>,
     /// Which classifiers are value classes, and how this target carries each occurrence of one;
     /// see [`crate::native::value_classes`].
     pub value_classes: &'a super::super::value_classes::NativeValueClasses,
@@ -242,30 +242,30 @@ pub fn lower_file(
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
-        imports: HashMap::new(),
-        data_imports: HashMap::new(),
-        strings: HashMap::new(),
-        string_objects: HashMap::new(),
+        imports: HashMap::default(),
+        data_imports: HashMap::default(),
+        strings: HashMap::default(),
+        string_objects: HashMap::default(),
         classes: Vec::new(),
-        accessors: HashMap::new(),
+        accessors: HashMap::default(),
         statics: Vec::new(),
-        lambdas: HashMap::new(),
-        local_delegate_helpers: HashMap::new(),
-        default_wrappers: HashMap::new(),
+        lambdas: HashMap::default(),
+        local_delegate_helpers: HashMap::default(),
+        default_wrappers: HashMap::default(),
         module_default_entries: Vec::new(),
-        default_constructors: HashMap::new(),
-        enum_entries: HashMap::new(),
-        reference_identities: HashMap::new(),
-        holders: HashMap::new(),
-        references: HashMap::new(),
+        default_constructors: HashMap::default(),
+        enum_entries: HashMap::default(),
+        reference_identities: HashMap::default(),
+        holders: HashMap::default(),
+        references: HashMap::default(),
         dependency_properties,
-        dependency_property_skips: HashMap::new(),
+        dependency_property_skips: HashMap::default(),
         implemented_collections: implemented_collections(ir, classifiers),
         overrides_a_throwable_accessor: overrides_a_throwable_accessor(ir),
         // Filled once the class model can be consulted: which classes are walkable is which ones
         // a thunk could be emitted for, and only the model knows that.
-        unwalkable_collections: std::collections::HashSet::new(),
-        walkable_classes: std::collections::HashMap::new(),
+        unwalkable_collections: crate::fx_hash::HashSet::default(),
+        walkable_classes: crate::fx_hash::HashMap::default(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
     };
@@ -380,7 +380,7 @@ struct FileLowering<'a> {
     ///
     /// A receiver typed by one of these may be an object of the program's rather than one the
     /// runtime made, and the tables that answer a dependency member answer only for the runtime's.
-    implemented_dependencies: std::collections::HashSet<crate::types::TypeName>,
+    implemented_dependencies: crate::fx_hash::HashSet<crate::types::TypeName>,
     /// The collection SHAPES this file declares a class of its own behind.
     ///
     /// A receiver typed by one of those goes to the runtime's own dispatch, which knows only the
@@ -388,10 +388,10 @@ struct FileLowering<'a> {
     /// that type would have its vtable read for an entry it does not have, so a receiver of a
     /// shape listed here declines by name instead of being answered wrongly. A receiver of any
     /// OTHER shape is answered as usual; see [`implemented_collections`].
-    implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
+    implemented_collections: crate::fx_hash::HashSet<super::super::intrinsics::CollectionShape>,
     /// Accessors synthesized for each dependency-property reference, keyed by expression site.
     dependency_properties:
-        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+        &'a crate::fx_hash::HashMap<u32, super::super::dependency_references::DependencyProperty>,
     /// Why a dependency-property reference was left without an object, keyed by expression site.
     dependency_property_skips: HashMap<u32, String>,
     /// Whether this file redeclares `Throwable.message` or `Throwable.cause`; see
@@ -404,13 +404,11 @@ struct FileLowering<'a> {
     /// lets the runtime's walking entry points reach an object it did not make. This says which
     /// class that is, so a receiver typed by the class rather than by the interface plays the
     /// shape too, so its iteration-protocol members use the same descriptor dispatch as a list.
-    walkable_classes: std::collections::HashMap<
-        crate::types::TypeName,
-        super::super::intrinsics::CollectionShape,
-    >,
+    walkable_classes:
+        crate::fx_hash::HashMap<crate::types::TypeName, super::super::intrinsics::CollectionShape>,
     /// The shapes among those that the runtime cannot walk an object of this file's behind; see
     /// [`unwalkable_collections`].
-    unwalkable_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
+    unwalkable_collections: crate::fx_hash::HashSet<super::super::intrinsics::CollectionShape>,
     /// Whether this file declares a class an object of which could stand behind a `Comparable<T>`;
     /// see [`declares_its_own_comparable`].
     declares_its_own_comparable: bool,
@@ -596,12 +594,12 @@ impl<'a> FileLowering<'a> {
                 let mut body = BodyLowering {
                     file: self,
                     builder: &mut builder,
-                    values: HashMap::new(),
-                    declared_value_types: HashMap::new(),
+                    values: HashMap::default(),
+                    declared_value_types: HashMap::default(),
                     lowering_depth: 0,
                     result: carried,
                     result_type: result,
-                    unit_values: std::collections::HashSet::new(),
+                    unit_values: crate::fx_hash::HashSet::default(),
                     loops: Vec::new(),
                     terminated: false,
                     handlers: Vec::new(),
@@ -609,8 +607,8 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
-                    frame_objects: std::collections::HashMap::new(),
-                    frame_fields: std::collections::HashMap::new(),
+                    frame_objects: crate::fx_hash::HashMap::default(),
+                    frame_fields: crate::fx_hash::HashMap::default(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -773,7 +771,7 @@ struct BodyLowering<'a, 'b, 'c> {
     /// the runtime owns it — so there is no variable to declare, but the local is still READABLE:
     /// `val u = println("x"); u.toString()` is "kotlin.Unit". The slot is remembered so a read
     /// answers the `Unit` value rather than a missing declaration.
-    unit_values: std::collections::HashSet<u32>,
+    unit_values: crate::fx_hash::HashSet<u32>,
     result: Carrier,
     /// The declared result TYPE behind [`Self::result`]. A `return` whose value arrives in another
     /// representation is converted into this, which the carrier alone cannot name.
@@ -805,9 +803,9 @@ struct BodyLowering<'a, 'b, 'c> {
     unresolved_reified: Vec<String>,
     /// The constructions of this body whose object lives in this frame, each with the local it
     /// initializes; see `frame_objects`.
-    frame_objects: std::collections::HashMap<u32, u32>,
+    frame_objects: crate::fx_hash::HashMap<u32, u32>,
     /// The field variables of each local that holds a frame object.
-    frame_fields: std::collections::HashMap<u32, Vec<Variable>>,
+    frame_fields: crate::fx_hash::HashMap<u32, Vec<Variable>>,
 }
 
 /// One `finally` the current position is inside.

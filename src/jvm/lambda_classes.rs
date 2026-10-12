@@ -28,7 +28,7 @@ use crate::types::{Ty, TypeName};
 /// normalize these bodies, but not unrelated member methods capturing the same generic parameter.
 #[derive(Default)]
 pub(super) struct LambdaMethods {
-    functions: std::collections::HashSet<FunId>,
+    functions: crate::fx_hash::HashSet<FunId>,
 }
 
 #[derive(Clone, Copy)]
@@ -49,11 +49,11 @@ struct InlineDefaultClassContext {
 fn inline_default_class_contexts(
     ir: &IrFile,
     lambdas: &[FunId],
-) -> std::collections::HashMap<FunId, InlineDefaultClassContext> {
+) -> crate::fx_hash::HashMap<FunId, InlineDefaultClassContext> {
     let direct = lambdas
         .iter()
         .filter_map(|&lambda| inline_default_owner(ir, lambda).map(|owner| (lambda, owner)))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     let paths = lambdas
         .iter()
         .filter_map(|&lambda| {
@@ -80,7 +80,7 @@ fn inline_default_class_contexts(
                 },
             )
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     for (lambda, sequence, path) in &paths {
         let root =
             paths
@@ -142,7 +142,7 @@ impl LambdaMethods {
             .lambda_origins
             .keys()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         functions.extend(ir.runtime_reified_lambda_implementations.iter().copied());
         let enclosing_lambdas = functions
             .iter()
@@ -150,7 +150,7 @@ impl LambdaMethods {
                 let (sequence, site) = ir.lifted_functions.get(function)?;
                 Some((sequence.clone(), site.path.last()?.position))
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         functions.extend(
             ir.lifted_functions
                 .iter()
@@ -288,8 +288,8 @@ fn reachable_lambdas(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Vec<E
 /// where a walk per lambda would make the step quadratic in the file's size.
 #[derive(Default)]
 struct ReachableLambdaIndex {
-    every_emitted_root: Option<std::collections::HashMap<FunId, Vec<ExprId>>>,
-    function_roots: Option<std::collections::HashMap<FunId, Vec<ExprId>>>,
+    every_emitted_root: Option<crate::fx_hash::HashMap<FunId, Vec<ExprId>>>,
+    function_roots: Option<crate::fx_hash::HashMap<FunId, Vec<ExprId>>>,
 }
 
 impl ReachableLambdaIndex {
@@ -315,8 +315,8 @@ impl ReachableLambdaIndex {
 fn reachable_lambda_index(
     ir: &IrFile,
     every_emitted_root: bool,
-) -> std::collections::HashMap<FunId, Vec<ExprId>> {
-    let mut index = std::collections::HashMap::<FunId, Vec<ExprId>>::new();
+) -> crate::fx_hash::HashMap<FunId, Vec<ExprId>> {
+    let mut index = crate::fx_hash::HashMap::<FunId, Vec<ExprId>>::default();
     for root in emitted_roots(ir, every_emitted_root) {
         for node in crate::ir::value_namespace_expressions(ir, root) {
             if let IrExpr::Lambda { impl_fn, .. } = ir.exprs[node as usize] {
@@ -353,7 +353,7 @@ fn inline_template_copies(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> 
             &mut pending,
         );
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut copies = Vec::new();
     while let Some(template) = pending.pop() {
         if !seen.insert(template) {
@@ -1092,7 +1092,7 @@ pub(super) fn rename_specialized_reified_classes(
     ir: &mut IrFile,
     facade: &str,
     modes: crate::jvm::ir_emit::LambdaModes,
-) -> std::collections::HashMap<TypeName, TypeName> {
+) -> crate::fx_hash::HashMap<TypeName, TypeName> {
     let pending = ir
         .classes
         .iter()
@@ -1102,12 +1102,12 @@ pub(super) fn rename_specialized_reified_classes(
             (from == specialized_reified_placeholder(facade, invoke)).then_some((invoke, from))
         })
         .collect::<Vec<_>>();
-    let mut all_names = std::collections::HashMap::new();
+    let mut all_names = crate::fx_hash::HashMap::default();
     for (function, from) in pending {
         let name =
             crate::jvm::ir_emit::lambda_class_names::specialized_name(ir, function, facade, modes)
                 .expect("a specialized reified lambda retains complete caller provenance");
-        let names = std::collections::HashMap::from([(from, crate::types::type_name(&name))]);
+        let names = crate::fx_hash::HashMap::from_iter([(from, crate::types::type_name(&name))]);
         ir.remap_classifier_identities(&names);
         all_names.extend(names);
     }
@@ -1212,9 +1212,7 @@ mod method_domain_tests {
         ir.lifted_functions.clear();
         ir.runtime_reified_lambda_implementations.clear();
         assert_eq!(
-            methods
-                .functions()
-                .collect::<std::collections::HashSet<_>>(),
+            methods.functions().collect::<crate::fx_hash::HashSet<_>>(),
             [7, 8].into_iter().collect()
         );
     }
@@ -1245,9 +1243,7 @@ mod method_domain_tests {
         let mut methods = LambdaMethods::default();
         methods.include_owned_methods(&ir);
         assert_eq!(
-            methods
-                .functions()
-                .collect::<std::collections::HashSet<_>>(),
+            methods.functions().collect::<crate::fx_hash::HashSet<_>>(),
             [3, 4].into_iter().collect()
         );
     }

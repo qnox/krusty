@@ -14,8 +14,8 @@
 //! one takes the position's mode over its expansion.
 
 use super::{JvmSignatureFormatter, Wildcards};
+use crate::fx_hash::{HashMap, HashSet};
 use crate::types::Ty;
-use std::collections::{HashMap, HashSet};
 
 /// One classifier visited while expanding, so a cyclic chain stops as kotlinc's does.
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -37,7 +37,7 @@ impl JvmSignatureFormatter<'_> {
         if !matches!(semantic, Ty::Obj(..)) || self.underlying(semantic).is_none() {
             return None;
         }
-        let expanded = self.expanded(ty, &mut HashSet::new())?;
+        let expanded = self.expanded(ty, &mut HashSet::default())?;
         if expanded == ty {
             return None;
         }

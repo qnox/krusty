@@ -2,7 +2,7 @@
 //! them LOCAL visibility and local class ids; JVM emission also writes them no nullability
 //! annotations.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrClass, IrFile};
 use crate::types::TypeName;
@@ -62,9 +62,9 @@ pub(crate) fn names(ir: &IrFile) -> HashSet<TypeName> {
         .iter()
         .any(|class| class.is_local_class || class.is_anonymous_object || class.is_enum_entry)
     {
-        return HashSet::new();
+        return HashSet::default();
     }
-    let mut class_ids = HashMap::with_capacity(ir.classes.len());
+    let mut class_ids = HashMap::with_capacity_and_hasher(ir.classes.len(), Default::default());
     for (id, class) in ir.classes.iter().enumerate() {
         // `class_id_by_name` answers with the first class of a name.
         class_ids

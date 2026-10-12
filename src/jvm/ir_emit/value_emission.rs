@@ -1,6 +1,6 @@
 //! Physical JVM emission of one common-IR value node.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::{Callee, IrExpr, NullCheck};
 use crate::jvm::classfile::CodeBuilder;

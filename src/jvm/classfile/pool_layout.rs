@@ -31,7 +31,7 @@
 
 mod index_slots;
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::ops::Range;
 
 use index_slots::{ClassSlots, Holder, Part, Unread};
@@ -328,8 +328,8 @@ impl<'a> Layout<'a> {
 /// treating it as the boundary moves a parameter annotation — interned ahead of the body — to the
 /// attribute's name.
 fn method_code_starts(read: &ClassSlots) -> HashMap<usize, usize> {
-    let mut body = HashMap::new();
-    let mut attribute = HashMap::new();
+    let mut body = HashMap::default();
+    let mut attribute = HashMap::default();
     for (position, slot) in read.visit_order().enumerate() {
         match slot.holder {
             Holder::Code(method, _) => {

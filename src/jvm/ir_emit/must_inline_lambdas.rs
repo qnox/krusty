@@ -7,7 +7,7 @@ use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 /// and the lowerer therefore gives it an `inline_body` that is an `invokestatic` to its impl. Such an
 /// impl is LIVE even though no `invokedynamic` ever references it, and must survive both the
 /// must-inline dead-marking and the facade dead-lambda sweep.
-pub(super) fn splice_called_impls(ir: &IrFile) -> std::collections::HashSet<u32> {
+pub(super) fn splice_called_impls(ir: &IrFile) -> crate::fx_hash::HashSet<u32> {
     ir.exprs
         .iter()
         .filter_map(|expression| match expression {

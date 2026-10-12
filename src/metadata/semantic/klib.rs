@@ -723,7 +723,7 @@ impl SemanticTables<'_> {
     {
         let mut names = TypeParameterScope {
             by_id: inherited.by_id.clone(),
-            own: std::collections::HashMap::new(),
+            own: crate::fx_hash::HashMap::default(),
         };
         let mut parsed = Vec::with_capacity(bodies.len());
         for body in bodies {
@@ -837,8 +837,8 @@ impl SemanticTables<'_> {
 /// id, and the declaration's own by name for the immediate-owner `type_parameter_name` form.
 #[derive(Clone, Default)]
 struct TypeParameterScope {
-    by_id: std::collections::HashMap<u64, String>,
-    own: std::collections::HashMap<String, u64>,
+    by_id: crate::fx_hash::HashMap<u64, String>,
+    own: crate::fx_hash::HashMap<String, u64>,
 }
 
 struct SemanticValueParameter {
@@ -1087,7 +1087,7 @@ fn semantic_function(
             types,
             first_nullable,
         };
-        let bounds = metadata::semantic_bounds(&formals, &std::collections::HashMap::new());
+        let bounds = metadata::semantic_bounds(&formals, &crate::fx_hash::HashMap::default());
         let mut resolve_type = |reference: crate::metadata::contract_decoder::ContractTypeRef<
             '_,
         >| {
@@ -1952,7 +1952,7 @@ pub(super) fn parse(
         .iter()
         .map(|body| semantic_class_header(body))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut class_by_qname = std::collections::HashMap::new();
+    let mut class_by_qname = crate::fx_hash::HashMap::default();
     for (index, header) in class_headers.iter().enumerate() {
         if class_by_qname.insert(header.fq_name, index).is_some() {
             return Err(semantic_error(format!(

@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 
 use super::{ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds};
-use crate::name_tree::FxHashMap;
+use crate::fx_hash::HashMap as FxHashMap;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
@@ -170,7 +170,7 @@ pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(Typ
         return Vec::new();
     };
     let mut pending = std::collections::VecDeque::from([(internal, root, 0)]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut hierarchy = Vec::new();
     while let Some((owner, applied, depth)) = pending.pop_front() {
         if !seen.insert(owner) {
@@ -245,7 +245,7 @@ pub(crate) fn apply_subtype_arguments_from_supertype(
     else {
         return subtype;
     };
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     unify_ty_from_symbols(source, applied_supertype, supertype, &mut bindings);
     let arguments = symbolic_args
         .iter()
@@ -320,7 +320,7 @@ pub(crate) fn classifier_companion_instance(
     receiver: Ty,
 ) -> Option<ClassifierCompanionInstance> {
     let mut queue = std::collections::VecDeque::from([receiver]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(current) = queue.pop_front() {
         let Some(owner) = current.kotlin_class_internal() else {
             continue;
@@ -388,7 +388,7 @@ pub(super) fn supertype_with_classifier(
 
 pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec<(Ty, u32)> {
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut hierarchy = Vec::new();
     while let Some((current, depth)) = queue.pop_front() {
         if let Some(parts) = intersection_components(current) {
@@ -414,13 +414,13 @@ pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec
 pub(crate) fn classifier_bindings(
     classifier: &crate::libraries::LibraryType,
     receiver: Ty,
-) -> std::collections::HashMap<String, Ty> {
+) -> crate::fx_hash::HashMap<String, Ty> {
     let raw_bindings = classifier
         .type_params
         .iter()
         .cloned()
         .zip(receiver.type_args().iter().copied())
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
 
     classifier
         .type_params
@@ -484,7 +484,7 @@ pub(crate) fn classifier_bindings(
 /// non-null occurrence bound.
 pub(super) fn classifier_type_parameter_bounds(
     classifier: &crate::libraries::LibraryType,
-) -> std::collections::HashMap<String, Ty> {
+) -> crate::fx_hash::HashMap<String, Ty> {
     classifier
         .type_params
         .iter()

@@ -8,7 +8,7 @@
 //! (`$x$inlined`) where the lambda read its captured parameters. The method keeps its own returns,
 //! its parameter checks and its variable names; only the lambdas' locals are added above its own.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::jvm::bytecode_passes::fix_stack::fix_stack;
 use crate::jvm::bytecode_passes::insn_list::EditableMethod;
@@ -68,8 +68,8 @@ pub(super) fn inline_into(
     let mut method_lines = MethodLines {
         lines,
         caller,
-        own: HashMap::new(),
-        lambda: HashMap::new(),
+        own: HashMap::default(),
+        lambda: HashMap::default(),
         failed: None,
     };
     let node =

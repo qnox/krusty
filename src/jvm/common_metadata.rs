@@ -11,7 +11,7 @@
 //! backend's *use* of that model and consumes it directly; no JVM builtins adapter participates in
 //! the KLIB provider path.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -166,7 +166,7 @@ impl CommonExpectationIndex {
         let Some(path) = path else {
             return Ok(Arc::new(Self::default()));
         };
-        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::default()));
         let shared = cache
             .lock()
             .map_err(|_| {

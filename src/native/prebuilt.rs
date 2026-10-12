@@ -32,7 +32,7 @@ pub fn runtime_objects(target: NativeTarget) -> Option<&'static [RuntimeObject]>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use crate::fx_hash::HashSet;
 
     fn u16_at(bytes: &[u8], at: usize) -> u16 {
         u16::from_le_bytes(bytes[at..at + 2].try_into().expect("two bytes"))
@@ -112,7 +112,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(names, expected, "{target}: one object per runtime source");
-            let mut defined = HashSet::new();
+            let mut defined = HashSet::default();
             let mut undefined = Vec::new();
             for (name, bytes) in objects.iter() {
                 assert_eq!(&bytes[..4], b"\x7fELF", "{target}/{name} is not ELF");

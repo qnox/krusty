@@ -10,7 +10,7 @@
 //! consumers index that immutable class plan; they never rescan predecessors or rebuild the class's
 //! static/declared-name sets.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::names::type_descriptor;
@@ -113,7 +113,7 @@ fn allocate_names(fields: Vec<FieldInput>, statics: HashSet<(String, String)>) -
             .iter()
             .map(|field| (field.source.clone(), field.declared_descriptor.clone())),
     );
-    let mut assigned = HashSet::with_capacity(fields.len());
+    let mut assigned = HashSet::with_capacity_and_hasher(fields.len(), Default::default());
     let mut names = Vec::with_capacity(fields.len());
     #[cfg(test)]
     let mut candidate_probes = 0;
@@ -164,7 +164,7 @@ fn allocate_names(fields: Vec<FieldInput>, statics: HashSet<(String, String)>) -
 fn group_signatures(
     entries: impl IntoIterator<Item = (String, String)>,
 ) -> HashMap<String, HashSet<String>> {
-    let mut grouped = HashMap::<String, HashSet<String>>::new();
+    let mut grouped = HashMap::<String, HashSet<String>>::default();
     for (name, descriptor) in entries {
         grouped.entry(name).or_default().insert(descriptor);
     }
@@ -197,7 +197,7 @@ mod tests {
                 field("same$1", "I"),
                 field("typed", "I"),
             ],
-            HashSet::from([
+            HashSet::from_iter([
                 ("result".to_string(), "I".to_string()),
                 ("typed".to_string(), "J".to_string()),
             ]),
@@ -221,7 +221,7 @@ mod tests {
         let fields = (0..4096)
             .map(|index| field(&format!("property{index}"), "I"))
             .collect();
-        let allocation = allocate_names(fields, HashSet::new());
+        let allocation = allocate_names(fields, HashSet::default());
 
         assert_eq!(allocation.names.len(), 4096);
         assert_eq!(allocation.candidate_probes, 4096);

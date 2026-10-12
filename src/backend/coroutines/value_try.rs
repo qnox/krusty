@@ -3,7 +3,7 @@
 //! Return-bound and local-bound forms share this reconstruction so a catch specialization cannot
 //! drift between them. The parent state machine decides where the bound local is consumed.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::{Callee, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;

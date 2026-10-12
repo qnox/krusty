@@ -3,7 +3,7 @@
 //! `when`s. Each lowered body is compared with checked FIR lowering of the equivalent source, on
 //! hand-built trees and on the Kotlin/Native stdlib bodies that use the form.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::super::*;
 use super::demo_package::*;
@@ -508,7 +508,7 @@ fn a_flat_if_chain_lowers_as_the_source_else_if_chain_does() {
 
 /// The semantic type of the class `kotlin.<name>`.
 pub(super) fn kotlin(name: &str) -> Ty {
-    semantic_ty(&kotlin_class(name), &HashMap::new())
+    semantic_ty(&kotlin_class(name), &HashMap::default())
 }
 
 #[test]
@@ -601,7 +601,7 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
     let archive = crate::klib::KlibArchive::open(&path).expect("the stdlib opens");
     let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");
     let builtins = super::super::ir_builtins::IrBuiltinOperators::new();
-    let mut checked = HashMap::<&'static str, usize>::new();
+    let mut checked = HashMap::<&'static str, usize>::default();
     for tree in trees.trees() {
         let arena = &tree.arena;
         for index in 0..arena.expr_count() {
@@ -676,7 +676,7 @@ fn stdlib_local_variable_flags_have_the_decoded_layout() {
                 KlibIrExprKind::SetValue { symbol, .. } => Some(symbol.clone()),
                 _ => None,
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         for index in 0..arena.variable_count() {
             let variable = arena.variable(arena.variable_id(index));
             let flags = variable.base.flags;

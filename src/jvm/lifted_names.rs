@@ -19,7 +19,7 @@
 //! `m_impl$lambda$0` in a value-class member, `constructor_impl$lambda$0` in a value class's `init`
 //! block. The sequence is that name's, so `o(Tag)` numbers apart from an overload `o(Int)`.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrEnclosure, IrFile, IrLiftingRoot, IrLiftingSequence};
 
@@ -36,10 +36,10 @@ pub(crate) fn number(
         .filter(|(function, _)| helper_access.uses_inline_delegate_name(**function))
         .filter_map(|(_, (sequence, site))| site.path.last().map(|step| (sequence, step.position)))
         .collect::<HashSet<_>>();
-    let mut segments = HashMap::<(&IrLiftingSequence, u32), String>::new();
-    let mut containers = HashMap::<(&IrLiftingSequence, u32), String>::new();
+    let mut segments = HashMap::<(&IrLiftingSequence, u32), String>::default();
+    let mut containers = HashMap::<(&IrLiftingSequence, u32), String>::default();
     for (sequence, entries) in &ir.lifting_sequences {
-        let mut scopes = HashMap::<(String, Option<u32>), (u32, HashSet<&str>)>::new();
+        let mut scopes = HashMap::<(String, Option<u32>), (u32, HashSet<&str>)>::default();
         // kotlinc's value-class lowering appends the primary `constructor-impl`, which runs the
         // `init` blocks, after the class's other declarations, so what it lifts numbers after what
         // a secondary constructor's `constructor-impl` lifts. `order` is source order otherwise,
@@ -135,7 +135,7 @@ pub(crate) fn realize(
         .map(|function| super::ir_emit::function_descriptor(ir, override_results, function as u32))
         .collect::<Vec<_>>();
     loop {
-        let mut holders = HashMap::<(Option<usize>, &str, &str), Vec<u32>>::new();
+        let mut holders = HashMap::<(Option<usize>, &str, &str), Vec<u32>>::default();
         for (index, function) in ir.functions.iter().enumerate() {
             let id = index as u32;
             // Foreign inline templates and typed helper prototypes have a declaration owner in

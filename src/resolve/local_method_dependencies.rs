@@ -16,7 +16,7 @@ pub(super) struct LocalMethodDependency {
     this_labels: Vec<ReceiverLabel>,
     extension_receiver_labels: Vec<(usize, Span)>,
     lexical_class_context: Vec<TypeName>,
-    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
+    exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
     static_companion_this: Option<crate::symbol_resolver::ClassifierCompanionInstance>,
     static_singleton_this: Option<SingletonValue>,
     this_extension_receiver: Option<Span>,
@@ -95,7 +95,7 @@ impl Checker<'_> {
             }
         };
         let mut rung = direct_supertypes(Ty::obj_name(owner));
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while !rung.is_empty() {
             let mut next = Vec::new();
             let mut candidates = Vec::new();
@@ -222,7 +222,7 @@ impl Checker<'_> {
         let source = self.fed_source();
         let mut functions = crate::libraries::FunctionSet::default();
         let mut queue = std::collections::VecDeque::from([(receiver, 0u32)]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some((current, depth)) = queue.pop_front() {
             let Some(owner) = crate::symbol_resolver::member_scope_receiver(current).obj_internal()
             else {

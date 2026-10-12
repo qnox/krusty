@@ -1111,7 +1111,7 @@ fn delegate_substitutions(
     span: Option<crate::diag::Span>,
     shapes: impl IntoIterator<Item = (Ty, Ty)>,
 ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
-    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+    let mut bindings = crate::symbol_resolver::GSigBinds::default();
     for (declared, selected) in shapes {
         crate::symbol_resolver::unify_inferred_ty(declared, selected, &mut bindings);
     }

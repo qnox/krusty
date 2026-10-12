@@ -7,7 +7,7 @@
 //! chooses that representation for the delegated references checked common IR records; the
 //! emitter declares and fills the arrays it publishes.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{LocalDelegatedPropertyId, PropertyId};
 use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrIntrinsic};
@@ -189,7 +189,7 @@ pub(super) fn place(ir: &mut IrFile, operands: Vec<DelegatedOperand>) -> Delegat
         }
     }
     let mut arrays = DelegatedPropertyArrays::default();
-    let mut index = HashMap::new();
+    let mut index = HashMap::default();
     let mut allocated = Vec::new();
     for (owner, mut owned) in slots {
         owned.sort_by_key(|operand| operand.source_order);

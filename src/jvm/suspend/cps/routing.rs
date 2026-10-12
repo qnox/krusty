@@ -6,8 +6,8 @@
 //! claiming it can only replace a `call arity mismatch` — never take over a function the IR machine
 //! already compiles.
 
+use crate::fx_hash::HashMap;
 use crate::ir::ExprId;
-use std::collections::HashMap;
 
 /// One suspension whose machine is built during emission, in the enclosing body's encounter order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

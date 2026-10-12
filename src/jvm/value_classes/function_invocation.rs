@@ -13,8 +13,8 @@ use crate::types::Ty;
 /// The checked call should have been the selected member. There is no name or arity to search:
 /// a missing implementation is not `FunctionN.invoke`.
 pub(super) fn missing_member_implementation(
-    logical_types: &std::collections::HashMap<ExprId, Ty>,
-    suspend_calls: &std::collections::HashMap<ExprId, Ty>,
+    logical_types: &crate::fx_hash::HashMap<ExprId, Ty>,
+    suspend_calls: &crate::fx_hash::HashMap<ExprId, Ty>,
     under: &Under,
     repr_ctx: &ReprCtx<'_>,
     id: ExprId,
@@ -30,7 +30,7 @@ pub(super) fn missing_member_implementation(
 }
 
 fn value_class_callee(
-    logical_types: &std::collections::HashMap<ExprId, Ty>,
+    logical_types: &crate::fx_hash::HashMap<ExprId, Ty>,
     repr_ctx: &ReprCtx<'_>,
     under: &Under,
     func: ExprId,

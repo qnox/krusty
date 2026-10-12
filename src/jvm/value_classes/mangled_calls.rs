@@ -1,6 +1,6 @@
 //! Calls whose selected source declaration has a value-class-mangled JVM realization.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{erase_descriptor, ir_method_desc, Under};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
@@ -151,9 +151,9 @@ mod tests {
         rename(
             &mut ir,
             &[function].into_iter().collect(),
-            &HashSet::new(),
-            &HashSet::new(),
-            &HashMap::new(),
+            &HashSet::default(),
+            &HashSet::default(),
+            &HashMap::default(),
         );
 
         let call = |expression| match ir.expr(expression) {

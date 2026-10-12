@@ -12,7 +12,7 @@ use crate::types::{type_name, TypeName};
 #[derive(Default)]
 pub(crate) struct SpecializedLambdaClasses {
     classes: Vec<(FunId, ClassId)>,
-    realized_methods: std::collections::HashSet<FunId>,
+    realized_methods: crate::fx_hash::HashSet<FunId>,
 }
 
 pub(super) fn placeholder(facade: &str, function: FunId) -> TypeName {
@@ -50,7 +50,7 @@ impl SpecializedLambdaClasses {
             )
             .expect("a specialized suspend lambda retains complete caller provenance");
             let to = type_name(&name);
-            let names = std::collections::HashMap::from([(from, to)]);
+            let names = crate::fx_hash::HashMap::from_iter([(from, to)]);
             ir.remap_classifier_identities(&names);
             machines.remap_suspend_lambda_class(function, from, to);
         }

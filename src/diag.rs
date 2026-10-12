@@ -246,8 +246,9 @@ impl DiagSink {
     pub(crate) fn collapse_duplicates_from(&mut self, start: usize) {
         let start = start.min(self.diags.len());
         let mut tail = self.diags.split_off(start);
-        let mut seen = std::collections::HashSet::with_capacity(tail.len());
-        let mut seen_identities = std::collections::HashSet::new();
+        let mut seen =
+            crate::fx_hash::HashSet::with_capacity_and_hasher(tail.len(), Default::default());
+        let mut seen_identities = crate::fx_hash::HashSet::default();
         tail.retain(|diagnostic| {
             if let Some(identity) = diagnostic.identity {
                 seen_identities.insert((

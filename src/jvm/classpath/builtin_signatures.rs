@@ -1,7 +1,7 @@
 //! The JVM shape of a decoded `.kotlin_builtins` declaration: its semantic types, the erasure a
 //! descriptor records, and the declared result a classpath member's metadata would publish.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::jvm::names::type_descriptor;
 use crate::libraries::GenericSig;
@@ -73,7 +73,7 @@ pub(super) fn builtin_bounds(
         let bound = p
             .bounds
             .first()
-            .map(|b| builtin_ty(b, &HashMap::new()))
+            .map(|b| builtin_ty(b, &HashMap::default()))
             .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
         out.insert(p.id, bound);
     }

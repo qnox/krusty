@@ -61,7 +61,7 @@ pub(in crate::resolve) fn declaration_annotation_identities(
 /// result with the occurrence, then projects declaration-owned facts to stable identities.
 pub(in crate::resolve) struct DeclarationAnnotationResolution<'a> {
     pub(in crate::resolve) file_index: u32,
-    pub(in crate::resolve) attempted: &'a mut std::collections::HashSet<(u32, u32, u32)>,
+    pub(in crate::resolve) attempted: &'a mut crate::fx_hash::HashSet<(u32, u32, u32)>,
 }
 
 pub(in crate::resolve) fn resolve_declaration_type_parameter_annotations(
@@ -164,7 +164,7 @@ fn extend_static_rung_classifier_names(
         }
         static_rungs.insert(companion, 2 * rank + 1);
     }
-    let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
+    let mut lexical_nested = HashMap::<String, (usize, TypeName)>::default();
     for &declaration in &file.decls {
         let Decl::Class(nested) = file.decl(declaration) else {
             continue;
@@ -216,7 +216,7 @@ pub(in crate::resolve) fn resolve_class_body_annotation_references(
                 .iter()
                 .map(|annotation| annotation.span)
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     for reference in &file.detached_type_refs {
         if reference.span.lo < class.span.lo || reference.span.hi > class.span.hi {
             continue;
@@ -278,8 +278,8 @@ pub(in crate::resolve) fn resolve_local_type_parameter_annotation_inventory(
     diags: &mut DiagSink,
 ) {
     let mut expressions = roots.into_iter().collect::<Vec<_>>();
-    let mut seen_expressions = std::collections::HashSet::new();
-    let mut seen_statements = std::collections::HashSet::new();
+    let mut seen_expressions = crate::fx_hash::HashSet::default();
+    let mut seen_statements = crate::fx_hash::HashSet::default();
     while let Some(expression) = expressions.pop() {
         if !seen_expressions.insert(expression) {
             continue;
@@ -381,7 +381,7 @@ pub(in crate::resolve) fn resolve_declaration_type_parameter_annotation_inventor
             .enum_entries
             .iter()
             .flat_map(enum_entry_expression_roots)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         roots.retain(|root| !entry_roots.contains(root));
     }
     resolve_local_type_parameter_annotation_inventory(
@@ -418,7 +418,7 @@ pub(in crate::resolve) fn resolve_enum_entry_type_parameter_annotation_inventory
     ));
     extend_lexical_nested_classifier_names(
         file,
-        &HashMap::from([(entry_owner, 0)]),
+        &HashMap::from_iter([(entry_owner, 0)]),
         &mut entry_class_names,
     );
     for declaration_start in entry

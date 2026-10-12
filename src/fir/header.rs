@@ -264,7 +264,7 @@ pub struct HeaderSyntaxArena {
     /// As-written type syntax for nodes rewritten by the parser's same-file type-alias expansion.
     /// Both keys and values are compact header identities. The parser's span-keyed rewrite table is
     /// consumed while one source AST is live and never becomes cross-pass state.
-    source_spellings: std::collections::HashMap<HeaderTypeId, HeaderTypeId>,
+    source_spellings: crate::fx_hash::HashMap<HeaderTypeId, HeaderTypeId>,
     classifier_types: Vec<HeaderClassifierType>,
     type_operands: Vec<HeaderTypeId>,
     path_segments: Vec<LookupNameId>,
@@ -417,13 +417,13 @@ impl HeaderSyntaxArena {
     fn capture_source_spellings(
         &mut self,
         first_type: usize,
-        spellings: &std::collections::HashMap<Span, TypeRef>,
+        spellings: &crate::fx_hash::HashMap<Span, TypeRef>,
         names: &mut LookupNames,
     ) {
         fn capture_descendants(
             arena: &mut HeaderSyntaxArena,
             root: HeaderTypeId,
-            spellings: &std::collections::HashMap<Span, TypeRef>,
+            spellings: &crate::fx_hash::HashMap<Span, TypeRef>,
             names: &mut LookupNames,
         ) {
             let children = match arena
@@ -685,12 +685,12 @@ impl HeaderSyntaxArena {
         &self,
         root: HeaderTypeId,
         names: &LookupNames,
-    ) -> Option<std::collections::HashMap<Span, TypeRef>> {
+    ) -> Option<crate::fx_hash::HashMap<Span, TypeRef>> {
         fn visit(
             arena: &HeaderSyntaxArena,
             id: HeaderTypeId,
             names: &LookupNames,
-            out: &mut std::collections::HashMap<Span, TypeRef>,
+            out: &mut crate::fx_hash::HashMap<Span, TypeRef>,
         ) -> Option<()> {
             let ty = arena.ty(id)?;
             if let Some(spelling) = arena.source_spellings.get(&id).copied() {
@@ -727,7 +727,7 @@ impl HeaderSyntaxArena {
             Some(())
         }
 
-        let mut spellings = std::collections::HashMap::new();
+        let mut spellings = crate::fx_hash::HashMap::default();
         visit(self, root, names, &mut spellings)?;
         Some(spellings)
     }
@@ -1546,7 +1546,7 @@ fn extract_file_stub_inventory(
     let companion_declarations = companion_declarations(file);
     let mut stubs = Vec::new();
     let mut source_declarations = vec![None; file.decls.len()];
-    let mut stable_by_transient = std::collections::HashMap::new();
+    let mut stable_by_transient = crate::fx_hash::HashMap::default();
     let mut declaration_blocks = Vec::new();
     let mut expect_keywords = Vec::new();
     for (index, declaration) in file.decls.iter().enumerate() {
@@ -1652,9 +1652,9 @@ fn extract_file_stub_inventory(
         let blocks = declaration_blocks
             .iter()
             .cloned()
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fx_hash::HashMap<_, _>>();
         let mut declaration_order = Vec::with_capacity(declaration_blocks.len());
-        let mut added = std::collections::HashSet::new();
+        let mut added = crate::fx_hash::HashSet::default();
         for declaration in file.decls.iter().copied() {
             if companion_declarations.contains(&declaration)
                 || file
@@ -1749,7 +1749,7 @@ fn extract_file_stub_inventory(
         .iter()
         .filter(|stub| stub.flags.has(DeclarationFlags::LOCAL_CLASS))
         .map(|stub| stub.id)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     loop {
         let mut changed = false;
         for stub in &mut stubs {
@@ -1882,7 +1882,7 @@ pub(super) fn order_file_stubs(stubs: &mut [DeclarationStub], ids: &DeclarationI
                 ),
             )
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     stubs.sort_by_cached_key(|stub| {
         let mut path = Vec::new();
         let mut current = Some(stub.id);
@@ -1943,7 +1943,7 @@ pub fn extract_file_header_syntax(
         headers: &mut HeaderSyntaxArena,
         names: &mut LookupNames,
         values: &[Param],
-        type_annotations: &std::collections::HashMap<u32, Vec<crate::ast::AnnotationRef>>,
+        type_annotations: &crate::fx_hash::HashMap<u32, Vec<crate::ast::AnnotationRef>>,
     ) -> HeaderParameterRange {
         let mut packed = Vec::with_capacity(values.len());
         for parameter in values {
@@ -1985,7 +1985,7 @@ pub fn extract_file_header_syntax(
         headers: &mut HeaderSyntaxArena,
         names: &mut LookupNames,
         values: &[PropParam],
-        type_annotations: &std::collections::HashMap<u32, Vec<crate::ast::AnnotationRef>>,
+        type_annotations: &crate::fx_hash::HashMap<u32, Vec<crate::ast::AnnotationRef>>,
     ) -> HeaderParameterRange {
         let mut packed = Vec::with_capacity(values.len());
         for parameter in values {
@@ -2622,7 +2622,7 @@ pub struct StreamedHeaderModule {
     /// Position in `stubs` of each inventoried declaration. Signature resolution asks for one stub
     /// by identity per type reference it resolves; scanning `stubs` for it was quadratic in module
     /// size.
-    stub_positions: std::collections::HashMap<DeclarationId, usize>,
+    stub_positions: crate::fx_hash::HashMap<DeclarationId, usize>,
     /// How many leading entries of `stubs` the position table covers.
     indexed_stubs: usize,
     /// The `expect` KEYWORD each header declaration was introduced by.
@@ -2632,13 +2632,13 @@ pub struct StreamedHeaderModule {
     /// than recovered afterwards by searching a file's modifiers for the nearest one preceding the
     /// declaration — a search with no answer for a synthesized declaration and a wrong one whenever
     /// two headers share a line. One entry per `expect` declaration.
-    pub expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
+    pub expect_keywords: crate::fx_hash::HashMap<DeclarationId, TextRange>,
     /// The generated-class position each `suspend` function's continuation holds in its scope's
     /// sequence, 1-based in declaration order. Only the parser pass that numbers that sequence can
     /// answer it, so it is carried rather than recomputed. A backend builds the spelling.
-    pub continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
+    pub continuation_ordinals: crate::fx_hash::HashMap<DeclarationId, u32>,
     pub local_class_name_provenance:
-        std::collections::HashMap<DeclarationId, super::LocalClassNameProvenance>,
+        crate::fx_hash::HashMap<DeclarationId, super::LocalClassNameProvenance>,
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
@@ -2650,7 +2650,7 @@ pub struct StreamedHeaderModule {
     /// declaration identities derived while the AST is live; no source coordinate or parser arena
     /// identity is retained. Inline/default preparation consumes this before Pass 2.
     pub(super) local_classifier_lexical_roots:
-        std::collections::HashMap<DeclarationId, DeclarationId>,
+        crate::fx_hash::HashMap<DeclarationId, DeclarationId>,
     /// Whether each source contributed compact declaration headers. A Java input, or a Kotlin input
     /// whose parse failed, has a stable file identity but no header inventory: its declarations were
     /// never walked, so a header lookup against it must not be read as a missing-header defect.
@@ -2658,11 +2658,11 @@ pub struct StreamedHeaderModule {
     /// Stable declarations intentionally removed by expect/actual actualization. The transient
     /// legacy signature bridge may still be walking the reparsed source file, so it must distinguish
     /// an excluded header from an inventory defect.
-    pub(super) excluded: std::collections::HashSet<DeclarationId>,
+    pub(super) excluded: crate::fx_hash::HashSet<DeclarationId>,
 }
 
 impl StreamedHeaderModule {
-    fn index_stubs(stubs: &[DeclarationStub]) -> std::collections::HashMap<DeclarationId, usize> {
+    fn index_stubs(stubs: &[DeclarationStub]) -> crate::fx_hash::HashMap<DeclarationId, usize> {
         stubs
             .iter()
             .enumerate()
@@ -2786,7 +2786,7 @@ impl StreamedHeaderModule {
                 Some(identity)
             })
             .collect::<Vec<_>>();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         names.retain(|name| seen.insert(*name));
         names
     }
@@ -2804,13 +2804,10 @@ impl StreamedHeaderModule {
     /// anchors remain interned, but no excluded header can contribute lookup candidates,
     /// constraints, or ordinary body-unit work. This is used by expect/actual actualization after compact
     /// matching has selected an actual declaration and before ordinary signature resolution runs.
-    pub fn exclude_declaration_subtrees(
-        &mut self,
-        roots: &std::collections::HashSet<DeclarationId>,
-    ) {
+    pub fn exclude_declaration_subtrees(&mut self, roots: &crate::fx_hash::HashSet<DeclarationId>) {
         fn is_excluded(
             declarations: &DeclarationIds,
-            roots: &std::collections::HashSet<DeclarationId>,
+            roots: &crate::fx_hash::HashSet<DeclarationId>,
             declaration: DeclarationId,
         ) -> bool {
             let mut current = Some(declaration);
@@ -2918,7 +2915,7 @@ impl StreamedHeaderModule {
     pub fn source_declaration_slots(
         &self,
         source: SourceFileId,
-    ) -> std::collections::HashMap<DeclarationId, usize> {
+    ) -> crate::fx_hash::HashMap<DeclarationId, usize> {
         self.source_declarations(source)
             .iter()
             .enumerate()
@@ -3023,12 +3020,12 @@ pub struct HeaderInventoryBuilder {
     type_use_annotations: HeaderTypeUseAnnotationArena,
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
-    expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
-    continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
+    expect_keywords: crate::fx_hash::HashMap<DeclarationId, TextRange>,
+    continuation_ordinals: crate::fx_hash::HashMap<DeclarationId, u32>,
     local_class_name_provenance:
-        std::collections::HashMap<DeclarationId, super::LocalClassNameProvenance>,
+        crate::fx_hash::HashMap<DeclarationId, super::LocalClassNameProvenance>,
     source_declarations: Vec<Vec<DeclarationId>>,
-    local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
+    local_classifier_lexical_roots: crate::fx_hash::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
 }
 
@@ -3190,7 +3187,7 @@ impl HeaderInventoryBuilder {
             source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,
             inventoried: self.inventoried,
-            excluded: std::collections::HashSet::new(),
+            excluded: crate::fx_hash::HashSet::default(),
         }
     }
 }

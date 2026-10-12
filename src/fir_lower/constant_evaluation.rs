@@ -11,7 +11,7 @@
 //! An operation kotlinc's interpreter would reject is left alone: an integer division by zero or a
 //! referential comparison.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Ty;

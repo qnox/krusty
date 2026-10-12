@@ -29,8 +29,8 @@ impl IrFile {
     pub(crate) fn declared_value_slot_types(
         &self,
         root: ExprId,
-    ) -> std::collections::HashMap<u32, Ty> {
-        let mut declarations = std::collections::HashMap::new();
+    ) -> crate::fx_hash::HashMap<u32, Ty> {
+        let mut declarations = crate::fx_hash::HashMap::default();
         let mut declare = |slot, ty| {
             let previous = declarations.insert(slot, ty);
             debug_assert!(
@@ -208,7 +208,7 @@ mod tests {
 
         assert_eq!(
             file.declared_value_slot_types(root),
-            std::collections::HashMap::from([
+            crate::fx_hash::HashMap::from_iter([
                 (3, Ty::String),
                 (5, Ty::obj("sample/Failure")),
                 (8, Ty::Long),

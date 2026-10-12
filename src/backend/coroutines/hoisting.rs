@@ -13,7 +13,7 @@
 //! Operand order is the contract. Operands are hoisted left to right so each temp is declared in
 //! the order the source evaluates it, and each operand is hoisted exactly once.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::types::Ty;
@@ -174,7 +174,7 @@ pub(crate) fn hoist_spliced_inline_bodies(
     typing: &SuspensionTyping<'_>,
     ret: &Ty,
 ) {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     hoist_spliced_walk(ir, body, suspend_set, typing, ret, &mut seen);
 }
 
@@ -1523,7 +1523,7 @@ mod tests {
             .insert(expression, Ty::obj("java/lang/Integer"));
 
         assert_eq!(
-            recorded_operand_type(&ir, expression, &HashMap::new()),
+            recorded_operand_type(&ir, expression, &HashMap::default()),
             Some(Ty::obj("java/lang/Integer"))
         );
     }
@@ -1553,9 +1553,9 @@ mod tests {
         hoist_suspensions(
             &mut ir,
             body,
-            &HashSet::new(),
+            &HashSet::default(),
             &typing(),
-            &mut HashMap::new(),
+            &mut HashMap::default(),
         );
 
         let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {
@@ -1617,7 +1617,7 @@ mod tests {
             inline_body: Some(body),
         });
 
-        hoist_spliced_inline_bodies(&mut ir, lambda, &HashSet::new(), &typing(), &Ty::Unit);
+        hoist_spliced_inline_bodies(&mut ir, lambda, &HashSet::default(), &typing(), &Ty::Unit);
 
         let IrExpr::Lambda {
             inline_body: Some(rewritten),
@@ -1670,9 +1670,9 @@ mod tests {
             hoist_suspensions(
                 &mut ir,
                 body,
-                &HashSet::new(),
+                &HashSet::default(),
                 &typing(),
-                &mut HashMap::new(),
+                &mut HashMap::default(),
             );
 
             let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {

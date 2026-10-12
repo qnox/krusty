@@ -100,7 +100,7 @@ impl IrFile {
                 .keys()
                 .filter(|(owner, _)| *owner == function)
                 .map(|(_, parameter)| first + parameter)
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             for expression in &frame {
                 if let IrExpr::Variable {
                     index,
@@ -203,7 +203,7 @@ impl IrFile {
     fn frame_expressions(&self, body: ExprId) -> Vec<ExprId> {
         let mut frame = Vec::new();
         let mut pending = vec![body];
-        let mut seen = std::collections::HashSet::<ExprId>::new();
+        let mut seen = crate::fx_hash::HashSet::<ExprId>::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -237,7 +237,7 @@ fn capture_parameter_ordinals(callee: &Callee, supplied: usize) -> Option<Vec<u3
     let omitted = defaults
         .iter()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let mut ordinals = Vec::with_capacity(supplied);
     let mut parameter = 0u32;
     let limit = supplied + defaults.len();
@@ -250,7 +250,7 @@ fn capture_parameter_ordinals(callee: &Callee, supplied: usize) -> Option<Vec<u3
     (ordinals.len() == supplied).then_some(ordinals)
 }
 
-fn forwards_holder(ir: &IrFile, value: ExprId, holders: &std::collections::HashSet<u32>) -> bool {
+fn forwards_holder(ir: &IrFile, value: ExprId, holders: &crate::fx_hash::HashSet<u32>) -> bool {
     matches!(ir.expr(value), IrExpr::GetValue(slot) if holders.contains(slot))
 }
 

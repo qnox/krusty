@@ -44,7 +44,7 @@ pub struct PassOneBodyInventory {
     units: Vec<BodyWorkItem>,
     /// Same-pass checker roots used only while preparing retained inline bodies. This map is
     /// destroyed before the Pass-1 result is returned.
-    checker_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
+    checker_roots: crate::fx_hash::HashMap<DeclarationId, DeclarationId>,
 }
 
 impl PassOneBodyInventory {
@@ -72,8 +72,8 @@ impl PassOneBodyInventory {
         &self,
         index: &ResolvedModuleIndex,
         source_count: usize,
-    ) -> Vec<std::collections::HashSet<crate::diag::Span>> {
-        let mut selected = vec![std::collections::HashSet::new(); source_count];
+    ) -> Vec<crate::fx_hash::HashSet<crate::diag::Span>> {
+        let mut selected = vec![crate::fx_hash::HashSet::default(); source_count];
         for unit in &self.units {
             let root = self
                 .checker_roots
@@ -192,12 +192,12 @@ impl BodyPartition {
             .units
             .iter()
             .map(|unit| unit.declaration)
-            .collect::<std::collections::HashSet<_>>();
-        let mut bodies = vec![std::collections::HashSet::new(); source_count];
-        let mut stable_bodies = vec![std::collections::HashSet::new(); source_count];
+            .collect::<crate::fx_hash::HashSet<_>>();
+        let mut bodies = vec![crate::fx_hash::HashSet::default(); source_count];
+        let mut stable_bodies = vec![crate::fx_hash::HashSet::default(); source_count];
         let retained_inline_owner = |declaration: DeclarationId| {
             let mut current = Some(declaration);
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             while let Some(candidate) = current {
                 if !seen.insert(candidate) {
                     return None;
@@ -216,7 +216,7 @@ impl BodyPartition {
             }
             None
         };
-        let mut payload_roots = std::collections::HashMap::new();
+        let mut payload_roots = crate::fx_hash::HashMap::default();
         for unit in self.inline.units.iter().chain(&self.ordinary.units) {
             let root = self
                 .inline
@@ -254,16 +254,16 @@ impl BodyPartition {
 }
 
 pub(crate) struct BodyCheckSelection {
-    pub roots: Vec<std::collections::HashSet<crate::diag::Span>>,
-    pub bodies: Vec<std::collections::HashSet<crate::diag::Span>>,
+    pub roots: Vec<crate::fx_hash::HashSet<crate::diag::Span>>,
+    pub bodies: Vec<crate::fx_hash::HashSet<crate::diag::Span>>,
     /// Stable identities whose syntax is checked as part of a retained inline subtree. This is
     /// transient Pass-1 selection state used to bind the live parser arena; it is consumed before
     /// ordinary body streaming and is never a source locator.
-    pub stable_bodies: Vec<std::collections::HashSet<DeclarationId>>,
+    pub stable_bodies: Vec<crate::fx_hash::HashSet<DeclarationId>>,
     /// Ordinary declaration bodies whose lexical lifetime is owned by a retained inline root.
     /// They are checked during Pass 1 and embedded into that root's FIR payload; this transient map
     /// is destroyed with the body inventory and never becomes a retained ordinary-body index.
-    pub payload_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
+    pub payload_roots: crate::fx_hash::HashMap<DeclarationId, DeclarationId>,
 }
 
 /// Stable parser-unit root for one declaration. Source containment is consulted only here, while
@@ -273,7 +273,7 @@ pub(crate) struct BodyCheckSelection {
 fn checker_root_for_declaration(
     index: &ResolvedModuleIndex,
     declarations: &super::DeclarationIds,
-    local_classifier_lexical_roots: &std::collections::HashMap<DeclarationId, DeclarationId>,
+    local_classifier_lexical_roots: &crate::fx_hash::HashMap<DeclarationId, DeclarationId>,
     declaration: DeclarationId,
 ) -> DeclarationId {
     let ordinary_root = |mut declaration: DeclarationId| loop {
@@ -366,15 +366,15 @@ impl StreamedHeaderModule {
     /// before signature finalization only for inline capture preparation; ordinary bodies remain
     /// untouched until their active Pass-2 file.
     pub(crate) fn inline_body_ranges(&self, source_count: usize) -> BodyCheckSelection {
-        let mut roots = vec![std::collections::HashSet::new(); source_count];
-        let mut bodies = vec![std::collections::HashSet::new(); source_count];
-        let mut stable_bodies = vec![std::collections::HashSet::new(); source_count];
+        let mut roots = vec![crate::fx_hash::HashSet::default(); source_count];
+        let mut bodies = vec![crate::fx_hash::HashSet::default(); source_count];
+        let mut stable_bodies = vec![crate::fx_hash::HashSet::default(); source_count];
         let inline_declarations = self
             .stubs
             .iter()
             .filter(|stub| stub.body.is_some() && stub.flags.has(super::DeclarationFlags::INLINE))
             .map(|stub| stub.id)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         for stub in self.stubs.iter().filter(|stub| stub.body.is_some()) {
             let mut declaration = Some(stub.id);
             let mut retained_by_inline_owner = false;
@@ -413,7 +413,7 @@ impl StreamedHeaderModule {
             roots,
             bodies,
             stable_bodies,
-            payload_roots: std::collections::HashMap::new(),
+            payload_roots: crate::fx_hash::HashMap::default(),
         }
     }
 
@@ -459,7 +459,7 @@ impl StreamedHeaderModule {
                     ),
                 )
             })
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fx_hash::HashMap<_, _>>();
         // Declaration inventory is grouped by declaration family, while executable initialization
         // semantics are source ordered. Establish that order before syntax disappears so a
         // consuming Pass-2 sink never has to retain/re-sort checked bodies.
@@ -468,7 +468,7 @@ impl StreamedHeaderModule {
             .copied()
             .enumerate()
             .map(|(order, declaration)| (declaration, order))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fx_hash::HashMap<_, _>>();
         units.sort_by_key(|unit| {
             let anchor = declarations
                 .anchor(unit.declaration)

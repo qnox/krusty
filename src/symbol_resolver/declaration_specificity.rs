@@ -100,7 +100,7 @@ pub(crate) fn retain_most_specific_declarations<T>(
         .collect::<Vec<_>>();
     let retained = declaration_maxima(src, &receivers, &parameter_shapes, &generic)
         .into_iter()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let mut index = 0;
     candidates.retain(|_| {
         let keep = retained.contains(&index);
@@ -163,7 +163,7 @@ fn retain_earliest_intersection_member<T>(
             reachable
                 .into_iter()
                 .filter_map(|(owner, depth)| (depth == nearest).then_some(owner))
-                .collect::<std::collections::HashSet<_>>(),
+                .collect::<crate::fx_hash::HashSet<_>>(),
         )
     }) else {
         return;

@@ -2,7 +2,7 @@
 //! that an inline call regenerates is renamed to the regenerated class, in instructions,
 //! descriptors, generic signatures and annotations alike (ASM's `ClassRemapper`).
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::jvm::class_node::{Annotation, ElementValue};
 use crate::jvm::method_node::{Constant, Handle, Insn, MethodNode, Node};
@@ -26,7 +26,7 @@ impl TypeRemapper {
     /// type parameter (`TypeRemapper.createRoot` over kotlinc's `TypeParameterMappings`).
     pub(crate) fn with_type_arguments(arguments: &[(String, String)]) -> TypeRemapper {
         TypeRemapper {
-            mappings: HashMap::new(),
+            mappings: HashMap::default(),
             type_parameters: arguments
                 .iter()
                 .map(|(name, signature)| (name.clone(), Some(signature.clone())))

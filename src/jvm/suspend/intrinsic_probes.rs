@@ -6,7 +6,7 @@
 //! which value holds that continuation once it binds the block's placeholder, so it records that
 //! JVM value index in emission facts keyed by the semantic point.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 
@@ -50,7 +50,7 @@ fn bind_probed_continuations(
     continuation: super::ProbedContinuation,
     continuations: &mut super::IntrinsicProbeContinuations,
 ) {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut pending = vec![root];
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {

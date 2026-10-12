@@ -35,12 +35,12 @@ pub(crate) fn publish_checked_classifier_annotations(
                 Decl::Class(class) => Some(class.span),
                 _ => None,
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         if selected.is_empty() {
             continue;
         }
         diags.set_file(file_index as u32);
-        let no_bodies = std::collections::HashSet::new();
+        let no_bodies = crate::fx_hash::HashSet::default();
         let info = check_file_at_impl_mode_with_index(
             file,
             file_index as u32,

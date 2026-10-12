@@ -4,7 +4,7 @@
 //! and compile-time constant initializers may still need parser syntax. This compactor follows those
 //! roots, rewrites every retained parser identity densely, and drops neighboring ordinary bodies.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, Expr, ExprId, File, FunBody, FunDecl, Param,
@@ -862,18 +862,18 @@ fn remap_statement(statement: &mut Stmt, expressions: &HashMap<ExprId, ExprId>) 
 }
 
 fn remap_u32_map<T>(
-    old: std::collections::HashMap<u32, T>,
+    old: crate::fx_hash::HashMap<u32, T>,
     expressions: &HashMap<ExprId, ExprId>,
-) -> std::collections::HashMap<u32, T> {
+) -> crate::fx_hash::HashMap<u32, T> {
     old.into_iter()
         .filter_map(|(old, value)| expressions.get(&ExprId(old)).map(|new| (new.0, value)))
         .collect()
 }
 
 fn remap_u32_set(
-    old: std::collections::HashSet<u32>,
+    old: crate::fx_hash::HashSet<u32>,
     expressions: &HashMap<ExprId, ExprId>,
-) -> std::collections::HashSet<u32> {
+) -> crate::fx_hash::HashSet<u32> {
     old.into_iter()
         .filter_map(|old| expressions.get(&ExprId(old)).map(|new| new.0))
         .collect()

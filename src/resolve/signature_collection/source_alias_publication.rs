@@ -34,7 +34,7 @@ pub(in crate::resolve) fn publish_source_alias(
     let symbolic = TParams::symbolic_from_decl_with(alias.formals, &[], &|candidate| {
         scope.names.get_class(candidate)
     });
-    let mut target_spellings = HashMap::new();
+    let mut target_spellings = HashMap::default();
     let expanded_target = crate::parser::expanded_type_alias_target(
         scope.visible_aliases,
         alias.target,

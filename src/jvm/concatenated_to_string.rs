@@ -6,7 +6,7 @@
 //! has already become a static `toString-impl` call and keeps its call. This pass runs after the
 //! value-class pass for the same reason; a static call has no dispatch receiver and is left alone.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::CallableId;
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};

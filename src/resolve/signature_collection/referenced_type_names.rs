@@ -7,7 +7,7 @@ use super::*;
 
 /// Collect every simple type NAME referenced in a `TypeRef` (recursively through generic arguments,
 /// function-type params/return, and the array/return `arg`) into `out`.
-pub(super) fn collect_typeref_names(r: &TypeRef, out: &mut std::collections::HashSet<String>) {
+pub(super) fn collect_typeref_names(r: &TypeRef, out: &mut crate::fx_hash::HashSet<String>) {
     if !r.name.is_empty() && r.name != "<fun>" {
         out.insert(r.name.clone());
     }
@@ -25,7 +25,7 @@ pub(super) fn collect_typeref_names(r: &TypeRef, out: &mut std::collections::Has
 fn collect_declaration_type_parameter_annotation_names(
     file: &File,
     declaration_start: u32,
-    out: &mut std::collections::HashSet<String>,
+    out: &mut crate::fx_hash::HashSet<String>,
 ) {
     if let Some(parameters) = file
         .declaration_type_parameter_annotations
@@ -40,7 +40,7 @@ fn collect_declaration_type_parameter_annotation_names(
     }
 }
 
-fn collect_fun_type_names(file: &File, f: &FunDecl, out: &mut std::collections::HashSet<String>) {
+fn collect_fun_type_names(file: &File, f: &FunDecl, out: &mut crate::fx_hash::HashSet<String>) {
     collect_declaration_type_parameter_annotation_names(file, f.signature_span.lo, out);
     if let Some(receiver) = &f.receiver {
         collect_typeref_names(receiver, out);
@@ -59,7 +59,7 @@ fn collect_fun_type_names(file: &File, f: &FunDecl, out: &mut std::collections::
 fn collect_property_type_names(
     file: &File,
     p: &PropDecl,
-    out: &mut std::collections::HashSet<String>,
+    out: &mut crate::fx_hash::HashSet<String>,
 ) {
     collect_declaration_type_parameter_annotation_names(file, p.span.lo, out);
     for parameter in &p.context_params {
@@ -83,12 +83,12 @@ fn collect_property_type_names(
 fn collect_expression_type_names(
     file: &File,
     roots: impl IntoIterator<Item = ExprId>,
-    out: &mut std::collections::HashSet<String>,
+    out: &mut crate::fx_hash::HashSet<String>,
 ) {
     let mut expressions = roots.into_iter().collect::<Vec<_>>();
     let mut statements = Vec::new();
-    let mut seen_expressions = std::collections::HashSet::new();
-    let mut seen_statements = std::collections::HashSet::new();
+    let mut seen_expressions = crate::fx_hash::HashSet::default();
+    let mut seen_statements = crate::fx_hash::HashSet::default();
     while let Some(expression) = expressions.pop() {
         if !seen_expressions.insert(expression) {
             continue;
@@ -202,7 +202,7 @@ pub(super) fn property_expression_roots(property: &PropDecl) -> impl Iterator<It
 pub(super) fn collect_class_type_names(
     file: &File,
     class: &ClassDecl,
-    out: &mut std::collections::HashSet<String>,
+    out: &mut crate::fx_hash::HashSet<String>,
 ) {
     collect_declaration_type_parameter_annotation_names(file, class.span.lo, out);
     for supertype in &class.supertypes {
@@ -304,7 +304,7 @@ pub(super) fn collect_class_type_names(
 pub(super) fn collect_streamed_header_type_names(
     headers: &crate::fir::StreamedHeaderModule,
     source: crate::fir::SourceFileId,
-    out: &mut std::collections::HashSet<String>,
+    out: &mut crate::fx_hash::HashSet<String>,
 ) {
     for root in headers.detached_type_roots(source).chain(
         headers
@@ -325,7 +325,7 @@ pub(super) fn collect_streamed_header_type_names(
 /// Collect names that signature inference may need to resolve through imports for the legacy
 /// inspection pipeline. Production uses [`collect_streamed_header_type_names`] and cannot observe
 /// ordinary expression or statement arenas here.
-pub(super) fn collect_file_type_names(file: &File, out: &mut std::collections::HashSet<String>) {
+pub(super) fn collect_file_type_names(file: &File, out: &mut crate::fx_hash::HashSet<String>) {
     for reference in &file.detached_type_refs {
         collect_typeref_names(reference, out);
     }

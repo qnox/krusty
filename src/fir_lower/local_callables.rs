@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{
     FirBody, FirCapture, FirImplicitReceiverCapture, FirLocalCallableRef, FirStatementId,
@@ -1144,7 +1144,7 @@ impl BodyLowering<'_> {
             })
             .collect::<HashMap<_, _>>();
         let mut scopes = self.local_callable_scopes.clone();
-        scopes.push(HashMap::new());
+        scopes.push(HashMap::default());
         let mut nested = BodyLowering::new(
             body,
             self.index,

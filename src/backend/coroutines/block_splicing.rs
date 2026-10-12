@@ -1,7 +1,7 @@
 //! Lifting a statement's value-position block into the statement list, so a suspension buried in
 //! the block's statements surfaces where the hoister and the flattener see it.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 
@@ -33,7 +33,7 @@ pub(crate) fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
     // visited set also makes shared arena nodes and malformed cycles safe.
     let mut nested_blocks = Vec::new();
     let mut pending = Vec::new();
-    let mut seen = HashSet::from([b]);
+    let mut seen = HashSet::from_iter([b]);
     for_each_child(&ir.exprs, b, &mut |child| pending.push(child));
     while let Some(node) = pending.pop() {
         if !seen.insert(node) {

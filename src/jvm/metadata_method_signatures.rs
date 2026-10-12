@@ -5,7 +5,7 @@
 //! reconstruction is impossible or differs from the physical descriptor. A property's backing
 //! field follows the same rule (`requiresSignature`) for its `JvmFieldSignature.desc`.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::types::{Ty, TypeName};
 
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn a_nullable_primitive_or_an_erased_reference_records_its_descriptor() {
-        let none = HashSet::new();
+        let none = HashSet::default();
         assert!(!requires_function_signature(
             None,
             [Ty::Int],

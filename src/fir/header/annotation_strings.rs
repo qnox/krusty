@@ -9,7 +9,7 @@ use super::{DeclarationId, File};
 pub(super) struct HeaderAnnotationStringArena {
     /// Entries are parallel to the declaration's annotation list. Empty argument slices preserve
     /// ordinals without retaining annotation spellings or source ranges.
-    declarations: std::collections::HashMap<DeclarationId, Vec<Box<[Box<str>]>>>,
+    declarations: crate::fx_hash::HashMap<DeclarationId, Vec<Box<[Box<str>]>>>,
 }
 
 impl HeaderAnnotationStringArena {

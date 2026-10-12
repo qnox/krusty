@@ -5,7 +5,7 @@
 //! Annotations and supertypes are the resolved identities of source declarations and the
 //! normalized dependency classifiers; nothing is looked up by spelling.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::types::TypeName;
 
@@ -30,8 +30,8 @@ impl<'a> ClassPredicate<'a> {
         ClassPredicate {
             table,
             annotations: annotations.into_iter().collect(),
-            classes: HashMap::new(),
-            matching_meta: HashSet::new(),
+            classes: HashMap::default(),
+            matching_meta: HashSet::default(),
         }
     }
 
@@ -53,7 +53,7 @@ impl<'a> ClassPredicate<'a> {
 
     /// Whether `annotation` is one of the plugin's, or is annotated with one at any depth.
     fn annotation_matches(&mut self, annotation: TypeName) -> bool {
-        self.annotation_matches_from(annotation, &mut HashSet::new())
+        self.annotation_matches_from(annotation, &mut HashSet::default())
     }
 
     fn annotation_matches_from(

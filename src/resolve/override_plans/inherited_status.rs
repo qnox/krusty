@@ -18,7 +18,7 @@
 //! member stays public (kotlinc accepts the widening) and `protected override` of a public member
 //! stays protected.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::hash::Hash;
 
 use crate::fir::{
@@ -385,7 +385,7 @@ where
     Edge: 'a,
 {
     let mut order = Vec::new();
-    let mut grouped: DepthStampedEdges<Id, E> = HashMap::new();
+    let mut grouped: DepthStampedEdges<Id, E> = HashMap::default();
     for classifier in classifiers {
         for edge in edges(classifier) {
             let Some((id, declaration)) = implementation(index, edge) else {
@@ -427,7 +427,7 @@ fn derive<Id: Copy + Eq + Hash, S: Status>(
         .iter()
         .map(|(id, edges)| (*id, edges.as_slice()))
         .collect::<HashMap<_, _>>();
-    let mut resolved = HashMap::new();
+    let mut resolved = HashMap::default();
     implementations
         .iter()
         .map(|(id, _)| (*id, resolve(*id, &edges, &own, &published, &mut resolved)))

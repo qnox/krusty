@@ -24,7 +24,7 @@ pub(super) fn missing_inherited_supertypes(
     binary: bool,
 ) -> Vec<TypeName> {
     let any = crate::types::wk::any();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut missing = Vec::new();
     let mut pending: Vec<(TypeName, bool)> = parents
         .into_iter()

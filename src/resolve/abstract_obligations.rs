@@ -67,7 +67,7 @@ impl Checker<'_> {
                     .cloned()
                     .collect::<Vec<_>>()
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let families = names
             .iter()
             .map(|name| {
@@ -93,13 +93,13 @@ impl Checker<'_> {
                 ))
             })
             .flatten()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
 
         // Interface delegation is a concrete source declaration even though it has no handwritten
         // member AST. Pass 1 has already selected every forwarded declaration and published its
         // exact semantic signature; consume those stable plans while checking subclasses.
-        let mut delegated_functions = std::collections::HashSet::<MemberKey>::new();
-        let mut delegated_properties = std::collections::HashSet::<String>::new();
+        let mut delegated_functions = crate::fx_hash::HashSet::<MemberKey>::default();
+        let mut delegated_properties = crate::fx_hash::HashSet::<String>::default();
         if let Some(index) = self.resolved_index {
             for (classifier, _, _) in &hierarchy {
                 let Some(declaration) = index.classifier_declaration(*classifier) else {
@@ -132,7 +132,7 @@ impl Checker<'_> {
             }
         }
 
-        let mut unresolved = std::collections::HashSet::<MemberKey>::new();
+        let mut unresolved = crate::fx_hash::HashSet::<MemberKey>::default();
         for (name, callables) in &families {
             let functions = callables.functions();
             for function in functions.iter().filter(|function| {

@@ -1,9 +1,9 @@
 //! Entry-local caches for decoded JVM method bodies and their shared class indexes.
 
 use super::{Classpath, Entry, EntryCache, EntryKey};
+use crate::fx_hash::HashMap;
 use crate::jvm::classreader::{parse_class, ClassBodies, MethodCode};
 use crate::types::TypeName;
-use std::collections::HashMap;
 
 /// Process-global cache of lazily-read method bodies, one [`EntryCache`] slot per classpath entry.
 /// A body is keyed by the owning entry, so classpath-order shadowing stays per lookup while bodies

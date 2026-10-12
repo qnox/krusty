@@ -25,9 +25,9 @@ pub mod registry;
 pub mod sam_with_receiver;
 pub mod serialization;
 
+use crate::fx_hash::HashMap;
 use crate::ir::{ClassId, IrFile};
 use crate::types::{Ty, TypeName};
-use std::collections::HashMap;
 
 /// A closed expression operation selected by a frontend plugin after ordinary name and overload
 /// resolution. Core lowering copies this payload into an [`crate::ir::IrExpr::PluginPlaceholder`];
@@ -295,35 +295,35 @@ pub struct PluginContext {
     pub class_annotations: HashMap<ClassId, Vec<TypeName>>,
     /// Annotation classifiers whose resolved declaration carries kotlinx.serialization's
     /// `@SerialInfo` meta-annotation.
-    serial_info_annotations: std::collections::HashSet<TypeName>,
+    serial_info_annotations: crate::fx_hash::HashSet<TypeName>,
     target_type_descriptor: fn(Ty) -> Option<String>,
     /// Types this compilation does NOT declare, mapped to the serializer that already exists for
     /// them: the one a class names for itself with `@Serializable(with = …)`, or the one another
     /// file's or a dependency's compilation generated for its kind. A plugin can only DERIVE a
     /// serializer for what this file declares; for everything else only the declaration's facts
     /// say where the serializer is.
-    external_serializers: std::collections::HashMap<TypeName, serialization::ExternalSerializer>,
+    external_serializers: crate::fx_hash::HashMap<TypeName, serialization::ExternalSerializer>,
     /// Serializer classes the ACTIVE runtime actually provides. A builtin mapping is only usable
     /// when the artifact on the classpath carries that class: `InstantSerializer` ships in newer
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
     /// class that is not there fails at class-load rather than at compile time.
-    runtime_serializers: std::collections::HashSet<TypeName>,
+    runtime_serializers: crate::fx_hash::HashSet<TypeName>,
     /// Serializer classes this compilation does NOT declare that a property's `@Serializable(with =
     /// …)` names, on the property or inside its declared type (`List<@Serializable(with = S::class)
     /// T>`), mapped to whether the provider confirms an `object` (read through `INSTANCE`) rather
     /// than a class (constructed). Absent ⇒ the provider could not classify it.
-    external_serializer_objects: std::collections::HashMap<TypeName, bool>,
+    external_serializer_objects: crate::fx_hash::HashMap<TypeName, bool>,
 }
 
 impl Default for PluginContext {
     fn default() -> Self {
         Self {
-            class_annotations: HashMap::new(),
-            serial_info_annotations: std::collections::HashSet::new(),
+            class_annotations: HashMap::default(),
+            serial_info_annotations: crate::fx_hash::HashSet::default(),
             target_type_descriptor: no_target_type_descriptor,
-            external_serializers: std::collections::HashMap::new(),
-            runtime_serializers: std::collections::HashSet::new(),
-            external_serializer_objects: std::collections::HashMap::new(),
+            external_serializers: crate::fx_hash::HashMap::default(),
+            runtime_serializers: crate::fx_hash::HashSet::default(),
+            external_serializer_objects: crate::fx_hash::HashMap::default(),
         }
     }
 }
@@ -344,7 +344,7 @@ impl Clone for PluginContext {
 impl PluginContext {
     fn with_serial_info_annotations(
         mut self,
-        annotations: std::collections::HashSet<TypeName>,
+        annotations: crate::fx_hash::HashSet<TypeName>,
     ) -> Self {
         self.serial_info_annotations = annotations;
         self
@@ -366,7 +366,7 @@ impl PluginContext {
     /// Record the serializer that exists outside this compilation for each type that has one.
     pub fn with_external_serializers(
         mut self,
-        serializers: std::collections::HashMap<TypeName, serialization::ExternalSerializer>,
+        serializers: crate::fx_hash::HashMap<TypeName, serialization::ExternalSerializer>,
     ) -> Self {
         self.external_serializers = serializers;
         self
@@ -375,7 +375,7 @@ impl PluginContext {
     /// Record which serializer classes the active runtime provides.
     pub(crate) fn with_runtime_serializers(
         mut self,
-        serializers: std::collections::HashSet<TypeName>,
+        serializers: crate::fx_hash::HashSet<TypeName>,
     ) -> Self {
         self.runtime_serializers = serializers;
         self
@@ -384,7 +384,7 @@ impl PluginContext {
     /// Record the provider-confirmed kind of each external serializer class a property names.
     pub(crate) fn with_external_serializer_objects(
         mut self,
-        objects: std::collections::HashMap<TypeName, bool>,
+        objects: crate::fx_hash::HashMap<TypeName, bool>,
     ) -> Self {
         self.external_serializer_objects = objects;
         self
@@ -767,13 +767,13 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
 fn declared_serializer_objects(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
-) -> std::collections::HashMap<TypeName, bool> {
+) -> crate::fx_hash::HashMap<TypeName, bool> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
     let declared = ir
         .classes
         .iter()
         .map(|class| class.fq_name_id())
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let property_annotations = ir
         .classes
         .iter()
@@ -799,18 +799,18 @@ fn declared_serializer_objects(
 fn serial_info_annotations(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
-) -> std::collections::HashSet<TypeName> {
+) -> crate::fx_hash::HashSet<TypeName> {
     let serial_info = crate::types::type_name("kotlinx/serialization/SerialInfo");
     let local_classes = ir
         .classes
         .iter()
         .map(|class| (class.fq_name_id(), class))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     ir.classes
         .iter()
         .flat_map(|class| class.applied_annotations.applications())
         .map(|application| application.internal)
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<crate::fx_hash::HashSet<_>>()
         .into_iter()
         .filter(|&annotation| {
             local_classes.get(&annotation).is_some_and(|class| {
@@ -873,14 +873,14 @@ fn record_external_value_classes(
                 },
             )
         })
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     let mut referenced = Vec::new();
     for class in &ir.classes {
         for field in &class.fields {
             collect(field.ty, &mut referenced);
         }
     }
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::fx_hash::HashSet::default();
     let mut resolved = Vec::new();
     while let Some(name) = referenced.pop() {
         if !visited.insert(name) {
@@ -916,7 +916,7 @@ fn record_external_value_classes(
 /// primitives are always there, so probing them would cost lookups for no decision.
 fn runtime_serializers(
     classifiers: &dyn crate::types::ClassifierFactSource,
-) -> std::collections::HashSet<TypeName> {
+) -> crate::fx_hash::HashSet<TypeName> {
     serialization::element_serializer::runtime_dependent_serializers()
         .filter(|&serializer| classifiers.classifier_annotations(serializer).is_some())
         .collect()
@@ -925,7 +925,7 @@ fn runtime_serializers(
 fn external_serializers(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
-) -> std::collections::HashMap<TypeName, serialization::ExternalSerializer> {
+) -> crate::fx_hash::HashMap<TypeName, serialization::ExternalSerializer> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
     external_classifier_candidates(ir)
         .filter_map(|classifier| {
@@ -1021,7 +1021,7 @@ fn external_serializers(
 }
 
 fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName> + '_ {
-    let declared: std::collections::HashSet<TypeName> =
+    let declared: crate::fx_hash::HashSet<TypeName> =
         ir.classes.iter().map(|class| class.fq_name_id()).collect();
     let mut candidates: Vec<Ty> = ir
         .classes
@@ -1037,7 +1037,7 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
             .values()
             .flat_map(|substitutions| substitutions.iter().map(|(_, ty)| *ty)),
     );
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut external = Vec::new();
     for expression in &ir.exprs {
         let crate::ir::IrExpr::PluginPlaceholder {
@@ -1223,16 +1223,14 @@ mod tests {
 
     #[derive(Default)]
     struct FakeClassifierFacts {
-        annotations: std::collections::HashMap<
-            crate::types::TypeName,
-            Vec<crate::types::ResolvedAnnotation>,
-        >,
-        value_underlyings: std::collections::HashMap<crate::types::TypeName, Ty>,
-        declarations: std::collections::HashMap<
+        annotations:
+            crate::fx_hash::HashMap<crate::types::TypeName, Vec<crate::types::ResolvedAnnotation>>,
+        value_underlyings: crate::fx_hash::HashMap<crate::types::TypeName, Ty>,
+        declarations: crate::fx_hash::HashMap<
             crate::types::TypeName,
             crate::types::ClassifierDeclarationFacts,
         >,
-        objects: std::collections::HashSet<crate::types::TypeName>,
+        objects: crate::fx_hash::HashSet<crate::types::TypeName>,
     }
 
     impl crate::types::ClassifierFactSource for FakeClassifierFacts {
@@ -1311,7 +1309,7 @@ mod tests {
         let mut ir = IrFile::default();
         ir.add_class(object);
         let facts = FakeClassifierFacts {
-            annotations: std::collections::HashMap::from([(
+            annotations: crate::fx_hash::HashMap::from_iter([(
                 stamp,
                 vec![crate::types::ResolvedAnnotation {
                     annotation: serial_info,
@@ -1324,7 +1322,7 @@ mod tests {
 
         assert_eq!(
             serial_info_annotations(&ir, &facts),
-            std::collections::HashSet::from([stamp])
+            crate::fx_hash::HashSet::from_iter([stamp])
         );
     }
 
@@ -1379,7 +1377,7 @@ mod tests {
         ));
         ir.add_class(holder);
         let facts = FakeClassifierFacts {
-            value_underlyings: std::collections::HashMap::from([
+            value_underlyings: crate::fx_hash::HashMap::from_iter([
                 (left, Ty::obj_name(right)),
                 (right, Ty::Int),
                 (unrelated, Ty::String),
@@ -1503,7 +1501,7 @@ mod tests {
             )],
         );
         let annotations = FakeClassifierFacts {
-            annotations: std::collections::HashMap::from([(
+            annotations: crate::fx_hash::HashMap::from_iter([(
                 payload,
                 vec![crate::types::ResolvedAnnotation {
                     annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
@@ -1514,7 +1512,7 @@ mod tests {
                     facts: Default::default(),
                 }],
             )]),
-            objects: std::collections::HashSet::from([serializer]),
+            objects: crate::fx_hash::HashSet::from_iter([serializer]),
             ..FakeClassifierFacts::default()
         };
 
@@ -1522,7 +1520,7 @@ mod tests {
 
         assert_eq!(
             resolved,
-            std::collections::HashMap::from([(
+            crate::fx_hash::HashMap::from_iter([(
                 payload,
                 serialization::ExternalSerializer::Singleton(serializer)
             )])
@@ -1550,7 +1548,7 @@ mod tests {
         ));
         ir.add_class(holder);
         let facts = FakeClassifierFacts {
-            annotations: std::collections::HashMap::from([
+            annotations: crate::fx_hash::HashMap::from_iter([
                 (
                     object,
                     vec![
@@ -1578,7 +1576,7 @@ mod tests {
                     }],
                 ),
             ]),
-            declarations: std::collections::HashMap::from([(
+            declarations: crate::fx_hash::HashMap::from_iter([(
                 object,
                 crate::types::ClassifierDeclarationFacts {
                     kind: crate::types::ClassifierDeclarationKind::Object,
@@ -1614,7 +1612,7 @@ mod tests {
         ));
         ir.add_class(holder);
         let facts = FakeClassifierFacts {
-            annotations: std::collections::HashMap::from([
+            annotations: crate::fx_hash::HashMap::from_iter([
                 (
                     object,
                     vec![
@@ -1632,7 +1630,7 @@ mod tests {
                 ),
                 (serializable, Vec::new()),
             ]),
-            declarations: std::collections::HashMap::from([(
+            declarations: crate::fx_hash::HashMap::from_iter([(
                 object,
                 crate::types::ClassifierDeclarationFacts {
                     kind: crate::types::ClassifierDeclarationKind::Object,

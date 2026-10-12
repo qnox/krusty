@@ -57,7 +57,7 @@ pub(crate) fn carried_parameters(ir: &IrFile, id: crate::ir::FunId) -> Vec<Ty> {
     let first = usize::from(function.dispatch_receiver.is_some());
     let mut holders = vec![false; function.params.len() + first];
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(id) = pending.pop() {
         if !seen.insert(id) {
             continue;

@@ -52,7 +52,7 @@ fn project_class_callable(
 fn classifier_relative_type(ty: crate::types::Ty, formals: &[String]) -> crate::types::Ty {
     let mut occurrences = Vec::new();
     super::ty_param_names_into(ty, &mut occurrences);
-    let mut identities = std::collections::HashMap::new();
+    let mut identities = crate::fx_hash::HashMap::default();
     for occurrence in occurrences {
         let source = crate::types::type_parameter_source_name(occurrence);
         let Some(formal) = formals
@@ -151,7 +151,7 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
         .anonymous_object_types
         .values()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
 
     // Signature collection may already have populated the derived ModuleSymbols cache with the
     // provisional `Pending` shapes needed by demand-driven solving. Projection changes those
@@ -164,7 +164,7 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
     for signature in table
         .ext_funs
         .values_mut()
-        .flat_map(std::collections::HashMap::values_mut)
+        .flat_map(crate::fx_hash::HashMap::values_mut)
         .flatten()
     {
         project_callable(index, signature);

@@ -1,7 +1,7 @@
 //! `krusty-ir` → JVM bytecode. The JVM backend's lowering of backend-agnostic IR maps Kotlin
 //! identities to JVM descriptors here; common IR never carries descriptors.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
@@ -333,14 +333,14 @@ pub(crate) struct EmitRun {
     /// Lambda impl `FunId`s that got a REAL `invokedynamic` this pass. A lambda spliced by the inliner
     /// (a `require { … }` message, an inlined `flatMap { … }` body) never emits one, so its standalone
     /// `$lambda$N` method is dead — dropped on the re-emit (kotlinc emits neither it nor its facade).
-    used_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
+    used_lambdas: std::cell::RefCell<crate::fx_hash::HashSet<u32>>,
     /// Lambda impls proven dead by the discovery emit. Unlike `inline_only_fns`, this is an
     /// emit-run decision: it includes class-owned helpers whose every use was spliced, and is cleared
     /// before the next independent emission of the same IR.
-    dead_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
+    dead_lambdas: std::cell::RefCell<crate::fx_hash::HashSet<u32>>,
     /// Subset of live closures actually realized with `invokedynamic`. A class-strategy closure still
     /// keeps its implementation method but does not impose the JVM-7 classfile requirement.
-    used_indy_lambdas: std::cell::RefCell<std::collections::HashSet<u32>>,
+    used_indy_lambdas: std::cell::RefCell<crate::fx_hash::HashSet<u32>>,
     /// Lambda classes to synthesize for `-Xlambdas=class`, recorded as their `invokedynamic`
     /// replacement is emitted and drained by the class driver. They cannot be written inline: the
     /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
@@ -350,17 +350,17 @@ pub(crate) struct EmitRun {
     /// contributes one class. The discovery pass is discarded when dead implementations require a
     /// second emit, so this set is cleared with the pending plans at each pass boundary.
     lambda_classes_written: std::cell::RefCell<
-        std::collections::HashSet<(String, lambda_class_names::LambdaClassIdentity)>,
+        crate::fx_hash::HashSet<(String, lambda_class_names::LambdaClassIdentity)>,
     >,
     /// Private instance members reached from another emitted JVM class. Kotlin permits this across
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
-    private_member_access_bridges: std::cell::RefCell<std::collections::HashSet<u32>>,
+    private_member_access_bridges: std::cell::RefCell<crate::fx_hash::HashSet<u32>>,
     /// Protected member calls emitted outside the checked receiver subclass that grants access.
     /// The selected declaration and semantic receiver determine the bridge; emission performs no
     /// name lookup or subtype reconstruction.
     protected_member_access_bridges: std::cell::RefCell<
-        std::collections::HashMap<crate::ir::ExprId, access_bridges::ProtectedMemberAccessBridge>,
+        crate::fx_hash::HashMap<crate::ir::ExprId, access_bridges::ProtectedMemberAccessBridge>,
     >,
     /// The synthetic accessors each static owner declares for its private static declarations
     /// used from other classes; see [`static_accessors`].
@@ -1319,7 +1319,7 @@ fn emit_all_with_class_meta_impl(
     env.run.used_lambdas.borrow_mut().clear();
     env.run.used_indy_lambdas.borrow_mut().clear();
     env.run.dead_lambdas.borrow_mut().clear();
-    let empty = std::collections::HashSet::new();
+    let empty = crate::fx_hash::HashSet::default();
     let first = emit_pass(
         ir,
         facade,
@@ -1348,7 +1348,7 @@ fn emit_all_with_class_meta_impl(
     // always succeeds — emitting the reference without the method would be a broken class
     // (`NoSuchMethodError`). RESCUE it: re-emit with the impl method present. (A bare-return impl is
     // never rescued — it is not a valid standalone method — and is not in `must_inline_lambdas`.)
-    let rescued: std::collections::HashSet<u32> = used
+    let rescued: crate::fx_hash::HashSet<u32> = used
         .iter()
         .copied()
         .filter(|fid| ir.must_inline_lambdas.contains(fid))
@@ -1361,13 +1361,13 @@ fn emit_all_with_class_meta_impl(
     // An anonymous function's impl is reached by an `invokestatic` the SPLICE emits, never by an
     // `invokedynamic` — discovery would otherwise read it as dead and drop the method the splice calls.
     let spliced_as_a_call = splice_called_impls(ir);
-    let function_reference_targets: std::collections::HashSet<u32> = ir
+    let function_reference_targets: crate::fx_hash::HashSet<u32> = ir
         .classes
         .iter()
         .filter_map(|class| class.func_ref.as_ref())
         .filter_map(|reference| function_reference_target(ir, reference))
         .collect();
-    let dead: std::collections::HashSet<u32> = ir
+    let dead: crate::fx_hash::HashSet<u32> = ir
         .lambda_own_params_from
         .keys()
         .filter(|&&fid| {
@@ -1410,8 +1410,8 @@ fn emit_all_with_class_meta_impl(
 /// Which facade-owned lambda impls a pass drops (`dead`) or keeps despite a pre-marked inline
 /// (`rescued`) — the only state that differs between emit pass 1 (both empty) and pass 2.
 struct LambdaSelection<'a> {
-    dead: &'a std::collections::HashSet<u32>,
-    rescued: &'a std::collections::HashSet<u32>,
+    dead: &'a crate::fx_hash::HashSet<u32>,
+    rescued: &'a crate::fx_hash::HashSet<u32>,
 }
 
 fn emit_pass(
@@ -1460,7 +1460,7 @@ fn emit_pass(
     // to a class — including a `static` member like the serialization plugin's `serializer()` accessor,
     // which has no dispatch receiver — is emitted on its class (below), NOT here; otherwise two classes'
     // same-signature statics (`C.serializer()`/`D.serializer()`) would collide on the facade.
-    let class_member_fids: std::collections::HashSet<u32> = ir
+    let class_member_fids: crate::fx_hash::HashSet<u32> = ir
         .classes
         .iter()
         .flat_map(|c| c.methods.iter().copied())
@@ -2107,7 +2107,7 @@ struct ScheduledMemberEmission<'a> {
     signature_formatter: &'a JvmSignatureFormatter<'a>,
     param_assertions: bool,
     env: &'a EmitEnv<'a>,
-    markers: &'a std::collections::HashSet<u32>,
+    markers: &'a crate::fx_hash::HashSet<u32>,
     byte_parity: bool,
 }
 
@@ -5555,25 +5555,25 @@ impl<'a> Emitter<'a> {
             dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),
             facade: facade.to_string(),
-            slots: HashMap::new(),
+            slots: HashMap::default(),
             temporaries: backend_temporaries::BackendTemporaries::default(),
-            unassigned_values: HashSet::new(),
-            label_unassigned_values: HashMap::new(),
-            label_stack_resident_values: HashMap::new(),
-            safe_call_null_exits: HashMap::new(),
+            unassigned_values: HashSet::default(),
+            label_unassigned_values: HashMap::default(),
+            label_stack_resident_values: HashMap::default(),
+            safe_call_null_exits: HashMap::default(),
             stack_resident_value: None,
-            safe_call_exit_temporaries: HashMap::new(),
+            safe_call_exit_temporaries: HashMap::default(),
             var_types: collect_body_var_types(ir, roots.iter().copied()),
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),
-            checked_parameters: HashSet::new(),
+            checked_parameters: HashSet::default(),
             frame: frame_map::FrameMap::default(),
             continuation_slot: None,
-            machine_suspensions: HashMap::new(),
-            inline_return_frame_results: HashMap::new(),
-            discarded_inline_results: HashSet::new(),
+            machine_suspensions: HashMap::default(),
+            inline_return_frame_results: HashMap::default(),
+            discarded_inline_results: HashSet::default(),
             transformed_suspensions: Default::default(),
-            suspend_lambda_parameter_reads: HashSet::new(),
-            erased_invocations: HashSet::new(),
+            suspend_lambda_parameter_reads: HashSet::default(),
+            erased_invocations: HashSet::default(),
             machine_next_ordinal: 0,
             machine_entered: false,
             machine_resumes: Vec::new(),
@@ -5583,7 +5583,7 @@ impl<'a> Emitter<'a> {
             loop_stack: Vec::new(),
             open_locals: Vec::new(),
             next_inline_frame_identity: 0,
-            inline_lambda_aliases: HashMap::new(),
+            inline_lambda_aliases: HashMap::default(),
             block_depth: 0,
             statement_line: None,
             comparison_line: None,

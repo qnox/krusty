@@ -222,7 +222,7 @@ pub(super) fn realize(
     // The spellings of the accessors an `access$…` bridge forwards to, read up front by the
     // IDENTITY the selection recorded: the loop below borrows `ir.classes` mutably and still has
     // to name the exact method each bridge belongs to.
-    let bridged_accessor_names: std::collections::HashMap<crate::ir::FunId, String> = realizations
+    let bridged_accessor_names: crate::fx_hash::HashMap<crate::ir::FunId, String> = realizations
         .accessor_functions()
         .filter_map(|function| {
             ir.functions

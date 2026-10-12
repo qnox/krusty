@@ -5,7 +5,7 @@
 //! realizes the companion accessors through synthetic outer bridges. This pass performs that physical
 //! rewrite after common lowering; it never re-reads the AST or resolves a declaration from its name.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrFunction, IrStatic};
 use crate::jvm::names::{property_getter_name, property_setter_name};
@@ -339,7 +339,7 @@ pub(crate) fn lower_companion_properties(
         return;
     }
 
-    let mut static_for_field = HashMap::new();
+    let mut static_for_field = HashMap::default();
     for candidate in &candidates {
         let index = ir.statics.len() as u32;
         ir.statics.push(IrStatic {
@@ -411,7 +411,7 @@ pub(crate) fn lower_companion_properties(
         .iter()
         .map(|candidate| candidate.companion)
         .collect();
-    let mut retain_initializer_stores = HashSet::new();
+    let mut retain_initializer_stores = HashSet::default();
     for companion in affected_companions.iter().copied() {
         let Some(body) = ir.classes[companion as usize].init_body else {
             continue;
@@ -503,7 +503,7 @@ pub(crate) fn lower_companion_properties(
     }
 
     // Compact each companion's field table and retarget all surviving field identities.
-    let mut remaps = HashMap::<ClassId, Vec<Option<u32>>>::new();
+    let mut remaps = HashMap::<ClassId, Vec<Option<u32>>>::default();
     for companion in affected_companions.iter().copied() {
         let fields = std::mem::take(&mut ir.classes[companion as usize].fields);
         let mut retained = Vec::with_capacity(fields.len());
@@ -697,8 +697,8 @@ fn schedule_class_companion_initializers(
             ir,
             companion,
             body,
-            &HashSet::new(),
-            &HashSet::new(),
+            &HashSet::default(),
+            &HashSet::default(),
         ) {
             continue;
         }
@@ -756,7 +756,7 @@ fn record_moved_initializer_accessors(
     realizations: &crate::jvm::property_realizations::PropertyRealizations,
 ) {
     let mut pending = vec![body];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -858,7 +858,7 @@ fn move_initializer_lambdas(
         return;
     };
     let mut pending = vec![body];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut lambdas = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -913,7 +913,7 @@ fn initializer_needs_companion_instance(
 ) -> bool {
     let companion_name = ir.classes[companion as usize].fq_name;
     let mut pending = vec![body];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) || skip.contains(&expression) {
             continue;

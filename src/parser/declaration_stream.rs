@@ -11,7 +11,7 @@ struct DeclarationPrelude {
     package: Option<String>,
     imports: Vec<ImportPath>,
     detached_import_types: Vec<TypeRef>,
-    detached_import_suppressions: std::collections::HashMap<u32, Vec<String>>,
+    detached_import_suppressions: crate::fx_hash::HashMap<u32, Vec<String>>,
 }
 
 impl DeclarationPrelude {
@@ -28,7 +28,7 @@ impl DeclarationPrelude {
             .detached_import_types
             .iter()
             .map(|reference| reference.span.lo)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         self.detached_import_suppressions = file
             .detached_type_ref_suppressions
             .iter()

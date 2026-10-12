@@ -4,7 +4,7 @@
 //! derives nesting from those identities and renders only the final classfile payload; it never uses
 //! rendered spellings as lookup keys or reparses them to recover semantic owners.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ir::{IrClass, IrFile};
@@ -37,7 +37,7 @@ impl InnerClasses {
             .map(|class| (class.fq_name_id(), class))
             .collect();
         let mut specs = Vec::new();
-        let mut serializers = HashSet::new();
+        let mut serializers = HashSet::default();
         let generated_serializer = type_name("kotlinx/serialization/internal/GeneratedSerializer");
 
         // Serialization's compiler-generated nested class is literally named `$serializer`, hence
@@ -405,8 +405,8 @@ fn enclosed_by_specialized_suspend_lambda(ir: &IrFile, class: &IrClass) -> bool 
 }
 
 fn enclosure_reaches_inline(ir: &IrFile, start: Option<crate::ir::IrEnclosure>) -> bool {
-    let mut functions = HashSet::new();
-    let mut classes = HashSet::new();
+    let mut functions = HashSet::default();
+    let mut classes = HashSet::default();
     let mut pending = vec![start];
     while let Some(scope) = pending.pop() {
         let Some(scope) = scope else {

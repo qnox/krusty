@@ -18,7 +18,7 @@ pub(crate) fn rename(
         .keys()
         .copied()
         .collect::<Vec<_>>();
-    let mut names = std::collections::HashMap::new();
+    let mut names = crate::fx_hash::HashMap::default();
     for class in pending {
         let from = ir.classes[class as usize].fq_name;
         let name =

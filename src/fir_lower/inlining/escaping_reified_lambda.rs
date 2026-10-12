@@ -41,8 +41,8 @@ fn lambda_implementations(ir: &crate::ir::IrFile, function: u32) -> Vec<u32> {
         .body
         .unwrap_or_else(|| panic!("{function} has a body"));
     let mut pending = vec![body];
-    let mut seen_exprs = std::collections::HashSet::new();
-    let mut seen_functions = std::collections::HashSet::new();
+    let mut seen_exprs = crate::fx_hash::HashSet::default();
+    let mut seen_functions = crate::fx_hash::HashSet::default();
     let mut implementations = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen_exprs.insert(expression) {
@@ -66,7 +66,7 @@ fn instanceof_targets(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
         return Vec::new();
     };
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut targets = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -315,7 +315,7 @@ fn forwarded_type_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
         return Vec::new();
     };
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut arguments = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -410,7 +410,7 @@ fn type_of_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
         return Vec::new();
     };
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut arguments = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -519,7 +519,7 @@ fn type_operands(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
         return Vec::new();
     };
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut operands = Vec::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {

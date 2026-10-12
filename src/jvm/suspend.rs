@@ -85,6 +85,7 @@ use crate::backend::coroutines::{
     suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
 };
 use crate::backend::coroutines::{CoroutineRepresentation, SuspensionTyping};
+use crate::fx_hash::HashSet;
 use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp,
 };
@@ -94,7 +95,6 @@ use crate::types::{type_name, Ty, TypeName};
 use call_operand_realization::append_continuation;
 use debug_metadata::capture_suspension_lines;
 use get_or_create::build_get_or_create;
-use std::collections::HashSet;
 use tail_forward::{record_return_adaptations, rewrite_forward_body, tail_forward};
 use value_liveness::{kills_value, pending_reads_after};
 
@@ -132,12 +132,12 @@ type Suspension = (Option<(u32, Ty)>, ExprId, SuspensionCompletion);
 #[derive(Clone, Default)]
 struct SuspensionScope {
     values: Vec<(u32, Ty)>,
-    names: std::collections::HashMap<u32, String>,
+    names: crate::fx_hash::HashMap<u32, String>,
     /// The spilled values nothing reads after this suspension: kotlinc still spills one in debug
     /// scope, but routes a reference through `SpillingKt.nullOutSpilledVariable` first.
     dead: HashSet<u32>,
 }
-type SuspensionScopes = std::collections::HashMap<ExprId, SuspensionScope>;
+type SuspensionScopes = crate::fx_hash::HashMap<ExprId, SuspensionScope>;
 
 /// What every state machine of one file is built against.
 struct MachineContext<'a> {
@@ -201,8 +201,8 @@ pub(crate) fn lower_suspend(
         null_out_dead_spills,
     };
     let (fids, lambda_values) = suspend_lambda::innermost_first(ir, ir.suspend_funs.clone());
-    let mut pre_splice_scopes: std::collections::HashMap<u32, SuspensionScopes> =
-        std::collections::HashMap::new();
+    let mut pre_splice_scopes: crate::fx_hash::HashMap<u32, SuspensionScopes> =
+        crate::fx_hash::HashMap::default();
     crate::trace_compiler!(
         "suspend",
         "lower_suspend facade={facade} suspend_funs={fids:?}"
@@ -329,7 +329,7 @@ pub(crate) fn lower_suspend(
         let suspension_lines = if let (Some(b), None) = (body, forward.as_ref()) {
             capture_suspension_lines(ir, b, &suspend_set, ir.fn_close_lines.get(&fid).copied())
         } else {
-            std::collections::HashMap::new()
+            crate::fx_hash::HashMap::default()
         };
         // Normalize `return { stmts…; value }` into `stmts…; return value`. An elvis / safe-call subject
         // that suspends lowers to a value-position `Block` binding a temp (`{ val t = susp()…; when{…} }`);
@@ -1246,7 +1246,7 @@ fn build_state_machine(
     reads.retain(|idx| param_ty(*idx).is_some() || head_writes.binary_search(idx).is_ok());
     // Named source variables declared anywhere in the body — the kotlinc scope-spill rule (below)
     // applies only to these; a compiler temp follows pure liveness.
-    let mut named_vars: HashSet<u32> = HashSet::new();
+    let mut named_vars: HashSet<u32> = HashSet::default();
     collect_named_vars(ir, b, &mut named_vars);
     // The coarse rule above keeps any local read at-or-after the FIRST suspending statement, but a
     // COMPILER TEMP (elvis/safe-call materialization, a suspension hoist) is a value kotlinc holds
@@ -1432,7 +1432,7 @@ fn build_state_machine(
     // suspension: allocate a fresh, collision-free value-index per such catch (above `base + 3`), rewrite
     // the catch body's reads of the user variable to it, and add it to the spill set BEFORE the
     // continuation class is built so it gets an `L$i` field. The handler binds it from `r_v` on entry.
-    let mut catch_spills: std::collections::HashMap<ExprId, u32> = std::collections::HashMap::new();
+    let mut catch_spills: crate::fx_hash::HashMap<ExprId, u32> = crate::fx_hash::HashMap::default();
     let mut catch_spill_sources: Vec<(u32, ExprId, u32)> = Vec::new();
     let mut next_ev = base + 4;
     {
@@ -1478,7 +1478,7 @@ fn build_state_machine(
     // collected here and merged into the pre-splice named-by-scope lists.
     merge_live_temps(&mut susp_scopes, live_temp_scopes(ir, b, &suspend_set));
     for &(cvar, cbody, ev) in &catch_spill_sources {
-        let mut catch_points = HashSet::new();
+        let mut catch_points = HashSet::default();
         collect_suspension_points(ir, cbody, &suspend_set, &mut catch_points);
         for (point, scope) in &mut susp_scopes {
             if !catch_points.contains(point) {
@@ -1497,7 +1497,7 @@ fn build_state_machine(
     // Fold the field layout only over suspensions still PRESENT in the final (post-transform)
     // body — a desugared-away call's captured list must not size the class (kotlinc's field count
     // reflects the suspensions its machine actually has).
-    let mut live_calls: HashSet<ExprId> = HashSet::new();
+    let mut live_calls: HashSet<ExprId> = HashSet::default();
     collect_suspension_points(ir, b, &suspend_set, &mut live_calls);
     // A positional scope list is the authoritative set the flattener stores and restores. Reconcile
     // local allocation with it after both pre-splice named scopes and post-hoist live temps are merged:
@@ -1582,8 +1582,8 @@ fn build_state_machine(
     let resume_points = std::mem::take(&mut flat.resume_points);
     {
         let ir = &*flat.ir;
-        let mut slot_name: std::collections::HashMap<u32, String> =
-            std::collections::HashMap::new();
+        let mut slot_name: crate::fx_hash::HashMap<u32, String> =
+            crate::fx_hash::HashMap::default();
         if let Some(identities) = ir.function_parameter_identities(fid) {
             let function = &ir.functions[fid as usize];
             let this_off = u32::from(function.dispatch_receiver.is_some() && !function.is_static);
@@ -1896,7 +1896,7 @@ struct Flat<'a> {
     /// The catch body's reads of `e` are pre-rewritten to this index; the handler state binds it from
     /// `r_v` (`e = (E) r_v`) once on entry, and it is spilled/restored like any local so it survives the
     /// catch's own suspension (after which `r_v` holds the resume value, no longer the exception).
-    catch_spills: std::collections::HashMap<ExprId, u32>,
+    catch_spills: crate::fx_hash::HashMap<ExprId, u32>,
     /// Per-suspension lexical scope lists (kotlinc's positional-spill model, see
     /// docs/POSITIONAL_SPILLS.md): suspend-call expr id → `params ++ in-scope locals`.
     scopes: SuspensionScopes,
@@ -1909,7 +1909,7 @@ struct Flat<'a> {
     /// a body-only local is dead, and spilling its (coalesced, possibly wrong-typed) slot would emit a
     /// verify-invalid store. A skipped field keeps a same-typed prior value or its default, and the
     /// loop-top restore is always type-correct — so gating on definite assignment is sound.
-    assigned: std::collections::HashSet<u32>,
+    assigned: crate::fx_hash::HashSet<u32>,
     next_local: u32,
     /// Loop-target stack for a suspending loop whose body is flattened across states: each entry is
     /// `(label, continue_state, break_state)`. A `Continue`/`Break` statement inside the body resolves to
@@ -3393,7 +3393,7 @@ fn collect_cond_susp_temp_bindings(
     out: &mut Vec<u32>,
 ) {
     let mut stack = vec![e];
-    let mut seen: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::default();
     while let Some(cur) = stack.pop() {
         if !seen.insert(cur) {
             continue;
@@ -3414,9 +3414,9 @@ fn collect_cond_susp_temp_bindings(
     }
 }
 
-fn collect_slot_names(ir: &IrFile, e: ExprId, out: &mut std::collections::HashMap<u32, String>) {
+fn collect_slot_names(ir: &IrFile, e: ExprId, out: &mut crate::fx_hash::HashMap<u32, String>) {
     let mut stack = vec![e];
-    let mut seen: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::default();
     while let Some(cur) = stack.pop() {
         if !seen.insert(cur) {
             continue;
@@ -3435,7 +3435,7 @@ fn collect_slot_names(ir: &IrFile, e: ExprId, out: &mut std::collections::HashMa
 
 fn collect_named_vars(ir: &IrFile, e: ExprId, out: &mut HashSet<u32>) {
     let mut stack = vec![e];
-    let mut seen: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::default();
     while let Some(cur) = stack.pop() {
         if !seen.insert(cur) {
             continue;

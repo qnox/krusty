@@ -15,7 +15,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[Ty],
         expected_result: Option<Ty>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         let dispatch_member = selected.kind == crate::libraries::FnKind::Member;
         if !dispatch_member {
             if let Some(declared) = selected.semantic_receiver() {

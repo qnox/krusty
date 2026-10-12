@@ -4,7 +4,8 @@
 //! redo on the unboxed value (a load, store, `pop`, `dup`, a safe cast, an unboxing or a
 //! same-typed comparison), and while it only meets boxes of its own type where edges join.
 
-use std::collections::{BTreeSet, HashMap};
+use crate::fx_hash::HashMap;
+use std::collections::BTreeSet;
 
 use super::super::analysis::{
     intern_descriptor, AnalyzerError, At, BasicInterpreter, BasicValue, Interpreter,
@@ -43,8 +44,8 @@ impl<'a> BoxingInterpreter<'a> {
         BoxingInterpreter {
             value_classes,
             basic: BasicInterpreter,
-            boxing_places: HashMap::new(),
-            progression_iterators: HashMap::new(),
+            boxing_places: HashMap::default(),
+            progression_iterators: HashMap::default(),
             tainted_iterators: BTreeSet::new(),
             candidates: Candidates::default(),
         }

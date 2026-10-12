@@ -7,8 +7,8 @@
 //! result coerced to the callee's declared result after the markers. The transformer reads the
 //! markers, builds the machine and deletes them when the class is written.
 
+use crate::fx_hash::{HashMap, HashSet};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 use super::scalar_coercion::{semantic_scalar_adapter, unbox_prim_from};
 use super::{jvm_declared_ty, EmitRun, Emitter};

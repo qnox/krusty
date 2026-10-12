@@ -13,7 +13,8 @@
 //! instruction its null-check rules inserted in front of the jump's original target, where kotlinc
 //! would have a line number between them.
 
-use std::collections::{BTreeSet, HashMap};
+use crate::fx_hash::HashMap;
+use std::collections::BTreeSet;
 
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 
@@ -68,7 +69,7 @@ pub(crate) fn remove(method: &mut MethodNode, pinned: &BTreeSet<LabelId>) -> boo
     // `nop`; `pending` is that instruction's target when it is a `goto`.
     let mut run: BTreeSet<LabelId> = BTreeSet::new();
     let mut pending: Option<LabelId> = None;
-    let mut leads_to: HashMap<LabelId, LabelId> = HashMap::new();
+    let mut leads_to: HashMap<LabelId, LabelId> = HashMap::default();
     let mut redundant: Vec<usize> = Vec::new();
     for (at, node) in method.nodes.iter().enumerate().rev() {
         match node {
@@ -97,7 +98,7 @@ pub(crate) fn remove(method: &mut MethodNode, pinned: &BTreeSet<LabelId>) -> boo
 
     let mut changed = false;
     // Thread every jump through the `goto`s its target leads into.
-    let mut resolved = HashMap::new();
+    let mut resolved = HashMap::default();
     for node in &mut method.nodes {
         if let Node::Insn(Insn::Jump { target, .. }) = node {
             if pinned.contains(target) {

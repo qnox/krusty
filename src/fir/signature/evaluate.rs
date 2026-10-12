@@ -135,7 +135,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             graph: &'a SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut std::collections::HashSet<SigExprId>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<SigCallArgumentProbe<'a>, DiagnosticId> {
             let name = argument.name.map(|name| {
                 graph
@@ -187,7 +187,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             graph: &'a SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut std::collections::HashSet<SigExprId>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedSigCallArgument<'a>, DiagnosticId> {
             let name = argument.name.map(|name| {
                 graph
@@ -443,7 +443,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut std::collections::HashSet<SigExprId>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
             match graph.expr(expression) {
                 Some(SigExpr::CallableReference(target)) => {
@@ -549,7 +549,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut std::collections::HashSet<SigExprId>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
             let selection = graph
                 .callable_selection(target)
@@ -722,7 +722,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut std::collections::HashSet<SigExprId>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
             match graph.expr(expression)? {
                 SigExpr::Call {
@@ -846,7 +846,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut std::collections::HashSet<SigExprId>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
             let receiver =
                 evaluate_expression(semantics, receiver, graph, demand, memo, computing)?;
@@ -954,7 +954,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             graph: &SignatureGraph,
             demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut std::collections::HashSet<SigExprId>,
+            computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
             if let Some(ty) = memo.get(&expression).copied() {
                 return Ok(ty);
@@ -1617,14 +1617,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             Ok(ty)
         }
 
-        let mut memo = HashMap::new();
+        let mut memo = HashMap::default();
         let evaluated = evaluate_expression(
             self.semantics,
             result,
             graph,
             demand,
             &mut memo,
-            &mut std::collections::HashSet::new(),
+            &mut crate::fx_hash::HashSet::default(),
         )?;
         let approximated = self
             .semantics

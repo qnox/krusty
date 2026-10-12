@@ -24,12 +24,12 @@
 
 use super::access_bridges::ProtectedMemberAccessBridge;
 use super::*;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::jvm::private_static_access::{
     bridged_getter, bridged_setter, declared_backing_getter, declared_backing_setter,
     member_property_accessor_name, StaticOwner,
 };
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 /// One synthetic accessor a static owner declares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -213,7 +213,7 @@ pub(super) fn routes_through_accessor(
 /// `$default` stub. A private inline function that is expanded only into non-inline callers,
 /// and that declares no default, stays out of the set and keeps direct access.
 pub(super) fn inline_functions_exporting_private_access(ir: &IrFile) -> HashSet<u32> {
-    let mut exporting = HashSet::new();
+    let mut exporting = HashSet::default();
     let mut stack = Vec::new();
     for index in 0..ir.functions.len() {
         let function = index as u32;
@@ -254,7 +254,7 @@ pub(super) fn body_exports_private_access(
 fn inline_template_dependencies(ir: &IrFile, root: crate::ir::ExprId) -> Vec<u32> {
     let mut targets = Vec::new();
     let mut stack = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(expression) = stack.pop() {
         if !seen.insert(expression) {
             continue;
@@ -349,7 +349,7 @@ pub(super) fn plan(
         protected: RefCell::default(),
         helper_access: env.local_delegate_access,
     };
-    let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::new();
+    let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::default();
     for context in contexts {
         let Some(class) = context
             .class
@@ -364,7 +364,7 @@ pub(super) fn plan(
                 context.owner,
                 root,
                 0,
-                &HashMap::new(),
+                &HashMap::default(),
                 body_exports_private_access(ir, &exporting_private_access, root),
                 &mut uses,
             );
@@ -426,7 +426,7 @@ pub(super) fn plan(
         exporting_private_access,
         ..StaticAccessorPlan::default()
     };
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for Use {
         owner, accessor, ..
     } in uses

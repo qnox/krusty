@@ -7,8 +7,8 @@
 //! kotlinc renders through the static `toString-impl` over its carrier.
 
 use super::{BoxOp, Repr, ReprCtx};
+use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, IrExpr};
-use std::collections::HashSet;
 
 pub(super) fn record(
     exprs: &[IrExpr],

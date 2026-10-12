@@ -252,7 +252,7 @@ impl BodyLowering<'_> {
             .iter()
             .filter(|(_, (existing, _))| existing == &sequence)
             .filter_map(|(_, (_, site))| site.path.last().map(|step| step.position))
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let entries = self
             .ir
             .lifting_sequences

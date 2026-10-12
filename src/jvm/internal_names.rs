@@ -8,7 +8,7 @@
 //! `@PublishedApi` members stay unmangled. A public override keeps the Kotlin name and a bridge of
 //! the mangled name delegates to it.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{Callee, FunId, IrExpr, IrFile, IrLocalPropertyLayout, IrVirtualTarget};
@@ -39,7 +39,7 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
         .map(|fid| fid as FunId)
         .filter(|&fid| declares_mangled_member(ir, fid, facade_name))
         .collect::<Vec<_>>();
-    let mut old_names = HashMap::<FunId, String>::new();
+    let mut old_names = HashMap::<FunId, String>::default();
     for fid in targets {
         let function = &mut ir.functions[fid as usize];
         let old = function.name.clone();
@@ -119,8 +119,8 @@ fn rewrite_property_references(
     synthesized: &[SynthesizedAccessor],
     suffix: &str,
 ) {
-    let mut getters = HashMap::<(TypeName, String), String>::new();
-    let mut setters = HashMap::<(TypeName, String), String>::new();
+    let mut getters = HashMap::<(TypeName, String), String>::default();
+    let mut setters = HashMap::<(TypeName, String), String>::default();
     for class in &ir.classes {
         for property in &class.properties {
             if let Some(function) = property
@@ -510,14 +510,14 @@ fn rewrite_call_names(
     synthesized: &[SynthesizedAccessor],
     suffix: &str,
 ) {
-    let mut by_callable = HashMap::<crate::fir::CallableId, String>::new();
+    let mut by_callable = HashMap::<crate::fir::CallableId, String>::default();
     for (&callable, &function) in &ir.checked_callable_functions {
         if old_names.contains_key(&function) {
             by_callable.insert(callable, ir.functions[function as usize].name.clone());
         }
     }
-    let mut getter_names = HashMap::<crate::fir::PropertyId, String>::new();
-    let mut setter_names = HashMap::<crate::fir::PropertyId, String>::new();
+    let mut getter_names = HashMap::<crate::fir::PropertyId, String>::default();
+    let mut setter_names = HashMap::<crate::fir::PropertyId, String>::default();
     for (&property, layout) in &ir.local_property_layouts {
         let (getter, setter) = match layout {
             IrLocalPropertyLayout::Member { getter, setter, .. } => (*getter, *setter),
@@ -534,7 +534,7 @@ fn rewrite_call_names(
             setter_names.insert(property, ir.functions[function as usize].name.clone());
         }
     }
-    let mut by_signature = HashMap::<(TypeName, String, String), String>::new();
+    let mut by_signature = HashMap::<(TypeName, String, String), String>::default();
     for class in &ir.classes {
         for &function in &class.methods {
             let Some(old) = old_names.get(&function) else {

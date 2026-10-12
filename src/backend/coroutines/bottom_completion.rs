@@ -2,8 +2,8 @@
 //! completion its resume path keeps.
 
 use super::suspension_points::is_suspension_point;
+use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, IrBottomValueCompletion, IrExpr, IrFile, IrTypeOp};
-use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
 pub(crate) struct UnwrappedSuspension {
@@ -108,7 +108,7 @@ mod tests {
             producer: point,
             completion: IrBottomValueCompletion::Diverge,
         });
-        let suspend_set = HashSet::new();
+        let suspend_set = HashSet::default();
 
         let discarded = unwrap_suspend_cast(&ir, fallthrough, &suspend_set, false);
         assert_eq!(discarded.point, point);
@@ -157,7 +157,7 @@ mod tests {
             completion: IrBottomValueCompletion::Diverge,
         });
 
-        let tail = unwrap_suspend_cast(&ir, wrapped, &HashSet::new(), true);
+        let tail = unwrap_suspend_cast(&ir, wrapped, &HashSet::default(), true);
         assert_eq!(tail.point, point);
         assert_eq!(tail.completion, None);
     }

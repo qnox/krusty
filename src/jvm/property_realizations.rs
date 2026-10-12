@@ -6,7 +6,7 @@
 //! prevents emission from recovering a declaration by `(owner, name)` and prevents JVM fields or
 //! accessor descriptors from leaking into FIR/common IR.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::PropertyId;
 use crate::ir::ExprId;

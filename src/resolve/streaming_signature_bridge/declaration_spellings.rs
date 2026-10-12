@@ -16,8 +16,8 @@ use crate::spelling::{DeclaredSpellings, RecordedTypeAnnotations, Spelled};
 /// each file's recorded type-use annotations.
 struct SpellingContext {
     expansions:
-        std::collections::HashMap<crate::types::TypeName, (Spelled, Vec<String>, crate::types::Ty)>,
-    annotations: std::collections::HashMap<crate::fir::SourceFileId, RecordedTypeAnnotations>,
+        crate::fx_hash::HashMap<crate::types::TypeName, (Spelled, Vec<String>, crate::types::Ty)>,
+    annotations: crate::fx_hash::HashMap<crate::fir::SourceFileId, RecordedTypeAnnotations>,
 }
 
 fn type_parameter_names(
@@ -184,23 +184,23 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
                 .map(|declaration| (declaration, classifier.internal))
         })
         .collect();
-    let empty_receivers = std::collections::HashMap::new();
+    let empty_receivers = crate::fx_hash::HashMap::default();
     let semantics = super::ProductionSignatureSemantics {
         headers,
         table,
         classifier_types: &classifier_types,
-        parameters: std::collections::HashMap::new(),
+        parameters: crate::fx_hash::HashMap::default(),
         extension_receivers: &empty_receivers,
-        source_orders: std::collections::HashMap::new(),
-        signature_origins: std::collections::HashMap::new(),
+        source_orders: crate::fx_hash::HashMap::default(),
+        signature_origins: crate::fx_hash::HashMap::default(),
         stable_functions: super::stable_function_index::StableFunctionIndex::default(),
-        scoped_receivers: std::cell::RefCell::new(std::collections::HashMap::new()),
-        scoped_constraint_inputs: std::cell::RefCell::new(std::collections::HashMap::new()),
-        scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
-        completed_scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
+        scoped_receivers: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
+        scoped_constraint_inputs: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
+        scoped_constraints: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
+        completed_scoped_constraints: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
         diagnostics: std::cell::RefCell::new(Vec::new()),
         selected_calls: Default::default(),
-        source_contracts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        source_contracts: std::cell::RefCell::new(crate::fx_hash::HashMap::default()),
         file_import_scopes: super::file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: std::cell::RefCell::new(None),
         extension_receivers_by_declaration: std::cell::RefCell::new(None),

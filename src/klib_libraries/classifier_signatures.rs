@@ -1,6 +1,6 @@
 //! Exact public `IdSignature`s of the classes a KLIB provider publishes, and of their members.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::declaration_signatures::{
     sign_function, sign_property, type_parameter_identities, unsignable, KlibLibraryError,
@@ -67,7 +67,7 @@ pub(super) fn sign_package_classes(
     let mut names = classes.keys().cloned().collect::<Vec<_>>();
     // An enclosing class sorts before every class nested in it.
     names.sort();
-    let mut scopes: HashMap<String, ClassTypeParameters> = HashMap::new();
+    let mut scopes: HashMap<String, ClassTypeParameters> = HashMap::default();
     let mut published = Vec::new();
     for name in names {
         let local = name

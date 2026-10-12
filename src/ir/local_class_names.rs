@@ -2,7 +2,7 @@
 
 mod reachable;
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::types::{Ty, TypeName};
 
@@ -1694,7 +1694,7 @@ impl super::IrFile {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        let mut physical = HashMap::new();
+        let mut physical = HashMap::default();
         for class in classes {
             physical_name(class, &root, self, &mut physical);
         }
@@ -1770,7 +1770,7 @@ mod tests {
         let declaration = crate::types::type_name("sample/Declaration");
         let intermediate = crate::types::type_name("sample/Intermediate");
         let terminal = crate::types::type_name("sample/Terminal");
-        let names = HashMap::from([(declaration, intermediate), (intermediate, terminal)]);
+        let names = HashMap::from_iter([(declaration, intermediate), (intermediate, terminal)]);
 
         assert_eq!(remapped_name(declaration, &names), terminal);
         assert_eq!(
@@ -1785,7 +1785,7 @@ mod tests {
         let target = crate::types::type_name("sample/Target");
         let source_ty = Ty::obj_name(source);
         let target_ty = Ty::obj_name(target);
-        let names = HashMap::from([(source, target)]);
+        let names = HashMap::from_iter([(source, target)]);
 
         let mut callable = IrExpr::CallableReference(IrCallableReference {
             target: IrCallableReferenceTarget::FunctionValueConversion { ordinal: 0 },
@@ -1895,7 +1895,7 @@ mod tests {
         let target = crate::types::type_name("sample/Target");
         let source_ty = Ty::obj_name(source);
         let target_ty = Ty::obj_name(target);
-        let names = HashMap::from([(source, target)]);
+        let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
         let expression = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
 
@@ -1963,7 +1963,7 @@ mod tests {
     fn reachable_remap_reports_a_lambda_implementation_detached_from_another_site() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");
-        let names = HashMap::from([(source, target)]);
+        let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
@@ -2004,8 +2004,8 @@ mod tests {
         let detached = ir.remap_reachable_classifier_identities(
             &names,
             [reachable],
-            &HashSet::from([reachable, reachable_inline_body]),
-            &mut HashSet::new(),
+            &HashSet::from_iter([reachable, reachable_inline_body]),
+            &mut HashSet::default(),
         );
 
         assert_eq!(detached.len(), 1);
@@ -2049,7 +2049,7 @@ mod tests {
     fn reachable_remap_detaches_an_implementation_owned_by_the_remapped_class() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");
-        let names = HashMap::from([(source, target)]);
+        let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
@@ -2076,8 +2076,8 @@ mod tests {
         let detached = ir.remap_reachable_classifier_identities(
             &names,
             [reachable],
-            &HashSet::from([reachable]),
-            &mut HashSet::new(),
+            &HashSet::from_iter([reachable]),
+            &mut HashSet::default(),
         );
 
         assert_eq!(detached.len(), 1);
@@ -2097,7 +2097,7 @@ mod tests {
     fn reachable_remap_detaches_a_consumed_lambda_direct_call() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");
-        let names = HashMap::from([(source, target)]);
+        let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
@@ -2139,8 +2139,8 @@ mod tests {
         let detached = ir.remap_reachable_classifier_identities(
             &names,
             [reachable],
-            &HashSet::from([reachable]),
-            &mut HashSet::new(),
+            &HashSet::from_iter([reachable]),
+            &mut HashSet::default(),
         );
 
         assert_eq!(detached.len(), 1);
@@ -2171,7 +2171,7 @@ mod tests {
     fn reachable_remap_specializes_a_consumed_lambda_with_no_other_site() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");
-        let names = HashMap::from([(source, target)]);
+        let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
@@ -2208,8 +2208,8 @@ mod tests {
         let detached = ir.remap_reachable_classifier_identities(
             &names,
             [reachable],
-            &HashSet::from([reachable]),
-            &mut HashSet::new(),
+            &HashSet::from_iter([reachable]),
+            &mut HashSet::default(),
         );
 
         assert_eq!(detached.len(), 1);
@@ -2234,7 +2234,7 @@ mod tests {
     fn reachable_remap_does_not_take_ownership_of_a_substituted_caller_lambda() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");
-        let names = HashMap::from([(source, target)]);
+        let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
@@ -2262,8 +2262,8 @@ mod tests {
         let detached = ir.remap_reachable_classifier_identities(
             &names,
             [copied_root],
-            &HashSet::from([copied_root]),
-            &mut HashSet::new(),
+            &HashSet::from_iter([copied_root]),
+            &mut HashSet::default(),
         );
 
         assert!(detached.is_empty());

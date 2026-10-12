@@ -1,6 +1,6 @@
 //! Type-parameter substitution. Callers supply a lookup; the walk never builds a map of its own.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::{intern, Ty};
 
@@ -357,7 +357,7 @@ mod tests {
     fn identity_only_transforms_preserve_definitely_non_null_provenance() {
         let original = nullable_bounded_parameter("owner:T");
         let intersection = Ty::DefinitelyNotNull(intern_ty(original));
-        let identities = HashMap::from([("owner:T", "call:T")]);
+        let identities = HashMap::from_iter([("owner:T", "call:T")]);
 
         let renamed = ty_rename_params(intersection, &identities);
         let renamed_original = nullable_bounded_parameter("call:T");
@@ -366,7 +366,7 @@ mod tests {
 
         let rebound = ty_with_param_bounds(
             intersection,
-            &HashMap::from([("owner:T".to_string(), Ty::nullable(Ty::obj("demo/Payload")))]),
+            &HashMap::from_iter([("owner:T".to_string(), Ty::nullable(Ty::obj("demo/Payload")))]),
         );
         let rebound_original = Ty::ty_param("owner:T", Ty::nullable(Ty::obj("demo/Payload")));
         assert_eq!(rebound, Ty::DefinitelyNotNull(intern_ty(rebound_original)));
@@ -379,25 +379,25 @@ mod tests {
         let intersection = Ty::DefinitelyNotNull(intern_ty(declared));
 
         assert_eq!(
-            ty_subst_keep_unbound(intersection, &HashMap::new()),
+            ty_subst_keep_unbound(intersection, &HashMap::default()),
             intersection
         );
         assert_eq!(
-            ty_subst(intersection, &HashMap::new()),
+            ty_subst(intersection, &HashMap::default()),
             Ty::obj("kotlin/Any")
         );
 
         let caller = nullable_bounded_parameter("caller:U");
         let symbolic = ty_subst_keep_unbound(
             intersection,
-            &HashMap::from([("callee:T".to_string(), caller)]),
+            &HashMap::from_iter([("callee:T".to_string(), caller)]),
         );
         assert_eq!(symbolic, Ty::DefinitelyNotNull(intern_ty(caller)));
         assert_eq!(Ty::nullable(symbolic), Ty::nullable(caller));
 
         let concrete = ty_subst_keep_unbound(
             intersection,
-            &HashMap::from([("callee:T".to_string(), Ty::nullable(Ty::String))]),
+            &HashMap::from_iter([("callee:T".to_string(), Ty::nullable(Ty::String))]),
         );
         assert_eq!(concrete, Ty::String);
     }
@@ -406,7 +406,7 @@ mod tests {
     fn alias_substitution_consumes_projections_at_function_boundaries_only() {
         let formal = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let template = Ty::fun(vec![formal, Ty::obj_args("sample/Box", &[formal])], formal);
-        let bindings = HashMap::from([(
+        let bindings = HashMap::from_iter([(
             "T".to_string(),
             Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
         )]);

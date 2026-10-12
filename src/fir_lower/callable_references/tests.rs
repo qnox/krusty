@@ -909,7 +909,7 @@ fn suspending_collection_map_is_structural_before_common_ir_escapes() {
         .body
         .expect("collect body must be streamed");
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut has_loop = false;
     let mut has_suspend_call = false;
     let mut has_lambda = false;
@@ -1237,7 +1237,7 @@ fn inner_property_initializer_offsets_source_parameters_after_enclosing_prefix()
         .expect("inner class");
     let body = inner.init_body.expect("property initializer");
     let mut pending = vec![body];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut reads_source_suffix = false;
     let mut reads_enclosing_prefix_as_source = false;
     while let Some(expression) = pending.pop() {
@@ -1722,7 +1722,7 @@ fn reflective_enum_value_of_reference_names_the_classifier_member() {
 
 fn expression_contains_enum_value_of(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
     let mut pending = vec![expression];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(current) = pending.pop() {
         if !seen.insert(current) {
             continue;

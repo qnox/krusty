@@ -1,6 +1,6 @@
 //! JVM realization of backend-neutral local-class naming provenance.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 mod continuations;
 
@@ -181,8 +181,8 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
         .keys()
         .copied()
         .collect::<Vec<_>>();
-    let mut physical = HashMap::new();
-    let mut paths = HashMap::new();
+    let mut physical = HashMap::default();
+    let mut paths = HashMap::default();
     for class in classes {
         let name = physical_name(class, &facade, ir, &mut physical);
         paths.insert(

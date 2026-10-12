@@ -45,7 +45,7 @@ fn field_type_parameter_erasure(
     }
     let name = element.strip_prefix('T')?.strip_suffix(';')?;
     let (formals, bounds, _) = parse_formals(declaring_class_signature?);
-    let by_name: std::collections::HashMap<&str, Ty> = formals
+    let by_name: crate::fx_hash::HashMap<&str, Ty> = formals
         .iter()
         .zip(&bounds)
         .filter_map(|(formal, bounds)| {
@@ -56,7 +56,7 @@ fn field_type_parameter_erasure(
         })
         .collect();
     let mut bound = *by_name.get(name)?;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Ty::TyParam(next, _) = bound {
         if !seen.insert(next) {
             return None;
@@ -79,7 +79,7 @@ pub(super) fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
             // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
             // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
             Some(canonicalize_jvm_collections(
-                crate::symbol_resolver::ty_subst(gsig.ret, &std::collections::HashMap::new()),
+                crate::symbol_resolver::ty_subst(gsig.ret, &crate::fx_hash::HashMap::default()),
             ))
         }
         _ => None,
@@ -91,7 +91,7 @@ pub(super) fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
 /// `Config`). A `Continuation<-Unit>` maps to `Ty::Unit` (the source `Unit` return).
 pub(super) fn suspend_return_from_gsig(
     gsig: &GenericSig,
-    binds: &std::collections::HashMap<String, Ty>,
+    binds: &crate::fx_hash::HashMap<String, Ty>,
 ) -> Option<Ty> {
     match *gsig.params.last()? {
         Ty::Obj(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
@@ -212,7 +212,7 @@ pub(super) fn constructor_inference_signature(
 
     let declared_formals = method.formals.clone();
     let mut constructor_formals = Vec::with_capacity(declared_formals.len());
-    let mut rename = std::collections::HashMap::new();
+    let mut rename = crate::fx_hash::HashMap::default();
     for (ordinal, formal) in declared_formals.iter().enumerate() {
         if class_formals
             .iter()

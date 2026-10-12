@@ -4,7 +4,7 @@
 //! also proves that exact `origin` binding non-null. The edge is stored on `result`'s lexical
 //! binding by the checker; this module owns syntax extraction and cycle-safe graph traversal.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ast::{Expr, ExprId};
 use crate::diag::Span;
@@ -142,7 +142,7 @@ fn origin_chain(
     start: BindingIdentity,
     mut origin_of: impl FnMut(BindingIdentity) -> Option<BindingIdentity>,
 ) -> Vec<BindingIdentity> {
-    let mut seen = HashSet::from([start]);
+    let mut seen = HashSet::from_iter([start]);
     let mut current = start;
     let mut origins = Vec::new();
     while let Some(origin) = origin_of(current) {
@@ -158,7 +158,7 @@ fn origin_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::fx_hash::HashMap;
 
     #[test]
     fn traversal_has_no_valid_depth_cap() {
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn traversal_stops_at_a_cycle() {
-        let edges = HashMap::from([
+        let edges = HashMap::from_iter([
             (BindingIdentity::new(1), BindingIdentity::new(2)),
             (BindingIdentity::new(2), BindingIdentity::new(1)),
         ]);

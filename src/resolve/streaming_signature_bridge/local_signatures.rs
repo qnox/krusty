@@ -87,7 +87,7 @@ pub(crate) fn publish_checked_local_signatures_in_active_root(
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
     selected_root: crate::fir::DeclarationId,
-    selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
     publish_checked_local_signatures_selected(
         file,
@@ -111,7 +111,7 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
     selected_root: crate::fir::DeclarationId,
-    selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
     publish_checked_local_signatures_selected(
         file,
@@ -263,7 +263,7 @@ fn publish_checked_local_signatures_selected(
     active_root: Option<(
         &crate::fir::ActiveSourceDeclarations,
         crate::fir::DeclarationId,
-        &std::collections::HashSet<crate::fir::DeclarationId>,
+        &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     )>,
     exact_declarations: Option<&[crate::fir::DeclarationId]>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {

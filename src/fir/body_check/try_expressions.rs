@@ -1,7 +1,7 @@
 //! Checked-FIR publication for `try` expressions: each catch clause binds its parameter in a scope
 //! of its own, and keeps its `catch` keyword's line for the handler's entry.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{CatchClause, ExprId};
 use crate::fir::FirCatch;
@@ -24,8 +24,8 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnresolvedTypeSyntax,
                 )
             })?;
-            self.scopes.push(HashMap::new());
-            self.delegate_scopes.push(HashMap::new());
+            self.scopes.push(HashMap::default());
+            self.delegate_scopes.push(HashMap::default());
             let parameter_ty = self.resolved_type(catch.ty.span, parameter_ty)?;
             let parameter = self.bind_local(&catch.name, parameter_ty);
             let checked_body = self.expression(catch.body);

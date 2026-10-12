@@ -17,7 +17,8 @@
 //!
 //! "The node before" is ASM's: a line number is a node, and a label nothing refers to is none.
 
-use std::collections::{BTreeSet, HashMap};
+use crate::fx_hash::HashMap;
+use std::collections::BTreeSet;
 
 use super::super::analysis::opcode;
 use super::super::opcodes::*;
@@ -161,7 +162,7 @@ fn checked_local(listing: &Listing, nodes: &[Node], at: usize, insn: &Insn) -> O
 /// insertion.
 fn checks_by_local(listing: &Listing, method: &MethodNode) -> Vec<(u16, Vec<usize>)> {
     let mut locals: Vec<(u16, Vec<usize>)> = Vec::new();
-    let mut index: HashMap<u16, usize> = HashMap::new();
+    let mut index: HashMap<u16, usize> = HashMap::default();
     for (at, node) in method.nodes.iter().enumerate() {
         let Node::Insn(insn) = node else {
             continue;

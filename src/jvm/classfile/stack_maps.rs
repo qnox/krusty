@@ -100,7 +100,7 @@ impl BodyKey {
 /// The frames already computed for a class's bodies. A method's body is computed when it is added,
 /// when its rewrite is judged, and when the class is written, and those are often the same body.
 #[derive(Default)]
-pub(super) struct ComputedBodies(std::cell::RefCell<crate::name_tree::FxHashMap<BodyKey, Frames>>);
+pub(super) struct ComputedBodies(std::cell::RefCell<crate::fx_hash::HashMap<BodyKey, Frames>>);
 
 /// One body's frames, or why the writer declines to compute them.
 type Frames = Result<Arc<Computed>, Decline>;

@@ -16,7 +16,7 @@
 //! wrapper for the interface. It runs before the value-class pass, which then realizes the method
 //! like any member taking value classes.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrSamTarget};
 use crate::types::{Ty, TypeName};
@@ -81,7 +81,7 @@ pub(super) fn realize(
         })
         .collect::<Vec<_>>();
     sites.sort_unstable_by_key(|(node, ..)| *node);
-    let mut wrappers: HashMap<(TypeName, bool, usize), TypeName> = HashMap::new();
+    let mut wrappers: HashMap<(TypeName, bool, usize), TypeName> = HashMap::default();
     for (node, value, target, arity, public_inline, source_line) in sites {
         let function_arity = wrapped_function_arity(ir, value, &target, arity);
         let wrapper = *wrappers
@@ -173,7 +173,7 @@ fn wraps(target: &IrSamTarget, class_java_sam: bool) -> bool {
 /// A lambda's `inline_body` is outside the enclosing function's value namespace, but a function
 /// value converted there is still that function's conversion.
 fn expression_functions(ir: &IrFile) -> HashMap<ExprId, FunId> {
-    let mut owners = HashMap::new();
+    let mut owners = HashMap::default();
     for (function, declaration) in ir.functions.iter().enumerate() {
         let Some(body) = declaration.body else {
             continue;
@@ -191,7 +191,7 @@ fn assign_expression_function(
     owners: &mut HashMap<ExprId, FunId>,
 ) {
     let mut pending = vec![body];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(body) = pending.pop() {
         if !seen.insert(body) {
             continue;

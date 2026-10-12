@@ -8,12 +8,12 @@ use crate::types::Ty;
 /// name.
 pub(super) fn denotable_signature_result(
     ty: Ty,
-    denotable_parameters: &std::collections::HashSet<String>,
+    denotable_parameters: &crate::fx_hash::HashSet<String>,
 ) -> Ty {
     fn result(
         ty: Ty,
-        denotable: &std::collections::HashSet<String>,
-        visiting: &mut std::collections::HashSet<&'static str>,
+        denotable: &crate::fx_hash::HashSet<String>,
+        visiting: &mut crate::fx_hash::HashSet<&'static str>,
     ) -> Ty {
         match ty {
             // `Null` is the solver's literal-only bottom marker. A declaration inferred from that
@@ -78,6 +78,6 @@ pub(super) fn denotable_signature_result(
     result(
         ty,
         denotable_parameters,
-        &mut std::collections::HashSet::new(),
+        &mut crate::fx_hash::HashSet::default(),
     )
 }

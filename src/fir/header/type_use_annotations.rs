@@ -15,9 +15,9 @@ type AnnotatedOccurrence = (u32, Box<[Span]>);
 
 #[derive(Default)]
 pub(super) struct HeaderTypeUseAnnotationArena {
-    occurrences: std::collections::HashMap<SourceFileId, Vec<AnnotatedOccurrence>>,
+    occurrences: crate::fx_hash::HashMap<SourceFileId, Vec<AnnotatedOccurrence>>,
     /// Per source, each named function-type parameter's type start offset and name.
-    parameter_names: std::collections::HashMap<SourceFileId, Vec<(u32, Box<str>)>>,
+    parameter_names: crate::fx_hash::HashMap<SourceFileId, Vec<(u32, Box<str>)>>,
 }
 
 impl HeaderTypeUseAnnotationArena {

@@ -127,7 +127,7 @@ fn fold_nullable_widenings(ir: &mut IrFile, boundaries: &[(ExprId, ExprId, Ty, T
         .iter()
         .filter(|(_, _, target, physical)| !target.is_reference() && physical.is_reference())
         .map(|&(coercion, expression, target, _)| (coercion, (expression, target)))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     if carriers.is_empty() {
         return;
     }

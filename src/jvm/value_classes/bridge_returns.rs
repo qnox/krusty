@@ -11,7 +11,7 @@ use crate::jvm::bridge_adaptations::ValueClassAdapter;
 pub(super) fn mentions_value_class(
     params: &[Ty],
     ret: Ty,
-    under: &std::collections::HashMap<TypeName, Ty>,
+    under: &crate::fx_hash::HashMap<TypeName, Ty>,
 ) -> bool {
     params.iter().chain(std::iter::once(&ret)).any(|ty| {
         ty.non_null()
@@ -31,7 +31,7 @@ pub(super) fn mentions_value_class(
 pub(super) fn plan_unboxing(
     bridge: &Bridge,
     value_class: Option<TypeName>,
-    under: &std::collections::HashMap<TypeName, Ty>,
+    under: &crate::fx_hash::HashMap<TypeName, Ty>,
 ) -> Option<ValueClassAdapter> {
     let owner = value_class?;
     // A nullable `X?` whose underlying is itself null-carrying stays UNBOXED and carries the null;

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::*;
 use crate::jvm::classreader::{self, ExcEntry, MethodCode, MethodLocal, C};
@@ -16,7 +16,7 @@ impl TestPool {
     fn new() -> TestPool {
         TestPool {
             cp: vec![C::Other],
-            index: HashMap::new(),
+            index: HashMap::default(),
             bootstrap_methods: Vec::new(),
         }
     }

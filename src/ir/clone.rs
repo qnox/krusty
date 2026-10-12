@@ -3,7 +3,7 @@
 //! Inline expansion needs a private copy of a retained body. Keeping the arena plumbing here gives
 //! every consumer one exhaustive child remapper instead of growing another ad-hoc expression walker.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::{ExprId, FunId, IrCheckedArgument, IrCheckedOperation, IrExpr, IrFile, IrFunction};
 use crate::types::{ty_subst_keep_unbound, Ty};
@@ -28,7 +28,7 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
         target
     }
 
-    let mut cloned = HashMap::new();
+    let mut cloned = HashMap::default();
     let root = clone_one(ir, root, &mut cloned);
     (root, cloned)
 }
@@ -722,7 +722,10 @@ mod tests {
 
         let (target, copies) = clone_expression_dag(&mut ir, source);
 
-        assert_eq!(copies, std::collections::HashMap::from([(source, target)]));
+        assert_eq!(
+            copies,
+            crate::fx_hash::HashMap::from_iter([(source, target)])
+        );
         assert_eq!(ir.inline_call_type_arguments.len(), 2);
         assert_eq!(ir.inline_call_type_arguments.get(&source), Some(&full));
         assert_eq!(ir.inline_call_type_arguments.get(&target), Some(&full));
@@ -798,7 +801,7 @@ mod tests {
         ir.note_class_method(class, source);
         let caller = ir.add_fun(function("box", Ty::obj("kotlin/Int")));
         let specialized = Ty::obj("sample/Token");
-        let bindings = std::collections::HashMap::from([("T".to_string(), specialized)]);
+        let bindings = crate::fx_hash::HashMap::from_iter([("T".to_string(), specialized)]);
 
         let first = clone_function_implementation(
             &mut ir,

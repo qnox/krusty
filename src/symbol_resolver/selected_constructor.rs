@@ -78,7 +78,7 @@ fn result_from_expected(
     if formals.is_empty() {
         return None;
     }
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     constrain_constructor_result(owner, formals, expected, &mut bindings);
     if !complete(formals, &bindings) {
         bind_direct_supertype(selected, expected, &mut bindings);

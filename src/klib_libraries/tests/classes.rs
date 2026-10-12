@@ -1,6 +1,6 @@
 //! Classes published by the KLIB provider, with their constructors and members.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -331,7 +331,7 @@ fn constructors_are_ordinary_callables_realizing_their_signatures() {
             (false, vec![Ty::Int], vec!["count".to_owned()]),
         ]
     );
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::default();
     for constructor in &derived.constructors {
         let realized = realization(&libraries, constructor.external_identity);
         assert_eq!(realized.kind, ExternalCallableKind::Constructor);
@@ -657,8 +657,8 @@ fn serialized_signatures(
         }
     }
     let trees = read_declaration_trees(archive).expect("the fixture's IR decodes");
-    let mut public = HashSet::new();
-    let mut accessors = HashSet::new();
+    let mut public = HashSet::default();
+    let mut accessors = HashSet::default();
     for tree in trees.trees() {
         walk(&tree.arena, &tree.declaration, &mut public, &mut accessors);
     }
@@ -722,7 +722,7 @@ fn fixture_classes_realize_the_signatures_their_ir_declares() {
         "Derived.Factory",
         "Singleton",
     ];
-    let mut realized = HashSet::new();
+    let mut realized = HashSet::default();
     for local in classes {
         realized.extend(realized_identities(&libraries, local));
     }

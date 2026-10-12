@@ -60,9 +60,9 @@ pub fn realize_delegate_static_field_names(ir: &mut IrFile) {
             | IrLocalPropertyLayout::Member { .. }
             | IrLocalPropertyLayout::MemberExtension { .. } => None,
         })
-        .collect::<std::collections::HashSet<_>>();
-    let mut used: std::collections::HashMap<Option<crate::types::TypeName>, Vec<String>> =
-        std::collections::HashMap::new();
+        .collect::<crate::fx_hash::HashSet<_>>();
+    let mut used: crate::fx_hash::HashMap<Option<crate::types::TypeName>, Vec<String>> =
+        crate::fx_hash::HashMap::default();
     for index in 0..ir.statics.len() {
         let owner = ir.statics[index].owner;
         let current = ir.static_field_jvm_name(index as u32).to_string();
@@ -87,7 +87,7 @@ pub fn realize_delegate_static_field_names(ir: &mut IrFile) {
 /// also remove a later `init { property = 0 }`, which has different Kotlin semantics when a base
 /// constructor has already dispatched to an override and written the field.
 pub fn elide_default_property_stores(ir: &mut IrFile) {
-    let elided: std::collections::HashSet<ExprId> = ir
+    let elided: crate::fx_hash::HashSet<ExprId> = ir
         .property_initializer_stores
         .iter()
         .copied()

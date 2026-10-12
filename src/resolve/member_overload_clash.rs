@@ -35,7 +35,7 @@ impl Checker<'_> {
         funs: &[&FunDecl],
     ) {
         let mut order = Vec::new();
-        let mut groups: HashMap<MemberOverloadKey, Vec<Span>> = HashMap::new();
+        let mut groups: HashMap<MemberOverloadKey, Vec<Span>> = HashMap::default();
         for (index, function) in funs.iter().enumerate() {
             let Some(declaration) = self.member_declaration(class_decl, owner, index) else {
                 continue;

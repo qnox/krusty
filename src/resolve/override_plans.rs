@@ -4,7 +4,7 @@
 //! declaration pairing there and stores a compact, provider-neutral edge in stable FIR. It never
 //! computes a target descriptor or decides whether a particular backend needs a bridge.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 mod inherited_defaults;
 mod inherited_status;
@@ -46,7 +46,7 @@ where
 {
     let nearest = candidates.iter().map(&rank_of).min()?;
     candidates.retain(|candidate| rank_of(candidate) == nearest);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     candidates.retain(|candidate| target_of(candidate).is_some_and(|target| seen.insert(target)));
     if candidates.len() != 1 {
         return None;
@@ -64,7 +64,7 @@ fn owner_already_has_obligation(
     obligation_owner: crate::types::TypeName,
 ) -> bool {
     let mut queue = std::collections::VecDeque::from([Ty::obj_name(implementation_owner)]);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(current) = queue.pop_front() {
         let Some(owner) = current.kotlin_class_internal() else {
             continue;
@@ -488,7 +488,7 @@ fn inherited_superclass_interfaces(
     else {
         return Vec::new();
     };
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     crate::symbol_resolver::applied_hierarchy(source, superclass.get())
         .into_iter()
         .filter_map(|(candidate, _, _)| {
@@ -1019,7 +1019,7 @@ fn property_override_plans(
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
 ) -> Vec<ResolvedPropertyOverride> {
     let mut overrides = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let names = class
         .declared_props
         .keys()
@@ -1117,7 +1117,7 @@ fn append_function_override_edges(
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
     overrides: &mut Vec<ResolvedFunctionOverride>,
 ) {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let first = overrides.len();
     let mut implementation_inputs = implementation.parameters.to_vec();
     if implementation.receiver.is_some() {
@@ -1391,7 +1391,7 @@ fn enum_entry_override_plans(
             })
             .collect::<Vec<_>>();
         let mut properties = Vec::new();
-        let mut property_seen = HashSet::new();
+        let mut property_seen = HashSet::default();
         let mut functions = Vec::new();
         for member in index.owned_declarations(entry).iter().copied() {
             let Some(header) = index.declaration_header(member) else {
@@ -1488,7 +1488,7 @@ pub(crate) fn publish_checked_local_override_plans(
                     let hierarchy =
                         with_function_supertypes(&source, index.classifier_hierarchy(classifier)?);
                     let mut properties = Vec::new();
-                    let mut property_seen = HashSet::new();
+                    let mut property_seen = HashSet::default();
                     let mut functions = Vec::new();
                     for declaration in index.owned_declarations(classifier).iter().copied() {
                         let Some(member) = index.declaration_header(declaration) else {
@@ -1750,7 +1750,7 @@ fn default_supertype_orders(
     source: &dyn SymbolSource,
     edges: &[ResolvedFunctionOverride],
 ) -> HashMap<TypeName, HashMap<TypeName, u32>> {
-    let mut orders = HashMap::new();
+    let mut orders = HashMap::default();
     for edge in edges {
         orders.entry(edge.implementation_owner).or_insert_with(|| {
             crate::symbol_resolver::supertype_preorder(source, edge.implementation_owner)

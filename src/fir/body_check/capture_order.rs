@@ -9,7 +9,7 @@
 //! local function the body only declares adds nothing, and neither does a call to the function
 //! itself.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{
     BodyLocalCallableDeclarationId, FirBody, FirCapture, FirCaptureSource, FirExprId, FirExprKind,

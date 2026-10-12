@@ -1,6 +1,6 @@
 //! Temporary packed source spellings and file scopes used only during Pass-1 lookup.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::File;
 
