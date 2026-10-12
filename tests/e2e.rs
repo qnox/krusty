@@ -77,6 +77,8 @@ mod annotation_kclass_member_e2e;
 mod annotation_nested_const_template_e2e;
 #[path = "annotation_retention_identity_e2e.rs"]
 mod annotation_retention_identity_e2e;
+#[path = "annotation_source_order_e2e.rs"]
+mod annotation_source_order_e2e;
 #[path = "annotation_target_emission_e2e.rs"]
 mod annotation_target_emission_e2e;
 #[path = "anon_fun_statement_e2e.rs"]

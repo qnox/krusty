@@ -6610,6 +6610,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after every member, so the descriptor landed after the companion's marker constructor. The
   synthesized setter is now a debug-locals declaration, like a data-class member. Test:
   `tests/method_pool_order_e2e.rs::a_hoisted_companion_setter_interns_its_locals_with_its_body`.
+- **Declaration annotations intern in kotlinc's visit order.** A class's and a field's annotations
+  intern as written, whichever attribute (`RuntimeVisibleAnnotations` or
+  `RuntimeInvisibleAnnotations`) holds each: `@ApiStatus.Internal @Deprecated(…)` interns
+  `Internal` first. A method is buffered in a `MethodNode`, whose `accept` replays its visible
+  annotations before its invisible ones, so a method's `@Deprecated` interns before a binary
+  annotation written above it. `tests/annotation_source_order_e2e.rs` (full-byte against kotlinc).
 - **A class's own annotations intern after its field table.** kotlinc's writer visits every
   method, then every field (name, descriptor, `ConstantValue` constant, field annotations), and only
   then the class's annotations ahead of `@Metadata`. krusty queued a class or interface annotation

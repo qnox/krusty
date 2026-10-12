@@ -1,6 +1,6 @@
 //! A method's own annotation attributes: the declared ones and kotlinc's return nullability.
 
-use super::{ClassWriter, ConstPool, NOT_NULL, NULLABLE};
+use super::{AnnotationVisitOrder, ClassWriter, ConstPool, NOT_NULL, NULLABLE};
 
 impl ClassWriter {
     /// Attach kotlinc's non-null annotations to a previously-added method (matched by name+descriptor):
@@ -79,7 +79,8 @@ impl ClassWriter {
         if !self.methods.iter().any(|m| m.name == n && m.desc == d) {
             return;
         }
-        let (vis, invis) = self.encode_declaration_annotations(annotations);
+        let (vis, invis) =
+            self.encode_declaration_annotations(annotations, AnnotationVisitOrder::VisibleFirst);
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
             m.visible_anns = vis;
             // A DECLARED annotation precedes the compiler's own `@NotNull`/`@Nullable` on the

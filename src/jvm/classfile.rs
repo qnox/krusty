@@ -467,6 +467,16 @@ pub(crate) fn split_declaration_annotations(
     )
 }
 
+/// When a declaration's annotations intern their constants.
+#[derive(Clone, Copy)]
+pub(crate) enum AnnotationVisitOrder {
+    /// As written: kotlinc visits a class's or a field's annotations straight into its writer.
+    Source,
+    /// Visible ones, then invisible ones: kotlinc buffers a method in a `MethodNode`, whose
+    /// `accept` replays its visible annotations before its invisible ones.
+    VisibleFirst,
+}
+
 /// What every `@kotlin.Metadata` of one compilation stamps beside its payload: the `mv` version,
 /// and whether `xi` carries kotlinc's pre-release flag (`LanguageVersionSettings.isPreRelease`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -850,7 +860,8 @@ impl ClassWriter {
     /// Attach user annotations to the most recently added field. The JVM representation boundary
     /// maps semantic retention onto visible/invisible class-file attributes.
     pub fn set_last_field_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
-        let (vis, invis) = self.encode_declaration_annotations(annotations);
+        let (vis, invis) =
+            self.encode_declaration_annotations(annotations, AnnotationVisitOrder::Source);
         if let Some(f) = self.fields.last_mut() {
             f.visible_anns = vis;
             f.invisible_anns = invis;
@@ -864,21 +875,42 @@ impl ClassWriter {
         body
     }
 
-    /// Encode retained declaration annotations in class-file attribute order: all visible entries,
-    /// then all invisible entries. Common IR carries no JVM attribute split.
+    /// Encode retained declaration annotations into their class-file attributes: visible entries,
+    /// then invisible ones. Common IR carries no JVM attribute split. `order` is when each
+    /// annotation's constants intern (see [`AnnotationVisitOrder`]).
     fn encode_declaration_annotations(
         &mut self,
         annotations: &crate::ir::DeclarationAnnotations,
+        order: AnnotationVisitOrder,
     ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        let (visible, invisible) = split_declaration_annotations(annotations);
-        let visible = visible
-            .iter()
-            .map(|annotation| self.encode_annotation(annotation))
-            .collect();
-        let invisible = invisible
-            .iter()
-            .map(|annotation| self.encode_annotation(annotation))
-            .collect();
+        use crate::types::AnnotationRetention;
+        let visible_of = |retention: &AnnotationRetention| match retention {
+            AnnotationRetention::Default | AnnotationRetention::Runtime => Some(true),
+            AnnotationRetention::Binary => Some(false),
+            AnnotationRetention::Source => None,
+        };
+        let passes: &[Option<bool>] = match order {
+            AnnotationVisitOrder::Source => &[None],
+            AnnotationVisitOrder::VisibleFirst => &[Some(true), Some(false)],
+        };
+        let mut visible = Vec::new();
+        let mut invisible = Vec::new();
+        for &pass in passes {
+            for retained in annotations.iter() {
+                let Some(is_visible) = visible_of(&retained.retention) else {
+                    continue;
+                };
+                if pass.is_some_and(|pass| pass != is_visible) {
+                    continue;
+                }
+                let encoded = self.encode_annotation(&retained.annotation);
+                if is_visible {
+                    visible.push(encoded);
+                } else {
+                    invisible.push(encoded);
+                }
+            }
+        }
         (visible, invisible)
     }
 
@@ -943,7 +975,8 @@ impl ClassWriter {
         if annotations.deprecated() {
             self.set_deprecated();
         }
-        let (visible, invisible) = self.encode_declaration_annotations(annotations);
+        let (visible, invisible) =
+            self.encode_declaration_annotations(annotations, AnnotationVisitOrder::Source);
         self.runtime_annotations.extend(visible);
         self.invisible_annotations.extend(invisible);
     }
@@ -1207,7 +1240,8 @@ impl ClassWriter {
                 self.cp.utf8(parameter);
             }
         }
-        let _ = self.encode_declaration_annotations(annotations);
+        let _ =
+            self.encode_declaration_annotations(annotations, AnnotationVisitOrder::VisibleFirst);
         for a in ann_types {
             if let Some(a) = self.written_annotation(a) {
                 self.cp.utf8(a);
