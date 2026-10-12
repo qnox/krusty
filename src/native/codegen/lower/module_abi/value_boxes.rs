@@ -27,7 +27,10 @@ impl FileLowering<'_> {
                 continue;
             }
             let (box_symbol, unbox_symbol) =
-                super::super::super::super::symbols::module_value_box_symbols(classifier);
+                super::super::super::super::symbols::module_value_box_symbols(
+                    self.module_name,
+                    classifier,
+                );
             let value = value_ty(classifier);
             let signature = self.signature_of(&[value], any())?;
             let id = self
@@ -63,7 +66,10 @@ impl BodyLowering<'_, '_, '_> {
         value: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
-        let (symbol, _) = super::super::super::super::symbols::module_value_box_symbols(classifier);
+        let (symbol, _) = super::super::super::super::symbols::module_value_box_symbols(
+            self.file.module_name,
+            classifier,
+        );
         let id = self.file.import(&symbol, &[value_ty(classifier)], any())?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &[value])?;
@@ -76,7 +82,10 @@ impl BodyLowering<'_, '_, '_> {
         object: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
-        let (_, symbol) = super::super::super::super::symbols::module_value_box_symbols(classifier);
+        let (_, symbol) = super::super::super::super::symbols::module_value_box_symbols(
+            self.file.module_name,
+            classifier,
+        );
         let value = value_ty(classifier);
         let id = self.file.import(&symbol, &[any()], value)?;
         let func_ref = self.func_ref(id);

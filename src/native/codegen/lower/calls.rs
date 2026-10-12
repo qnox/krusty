@@ -6,6 +6,27 @@
 
 use super::*;
 
+/// Whether an authenticated source-module dependency export can realize this call directly.
+///
+/// An absent symbol is not an error here: platform KLIB declarations have no preceding source
+/// object and continue to their compiler-intrinsic/runtime realization below. Once an exact source
+/// export exists, however, it owns the call. An omission cannot fall through to a name-based
+/// realization, and the ordinary export cannot receive fewer operands than its declared ABI.
+fn direct_dependency_export<'a>(
+    symbol: Option<&'a String>,
+    defaults: &[u32],
+) -> Result<Option<&'a str>, Unsupported> {
+    let Some(symbol) = symbol else {
+        return Ok(None);
+    };
+    if !defaults.is_empty() {
+        return Err(declined!(
+            "a top-level dependency call with omitted arguments and no exported default bridge"
+        ));
+    }
+    Ok(Some(symbol))
+}
+
 impl BodyLowering<'_, '_, '_> {
     /// A top-level function defined in another file of this module: an import of the symbol
     /// `module_function_symbol` and a direct call. The defining file exports that same symbol.
@@ -17,7 +38,8 @@ impl BodyLowering<'_, '_, '_> {
         dispatch_receiver: Option<u32>,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
-        let symbol = super::super::super::symbols::module_function_symbol(target);
+        let symbol =
+            super::super::super::symbols::module_function_symbol(self.file.module_name, target);
         if dispatch_receiver.is_some() {
             return Err(declined!("a cross-file call with a receiver (`{symbol}`)"));
         }
@@ -43,7 +65,10 @@ impl BodyLowering<'_, '_, '_> {
         let Some(record) = self.file.ir.referenced_module_callables.get(&target) else {
             return Err("a cross-file call with no recorded source file".into());
         };
-        let init = super::super::super::symbols::file_init_symbol(record.source.source);
+        let init = super::super::super::symbols::file_init_symbol(
+            self.file.module_name,
+            record.source.source,
+        );
         let id = self.file.import(&init, &[], Ty::Unit)?;
         if self.terminated {
             return Ok(());
@@ -75,8 +100,8 @@ impl BodyLowering<'_, '_, '_> {
                 defaults,
                 dispatch_receiver_ty: None,
                 ..
-            } if provider == target && dispatch_receiver.is_none() => {
-                self.module_defaulted_call(*target, params, *ret, defaults, args)
+            } if dispatch_receiver.is_none() => {
+                self.module_defaulted_call(*provider, *target, params, *ret, defaults, args)
             }
             Callee::ModuleWithDefaults { defaults, .. } => {
                 match self.file.inherited_default_provider(callee) {
@@ -165,11 +190,28 @@ impl BodyLowering<'_, '_, '_> {
                 target,
                 params,
                 ret,
+                defaults,
                 ..
             } => {
                 let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".into());
                 };
+                if dispatch_receiver.is_none() && realization.is_top_level() {
+                    let symbol = realization
+                        .dependency_callable
+                        .as_ref()
+                        .and_then(|identity| self.file.dependency_symbols.get(identity));
+                    if let Some(symbol) = direct_dependency_export(symbol, defaults)? {
+                        let id = self.file.import(symbol, params, *ret)?;
+                        let arguments = self.arguments(args, params)?;
+                        if self.terminated {
+                            return Ok(None);
+                        }
+                        let func_ref = self.func_ref(id);
+                        let call = self.emit_call(func_ref, &arguments)?;
+                        return Ok(self.builder.inst_results(call).first().copied());
+                    }
+                }
                 // A callable reference reaches this ordinary dependency-call path, while retaining
                 // the exact compiler intrinsic the source-form operation uses.
                 if let Some(realized) = self.compiler_intrinsic_call(
@@ -744,5 +786,31 @@ impl BodyLowering<'_, '_, '_> {
             } => self.module_call(*target, params, *ret, dispatch_receiver, args),
             other => Err(declined!("a {} call", callee_kind(other))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::direct_dependency_export;
+
+    #[test]
+    fn an_exact_dependency_export_never_receives_too_few_arguments() {
+        let symbol = "kt_klib_export_0".to_string();
+        assert_eq!(
+            direct_dependency_export(Some(&symbol), &[])
+                .expect("a full call uses the authenticated export"),
+            Some(symbol.as_str())
+        );
+        assert_eq!(
+            direct_dependency_export(Some(&symbol), &[0])
+                .expect_err("an omission needs a provider-owned default bridge")
+                .construct(),
+            "a top-level dependency call with omitted arguments and no exported default bridge"
+        );
+        assert_eq!(
+            direct_dependency_export(None, &[0])
+                .expect("a platform declaration may have an authenticated intrinsic realization"),
+            None
+        );
     }
 }

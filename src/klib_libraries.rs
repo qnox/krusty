@@ -28,7 +28,8 @@ use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput};
-pub use declaration_bodies::{KlibDeclarationBodies, KlibDeclarationBodiesError};
+pub(crate) use declaration_bodies::KlibCalleeOrigin;
+pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.
@@ -54,6 +55,26 @@ impl KlibLibraries {
                 packages
                     .into_iter()
                     .map(|(segments, package)| (segments, package, false))
+                    .collect(),
+            )?,
+        )))
+    }
+
+    /// Build one named in-memory KLIB provider. Test and compiler-owned synthetic libraries use
+    /// this when their callable identities must join serialized bodies exactly as an archive's
+    /// manifest `unique_name` would.
+    #[cfg(test)]
+    pub(crate) fn from_named_packages(
+        module: &str,
+        packages: Vec<(Vec<String>, KotlinPackage)>,
+    ) -> Result<Self, KlibLibraryError> {
+        Ok(Self::over(std::rc::Rc::new(
+            inventory::PackageInventory::from_package_inputs(
+                packages
+                    .into_iter()
+                    .map(|(segments, package)| {
+                        (segments, package, false, false, Some(module.to_owned()))
+                    })
                     .collect(),
             )?,
         )))

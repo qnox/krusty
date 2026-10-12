@@ -74,6 +74,7 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
         declaration_owner: None,
         parameter_identities: Box::new([]),
         declaration_signature: None,
+        dependency_callable: None,
     };
     let mut facts = CheckedBackendCallables::default();
     facts

@@ -39,6 +39,20 @@ impl PackageInventory {
     pub(super) fn from_packages(
         packages: Vec<(Vec<String>, KotlinPackage, bool)>,
     ) -> Result<Self, KlibLibraryError> {
+        Self::from_package_inputs(
+            packages
+                .into_iter()
+                .map(|(segments, package, compiler_builtin_owner)| {
+                    (segments, package, compiler_builtin_owner, false, None)
+                })
+                .collect(),
+        )
+    }
+
+    /// Build an inventory while retaining which archive supplied friend-visible internals.
+    pub(super) fn from_package_inputs(
+        packages: Vec<(Vec<String>, KotlinPackage, bool, bool, Option<String>)>,
+    ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
             functions: HashMap::default(),
             properties: HashMap::default(),
@@ -48,12 +62,16 @@ impl PackageInventory {
             companion_properties: HashMap::default(),
             namespaces: HashSet::default(),
         };
-        // A public IdSignature is the serialized declaration identity used to join metadata to
-        // one IR body. Split package fragments, or repeated libraries in the input graph, may
-        // publish the same declaration more than once; they must not become duplicate overload
-        // candidates carrying one ExternalCallableId.
+        // A type alias's qualified identity omits its declaring archive. When an ordinary
+        // dependency and an exact friend both publish the same identity, keep the friend-owned
+        // declaration just as classifier selection below does. Otherwise dependency ordering
+        // could make an inaccessible alias shadow the declaration this compilation may use.
+        let mut type_alias_friends = HashMap::default();
+        // A public IdSignature is unique inside one KLIB, not across the dependency graph. Split
+        // package fragments from the same module must not become duplicate candidates, while two
+        // modules' equal internal signatures remain distinct so exact friendship can select one.
         let mut declared_signatures = HashSet::default();
-        for (segments, package, compiler_builtin_owner) in packages {
+        for (segments, package, compiler_builtin_owner, internal_friend, module) in packages {
             let identity = inventory.declare_package(&segments);
             for alias in package
                 .type_aliases
@@ -64,10 +82,13 @@ impl PackageInventory {
                     .map_err(|error| {
                         super::declaration_signatures::unsignable(&segments, &alias.name, error)
                     })?;
-                inventory
-                    .type_aliases
-                    .entry(expansion.identity)
-                    .or_insert(expansion);
+                let selected = type_alias_friends
+                    .get(&expansion.identity)
+                    .is_none_or(|selected_friend| !selected_friend && internal_friend);
+                if selected {
+                    type_alias_friends.insert(expansion.identity, internal_friend);
+                    inventory.type_aliases.insert(expansion.identity, expansion);
+                }
             }
             let signed = package
                 .functions
@@ -76,28 +97,33 @@ impl PackageInventory {
                 // serializes it under a file-local identity, never a public one.
                 .filter(|function| function.visibility != Visibility::Private)
                 .map(|function| {
-                    sign_package_function(&segments, function).map(|mut signed| {
-                        signed.compiler_builtin_owner = compiler_builtin_owner;
-                        signed
-                    })
+                    sign_package_function(&segments, function, internal_friend, module.as_deref())
+                        .map(|mut signed| {
+                            signed.compiler_builtin_owner = compiler_builtin_owner;
+                            signed
+                        })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for function in signed {
-                if !declared_signatures.insert(function.signature.clone()) {
-                    inventory.replace_with_authoritative_function(identity, function);
+                if !declared_signatures.insert((module.clone(), function.signature.clone())) {
+                    if function.compiler_builtin_owner {
+                        inventory.insert_selected_function(identity, function);
+                    }
                     continue;
                 }
-                inventory.insert_function(identity, function);
+                inventory.insert_selected_function(identity, function);
             }
             let signed = package
                 .properties
                 .into_iter()
                 // As for functions, a private top-level property has a file-local identity.
                 .filter(|property| property.visibility != Visibility::Private)
-                .map(|property| sign_package_property(&segments, property))
+                .map(|property| {
+                    sign_package_property(&segments, property, internal_friend, module.as_deref())
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             for property in signed {
-                if !declared_signatures.insert(property.signature.clone()) {
+                if !declared_signatures.insert((module.clone(), property.signature.clone())) {
                     continue;
                 }
                 if property.declaration.is_static {
@@ -121,16 +147,29 @@ impl PackageInventory {
                     .or_default()
                     .push(property);
             }
-            for (classifier, signed) in
-                sign_package_classes(&segments, package.classes, &mut declared_signatures)?
-            {
-                for alias in &signed.type_aliases {
-                    inventory
-                        .type_aliases
-                        .entry(alias.identity)
-                        .or_insert_with(|| alias.clone());
+            for (classifier, signed) in sign_package_classes(
+                &segments,
+                package.classes,
+                &mut declared_signatures,
+                internal_friend,
+                module.as_deref(),
+            )? {
+                let selected = inventory
+                    .classifiers
+                    .get(&classifier)
+                    .is_none_or(|current| !current.internal_friend && signed.internal_friend);
+                if selected {
+                    if let Some(previous) = inventory.classifiers.insert(classifier, signed) {
+                        // Nested aliases are one facet of their owning classifier. Replacing an
+                        // inaccessible same-FQN classifier must replace, not merge, those facets.
+                        for alias in previous.type_aliases {
+                            inventory.type_aliases.remove(&alias.identity);
+                        }
+                    }
+                    for alias in &inventory.classifiers[&classifier].type_aliases {
+                        inventory.type_aliases.insert(alias.identity, alias.clone());
+                    }
                 }
-                inventory.classifiers.insert(classifier, signed);
             }
         }
         Ok(inventory)
@@ -155,27 +194,37 @@ impl PackageInventory {
         self.functions.entry(package).or_default().push(function);
     }
 
-    /// Replace a dependency-first duplicate with the compilation-designated stdlib declaration.
+    /// Publish a function unless the compilation-designated stdlib already owns its signature.
     ///
     /// The public signature is the shared serialized identity, but it omits result type and source
     /// modifiers such as `operator`. Authority therefore belongs to the complete stdlib declaration,
     /// not just a boolean copied onto whichever dependency metadata happened to be read first.
     /// Removing from both publication stores also keeps the declaration in the namespace selected
     /// by its authoritative placement metadata.
-    fn replace_with_authoritative_function(&mut self, package: TypeName, function: SignedFunction) {
-        if !function.compiler_builtin_owner {
+    fn insert_selected_function(&mut self, package: TypeName, function: SignedFunction) {
+        let signature = &function.signature;
+        let authoritative_exists = self
+            .functions
+            .values()
+            .flatten()
+            .any(|prior| prior.compiler_builtin_owner && &prior.signature == signature)
+            || self.companion_functions.values().flatten().any(|prior| {
+                prior.signed.compiler_builtin_owner && &prior.signed.signature == signature
+            });
+        if authoritative_exists && !function.compiler_builtin_owner {
             return;
         }
-        let signature = &function.signature;
-        self.functions
-            .values_mut()
-            .for_each(|functions| functions.retain(|prior| &prior.signature != signature));
-        self.functions.retain(|_, functions| !functions.is_empty());
-        self.companion_functions.values_mut().for_each(|functions| {
-            functions.retain(|prior| &prior.signed.signature != signature);
-        });
-        self.companion_functions
-            .retain(|_, functions| !functions.is_empty());
+        if function.compiler_builtin_owner {
+            self.functions
+                .values_mut()
+                .for_each(|functions| functions.retain(|prior| &prior.signature != signature));
+            self.functions.retain(|_, functions| !functions.is_empty());
+            self.companion_functions.values_mut().for_each(|functions| {
+                functions.retain(|prior| &prior.signed.signature != signature);
+            });
+            self.companion_functions
+                .retain(|_, functions| !functions.is_empty());
+        }
         self.insert_function(package, function);
     }
 
@@ -191,10 +240,11 @@ impl PackageInventory {
         );
         for function in functions {
             if function.compiler_builtin_owner {
-                wanted.select_authoritative_function(&function.signature);
+                wanted
+                    .select_authoritative_function(function.module.as_deref(), &function.signature);
             }
             if function.declaration.param_defaults.contains(&true) {
-                wanted.insert_top_level(&function.signature);
+                wanted.insert(function.module.as_deref(), &function.signature);
             }
         }
         for classifier in self.classifiers.values() {
@@ -211,7 +261,7 @@ impl PackageInventory {
                 .map(|function| &function.signature);
             constructors
                 .chain(members)
-                .for_each(|signature| wanted.insert_top_level(signature));
+                .for_each(|signature| wanted.insert(classifier.module.as_deref(), signature));
         }
         wanted
     }
@@ -220,7 +270,7 @@ impl PackageInventory {
     pub(super) fn attach_defaults(&mut self, defaults: &ParameterDefaults) {
         let mut attach = |function: &mut SignedFunction| {
             let signature = KlibIrSignature::Public(function.signature.clone());
-            function.defaults = defaults.of(&signature);
+            function.defaults = defaults.of(function.module.as_deref(), &signature);
         };
         self.functions.values_mut().flatten().for_each(&mut attach);
         self.companion_functions
@@ -230,7 +280,7 @@ impl PackageInventory {
         for classifier in self.classifiers.values_mut() {
             for constructor in &mut classifier.constructors {
                 let signature = KlibIrSignature::Public(constructor.signature.clone());
-                constructor.defaults = defaults.of(&signature);
+                constructor.defaults = defaults.of(classifier.module.as_deref(), &signature);
             }
             classifier.functions.iter_mut().for_each(&mut attach);
             classifier
@@ -307,6 +357,13 @@ impl PackageInventory {
     /// The published class with exactly this identity.
     pub(super) fn classifier(&self, identity: TypeName) -> Option<&SignedClassifier> {
         self.classifiers.get(&identity)
+    }
+
+    /// Whether `identity` is declared by a friend KLIB selected for this compilation.
+    pub(super) fn classifier_is_friend(&self, identity: TypeName) -> bool {
+        self.classifiers
+            .get(&identity)
+            .is_some_and(|classifier| classifier.internal_friend)
     }
 
     /// The type alias declared with exactly this qualified identity.

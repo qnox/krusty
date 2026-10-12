@@ -196,7 +196,7 @@ pub(super) fn declare(
     ir: &IrFile,
     module: &mut Module,
     objects: &mut ObjectRoot,
-    functions: &[u32],
+    functions: &[Option<u32>],
     properties: &RealizedProperties,
 ) -> Result<FileClasses, Unsupported> {
     for class in &ir.classes {
@@ -306,7 +306,14 @@ pub(super) fn declare(
                 Slot::AnyMember(AnyMember::HashCode | AnyMember::ToString) | Slot::Abstract => {
                     objects.trap(module, ty)
                 }
-                Slot::Function(function) => functions[*function as usize],
+                Slot::Function(function) => functions
+                    .get(*function as usize)
+                    .copied()
+                    .ok_or_else(|| "an invalid function in a class dispatch table".to_string())?
+                    .ok_or_else(|| {
+                        "an inline-only function that remained in a class dispatch table"
+                            .to_string()
+                    })?,
                 Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field } => {
                     let accessor = Accessor {
                         class: *class,

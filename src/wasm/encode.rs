@@ -283,6 +283,15 @@ impl Module {
         *slot = Some(function);
     }
 
+    /// Whether a reserved function index already has its physical body. Imported functions are
+    /// complete by definition; a local declaration remains incomplete until [`Module::define`].
+    pub(super) fn function_is_defined(&self, index: u32) -> bool {
+        let Some(local) = (index as usize).checked_sub(self.imports.len()) else {
+            return true;
+        };
+        self.functions.get(local).is_some_and(Option::is_some)
+    }
+
     pub(super) fn memory(&mut self, pages: u32) {
         self.memory_pages = Some(pages);
     }

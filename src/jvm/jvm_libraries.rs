@@ -1,7 +1,6 @@
 //! The JVM implementation of the [`SymbolSource`] abstraction: resolves symbols from a `.class`-jar
-//! classpath (the bytecode target). All classpath reads, JVM method-descriptor parsing, and
-//! `java/lang ↔ kotlin` name normalization live here — resolution and checked FIR see
-//! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
+//! classpath. Classpath reads, JVM descriptors, and `java/lang ↔ kotlin` normalization live here;
+//! resolution and checked FIR see only Kotlin-level `Ty`s and opaque descriptor tokens.
 
 mod builtin_classifier_shapes;
 mod builtin_property_realization;
@@ -11,6 +10,7 @@ mod catalog_presence;
 mod classifier_facts;
 #[cfg(test)]
 mod contract_dsl_tests;
+mod dependency_access_policy;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -4928,6 +4928,10 @@ fn collection_barrier_role(
 }
 
 impl crate::libraries::SemanticPlatform for JvmLibraries {
+    fn dependency_access_policy(&self) -> &dyn crate::libraries::DependencyAccessPolicy {
+        self
+    }
+
     fn validate_initialization(&self) -> Result<(), crate::libraries::PlatformInitializationError> {
         self.cp.validate_lazy_class_loads()
     }
@@ -5003,10 +5007,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         !self.cp.class_exists_name(classifier)
             && self.cp.type_alias_target_name(classifier).is_none()
             && self.cp.builtin_classifier_name(classifier).is_none()
-    }
-
-    fn internal_accessible(&self, owner: TypeName) -> bool {
-        self.cp.grants_internal_access(owner)
     }
 
     fn inherits_classifier_callables(&self, internal: TypeName) -> bool {

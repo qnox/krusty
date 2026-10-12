@@ -160,8 +160,12 @@ impl crate::plugins::FrontendCallResolver for Checker<'_> {
         else {
             return None;
         };
-        if !self.receiver_member_accessible(selected.visibility, selected.callable.owner, receiver)
-        {
+        if !self.receiver_callable_accessible(
+            selected.visibility,
+            selected.callable.owner,
+            receiver,
+            selected.callable.external_identity,
+        ) {
             return None;
         }
         let mut call = resolver.commit_selected_member_function_result(receiver, selected, result);

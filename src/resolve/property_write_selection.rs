@@ -138,6 +138,7 @@ impl Checker<'_> {
                                 property.visibility,
                                 property.owner,
                                 receiver.ty,
+                                property.getter.external_identity,
                             ),
                             property.context_count,
                         )

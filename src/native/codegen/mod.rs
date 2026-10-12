@@ -72,6 +72,11 @@ pub struct CodegenModule {
     /// Export spellings already claimed by earlier files. The C spelling is intentionally
     /// human-readable and therefore lossy; a collision is refused rather than emitted twice.
     abi_symbols: crate::fx_hash::HashSet<String>,
+    /// Exact declaring KLIB module plus declaration identity to its collision-free exported
+    /// target symbol. Entries survive source-module boundaries for one emission session; the
+    /// module component distinguishes legal same-signature internals in unrelated dependencies.
+    dependency_symbols: crate::fx_hash::HashMap<crate::backend::KlibDependencyCallable, String>,
+    next_dependency_symbol: usize,
 }
 
 impl Backend for CraneliftBackend {
@@ -99,7 +104,14 @@ impl Backend for CraneliftBackend {
         let properties = super::dependency_references::realize_properties(&mut file.ir);
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
-                Ok(symbols) => state.runtime_symbols = Some(symbols),
+                Ok(symbols) => {
+                    // A public top-level function's C spelling shares the final image's global
+                    // namespace with the prebuilt runtime. Reserve those definitions before the
+                    // first file records its human-readable exports, just as target symbol
+                    // allocation already does below.
+                    state.abi_symbols.extend(symbols.iter().cloned());
+                    state.runtime_symbols = Some(symbols);
+                }
                 Err(error) => {
                     diags.error(
                         crate::diag::Span::new(0, 0),
@@ -134,6 +146,27 @@ impl Backend for CraneliftBackend {
                 return Vec::new();
             }
         };
+        let mut dependency_exports = crate::fx_hash::HashMap::default();
+        let mut exports = file.dependency_exports.callables().collect::<Vec<_>>();
+        // `DependencyExportSignatures` is a lookup map; target symbol allocation must not inherit
+        // its randomized iteration order or identical inputs would produce different objects.
+        exports.sort_unstable_by_key(|(callable, _)| *callable);
+        for (callable, identity) in exports {
+            let symbol = format!("kt_klib_export_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            if state
+                .dependency_symbols
+                .insert(identity.clone(), symbol.clone())
+                .is_some()
+            {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: two source declarations export one module-qualified KLIB identity",
+                );
+                return Vec::new();
+            }
+            dependency_exports.insert(callable, symbol);
+        }
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -144,6 +177,9 @@ impl Backend for CraneliftBackend {
                 dependency_properties: &properties,
                 value_classes: &value_classes,
                 source: file.source,
+                module_name: file.module_name,
+                dependency_exports: &dependency_exports,
+                dependency_symbols: &state.dependency_symbols,
             },
             self.target,
             &stem,

@@ -5,8 +5,10 @@
 //! generator has not been taught declines the compilation with a diagnostic naming the construct,
 //! and a declined compilation emits nothing.
 
+mod callable_registry;
 mod classes;
 mod lower;
+mod property_registry;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile, Entry, BOX_RESULT_FRAME};
 use crate::diag::DiagSink;
@@ -58,6 +60,8 @@ struct Started {
     module: Module,
     host: Host,
     runtime: Runtime,
+    callables: callable_registry::CallableRegistry,
+    properties: property_registry::PropertyRegistry,
 }
 
 impl Started {
@@ -72,6 +76,8 @@ impl Started {
             module,
             host,
             runtime,
+            callables: Default::default(),
+            properties: Default::default(),
         }
     }
 }
@@ -117,11 +123,17 @@ impl Backend for WasmBackend {
         let started = state
             .started
             .get_or_insert_with(|| Started::new(self.target));
+        started.callables.enter_source_module(file.module_name);
+        started.properties.enter_source_module(file.module_name);
         let lowered = match lower::lower_file(
             &file.ir,
             &properties,
+            &file.callables,
+            &file.dependency_exports,
             &mut started.module,
             &mut started.runtime,
+            &mut started.callables,
+            &mut started.properties,
         ) {
             Ok(lowered) => lowered,
             Err(construct) => {
@@ -131,6 +143,17 @@ impl Backend for WasmBackend {
         };
         state.initializers.extend(lowered.initializer);
         if let Some((function, _)) = selected {
+            let entry = match lowered.functions.get(function as usize).copied() {
+                Some(Some(entry)) => entry,
+                Some(None) => {
+                    decline(state, "an inline-only entry function".to_string());
+                    return Vec::new();
+                }
+                None => {
+                    decline(state, "an invalid entry function identity".to_string());
+                    return Vec::new();
+                }
+            };
             let stem = file.stems[file.source.raw() as usize].clone();
             match &state.entry {
                 Some((_, first)) => diags.error(
@@ -140,7 +163,7 @@ impl Backend for WasmBackend {
                         self.entry.declaration()
                     ),
                 ),
-                None => state.entry = Some((lowered.functions[function as usize], stem)),
+                None => state.entry = Some((entry, stem)),
             }
         }
         Vec::new()
@@ -278,6 +301,22 @@ mod tests {
             assert_eq!(&outputs[0].1[..8], b"\0asm\x01\0\0\0");
             let loader = String::from_utf8(outputs[1].1.clone()).expect("utf-8 loader");
             assert!(loader.contains("./main.wasm"), "{loader}");
+        }
+    }
+
+    #[test]
+    fn a_cross_file_inline_template_is_not_emitted_as_a_second_declaration() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile_program(
+                target,
+                Entry::Box,
+                &[
+                    "inline fun answer(): String = \"OK\"",
+                    "fun box(): String = answer()",
+                ],
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
         }
     }
 

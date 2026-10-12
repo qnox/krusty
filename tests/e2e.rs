@@ -22,6 +22,10 @@ mod compiler_plugin_fixture;
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
+#[path = "common/reference_compiler.rs"]
+mod reference_compiler_support;
+#[path = "common/reference_recording.rs"]
+mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
 
@@ -32,6 +36,7 @@ mod common {
     pub use super::inner_class_rows_support::{
         assert_same_inner_classes, compile_with_kotlinc, compile_with_kotlinc_for_target,
     };
+    pub use super::reference_compiler_support::*;
     pub use super::reference_targets_support::*;
 }
 

@@ -7,7 +7,8 @@ use super::declaration_signatures::{SignedFunction, SignedProperty};
 use crate::fir::{ExternalCallableId, ExternalPropertyId, ResolvedParameterIdentity};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization, FnKind,
-    FunctionInfo, KlibDeclarationSignature, LibraryCallable, LibraryMember, PropertyInfo,
+    FunctionInfo, KlibDeclarationSignature, KlibDependencyCallable, LibraryCallable, LibraryMember,
+    PropertyInfo,
 };
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::types::{SemanticCallableOwner, TypeName};
@@ -17,9 +18,12 @@ use crate::types::{SemanticCallableOwner, TypeName};
 #[derive(Default)]
 pub(super) struct ExternalIdentities {
     realizations: RefCell<Vec<ExternalCallableRealization>>,
-    by_signature: RefCell<HashMap<KlibDeclarationSignature, ExternalCallableId>>,
+    /// Parallel to `realizations`: the declaring KLIB is a friend of this compilation.
+    internal_friends: RefCell<Vec<bool>>,
+    by_signature: RefCell<HashMap<(Option<String>, KlibDeclarationSignature), ExternalCallableId>>,
     properties: RefCell<Vec<ExternalPropertyRealization>>,
-    properties_by_signature: RefCell<HashMap<KlibPublicIdSignature, ExternalPropertyId>>,
+    properties_by_signature:
+        RefCell<HashMap<(Option<String>, KlibPublicIdSignature), ExternalPropertyId>>,
 }
 
 impl ExternalIdentities {
@@ -35,6 +39,8 @@ impl ExternalIdentities {
             KlibDeclarationSignature::Public(signed.signature.clone()),
             kind,
             &signed.parameters.physical,
+            signed.internal_friend,
+            signed.module.as_deref(),
             &mut function.callable,
         );
     }
@@ -52,6 +58,8 @@ impl ExternalIdentities {
             KlibDeclarationSignature::Accessor(signed.getter.clone()),
             kind,
             &signed.parameters.getter,
+            signed.internal_friend,
+            signed.module.as_deref(),
             &mut property.getter,
         );
         if let Some(setter) = &mut property.setter {
@@ -68,6 +76,8 @@ impl ExternalIdentities {
                 KlibDeclarationSignature::Accessor(signature),
                 kind,
                 parameters,
+                signed.internal_friend,
+                signed.module.as_deref(),
                 setter,
             );
         }
@@ -84,6 +94,8 @@ impl ExternalIdentities {
         signature: &KlibPublicIdSignature,
         parameters: &[ResolvedParameterIdentity],
         owner: TypeName,
+        internal_friend: bool,
+        module: Option<&str>,
         constructor: &mut LibraryMember,
     ) {
         let mut callable = LibraryCallable::constructor(owner, constructor);
@@ -92,6 +104,8 @@ impl ExternalIdentities {
             KlibDeclarationSignature::Public(signature.clone()),
             ExternalCallableKind::Constructor,
             parameters,
+            internal_friend,
+            module,
             &mut callable,
         );
         constructor.external_identity = callable.external_identity;
@@ -105,6 +119,8 @@ impl ExternalIdentities {
         signature: KlibDeclarationSignature,
         parameters: &[ResolvedParameterIdentity],
         owner: TypeName,
+        internal_friend: bool,
+        module: Option<&str>,
         member: &mut LibraryMember,
     ) {
         let mut callable =
@@ -114,6 +130,8 @@ impl ExternalIdentities {
             signature,
             ExternalCallableKind::TopLevel,
             parameters,
+            internal_friend,
+            module,
             &mut callable,
         );
         member.external_identity = callable.external_identity;
@@ -127,7 +145,7 @@ impl ExternalIdentities {
         if let Some(identity) = self
             .properties_by_signature
             .borrow()
-            .get(&signed.signature)
+            .get(&(signed.module.clone(), signed.signature.clone()))
             .copied()
         {
             return identity;
@@ -152,7 +170,7 @@ impl ExternalIdentities {
         });
         self.properties_by_signature
             .borrow_mut()
-            .insert(signed.signature.clone(), identity);
+            .insert((signed.module.clone(), signed.signature.clone()), identity);
         identity
     }
 
@@ -161,10 +179,22 @@ impl ExternalIdentities {
         signature: KlibDeclarationSignature,
         kind: ExternalCallableKind,
         parameters: &[ResolvedParameterIdentity],
+        internal_friend: bool,
+        module: Option<&str>,
         callable: &mut LibraryCallable,
     ) {
-        if let Some(identity) = self.by_signature.borrow().get(&signature).copied() {
+        let key = (module.map(str::to_owned), signature.clone());
+        if let Some(identity) = self.by_signature.borrow().get(&key).copied() {
             callable.external_identity = Some(identity);
+            if internal_friend {
+                if let Some(friend) = self
+                    .internal_friends
+                    .borrow_mut()
+                    .get_mut(identity.raw() as usize)
+                {
+                    *friend = true;
+                }
+            }
             return;
         }
         let mut realizations = self.realizations.borrow_mut();
@@ -173,14 +203,19 @@ impl ExternalIdentities {
                 .expect("too many external callable declarations for packed FIR identity"),
         );
         callable.external_identity = Some(identity);
+        self.internal_friends.borrow_mut().push(internal_friend);
         realizations.push(ExternalCallableRealization {
             callable: callable.clone(),
             kind,
             declaration_owner: callable.declaration_owner,
             parameter_identities: parameters.into(),
             declaration_signature: Some(signature.clone()),
+            dependency_callable: module.map(|module| KlibDependencyCallable {
+                module: module.to_owned(),
+                declaration: signature,
+            }),
         });
-        self.by_signature.borrow_mut().insert(signature, identity);
+        self.by_signature.borrow_mut().insert(key, identity);
     }
 
     pub(super) fn realization(
@@ -201,5 +236,13 @@ impl ExternalIdentities {
             .borrow()
             .get(identity.raw() as usize)
             .cloned()
+    }
+
+    pub(super) fn internal_friend(&self, identity: ExternalCallableId) -> bool {
+        self.internal_friends
+            .borrow()
+            .get(identity.raw() as usize)
+            .copied()
+            .unwrap_or(false)
     }
 }

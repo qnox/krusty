@@ -6,6 +6,7 @@ pub(crate) mod class_tables;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
 mod dependency_facts;
+mod dependency_metadata;
 mod entry;
 pub(crate) mod local_properties;
 mod module_facts;
@@ -16,6 +17,8 @@ pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyFactError,
 };
+pub(crate) use dependency_metadata::KlibDependencyCallable;
+pub use dependency_metadata::{DependencyExportSignatures, DependencyMetadata};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub(crate) use crate::ir::MainEntryParameters;
@@ -26,6 +29,7 @@ pub use module_facts::{
     CheckedBackendClassifiers, UndeterminedType,
 };
 
+use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::ir::IrFile;
 
@@ -42,6 +46,11 @@ pub struct CheckedIrFile<'a> {
     /// copied from their provider at this boundary so emission need not ask the provider about one
     /// again.
     pub callables: CheckedBackendCallables,
+    /// Exact KLIB declaration identities exported by this source module, keyed by the common-IR
+    /// callable that realizes each declaration. A dependency-metadata sink records these before a
+    /// target mutates the IR, so target code and a later module's `Callee::External` join through
+    /// one stable identity rather than a source or physical spelling.
+    pub dependency_exports: DependencyExportSignatures,
     /// The native compiler plugins the frontend ran for this compilation. A backend runs exactly
     /// these, so a declaration the frontend published is realized and no unrequested one appears.
     pub native_plugins: &'a crate::plugins::registry::NativePlugins,
@@ -70,7 +79,7 @@ pub trait Backend {
 
     /// The platform this backend emits for. The analysis it consumes must have been checked under
     /// the same platform's rules.
-    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget;
+    fn compilation_target(&self) -> CompilationTarget;
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR

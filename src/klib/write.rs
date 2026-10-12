@@ -28,6 +28,10 @@ use crate::language_version::LanguageVersion;
 pub enum KlibPlatform {
     /// Kotlin/Native. A metadata library is not bound to a Konan target, so its manifest lists none.
     Native,
+    /// Kotlin/Wasm for a JavaScript host.
+    WasmJs,
+    /// Kotlin/Wasm for a WASI host.
+    WasmWasi,
 }
 
 /// The versions a KLIB's manifest is stamped with: the compiler release that wrote it and the
@@ -120,6 +124,14 @@ impl KlibWriter {
             KlibPlatform::Native => {
                 manifest.insert("builtins_platform".to_string(), "NATIVE".to_string());
                 manifest.insert("native_targets".to_string(), String::new());
+            }
+            KlibPlatform::WasmJs => {
+                manifest.insert("builtins_platform".to_string(), "WASM".to_string());
+                manifest.insert("wasm_targets".to_string(), "wasm-js".to_string());
+            }
+            KlibPlatform::WasmWasi => {
+                manifest.insert("builtins_platform".to_string(), "WASM".to_string());
+                manifest.insert("wasm_targets".to_string(), "wasm-wasi".to_string());
             }
         }
         Self {
@@ -268,6 +280,29 @@ mod tests {
              native_targets=\n\
              unique_name=lib\n"
         );
+    }
+
+    #[test]
+    fn wasm_manifests_name_the_exact_target() {
+        let stamp = KlibStamp::new(KotlinVersion::V2_4_10, LanguageVersion::V2_4);
+        for (platform, target) in [
+            (KlibPlatform::WasmJs, "wasm-js"),
+            (KlibPlatform::WasmWasi, "wasm-wasi"),
+        ] {
+            let manifest = manifest(&KlibWriter::new("lib", stamp, platform));
+            assert_eq!(
+                manifest,
+                format!(
+                    "abi_version=2.4.0\n\
+                     builtins_platform=WASM\n\
+                     compiler_version=2.4.10\n\
+                     ir_signature_versions=1,2\n\
+                     metadata_version=2.4.0\n\
+                     unique_name=lib\n\
+                     wasm_targets={target}\n"
+                )
+            );
+        }
     }
 
     /// The `abi_version` and `metadata_version` the reference compilers write with

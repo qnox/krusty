@@ -30,6 +30,9 @@ pub(super) fn realize_member(owner: TypeName, function: &mut FunctionInfo) {
     };
     let realization = match member_rules::realization(facts()) {
         MemberRealization::Dispatch => member_rules::unsigned_range_construction(&facts())
+            .or_else(|| {
+                member_rules::unsigned_bitwise_intrinsic(&facts()).map(MemberRealization::Intrinsic)
+            })
             .or_else(|| member_rules::primitive_iterator_next(&facts())),
         realization => Some(realization),
     };
@@ -59,6 +62,7 @@ pub(super) fn realize_member_property(owner: TypeName, property: &mut PropertyIn
 pub(super) fn realize_package_function(
     package: TypeName,
     compiler_builtin_owner: bool,
+    signature: &crate::metadata::id_signature::KlibPublicIdSignature,
     function: &mut FunctionInfo,
 ) {
     let name = function.callable.name.clone();
@@ -68,6 +72,13 @@ pub(super) fn realize_package_function(
         compiler_builtin_owner,
         function,
     );
+    if compiler_builtin_owner {
+        if let Some(intrinsic) = crate::libraries::stdlib_klib_intrinsic(signature) {
+            if intrinsic.accepts_normalized_klib(function) {
+                function.callable.compiler_intrinsic = Some(intrinsic.compiler_intrinsic());
+            }
+        }
+    }
 }
 
 /// Attach the operation the package property `property` reads, if it is a builtin one.

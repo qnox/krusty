@@ -16,11 +16,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::klib::{KlibArchive, KlibError};
-use crate::libraries::{CompilerIntrinsic, FnKind, FunctionInfo, GenericSig, InlineKind};
+use crate::libraries::{
+    stdlib_klib_intrinsic, CompilerIntrinsic, FunctionInfo, GenericSig, StdlibKlibIntrinsic,
+};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::{decode, semantic};
 use crate::symbol_source::SymbolNamespace;
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::TypeName;
 
 #[derive(Debug)]
 pub(super) enum CommonExpectationError {
@@ -107,55 +109,10 @@ pub(super) struct CommonExpectationIndex {
 
 #[derive(Clone)]
 struct CommonPackageFunctionRole {
-    identity: CommonPackageFunctionIdentity,
+    identity: StdlibKlibIntrinsic,
     package: TypeName,
     name: &'static str,
     generic_sig: GenericSig,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CommonPackageFunctionIdentity {
-    DoubleRangeTo,
-    FloatRangeTo,
-    DoubleRangeUntil,
-    FloatRangeUntil,
-    EnumEntries,
-}
-
-impl CommonPackageFunctionIdentity {
-    fn compiler_intrinsic(self) -> CompilerIntrinsic {
-        match self {
-            Self::DoubleRangeTo
-            | Self::FloatRangeTo
-            | Self::DoubleRangeUntil
-            | Self::FloatRangeUntil => CompilerIntrinsic::FloatingRangeMembership,
-            Self::EnumEntries => CompilerIntrinsic::EnumEntries,
-        }
-    }
-
-    /// Shape of the paired JVM declaration. The public identity selects the role; these facts only
-    /// refuse a declaration that cannot be that realization.
-    fn accepts(self, candidate: &FunctionInfo) -> bool {
-        let plain = !candidate.flags.suspend
-            && !candidate.flags.infix
-            && candidate.context_count == 0
-            && !candidate.call_sig.vararg;
-        match self {
-            Self::DoubleRangeTo
-            | Self::FloatRangeTo
-            | Self::DoubleRangeUntil
-            | Self::FloatRangeUntil => {
-                plain && candidate.kind == FnKind::Extension && candidate.flags.operator
-            }
-            Self::EnumEntries => {
-                plain
-                    && candidate.kind == FnKind::TopLevel
-                    && !candidate.flags.operator
-                    && candidate.flags.reified
-                    && candidate.flags.inline == InlineKind::MustInline
-            }
-        }
-    }
 }
 
 impl CommonExpectationIndex {
@@ -202,7 +159,7 @@ impl CommonExpectationIndex {
             declaration.package == package
                 && declaration.name == name
                 && declaration.generic_sig == *signature
-                && declaration.identity.accepts(candidate)
+                && declaration.identity.accepts_source(candidate)
         });
         let declaration = matches.next()?;
         matches
@@ -294,95 +251,13 @@ impl CommonExpectationIndex {
 fn common_package_function_role(
     identity: KlibPublicIdSignature,
 ) -> Option<CommonPackageFunctionRole> {
-    const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
-    const FLOAT_RANGE_TO: u64 = 14_812_996_858_166_169_491;
-    const DOUBLE_RANGE_UNTIL: u64 = 742_649_461_109_916_381;
-    const FLOAT_RANGE_UNTIL: u64 = 1_543_348_898_644_284_516;
-    // The zero-argument `kotlin.enums.enumEntries`. The one-argument overloads publish different
-    // member ids and stay ordinary functions.
-    const ENUM_ENTRIES: u64 = 1_918_022_784_687_648_499;
-    if identity.matches_exact(&["kotlin", "enums"], &["enumEntries"], ENUM_ENTRIES, 0) {
-        return Some(CommonPackageFunctionRole {
-            identity: CommonPackageFunctionIdentity::EnumEntries,
-            package: type_name("kotlin/enums"),
-            name: "enumEntries",
-            generic_sig: enum_entries_signature(),
-        });
-    }
-    let (identity, scalar, name, range) =
-        if identity.matches_exact(&["kotlin", "ranges"], &["rangeTo"], DOUBLE_RANGE_TO, 0) {
-            (
-                CommonPackageFunctionIdentity::DoubleRangeTo,
-                Ty::Double,
-                "rangeTo",
-                "kotlin/ranges/ClosedFloatingPointRange",
-            )
-        } else if identity.matches_exact(&["kotlin", "ranges"], &["rangeTo"], FLOAT_RANGE_TO, 0) {
-            (
-                CommonPackageFunctionIdentity::FloatRangeTo,
-                Ty::Float,
-                "rangeTo",
-                "kotlin/ranges/ClosedFloatingPointRange",
-            )
-        } else if identity.matches_exact(
-            &["kotlin", "ranges"],
-            &["rangeUntil"],
-            DOUBLE_RANGE_UNTIL,
-            0,
-        ) {
-            (
-                CommonPackageFunctionIdentity::DoubleRangeUntil,
-                Ty::Double,
-                "rangeUntil",
-                "kotlin/ranges/OpenEndRange",
-            )
-        } else if identity.matches_exact(
-            &["kotlin", "ranges"],
-            &["rangeUntil"],
-            FLOAT_RANGE_UNTIL,
-            0,
-        ) {
-            (
-                CommonPackageFunctionIdentity::FloatRangeUntil,
-                Ty::Float,
-                "rangeUntil",
-                "kotlin/ranges/OpenEndRange",
-            )
-        } else {
-            return None;
-        };
+    let identity = stdlib_klib_intrinsic(&identity)?;
     Some(CommonPackageFunctionRole {
         identity,
-        package: crate::types::wk::kotlin_ranges_package(),
-        name,
-        generic_sig: GenericSig {
-            formals: Vec::new(),
-            formal_bounds: Vec::new(),
-            receiver: Some(scalar),
-            params: vec![scalar],
-            ret: Ty::obj_args(range, &[scalar]),
-            return_policy: Default::default(),
-        },
+        package: identity.package(),
+        name: identity.name(),
+        generic_sig: identity.generic_signature(),
     })
-}
-
-/// Source signature of the zero-argument `enumEntries` declaration: one formal bounded by
-/// `Enum<T>`, no value parameters, and `EnumEntries<T>`. The type argument inside the bound is the
-/// formal with Kotlin's implicit nullable `Any` bound, which is how metadata decodes that bound
-/// before the formal's own erasure is known. Reified and inline are declaration flags, checked
-/// when this signature is joined to the paired JVM method.
-fn enum_entries_signature() -> GenericSig {
-    let parameter_in_bound = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
-    let bound = Ty::obj_args("kotlin/Enum", &[parameter_in_bound]);
-    let parameter = Ty::ty_param("T", bound);
-    GenericSig {
-        formals: vec!["T".to_string()],
-        formal_bounds: vec![vec![bound]],
-        receiver: None,
-        params: Vec::new(),
-        ret: Ty::obj_args("kotlin/enums/EnumEntries", &[parameter]),
-        return_policy: Default::default(),
-    }
 }
 
 #[cfg(test)]
@@ -724,6 +599,15 @@ mod tests {
             realized.len(),
             1,
             "only the zero-argument declaration is the intrinsic; signatures: {described:?}"
+        );
+        assert!(
+            crate::libraries::StdlibKlibIntrinsic::EnumEntries.accepts_source(realized[0]),
+            "the paired JVM declaration keeps the exact source-shaped common signature"
+        );
+        assert!(
+            !crate::libraries::StdlibKlibIntrinsic::EnumEntries
+                .accepts_normalized_klib(realized[0]),
+            "a paired JVM declaration must not be reinterpreted as provider-normalized KLIB metadata"
         );
         let signature = realized[0]
             .generic_sig

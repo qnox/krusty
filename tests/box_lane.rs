@@ -79,6 +79,9 @@ pub trait Lane: Sync {
 
     fn test_target(&self) -> TestTarget;
 
+    /// What this lane's cases are analyzed against.
+    fn libraries(&self) -> Libraries;
+
     /// Why this host cannot run the lane, or `None` when it can.
     fn unavailable(&self) -> Option<String>;
 
@@ -96,6 +99,15 @@ pub trait Lane: Sync {
         sources: &[(String, String)],
         directive_source: &str,
     ) -> Outcome;
+
+    /// Compile independently analyzed source modules and run the resulting target program.
+    fn compile_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome;
 }
 
 pub fn ratchet_outcome(outcome: &Outcome) -> box_ratchet::Outcome {
@@ -108,6 +120,23 @@ pub fn ratchet_outcome(outcome: &Outcome) -> box_ratchet::Outcome {
         | Outcome::Harness(_)
         | Outcome::Failed(_) => box_ratchet::Outcome::Fail,
     }
+}
+
+fn validate_bless(bless: bool, full_run: bool, provisioned: bool, ci: bool) -> Result<(), String> {
+    if !bless {
+        return Ok(());
+    }
+    if !full_run || !provisioned {
+        return Err(
+            "KRUSTY_BLESS_BOX_EXPECTATIONS needs a full run over the provisioned corpus".into(),
+        );
+    }
+    if ci {
+        return Err(
+            "KRUSTY_BLESS_BOX_EXPECTATIONS is refused under CI; review and update the manifests from a deliberate local run".into(),
+        );
+    }
+    Ok(())
 }
 
 /// The corpus: the reference checkout when provisioned, else the vendored cases.
@@ -139,22 +168,93 @@ impl Drop for Scratch {
     }
 }
 
+/// What a lane's cases are analyzed against. It is the lane's own setting, so a target moves to its
+/// own library surface without forking the driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Libraries {
+    /// The JVM stdlib and `kotlin-test` jars with the JDK modules, which is what the JVM lane
+    /// compiles against. A mapped builtin like `kotlin.Throwable` is a typealias for a `java.lang`
+    /// class there, so the JDK has to be present for those names to resolve at all.
+    JvmArtifacts,
+    /// The target's own stdlib KLIB (`toolchain::kotlin_stdlib_klib`), the library kotlinc
+    /// compiles that target against. `kotlin.test` is part of it.
+    StdlibKlib,
+}
+
+impl Libraries {
+    /// Whether this host has the libraries a `target` case is analyzed against.
+    pub fn available(self, target: TestTarget) -> bool {
+        match self {
+            Self::JvmArtifacts => {
+                krusty::toolchain::stdlib_jar().is_some()
+                    && krusty::toolchain::jdk_modules().is_some()
+            }
+            Self::StdlibKlib => {
+                krusty::toolchain::kotlin_stdlib_klib(target.compilation_target()).is_some()
+            }
+        }
+    }
+
+    /// A fresh semantic platform for one compilation.
+    fn platform(
+        self,
+        target: krusty::compilation_target::CompilationTarget,
+        dependencies: &[PathBuf],
+        friend_dependencies: &[PathBuf],
+    ) -> Box<dyn krusty::libraries::SemanticPlatform> {
+        match self {
+            Self::JvmArtifacts if !dependencies.is_empty() || !friend_dependencies.is_empty() => {
+                panic!("JVM box libraries cannot ingest KLIB dependency modules")
+            }
+            Self::JvmArtifacts => Box::new(
+                krusty::jvm::jvm_libraries::JvmLibraries::new(CLASSPATH.with(std::rc::Rc::clone))
+                    .expect("JVM provider initialization"),
+            ),
+            Self::StdlibKlib => Box::new(STDLIB_KLIBS.with(|opened| {
+                if !dependencies.is_empty() {
+                    let mut libraries = dependencies
+                        .iter()
+                        .map(|path| {
+                            if friend_dependencies.contains(path) {
+                                krusty::klib_libraries::KlibLibraryInput::friend(path.clone())
+                            } else {
+                                krusty::klib_libraries::KlibLibraryInput::dependency(path.clone())
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    libraries.push(krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                        krusty::toolchain::kotlin_stdlib_klib(target)
+                            .expect("checked by `Libraries::available`"),
+                    ));
+                    return krusty::klib_libraries::KlibLibraries::open(&libraries).unwrap_or_else(
+                        |error| panic!("opening the {target:?} dependency KLIBs: {error}"),
+                    );
+                }
+                let mut opened = opened.borrow_mut();
+                if let Some((_, libraries)) = opened.iter().find(|(opened, _)| *opened == target) {
+                    return libraries.for_compilation();
+                }
+                let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
+                    .expect("checked by `Libraries::available`");
+                let libraries = krusty::klib_libraries::KlibLibraries::open(&[
+                    krusty::klib_libraries::KlibLibraryInput::platform_stdlib(stdlib),
+                ])
+                .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
+                let compilation = libraries.for_compilation();
+                opened.push((target, libraries));
+                compilation
+            })),
+        }
+    }
+}
+
 thread_local! {
     /// One classpath per worker thread: it is `Rc`-shared and caches parsed class files, so
     /// building it per case would redo the stdlib jar's index thousands of times.
-    ///
-    /// The stdlib jar AND the JDK jimage, which is the pair the JVM lane compiles against. Nothing
-    /// about the emitted program changes — no JVM is involved in running it — but the SIGNATURES
-    /// come out of JVM artifacts until the provider is klib-based, and a mapped builtin like
-    /// `kotlin.Throwable` is a typealias for a `java.lang` class. Without the jimage those names
-    /// resolve to nothing, and a case that fails to RESOLVE is counted as declined — so a lane
-    /// would report "not supported yet" for a whole family of programs it had never actually
-    /// attempted. Every lane has to compile against the same thing for the comparison between
-    /// them to mean anything.
     static CLASSPATH: std::rc::Rc<Classpath> = std::rc::Rc::new(Classpath::new(
         [
-            krusty::toolchain::stdlib_jar().expect("checked by `frontend_available`"),
-            krusty::toolchain::jdk_modules().expect("checked by `frontend_available`"),
+            krusty::toolchain::stdlib_jar().expect("checked by `Libraries::available`"),
+            krusty::toolchain::jdk_modules().expect("checked by `Libraries::available`"),
         ]
         .into_iter()
         // `kotlin-test`, which is what `// WITH_STDLIB` means on top of the stdlib: the corpus
@@ -163,11 +263,12 @@ thread_local! {
         .chain(krusty::toolchain::kotlin_test_jar())
         .collect::<Vec<_>>(),
     ));
-}
 
-/// Whether the libraries every lane analyzes against are present.
-pub fn frontend_available() -> bool {
-    krusty::toolchain::stdlib_jar().is_some() && krusty::toolchain::jdk_modules().is_some()
+    /// Each target's stdlib KLIB, opened once per worker thread: opening decodes and signs every
+    /// declaration, which `for_compilation` then shares with each case.
+    static STDLIB_KLIBS: std::cell::RefCell<
+        Vec<(krusty::compilation_target::CompilationTarget, krusty::klib_libraries::KlibLibraries)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -181,15 +282,12 @@ thread_local! {
 pub fn compile<B: Backend>(
     sources: &[(String, String)],
     directive_source: &str,
+    libraries: Libraries,
     target: TestTarget,
     backend: &B,
     module_name: &str,
     decline_prefix: &str,
 ) -> Result<Vec<Artifact>, Outcome> {
-    let platform: Box<dyn krusty::libraries::SemanticPlatform> = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(CLASSPATH.with(std::rc::Rc::clone))
-            .expect("JVM provider initialization"),
-    );
     let inputs = sources
         .iter()
         .map(|(stem, source)| SourceInput::kotlin(source).with_file_stem(stem))
@@ -204,7 +302,10 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
-    let platform = krusty::frontend::PlatformProvider::new(compilation_target, platform);
+    let platform = krusty::frontend::PlatformProvider::new(
+        compilation_target,
+        libraries.platform(compilation_target, &[], &[]),
+    );
     let features = krusty::features::LangFeatures::from_source(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
@@ -226,6 +327,239 @@ pub fn compile<B: Backend>(
     }
     if let Some(first) = diags.diags.first() {
         return Err(Outcome::Frontend(first.msg.clone()));
+    }
+    Ok(artifacts)
+}
+
+/// Analyze one independently built corpus module against the exact KLIB artifacts of its
+/// dependencies. `common_file_count` is the dependency-first `dependsOn` prefix folded into this
+/// unit; those sources remain common rather than being flattened into platform sources.
+fn module_features(
+    directive_source: &str,
+    common_file_count: usize,
+) -> krusty::features::LangFeatures {
+    let mut features = krusty::features::LangFeatures::from_source(directive_source);
+    if common_file_count != 0 {
+        features.enable("MultiPlatformProjects");
+    }
+    features
+}
+
+pub fn analyze_module(
+    unit: &krusty::conformance::ModuleUnit,
+    dependency_klibs: &[PathBuf],
+    friend_klibs: &[PathBuf],
+    directive_source: &str,
+    libraries: Libraries,
+    target: TestTarget,
+    backend_target: krusty::compilation_target::CompilationTarget,
+    diags: &mut DiagSink,
+) -> Result<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>), Outcome> {
+    if backend_target != target.compilation_target() {
+        return Err(Outcome::Harness(format!(
+            "the {target:?} corpus lane received a {backend_target:?} backend"
+        )));
+    }
+    let inputs = unit
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, (stem, source))| {
+            let input = SourceInput::kotlin(source).with_file_stem(stem);
+            if index < unit.common_file_count {
+                input.common()
+            } else {
+                input
+            }
+        })
+        .collect::<Vec<_>>();
+    let stems = unit
+        .files
+        .iter()
+        .map(|(stem, _)| stem.clone())
+        .collect::<Vec<_>>();
+    let platform = krusty::frontend::PlatformProvider::new(
+        backend_target,
+        libraries.platform(backend_target, dependency_klibs, friend_klibs),
+    );
+    let features = module_features(directive_source, unit.common_file_count);
+    let diagnostics_start = diags.diags.len();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
+        &inputs, platform, &features, &unit.name, diags,
+    );
+    if let Some(first) = diags.diags.get(diagnostics_start) {
+        return Err(Outcome::Frontend(first.msg.clone()));
+    }
+    Ok((analysis, stems))
+}
+
+/// Analyze each source module against only its declared dependency KLIB closure, emit all target
+/// code through one backend session, and retain every generated dependency as a distinct archive.
+pub fn compile_modules<B: Backend>(
+    scratch: &Path,
+    stem: &str,
+    modules: &[krusty::conformance::ModuleUnit],
+    directive_source: &str,
+    libraries: Libraries,
+    target: TestTarget,
+    backend: &B,
+    decline_prefix: &str,
+) -> Result<Vec<Artifact>, Outcome> {
+    #[derive(Clone)]
+    struct GeneratedDependency {
+        archive: PathBuf,
+        transitive: Vec<PathBuf>,
+    }
+
+    struct GeneratedRoot(PathBuf);
+
+    impl Drop for GeneratedRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn diagnostic_outcome(diags: &DiagSink, decline_prefix: &str) -> Option<Outcome> {
+        if let Some(decline) = diags
+            .diags
+            .iter()
+            .find_map(|diagnostic| diagnostic.msg.strip_prefix(decline_prefix))
+        {
+            return Some(Outcome::Declined(
+                decline.trim_end_matches(" yet").to_string(),
+            ));
+        }
+        diags
+            .diags
+            .first()
+            .map(|first| Outcome::Frontend(first.msg.clone()))
+    }
+
+    fn write_dependency_archive(
+        root: &Path,
+        ordinal: usize,
+        artifacts: &[Artifact],
+    ) -> Result<PathBuf, Outcome> {
+        let archive = root.join(format!("module-{ordinal}"));
+        for (name, bytes) in artifacts {
+            let relative = Path::new(name);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(Outcome::Harness(format!(
+                    "generated KLIB contains an unsafe artifact path {name:?}"
+                )));
+            }
+            let output = archive.join(relative);
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    Outcome::Failed(format!("creating generated KLIB directory: {error}"))
+                })?;
+            }
+            std::fs::write(&output, bytes).map_err(|error| {
+                Outcome::Failed(format!("writing generated KLIB artifact {name}: {error}"))
+            })?;
+        }
+        Ok(archive)
+    }
+
+    let compilation_target = backend.compilation_target();
+    if compilation_target != target.compilation_target() {
+        return Err(Outcome::Harness(format!(
+            "the {target:?} corpus lane received a {compilation_target:?} backend"
+        )));
+    }
+    let features = krusty::features::LangFeatures::from_source(directive_source);
+    let platform = match compilation_target {
+        krusty::compilation_target::CompilationTarget::Native => {
+            krusty::klib::write::KlibPlatform::Native
+        }
+        krusty::compilation_target::CompilationTarget::WasmJs => {
+            krusty::klib::write::KlibPlatform::WasmJs
+        }
+        krusty::compilation_target::CompilationTarget::WasmWasi => {
+            krusty::klib::write::KlibPlatform::WasmWasi
+        }
+        other => {
+            return Err(Outcome::Harness(format!(
+                "the multi-module box lane cannot emit dependency KLIBs for {other:?}"
+            )))
+        }
+    };
+    let metadata = krusty::klib::backend::KlibBackend::new(
+        platform,
+        krusty::klib::write::KlibStamp::new(
+            krusty::kotlin_version::target(),
+            features.language_version(),
+        ),
+    )
+    .with_annotations_in_metadata(features.has("AnnotationsInMetadata"));
+    let generated_root = GeneratedRoot(scratch.join(format!(
+        ".krusty-klib-{stem}-{}-{}",
+        std::process::id(),
+        rayon::current_thread_index().unwrap_or(0)
+    )));
+    if let Err(error) = std::fs::create_dir_all(&generated_root.0) {
+        return Err(Outcome::Failed(format!(
+            "creating generated KLIB root: {error}"
+        )));
+    }
+
+    let mut session = krusty::compiler::EmissionSession::new(backend);
+    let mut diags = DiagSink::new();
+    let mut generated = BTreeMap::<String, GeneratedDependency>::new();
+    for (ordinal, unit) in modules.iter().enumerate() {
+        let mut dependency_klibs = Vec::new();
+        let mut friend_klibs = Vec::new();
+        let mut seen = BTreeSet::new();
+        for dependency in &unit.deps {
+            let Some(archive) = generated.get(dependency) else {
+                return Err(Outcome::Harness(format!(
+                    "module dependency {dependency} was not built"
+                )));
+            };
+            for path in std::iter::once(&archive.archive).chain(&archive.transitive) {
+                if seen.insert(path.clone()) {
+                    dependency_klibs.push(path.clone());
+                }
+            }
+            if unit.friends.contains(dependency) {
+                friend_klibs.push(archive.archive.clone());
+            }
+        }
+        let (analysis, stems) = analyze_module(
+            unit,
+            &dependency_klibs,
+            &friend_klibs,
+            directive_source,
+            libraries,
+            target,
+            compilation_target,
+            &mut diags,
+        )?;
+        let Some(dependency) =
+            session.emit_module(analysis, &stems, &metadata, &unit.name, &mut diags)
+        else {
+            let outcome = diagnostic_outcome(&diags, decline_prefix).unwrap_or_else(|| {
+                Outcome::Harness("module emission failed without a diagnostic".to_string())
+            });
+            return Err(outcome);
+        };
+        let archive = write_dependency_archive(&generated_root.0, ordinal, dependency.artifacts())?;
+        generated.insert(
+            unit.name.clone(),
+            GeneratedDependency {
+                archive,
+                transitive: dependency_klibs,
+            },
+        );
+    }
+    let artifacts = session.finish("box", &mut diags);
+    let outcome = diagnostic_outcome(&diags, decline_prefix);
+    if let Some(outcome) = outcome {
+        return Err(outcome);
     }
     Ok(artifacts)
 }
@@ -450,6 +784,36 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("Case");
+    if source.contains("// MODULE:") {
+        let prepared = krusty::conformance::prepare_test_source(&source, lane.test_target());
+        let Some(mut modules) = krusty::conformance::split_modules(&prepared) else {
+            return Outcome::Harness("unsupported // MODULE: shape".to_string());
+        };
+        if krusty::conformance::directive(&source, "WITH_COROUTINES") {
+            krusty::conformance::inject_support_module(
+                &mut modules,
+                krusty::conformance::COROUTINE_HELPERS,
+            );
+        }
+        let units = krusty::conformance::module_units(&modules);
+        if units.iter().any(|unit| !unit.java_files.is_empty()) {
+            return Outcome::NotApplicable(
+                "contains Java source blocks unavailable to this target",
+            );
+        }
+        let mut emitted = BTreeSet::new();
+        for unit in &units {
+            if unit
+                .deps
+                .iter()
+                .any(|dependency| !emitted.contains(dependency))
+            {
+                return Outcome::Harness("module dependency declared out of order".to_string());
+            }
+            emitted.insert(unit.name.clone());
+        }
+        return lane.compile_modules_and_run(scratch, stem, &units, &source);
+    }
     let sources = match prepare_sources(&source, stem, lane.test_target()) {
         Ok(sources) => sources,
         Err(outcome) => return outcome,
@@ -467,6 +831,14 @@ fn report_line(lane: &str, counts: &[(&str, usize)]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{lane} conformance: {fields}")
+}
+
+/// A deliberate local bless may replace the committed outcome inventory only after every case completed
+/// without a compiler panic. Panic details are reported below before the ordinary failure
+/// assertion; keeping this decision separate prevents that reporting path from publishing a
+/// partial inventory.
+fn may_write_blessed_expectations(bless: bool, compiler_panics: usize) -> bool {
+    bless && compiler_panics == 0
 }
 
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
@@ -512,7 +884,6 @@ pub fn run(lane: &dyn Lane) {
     );
     let platform = lane.platform();
     let version = krusty::kotlin_version::target();
-    let baseline = provisioned.then(|| box_ratchet::load(platform, version));
     let corpus_cases: BTreeSet<String> = files.iter().map(|file| relative(file)).collect();
     // Triage knob: scan only the cases whose path contains this substring. The expected-failure
     // checks below cover the cases actually scanned, so a narrowed run stays self-consistent.
@@ -536,16 +907,14 @@ pub fn run(lane: &dyn Lane) {
             .as_deref(),
     )
     .unwrap_or_else(|error| panic!("{error}"));
-    if bless {
-        assert!(
-            full_run && provisioned,
-            "KRUSTY_BLESS_BOX_EXPECTATIONS needs a full run over the provisioned {label} corpus"
-        );
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "KRUSTY_BLESS_BOX_EXPECTATIONS is refused under CI: expectations are blessed locally and reviewed"
-        );
-    }
+    validate_bless(
+        bless,
+        full_run,
+        provisioned,
+        std::env::var_os("CI").is_some(),
+    )
+    .unwrap_or_else(|error| panic!("{error}: {label}"));
+    let baseline = provisioned.then(|| box_ratchet::load(platform, version));
     let scratch = Scratch::new(platform.name());
     // Panics are recorded per case below; the default hook's backtrace spam would bury the
     // report. The hook keeps the panic's file so the case can be attributed.
@@ -642,11 +1011,7 @@ pub fn run(lane: &dyn Lane) {
             }
         }
     }
-    if bless {
-        assert!(
-            compiler_panics.is_empty(),
-            "a compiler panic cannot be recorded as an expected failure"
-        );
+    if may_write_blessed_expectations(bless, compiler_panics.len()) {
         box_ratchet::write(platform, version, &current)
             .unwrap_or_else(|error| panic!("failed to write {label} box expectations: {error}"));
     }
@@ -770,6 +1135,30 @@ fn source_sets_split_files_and_receive_runner_helpers() {
         ["lib", "main", "CoroutineUtil"]
     );
     assert!(sources[2].1.contains("fun <T> runBlocking"));
+}
+
+#[test]
+fn a_depends_on_source_set_enables_the_multiplatform_project_feature() {
+    assert!(!module_features("", 0).has("MultiPlatformProjects"));
+    assert!(module_features("", 1).has("MultiPlatformProjects"));
+}
+
+#[test]
+fn blessing_is_a_deliberate_local_full_corpus_operation() {
+    assert_eq!(validate_bless(false, false, false, true), Ok(()));
+    assert_eq!(validate_bless(true, true, true, false), Ok(()));
+    assert!(validate_bless(true, false, true, false).is_err());
+    assert!(validate_bless(true, true, false, false).is_err());
+    assert!(validate_bless(true, true, true, true).is_err());
+}
+
+#[test]
+fn a_bless_with_a_compiler_panic_cannot_write_expectations() {
+    assert_eq!(
+        [(false, 0), (false, 1), (true, 1), (true, 0),]
+            .map(|(bless, compiler_panics)| may_write_blessed_expectations(bless, compiler_panics)),
+        [false, false, false, true]
+    );
 }
 
 #[test]

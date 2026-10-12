@@ -576,7 +576,11 @@ mod tests {
             "src/wasm/codegen.rs",
             &["backend", "compilation_target", "diag", "types"],
         );
-        assert_allowed_crate_modules("src/wasm/codegen/lower.rs", &["ir", "types"]);
+        assert_allowed_crate_modules(
+            "src/wasm/codegen/callable_registry.rs",
+            &["backend", "fir", "ir"],
+        );
+        assert_allowed_crate_modules("src/wasm/codegen/lower.rs", &["backend", "ir", "types"]);
         // A class's WasmGC form is built on the shared class tables (`backend`), whose slot keys
         // name the opaque checked property and callable ids IR carries (`fir`).
         for path in [
@@ -859,6 +863,7 @@ mod tests {
                 "js",
                 "jvm",
                 "klib",
+                "klib_libraries",
                 "kotlin_version",
                 "language_settings",
                 "language_version",

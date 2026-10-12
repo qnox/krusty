@@ -29,10 +29,12 @@ pub enum KlibBodyDeclineReason {
     UnsupportedOperation(&'static str),
     /// The body calls a declaration lowering cannot realize.
     UnsupportedCallee(Box<KlibPublicIdSignature>),
-    /// The body calls a declaration no loaded library declares, so nothing describes the callee.
+    /// No producer-reachable library serializes the declaration the body calls.
     UndeclaredCallee(Box<KlibPublicIdSignature>),
     /// The body calls a dependency declaration that two frozen selections describe.
     AmbiguousCallee(Box<KlibPublicIdSignature>),
+    /// Multiple modules reachable in the producer graph serialize the call signature.
+    AmbiguousCalleeOrigin(Box<KlibPublicIdSignature>),
     /// The body reaches, through calls, a dependency body that declines.
     CalleeDeclined(Box<KlibBodyDecline>),
     /// The body names a type lowering does not model, by its form.
@@ -110,12 +112,23 @@ impl std::fmt::Display for KlibBodyDecline {
             KlibBodyDeclineReason::UndeclaredCallee(callee) => {
                 write!(formatter, "it calls `")?;
                 write_qualified(formatter, callee)?;
-                write!(formatter, "`, which no loaded library declares")
+                write!(
+                    formatter,
+                    "`, which no reachable library serializes its declaration"
+                )
             }
             KlibBodyDeclineReason::AmbiguousCallee(callee) => {
                 write!(formatter, "it calls `")?;
                 write_qualified(formatter, callee)?;
                 write!(formatter, "`, which two selected declarations describe")
+            }
+            KlibBodyDeclineReason::AmbiguousCalleeOrigin(callee) => {
+                write!(formatter, "it calls `")?;
+                write_qualified(formatter, callee)?;
+                write!(
+                    formatter,
+                    "`, whose declaration multiple producer dependencies serialize"
+                )
             }
             KlibBodyDeclineReason::CalleeDeclined(callee) => {
                 write!(formatter, "it reaches {callee}")

@@ -11,7 +11,7 @@ use super::demo_package::{
 };
 use super::{base, local_symbol, lowered_body, public_symbol, validated};
 use crate::fir::ResolvedParameterIdentity;
-use crate::libraries::{ExternalCallableKind, KlibDeclarationSignature};
+use crate::libraries::{ExternalCallableKind, KlibDependencyCallable};
 use crate::metadata::id_signature::{
     callable_signature, CallableShape, DeclarationContainer, KlibPublicIdSignature, Placement,
 };
@@ -98,7 +98,7 @@ struct Record {
     params: [Ty; 1],
     identities: [ResolvedParameterIdentity; 1],
     ret: Ty,
-    signature: KlibDeclarationSignature,
+    identity: KlibDependencyCallable,
 }
 
 impl Record {
@@ -108,10 +108,10 @@ impl Record {
             params: [T::Int.semantic()],
             identities: [ResolvedParameterIdentity::Source("a".into())],
             ret: T::Int.semantic(),
-            signature: demo.facts["b"]
-                .declaration_signature
+            identity: demo.facts["b"]
+                .dependency_callable
                 .clone()
-                .expect("signed"),
+                .expect("a signed dependency callable"),
         }
     }
 
@@ -123,7 +123,7 @@ impl Record {
             self.ret,
             &self.identities,
             0,
-            Some(&self.signature),
+            Some(&self.identity),
         )
         .expect("signed")
     }
@@ -303,7 +303,7 @@ fn function_tree(
 const CALLER: [Shape; 1] = [("a", &[T::Int], T::Int)];
 
 #[test]
-fn a_call_no_loaded_library_declares_declines_by_name() {
+fn a_call_no_reachable_library_serializes_declines_by_name() {
     let undeclared = demo_signature(None, "z", &[], &[T::Int]);
     let demo = demo(&CALLER, |_, body| {
         let a = body.param(0);
@@ -312,7 +312,7 @@ fn a_call_no_loaded_library_declares_declines_by_name() {
     });
     assert_eq!(
         demo.declined("a", &[]),
-        "the KLIB body of `demo.a` (it calls `demo.z`, which no loaded library declares)"
+        "the KLIB body of `demo.a` (it calls `demo.z`, which no reachable library serializes its declaration)"
     );
 }
 

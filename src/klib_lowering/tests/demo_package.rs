@@ -553,7 +553,16 @@ pub(super) fn demo(
     shapes: &[Shape],
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> Demo {
-    demo_with(shapes, Vec::new(), build)
+    demo_in_module("demo", shapes, build)
+}
+
+/// [`demo`], with an exact provider/archive module identity chosen by the test.
+pub(super) fn demo_in_module(
+    module: &str,
+    shapes: &[Shape],
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> Demo {
+    demo_with_module(module, shapes, Vec::new(), build)
 }
 
 /// [`demo`], with `extra` trees serialized by the same library beside the `demo` functions.
@@ -562,13 +571,61 @@ pub(super) fn demo_with(
     extra: Vec<KlibIrDeclarationTree>,
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> Demo {
-    let libraries = KlibLibraries::from_packages(vec![(
-        vec!["demo".to_owned()],
-        KotlinPackage {
-            functions: shapes.iter().copied().map(declaration).collect(),
-            ..KotlinPackage::default()
-        },
-    )])
+    demo_with_module("demo", shapes, extra, build)
+}
+
+fn demo_with_module(
+    module: &str,
+    shapes: &[Shape],
+    extra: Vec<KlibIrDeclarationTree>,
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> Demo {
+    let (facts, trees) = demo_module(module, shapes, extra, |_| true, build);
+    let bodies = KlibDeclarationBodies::from_libraries(vec![(module.to_owned(), trees)])
+        .expect("one library");
+    Demo { facts, bodies }
+}
+
+/// Build one fixture module while serializing only `declarations`. Facts still cover every shape,
+/// so a serialized body can refer to a declaration owned by another fixture module.
+pub(super) fn selected_demo_module(
+    module: &str,
+    shapes: &[Shape],
+    declarations: &[&str],
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> (
+    HashMap<&'static str, BackendCallableFact>,
+    KlibIrModuleTrees,
+) {
+    demo_module(
+        module,
+        shapes,
+        Vec::new(),
+        |name| declarations.contains(&name),
+        build,
+    )
+}
+
+fn demo_module(
+    module: &str,
+    shapes: &[Shape],
+    extra: Vec<KlibIrDeclarationTree>,
+    serialize: impl Fn(&str) -> bool,
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> (
+    HashMap<&'static str, BackendCallableFact>,
+    KlibIrModuleTrees,
+) {
+    let libraries = KlibLibraries::from_named_packages(
+        module,
+        vec![(
+            vec!["demo".to_owned()],
+            KotlinPackage {
+                functions: shapes.iter().copied().map(declaration).collect(),
+                ..KotlinPackage::default()
+            },
+        )],
+    )
     .expect("the declarations are signable");
     let facts = shapes
         .iter()
@@ -593,6 +650,7 @@ pub(super) fn demo_with(
     let mut slot = 0;
     let trees = shapes
         .iter()
+        .filter(|&&(name, _, _)| serialize(name))
         .map(|&(name, params, ret)| {
             let function = public_symbol(KlibIrSymbolKind::Function, signatures[name].clone());
             let params = params
@@ -647,8 +705,7 @@ pub(super) fn demo_with(
         .chain(extra)
         .collect();
     let trees = KlibIrModuleTrees::from_trees(trees).expect("one tree defines each identity once");
-    let bodies = KlibDeclarationBodies::from_libraries(vec![trees]).expect("one library");
-    Demo { facts, bodies }
+    (facts, trees)
 }
 
 impl Demo {

@@ -25,7 +25,7 @@ fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'conformance shard settings must stay retired' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_SHARDS KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS; source \"$1\"; if [ -n \"${KRUSTY_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_SHARDS+set}\" ] || [ -n \"${KRUSTY_SCORED_CONFORMANCE_TIMEOUT_SECONDS+set}\" ]; then echo 'conformance shard settings must stay retired' >&2; exit 1; fi; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -41,7 +41,7 @@ fn canonical_gate_defaults_bound_ordinary_and_single_process_suites() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 120, 1800, 600, 1800]);
+    assert_eq!(values, [120, 120, 1800, 600, 600, 1800]);
 }
 
 #[cfg(unix)]
@@ -302,6 +302,80 @@ fn run_tests_wires_target_hygiene_before_building() {
     );
 }
 
+#[test]
+fn full_local_conformance_uses_target_owned_focused_passes() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let runner = fs::read_to_string(root.join("run-tests.sh")).expect("read run-tests.sh");
+    for required in [
+        "run-tests.sh: conformance native-focused",
+        "KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1",
+        "kotlin_box_native_conformance:: --skip kotlin_box_native_conformance::kotlin_codegen_box_native_conformance",
+        "run-tests.sh: conformance native-multimodule",
+        "KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=native",
+        "run-tests.sh: conformance wasm-focused",
+        "KRUSTY_REQUIRE_WASM_JS_CONFORMANCE=1",
+        "KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE=1",
+        "kotlin_box_wasm_conformance:: --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance",
+        "run-tests.sh: conformance wasm-multimodule",
+        "KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=wasm",
+        "multimodule_conformance_cases:: --test-threads=1",
+        "--skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance::",
+    ] {
+        assert!(
+            runner.contains(required),
+            "the canonical full gate must preserve target ownership ({required})"
+        );
+    }
+
+    let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
+    for recipe in ["conformance-all-plain", "conformance-one"] {
+        let body = justfile
+            .split(&format!("\n{recipe}"))
+            .nth(1)
+            .and_then(|text| text.split("\n\n").next())
+            .unwrap_or_else(|| panic!("justfile has {recipe}"));
+        for required in [
+            "target-conformance-regressions.sh native",
+            "target-conformance-regressions.sh wasm",
+            "KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm",
+            "--skip kotlin_box_native_conformance::",
+            "--skip kotlin_box_wasm_conformance::",
+        ] {
+            assert!(
+                body.contains(required)
+                    || (recipe == "conformance-all-plain"
+                        && required == "target-conformance-regressions.sh native"
+                        && body.contains("native-conformance-regressions"))
+                    || (recipe == "conformance-all-plain"
+                        && required == "target-conformance-regressions.sh wasm"
+                        && body.contains("wasm-conformance-regressions")),
+                "{recipe} must preserve target ownership ({required})"
+            );
+        }
+    }
+}
+
+#[test]
+fn target_focused_modules_do_not_consume_jvm_oracles() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for module in [
+        "tests/kotlin_box_native_conformance.rs",
+        "tests/kotlin_box_wasm_conformance.rs",
+    ] {
+        let source = fs::read_to_string(root.join(module)).expect("read target conformance module");
+        for forbidden in [
+            "reference_jvm_acceptance",
+            "expect_box_ok_with_stdlib",
+            "stdlib_jar",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{module} must assert real target KLIB/runtime outcomes, not {forbidden}"
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 fn regression_fixture(name: &str, body: &str) -> (PathBuf, PathBuf) {
     let temp = std::env::temp_dir().join(format!(
@@ -371,7 +445,7 @@ fn native_runner_rejects_a_missing_report_and_truncates_the_callers_copy() {
 
 #[cfg(unix)]
 #[test]
-fn prebuilt_conformance_regressions_skip_the_box_suites() {
+fn prebuilt_jvm_regressions_skip_the_runnable_target_modules() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (temp, binary) = regression_fixture(
         "skip",
@@ -407,7 +481,7 @@ fn prebuilt_conformance_regressions_skip_the_box_suites() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_box_native_conformance::\n--skip\nkotlin_box_wasm_conformance::\n--test-threads\n{}\n\
              bin={}\n--ignored\n--exact\n\
              kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
@@ -457,7 +531,7 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
     assert_eq!(
         stdout,
         format!(
-            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_codegen_box_native_conformance\n--skip\nkotlin_codegen_box_wasm\n--test-threads\n{}\n\
+            "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_box_native_conformance::\n--skip\nkotlin_box_wasm_conformance::\n--test-threads\n{}\n\
              bin={}\n--ignored\n--exact\n\
              kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
             sibling.display(),
@@ -468,6 +542,74 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
         String::from_utf8_lossy(&output.stderr)
     );
     fs::remove_dir_all(temp).expect("remove regressions fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn target_regressions_run_their_focused_module_and_shared_cases_after_provisioning() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture(
+        "target-ownership",
+        "#!/usr/bin/env bash\nprintf 'language=%s native=%s js=%s wasi=%s runner=%s\\n' \
+         \"$KRUSTY_LANGUAGE_VERSION\" \"${KRUSTY_REQUIRE_NATIVE_CONFORMANCE:-0}\" \
+         \"${KRUSTY_REQUIRE_WASM_JS_CONFORMANCE:-0}\" \
+         \"${KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE:-0}\" \
+         \"${KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER:-unset}\"\nprintf '%s\\n' \"$@\"\n",
+    );
+    let node = temp.join("bin").join("node");
+    fs::write(&node, "#!/bin/sh\nexit 0\n").expect("write node stub");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).expect("make node executable");
+    let path = format!("{}:/usr/bin:/bin", temp.join("bin").display());
+
+    let native = Command::new("bash")
+        .arg(root.join("scripts/target-conformance-regressions.sh"))
+        .args(["native", binary.to_str().unwrap(), "2.4.10"])
+        .env("KRUSTY_KOTLIN_NATIVE", &temp)
+        .env_remove("KRUSTY_KOTLINC")
+        .env_remove("KRUSTY_KOTLIN_BOX_DIR")
+        .env("KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env_remove("KRUSTY_REQUIRE_NATIVE_CONFORMANCE")
+        .env_remove("KRUSTY_REQUIRE_WASM_JS_CONFORMANCE")
+        .env_remove("KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE")
+        .env("PATH", &path)
+        .output()
+        .expect("run Native target regressions");
+    assert_eq!(native.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(native.stdout).expect("Native stdout is UTF-8"),
+        "language=2.4.10 native=1 js=0 wasi=0 runner=native\n\
+         kotlin_box_native_conformance::\n--skip\n\
+         kotlin_box_native_conformance::kotlin_codegen_box_native_conformance\n\
+         --test-threads\n1\n\
+         language=2.4.10 native=1 js=0 wasi=0 runner=native\n\
+         multimodule_conformance_cases::\n--test-threads\n1\n"
+    );
+
+    let wasm = Command::new("bash")
+        .arg(root.join("scripts/target-conformance-regressions.sh"))
+        .args(["wasm", binary.to_str().unwrap(), "2.4.10"])
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_DEPS_CACHE", &temp)
+        .env_remove("KRUSTY_KOTLIN_BOX_DIR")
+        .env("KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS", "3")
+        .env_remove("KRUSTY_REQUIRE_NATIVE_CONFORMANCE")
+        .env_remove("KRUSTY_REQUIRE_WASM_JS_CONFORMANCE")
+        .env_remove("KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE")
+        .env("PATH", &path)
+        .output()
+        .expect("run Wasm target regressions");
+    assert_eq!(wasm.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(wasm.stdout).expect("Wasm stdout is UTF-8"),
+        "language=2.4.10 native=0 js=1 wasi=1 runner=wasm\n\
+         kotlin_box_wasm_conformance::\n--skip\n\
+         kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance\n--skip\n\
+         kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance\n\
+         --test-threads\n1\n\
+         language=2.4.10 native=0 js=1 wasi=1 runner=wasm\n\
+         multimodule_conformance_cases::\n--test-threads\n1\n"
+    );
+    fs::remove_dir_all(temp).expect("remove target ownership fixture");
 }
 
 #[cfg(unix)]
@@ -549,7 +691,7 @@ fn prebuilt_conformance_regressions_enforce_the_deadline() {
 }
 
 #[test]
-fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
+fn ci_splits_every_version_into_independent_target_rows() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
@@ -573,13 +715,25 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         .find("just native-conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
         .map(|offset| matrix + offset)
         .expect("each version's Native row runs the native box suite");
+    let native_regressions = workflow[matrix..]
+        .find(
+            "just native-conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"",
+        )
+        .map(|offset| matrix + offset)
+        .expect("each version's Native row runs its focused target tests");
+    let wasm_regressions = workflow[matrix..]
+        .find(
+            "just wasm-conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"",
+        )
+        .map(|offset| matrix + offset)
+        .expect("each version's Wasm row runs its focused target tests");
     let regressions = workflow[matrix..]
         .find("just conformance-regressions \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
         .map(|offset| matrix + offset)
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
+            "needs: [ci, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
@@ -587,13 +741,17 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     assert!(
         matrix < box_run
             && box_run < native_box_run
-            && native_box_run < regressions
+            && native_box_run < native_regressions
+            && native_regressions < wasm_regressions
+            && wasm_regressions < regressions
             && regressions < release
     );
     for needle in [
         "- name: run box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
         "- name: run native box conformance ${{ matrix.version }}\n        if: matrix.target == 'native'",
         "- name: run wasm box conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
+        "- name: run focused Native conformance ${{ matrix.version }}\n        # Keep focused target regressions independent",
+        "- name: run focused Wasm conformance ${{ matrix.version }}\n        if: matrix.target == 'wasm'",
         "- name: run non-box conformance ${{ matrix.version }}\n        if: matrix.target == 'jvm'",
     ] {
         assert!(
@@ -630,7 +788,7 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
     assert_eq!(
         workflow.matches("path: target/cache/box-corpus").count(),
         2,
-        "only the coverage and conformance lanes read the box and CLI corpus; the KLIB lane caches none"
+        "only the coverage and conformance jobs read the box and CLI corpus"
     );
     let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
     let klib_recipe = justfile
@@ -640,7 +798,41 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         .expect("justfile has a klib-semantics recipe");
     assert!(
         klib_recipe.contains("KRUSTY_PROVISION_BOX_CORPUS=0 "),
-        "the KLIB lane caches no corpus, so its harness run must not provision one"
+        "the focused local KLIB recipe must not provision an unrelated corpus"
+    );
+    let native_target_recipe = justfile
+        .split("\nnative-conformance-regressions ")
+        .nth(1)
+        .and_then(|recipe| recipe.split("\n\n").next())
+        .expect("justfile has a Native target regression recipe");
+    for required in [
+        "just kotlin-native",
+        "target-conformance-regressions.sh native",
+    ] {
+        assert!(
+            native_target_recipe.contains(required),
+            "Native focused regressions must provision their exact target setup ({required})"
+        );
+    }
+    let wasm_target_recipe = justfile
+        .split("\nwasm-conformance-regressions ")
+        .nth(1)
+        .and_then(|recipe| recipe.split("\n\n").next())
+        .expect("justfile has a Wasm target regression recipe");
+    for required in ["just kotlinc", "target-conformance-regressions.sh wasm"] {
+        assert!(
+            wasm_target_recipe.contains(required),
+            "Wasm focused regressions must provision their exact target setup ({required})"
+        );
+    }
+    assert!(
+        !native_target_recipe.contains("box-corpus")
+            && !native_target_recipe.contains("KRUSTY_KOTLIN_BOX_DIR")
+            && !native_target_recipe.contains("just kotlinc")
+            && !native_target_recipe.contains("KRUSTY_KOTLINC")
+            && !wasm_target_recipe.contains("box-corpus")
+            && !wasm_target_recipe.contains("KRUSTY_KOTLIN_BOX_DIR"),
+        "focused target regressions must not provision the unrelated box corpus"
     );
     assert_eq!(
         workflow
@@ -698,8 +890,8 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         "Native expectations are committed text, not an opaque GHA cache"
     );
     for directory in [
-        "tests/box_expected_failures/native",
-        "tests/box_expected_not_applicable/native",
+        "tests/box_expected_failures/native-klib",
+        "tests/box_expected_not_applicable/native-klib",
     ] {
         assert!(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -712,10 +904,15 @@ fn ci_splits_every_version_into_independent_jvm_and_native_rows() {
         !workflow.contains("\n  conformance-regressions:\n"),
         "non-box conformance must not remain a max-version-only job"
     );
+    let conformance_builds = fs::read_dir(root.join(".github/workflows"))
+        .expect("read workflow directory")
+        .flatten()
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .map(|workflow| workflow.matches("bin=$(just conformance-bin)").count())
+        .sum::<usize>();
     assert_eq!(
-        workflow.matches("bin=$(just conformance-bin)").count(),
-        1,
-        "the matrix reuses one conformance build"
+        conformance_builds, 1,
+        "all GHA matrices must reuse one conformance build; ratchet updates are one-off local operations"
     );
     assert_eq!(
         workflow
