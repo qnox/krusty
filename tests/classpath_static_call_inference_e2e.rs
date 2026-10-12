@@ -570,9 +570,8 @@ fn null_literal_into_a_java_interface_parameter() {
 
 #[test]
 fn null_literal_into_a_primitive_parameter_still_fails() {
-    // Negative pin: `null` into a primitive `boolean`/`int` parameter stays an error (kotlinc:
-    // "null cannot be a value of a non-null type 'Boolean'"); krusty reports it with its existing
-    // unresolved-static message — message formats are unchanged.
+    // Negative pin: `null` into a primitive `boolean`/`int` parameter stays an error. kotlinc 2.4.20
+    // resolves each call to its one candidate and reports the null argument.
     let fixture = NullCallFixture::new();
     let source = r#"
         import fixtures.NullCallProvider
@@ -580,19 +579,12 @@ fn null_literal_into_a_primitive_parameter_still_fails() {
         fun badBoolean(): String = NullCallProvider.primitive(null)
         fun badInt(): String = NullCallProvider.primitiveInt(null)
     "#;
-    let diagnostics = fixture.diagnostics(source);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("unresolved Java static 'NullCallProvider.primitive'")),
-        "null into a primitive boolean parameter must stay an error, got {diagnostics:?}"
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message
-                .contains("unresolved Java static 'NullCallProvider.primitiveInt'")),
-        "null into a primitive int parameter must stay an error, got {diagnostics:?}"
+    assert_eq!(
+        fixture.diagnostics(source),
+        [
+            "null cannot be a value of a non-null type 'Boolean'.",
+            "null cannot be a value of a non-null type 'Int'.",
+        ]
     );
 }
 

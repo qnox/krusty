@@ -202,7 +202,8 @@ fn an_override_with_another_parameter_type_does_not_implement_the_java_method() 
 }
 
 /// An override of `from(String!)` declared as `from(String)` is the one member of the class, so a
-/// call through the subclass sees only its non-null parameter, exactly as for a Kotlin base.
+/// call through the subclass sees only its non-null parameter, exactly as for a Kotlin base. kotlinc
+/// 2.4.20 resolves `b.from(null)` to it and reports only the null argument.
 #[test]
 fn an_override_of_a_java_method_replaces_the_platform_signature_at_call_sites() {
     let open = "public class J4 { public String from(String r) { return r; } }";
@@ -211,10 +212,7 @@ fn an_override_of_a_java_method_replaces_the_platform_signature_at_call_sites() 
     let kotlin_base = "open class J4 { open fun from(r: String): String = r }\n\
         class B : J4() { override fun from(r: String): String = \"x\" + r }\n\
         fun f(b: B) = b.from(null)\n";
-    let expected = [
-        "none of the following candidates is applicable:\n\nfun from(r: String): String",
-        "null cannot be a value of a non-null type 'String'.",
-    ];
+    let expected = ["null cannot be a value of a non-null type 'String'."];
     assert_eq!(java_diagnostics(&[("J4.java", open)], main), expected);
     assert_eq!(
         common::front_end_diagnostics(kotlin_base, &[], None),

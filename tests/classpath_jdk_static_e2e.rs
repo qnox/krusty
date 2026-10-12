@@ -178,7 +178,8 @@ fn non_literal_int_does_not_match_long_parameter() {
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
-    let unresolved = ["unresolved Java static 'NumericApi.onlyLong' for given argument types"];
+    // kotlinc 2.4.20 resolves the call to `onlyLong` and reports the argument.
+    let unresolved = ["argument type mismatch: actual type is 'Int', but 'Long' was expected."];
     for expression in ["value", "value / 0"] {
         let source = format!(
             "import fixtures.NumericApi\n\
