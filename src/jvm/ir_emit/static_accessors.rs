@@ -863,51 +863,31 @@ impl Walk<'_> {
     }
 
     /// The `$cp` accessor a read or write of a private companion property uses when its field
-    /// moved to the outer class: the property selected by the operation's own coordinate, or by
-    /// the active-source declaration it was realized against. A physically realized access names
-    /// its own member.
+    /// moved to the outer class. The operation's realization names the exact active-source
+    /// declaration; a physically realized access names its own member.
     fn hoisted_companion_property(
         &self,
         expression: crate::ir::ExprId,
         write: bool,
     ) -> Option<(StaticOwner, StaticAccessor)> {
-        let (operation, owner, name) = match self.ir.expr(expression) {
-            IrExpr::PropertyRead {
-                operation,
-                owner,
-                name,
-                ..
+        let operation = match self.ir.expr(expression) {
+            IrExpr::PropertyRead { operation, .. } | IrExpr::PropertyWrite { operation, .. } => {
+                operation.unwrap_or(expression)
             }
-            | IrExpr::PropertyWrite {
-                operation,
-                owner,
-                name,
-                ..
-            } => (operation.unwrap_or(expression), *owner, name.as_str()),
             _ => return None,
         };
-        let (owner, name) = match self.property_realizations.get(operation) {
-            Some(crate::jvm::property_realizations::PropertyRealization::Physical(_)) => {
-                return None
-            }
-            Some(crate::jvm::property_realizations::PropertyRealization::Local(target)) => {
-                match self.ir.local_property_layouts.get(target)? {
-                    crate::ir::IrLocalPropertyLayout::Member { owner, name, .. } => {
-                        (*owner, name.as_str())
-                    }
-                    _ => return None,
-                }
-            }
-            None => (owner, name),
+        let crate::jvm::property_realizations::PropertyRealization::Local(target) =
+            self.property_realizations.get(operation)?
+        else {
+            return None;
         };
-        let property = self
-            .ir
-            .classes
-            .iter()
-            .find(|class| class.fq_name == owner)?
-            .properties
-            .iter()
-            .position(|property| property.name == name)? as u32;
+        let crate::ir::IrLocalPropertyLayout::Member {
+            class, property, ..
+        } = *self.ir.local_property_layouts.get(target)?
+        else {
+            return None;
+        };
+        let owner = self.ir.classes.get(class as usize)?.fq_name;
         let storage = super::declared_property_access::hoisted_companion_storage(
             self.ir, owner, property, write,
         )
