@@ -17084,9 +17084,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class's `access$get…$cp`/`access$set…$cp` bridges keep the unmangled name. A bodiless private
   setter has no companion method and is recorded as absent from the static realization, whether
   or not the property has an initializer; a nested class writes through the outer field's public
-  synthetic bridge. Hoisting does not erase an explicit companion receiver's effects: a read such
-  as `self().x` evaluates `self()` exactly once before loading the outer static, even though its
-  result is no longer needed as the field receiver. Test:
+  synthetic bridge. An explicit expression written as a companion property's receiver is a lookup
+  coordinate rather than a runtime receiver: `self().x` does not evaluate `self()` once the selected
+  property is realized as an outer static. A canonical companion singleton read is retained when it
+  is needed to trigger class initialization. Test:
   `tests/companion_property_visibility_e2e.rs`. Corpus: `regressions/kt5395.kt` (`protected val`).
 - **An enum class's companion properties are enum statics.** kotlinc moves an enum companion's
   backing fields like any class companion's, and runs the companion initializer in the enum's

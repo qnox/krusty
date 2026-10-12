@@ -56,10 +56,10 @@ pub struct IrStatic {
     /// top-level `val`/`var` is `private static [final]` + a `public static` getter/setter whatever
     /// the source said, because every reader goes through the accessor.
     pub is_const: bool,
-    /// `lateinit var`. A public or internal one is a `public static` field whose default getter
-    /// throws while the field is null; readers call that getter. A private one keeps a private
-    /// field and the guard sits on each raw read, including after `access$get<X>$p`. An
-    /// `isInitialized` probe is recorded separately and reads the field without the guard.
+    /// `lateinit var`. A hoisted companion field follows the exact companion setter's visibility; a
+    /// public or internal setter makes it `public static`, while a private or protected setter keeps
+    /// that JVM restriction. The default getter throws while the field is null. An `isInitialized`
+    /// probe is recorded separately and reads the field without the guard.
     pub is_lateinit: bool,
     /// The class this static field belongs to. `None` = the file facade (a top-level property). `Some`
     /// = a specific class. A class companion's `const val` lives on the OUTER class (`public static

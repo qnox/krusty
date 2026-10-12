@@ -35,6 +35,15 @@ class InitializerBacked {\n\
     }\n\
 }\n\
 \n\
+class LateSetterVisibility {\n\
+    companion object {\n\
+        lateinit var hidden: String\n\
+            private set\n\
+        lateinit var guarded: String\n\
+            protected set\n\
+    }\n\
+}\n\
+\n\
 fun box(): String = InitializerBacked.Nested().update()\n\
 ";
 
@@ -69,6 +78,8 @@ fn an_internal_or_protected_companion_property_is_an_outer_static() {
         "store/InitializerBacked",
         "store/InitializerBacked$Companion",
         "store/InitializerBacked$Nested",
+        "store/LateSetterVisibility",
+        "store/LateSetterVisibility$Companion",
     ] {
         common::byte_diff_against_kotlinc_cp(
             "CompanionPropertyVisibility",

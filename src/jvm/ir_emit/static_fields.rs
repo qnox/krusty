@@ -4,12 +4,30 @@
 //! is not assigned at run time at all; everything else is stored by `<clinit>` in declaration order.
 //! Field flags are decided here too, and they are not uniform: a `const val`'s field takes its
 //! DECLARATION's visibility, while a plain `val`/`var` is private whatever the source said, because
-//! every reader outside the facade goes through the generated accessor. A public or internal
-//! `lateinit var` is the exception: its field is `public static`, and the default getter throws
-//! while that field is null.
+//! every reader outside the facade goes through the generated accessor. A `lateinit var` is the
+//! exception: its field follows the setter's visibility, and the default getter throws while that
+//! field is null.
 
 use super::field_visibility::annotated_field_modifiers;
 use super::*;
+
+fn hoisted_lateinit_visibility(ir: &IrFile, index: u32) -> Option<crate::types::Visibility> {
+    ir.statics[index as usize]
+        .is_lateinit
+        .then(|| {
+            ir.jvm_companion_static_declaration(index)
+                .map(|(_, property)| property.setter_visibility)
+        })
+        .flatten()
+}
+
+fn static_visibility_access(visibility: crate::types::Visibility) -> u16 {
+    match visibility {
+        crate::types::Visibility::Private => 0x0002,
+        crate::types::Visibility::Protected => 0x0004,
+        _ => 0x0001,
+    }
+}
 
 /// The `ConstantValue` payload of a compile-time literal, excluding `null` (JVMS 4.7.2 has no
 /// constant for it). The field-table visit interns it; callers must not intern it earlier.
@@ -465,11 +483,10 @@ pub(super) fn emit_class_static_fields(
         let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
         let jvm_field = ir.is_jvm_field_static(static_index);
         let block_storage = companion_blocks::storage_is_private(ir, static_index);
-        let public_lateinit = s.is_lateinit && !s.visibility.is_private();
-        let acc = if (s.visibility.is_private() || hoisted || block_storage)
-            && !jvm_field
-            && !public_lateinit
-        {
+        let lateinit_visibility = hoisted_lateinit_visibility(ir, static_index);
+        let acc = if let Some(visibility) = lateinit_visibility {
+            0x0008 | static_visibility_access(visibility) | final_flag
+        } else if (s.visibility.is_private() || hoisted || block_storage) && !jvm_field {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -529,15 +546,25 @@ fn static_field_annotations<'a>(
     static_index: u32,
 ) -> Option<&'a crate::ir::FieldAnnotations> {
     if let Some((companion, property)) = ir.jvm_companion_static_declaration(static_index) {
-        return owner
+        return companion
             .field_annotations
             .iter()
             .find(|annotations| annotations.field == property.name)
             .or_else(|| {
-                companion
-                    .field_annotations
+                // Enum metadata currently records a companion field annotation on the physical
+                // enum inventory. It can belong to this exact companion declaration only when the
+                // enum declares no same-named property of its own.
+                owner
+                    .properties
                     .iter()
-                    .find(|annotations| annotations.field == property.name)
+                    .all(|declaration| declaration.name != property.name)
+                    .then(|| {
+                        owner
+                            .field_annotations
+                            .iter()
+                            .find(|annotations| annotations.field == property.name)
+                    })
+                    .flatten()
             });
     }
     let field = &ir.statics[static_index as usize].name;
@@ -569,7 +596,9 @@ pub(super) fn emit_enum_static_fields(
         let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
         let jvm_field = ir.is_jvm_field_static(index);
         let private = s.visibility.is_private() || ir.is_jvm_companion_hoisted_static(index);
-        let acc = if private && !jvm_field {
+        let acc = if let Some(visibility) = hoisted_lateinit_visibility(ir, index) {
+            0x0008 | static_visibility_access(visibility) | final_flag
+        } else if private && !jvm_field {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -906,7 +935,12 @@ impl Emitter<'_> {
             } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(i)
                 || self.ir.is_jvm_field_static(i)
-                || (is_lateinit && !is_private)
+                || hoisted_lateinit_visibility(self.ir, i).is_some_and(|visibility| {
+                    matches!(
+                        visibility,
+                        crate::types::Visibility::Public | crate::types::Visibility::Internal
+                    )
+                })
             {
                 let fref = self.cw.fieldref(
                     &owner_name,
@@ -963,7 +997,13 @@ impl Emitter<'_> {
         let jt = jvm_declared_ty(&s.ty);
         let name = s.name.clone();
         let is_const = s.is_const;
-        let public_lateinit = s.is_lateinit && !s.visibility.is_private();
+        let directly_writable_lateinit =
+            hoisted_lateinit_visibility(self.ir, index).is_some_and(|visibility| {
+                matches!(
+                    visibility,
+                    crate::types::Visibility::Public | crate::types::Visibility::Internal
+                )
+            });
         let facade = self.facade.clone();
         self.emit_value(value, code);
         if self.diverges(value) {
@@ -1008,7 +1048,7 @@ impl Emitter<'_> {
             } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(index)
                 || self.ir.is_jvm_field_static(index)
-                || public_lateinit
+                || directly_writable_lateinit
             {
                 let fref = self.cw.fieldref(
                     &owner_name,

@@ -122,6 +122,28 @@ fn enum_companion_field_annotations_are_byte_identical() {
     );
 }
 
+/// A same-named outer property cannot donate its FIELD annotation to the companion property's
+/// separate hoisted static.
+#[test]
+fn companion_field_annotations_keep_their_declaration_identity() {
+    assert_byte_identical(
+        "package demo\n\
+         @Target(AnnotationTarget.FIELD)\n\
+         @Retention(AnnotationRetention.BINARY)\n\
+         annotation class OuterMarker\n\
+         @Target(AnnotationTarget.FIELD)\n\
+         @Retention(AnnotationRetention.BINARY)\n\
+         annotation class CompanionMarker\n\
+         class Collision {\n\
+             @field:OuterMarker val value: String = \"outer\"\n\
+             companion object {\n\
+                 @field:CompanionMarker val value: String = \"companion\"\n\
+             }\n\
+         }\n",
+        "demo/Collision",
+    );
+}
+
 // ---- Byte identity: interface owner --------------------------------------------------------------
 
 /// kotlinc hoists an interface companion's `@JvmField val` onto the INTERFACE as `public static
