@@ -3671,6 +3671,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `String`, not `Any`. The upper bound alone fixes a variable no argument bounds from below
   (`only { x: Long -> }` for `(T) -> Unit` gives `T = Long`). A variable inside an invariant
   argument is an equality: `{ x: Box<Any> -> }` for `(Box<T>) -> Unit` fixes `T` to `Any`.
+  Several written types on one variable meet: `{ a: Left, b: Right -> }` for `(T, T) -> Unit`
+  gives `T = Left & Right`, and `{ a: Any, b: Left -> }` gives `T = Left`.
   Known gap: a lambda's result is a lower bound, and kotlinc joins it with the other lower
   bounds (`{ 1 }` for `Src<out T>` beside `"s"` gives `Comparable<*> & Serializable`); krusty
   checks the lambda against the `T` the other arguments fixed and rejects `1`.
