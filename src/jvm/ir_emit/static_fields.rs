@@ -581,54 +581,6 @@ pub(super) fn emit_enum_static_fields(
     }
 }
 
-/// HOISTED companion properties: the private static field lives on THIS class, so the companion's
-/// delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
-/// bridges — emitted AFTER the instance methods, right before `<clinit>` (kotlinc's order).
-pub(super) fn emit_hoisted_companion_bridges(ir: &IrFile, fq_name: &str, cw: &mut ClassWriter) {
-    for (static_index, s) in ir.statics.iter().enumerate().filter(|(index, s)| {
-        ir.is_jvm_companion_hoisted_static(*index as u32)
-            && !ir.is_jvm_field_static(*index as u32)
-            && s.owner_matches(fq_name)
-    }) {
-        let field_name = ir.static_field_jvm_name(static_index as u32);
-        let jt = jvm_declared_ty(&s.ty);
-        let desc = type_descriptor(jt);
-        // kotlinc visits the bridge's name before its body's field cluster.
-        let getter_bridge = format!("access${}$cp", property_getter_name(&s.name));
-        cw.reserve_method_name(&getter_bridge);
-        cw.seed_utf8(&format!("(){desc}"));
-        let mut g = CodeBuilder::new(0);
-        let fref = cw.fieldref(fq_name, field_name, &desc);
-        g.getstatic(fref, slot_words(jt) as i32);
-        emit_return(jt, &mut g);
-        g.ensure_locals(0);
-        g.link();
-        cw.add_method(
-            0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
-            &getter_bridge,
-            &format!("(){desc}"),
-            &g,
-        );
-        if s.is_var {
-            let setter_bridge = format!("access${}$cp", property_setter_name(&s.name));
-            cw.reserve_method_name(&setter_bridge);
-            cw.seed_utf8(&format!("({desc})V"));
-            // The setter bridge's `<set-?>` LocalVariableTable strings intern at its method visit.
-            cw.seed_utf8("<set-?>");
-            cw.seed_utf8(&desc);
-            let words = slot_words(jt);
-            let mut st = CodeBuilder::new(words);
-            load(jt, 0, &mut st);
-            let fref = cw.fieldref(fq_name, field_name, &desc);
-            st.putstatic(fref, slot_words(jt) as i32);
-            st.ret_void();
-            st.ensure_locals(words);
-            st.link();
-            cw.add_method(0x1019, &setter_bridge, &format!("({desc})V"), &st);
-        }
-    }
-}
-
 /// Whether the outer `<clinit>` must bind value 0 before running a moved companion initializer.
 ///
 /// A hoisted companion property is a static field of this class. Emission does not evaluate a

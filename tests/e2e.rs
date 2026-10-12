@@ -2989,6 +2989,8 @@ mod reified_object_type_of_e2e;
 
 #[path = "companion_default_initializer_e2e.rs"]
 mod companion_default_initializer_e2e;
+#[path = "companion_field_bridge_use_e2e.rs"]
+mod companion_field_bridge_use_e2e;
 #[path = "companion_init_assigned_property_e2e.rs"]
 mod companion_init_assigned_property_e2e;
 #[path = "companion_property_visibility_e2e.rs"]

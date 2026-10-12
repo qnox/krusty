@@ -17103,6 +17103,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   companion property hoisted to its outer class and a top-level property.
   `kotlin.concurrent.Volatile` resolves to the same identity. Test:
   `tests/volatile_field_e2e.rs`. Corpus: `volatile/volatileInt.kt` and its siblings.
+- **An outer class bridges a hoisted companion field only for another class's use.** kotlinc's
+  `SyntheticAccessorLowering` creates `access$get…$cp` / `access$set…$cp` when code outside the
+  outer class reaches the moved field: the companion's own accessors, a nested class reading a
+  private property, or a property-reference carrier. The outer class reads and writes the field
+  directly, so a private companion property used only there, or never, has no bridge. The JVM
+  backend plans these accessors with the other synthetic accessors of the outer class, from the
+  same uses its emitter routes through them. Test: `tests/companion_field_bridge_use_e2e.rs`.
+  Corpus: `classes/kt1018.kt`, `objects/kt1047.kt`, `objects/kt1047a.kt`,
+  `properties/kt4252.kt`.
 - **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
   kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
   `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and
