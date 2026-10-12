@@ -111,9 +111,18 @@ struct Layout<'a> {
     /// Per rewritten method: the index its constants are placed before, and the entries its code
     /// names in ASM's order.
     sequences: Vec<(usize, Vec<u16>)>,
-    /// Entries a rewrite left only to code emitted as it was, with the index each is placed
-    /// before (see [`orphan_anchors`]).
-    anchored: Vec<Option<usize>>,
+    /// Entries a rewrite left only to code emitted as it was, with where each is placed (see
+    /// [`orphan_anchors`]).
+    anchored: Vec<Option<Anchor>>,
+}
+
+/// Where an orphaned entry is placed: before the entry at `before`, after the orphans anchored
+/// there that kotlinc's visit reached earlier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Anchor {
+    before: usize,
+    /// The entry's rank in visit order among the orphans.
+    visit: usize,
 }
 
 impl<'a> Layout<'a> {
@@ -246,10 +255,16 @@ impl<'a> Layout<'a> {
         let mut anchors: Vec<&(usize, Vec<u16>)> = self.sequences.iter().collect();
         anchors.sort_by_key(|(anchor, _)| *anchor);
         let mut anchors = anchors.into_iter().peekable();
-        let mut orphans: Vec<(usize, u16)> = (0..count)
-            .filter_map(|index| Some((self.anchored[index]?, index as u16)))
-            .collect();
-        orphans.sort_unstable();
+        let orphans: Vec<(usize, u16)> = {
+            let mut anchored: Vec<(Anchor, u16)> = (0..count)
+                .filter_map(|index| Some((self.anchored[index]?, index as u16)))
+                .collect();
+            anchored.sort_unstable();
+            anchored
+                .into_iter()
+                .map(|(anchor, index)| (anchor.before, index))
+                .collect()
+        };
         let mut orphans = orphans.into_iter().peekable();
         // A sequence goes before an orphan with the same anchor; an anchor past the last entry
         // places its sequence or orphan at the end, still in anchor order.
@@ -335,13 +350,14 @@ fn method_code_starts(read: &ClassSlots) -> HashMap<usize, usize> {
 /// Where each `orphaned` entry goes: an entry a rewritten method interned that its rewritten
 /// code no longer names, first named (in kotlinc's visit order) by later code, a later header, or
 /// a class attribute, is placed before the first entry that visit names for the first time with or
-/// after it, or right after the last entry that visit names when none follows.
+/// after it. When none follows, it goes right after the last entry that visit names: the method's
+/// last entry for its code, the header's last entry for a method header.
 fn orphan_anchors(
     read: &ClassSlots,
     relaid: &[RelaidMethod],
     by_method: &HashMap<usize, usize>,
     orphaned: &[bool],
-) -> Vec<Option<usize>> {
+) -> Vec<Option<Anchor>> {
     let count = read.entries.len();
     let mut anchored = vec![None; count];
     if !orphaned.contains(&true) {
@@ -363,10 +379,16 @@ fn orphan_anchors(
     // The last entry the slots since the last code slot name: the next method's header.
     let mut header_max = 0;
     let mut pending: Vec<usize> = Vec::new();
-    let settle = |pending: &mut Vec<usize>, anchor: usize, anchored: &mut [Option<usize>]| {
+    // Whether the previous slot was code that is not rewritten.
+    let mut in_code = false;
+    // Orphans with one anchor keep the order the visit reached them in: a method header's
+    // descriptor before the entries its code names.
+    let mut visits = 0..;
+    let mut settle = |pending: &mut Vec<usize>, before: usize, anchored: &mut [Option<Anchor>]| {
         for orphan in pending.drain(..) {
-            if anchor > orphan {
-                anchored[orphan] = Some(anchor);
+            if before > orphan {
+                let visit = visits.next().expect("an unbounded range");
+                anchored[orphan] = Some(Anchor { before, visit });
             }
         }
     };
@@ -377,6 +399,12 @@ fn orphan_anchors(
         };
         let reached = reached_from(read, slot.index);
         let Some(at) = code else {
+            // ASM interns a method's code entries as it writes that code, so an orphan the code
+            // names first is placed right after the last entry the method names, whatever is
+            // visited next.
+            if std::mem::take(&mut in_code) {
+                settle(&mut pending, named_max + 1, &mut anchored);
+            }
             // A rewrite-owned entry whose first remaining use comes after that method's code is
             // interned at that later visit, not at the position of the removed instruction. This
             // includes an `InnerClasses` row retaining a holder class that CapturedVars removed.
@@ -405,10 +433,12 @@ fn orphan_anchors(
             continue;
         };
         if method != Some(at) {
-            settle(&mut pending, named_max + 1, &mut anchored);
+            // What is pending now the header named: it follows the header's own entries.
+            settle(&mut pending, header_max + 1, &mut anchored);
             method = Some(at);
             named_max = header_max;
         }
+        in_code = true;
         header_max = 0;
         for index in reached {
             if orphaned[index] && !seen[index] {

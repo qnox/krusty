@@ -109,9 +109,12 @@ pub(super) fn accept_active_debug_metadata(
                 ir.fn_sig_lines.insert(ir_function, function.sig_line);
                 ir.fn_signature_offsets
                     .insert(ir_function, function.span.lo);
-                if function.body_close_line != 0 {
+                if function.body_lines.close != 0 {
                     ir.fn_close_lines
-                        .insert(ir_function, function.body_close_line);
+                        .insert(ir_function, function.body_lines.close);
+                }
+                if function.body_lines.end != 0 {
+                    ir.fn_end_lines.insert(ir_function, function.body_lines.end);
                 }
             }
         }
@@ -154,8 +157,12 @@ pub(super) fn accept_active_debug_metadata(
                 if let Some(property) = ir.checked_properties.get_mut(&property) {
                     property.decl_line = line;
                     let accessor_lines = accessor_lines.unwrap_or_default();
-                    property.getter_decl_line = accessor_lines.getter;
-                    property.setter_decl_line = accessor_lines.setter;
+                    property.accessor_lines = crate::ir::IrAccessorLines {
+                        getter: accessor_lines.getter,
+                        setter: accessor_lines.setter,
+                        getter_end: accessor_lines.getter_end,
+                        setter_end: accessor_lines.setter_end,
+                    };
                     property.decl_start_line = constructor_parameter
                         .map(|parameter| parameter.decl_start_line)
                         .unwrap_or(0);

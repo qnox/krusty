@@ -13,6 +13,31 @@ pub(super) struct AccessorOwner<'a> {
     pub(super) run: &'a EmitRun,
 }
 
+/// The nullability annotation an accessor's header carries for the reference type `jt`. A field
+/// typed by a class type parameter answers from the field's own classification, the one the
+/// class-wide accessor pass attaches: `T?` is `@Nullable`, a non-null-bounded `T` is `@NotNull`,
+/// and an unbounded `T` is unannotated. Reserving it with the header puts it where kotlinc visits
+/// it, before the accessor's body.
+fn accessor_nullability(
+    ir: &IrFile,
+    fq_name: &str,
+    property: &crate::ir::IrProperty,
+    field: &crate::ir::IrField,
+    jt: Ty,
+) -> Option<&'static str> {
+    if !jt.is_reference() {
+        return None;
+    }
+    if field.type_param.is_some() {
+        return nullability_annotation(field_nullability_kind(ir, fq_name, &field.name, field.ty));
+    }
+    Some(if property.ty.is_nullable() {
+        "Lorg/jetbrains/annotations/Nullable;"
+    } else {
+        "Lorg/jetbrains/annotations/NotNull;"
+    })
+}
+
 /// Emit `property`'s synthesized accessor on `side`, unless the class declares that accessor itself.
 pub(super) fn emit(
     owner: &AccessorOwner<'_>,
@@ -87,13 +112,7 @@ pub(super) fn emit(
         // Visit the method header before constructing its code. This is especially observable for a
         // setter guard (`<set-?>`) and for a generic accessor Signature.
         let sig = &signatures.getter;
-        let getter_ann = (getter_jt.is_reference() && field.type_param.is_none()).then(|| {
-            if property.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
+        let getter_ann = accessor_nullability(ir, fq_name, property, field, getter_jt);
         let annotations = &property.accessor_annotations.getter;
         cw.reserve_method_pool_with_annotations(
             &getter,
@@ -155,14 +174,7 @@ pub(super) fn emit(
         let setter_desc = format!("({accessor_desc})V");
         if !occupied(&setter, &setter_desc) {
             let sig = &signatures.setter;
-            let setter_ann =
-                (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
-                    if property.ty.is_nullable() {
-                        "Lorg/jetbrains/annotations/Nullable;"
-                    } else {
-                        "Lorg/jetbrains/annotations/NotNull;"
-                    }
-                });
+            let setter_ann = accessor_nullability(ir, fq_name, property, field, accessor_jt);
             let annotations = &property.accessor_annotations.setter;
             cw.reserve_method_pool_with_annotations(
                 &setter,

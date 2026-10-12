@@ -144,8 +144,9 @@ pub use package_declarations::{
 };
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
-    IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution, IrMemberKind,
-    IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
+    IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
+    IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
+    MemberExtProp,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -2426,6 +2427,9 @@ pub struct IrFile {
     /// FunId → 1-based source line of a BLOCK body's closing `}` — kotlinc maps a `Unit` fn's
     /// implicit `return` there in the `LineNumberTable`. Same side-map rationale as `fn_decl_lines`.
     pub fn_close_lines: std::collections::HashMap<u32, u32>,
+    /// FunId → 1-based source line the declaration ENDS on (a block's `}` or an expression body's
+    /// last line). kotlinc returns a generated forwarder of the declaration on this line.
+    pub fn_end_lines: std::collections::HashMap<u32, u32>,
     /// FunId → 1-based source line of the DECLARATION itself, never body-rewritten. `fn_decl_lines`
     /// holds the line the method BODY maps to (an expression body's own line); a `$default` stub's
     /// LineNumberTable instead points here — the two differ exactly when an expression body starts

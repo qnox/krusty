@@ -117,24 +117,31 @@ pub(super) fn attach(file: &mut File, src: &str) {
             _ => decl,
         }
     };
-    // A BLOCK body's closing `}` line — kotlinc maps a `Unit` fn's implicit `return` there.
-    let body_close = |body: &FunBody| -> u32 {
-        match body {
-            FunBody::Block(e) => {
-                // A synthesized block with the zero span stays "unknown" (mirror the
-                // `expr_lines`/`stmt_lines` guard) — `line_at(0)` would fabricate line 1.
-                let (lo, hi) = expr_lo
-                    .get(e.0 as usize)
-                    .copied()
-                    .zip(expr_hi.get(e.0 as usize).copied())
-                    .unwrap_or((0, 0));
-                if lo == 0 && hi == 0 {
-                    0
-                } else {
-                    line_at(hi.saturating_sub(1))
-                }
-            }
-            _ => 0,
+    // The line a body's last character sits on: a block's closing `}` (kotlinc maps a `Unit` fn's
+    // implicit `return` there) or an expression body's end.
+    let body_lines = |body: &FunBody| -> crate::ast::FunBodyLines {
+        let (FunBody::Block(e) | FunBody::Expr(e)) = body else {
+            return crate::ast::FunBodyLines::default();
+        };
+        // A synthesized body with the zero span stays "unknown" (mirror the
+        // `expr_lines`/`stmt_lines` guard) — `line_at(0)` would fabricate line 1.
+        let (lo, hi) = expr_lo
+            .get(e.0 as usize)
+            .copied()
+            .zip(expr_hi.get(e.0 as usize).copied())
+            .unwrap_or((0, 0));
+        let end = if lo == 0 && hi == 0 {
+            0
+        } else {
+            line_at(hi.saturating_sub(1))
+        };
+        crate::ast::FunBodyLines {
+            close: if matches!(body, FunBody::Block(_)) {
+                end
+            } else {
+                0
+            },
+            end,
         }
     };
     for decl in &mut file.decl_arena {
@@ -169,7 +176,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 for m in &mut c.methods {
                     m.sig_line = line_at(m.span.lo);
                     m.decl_line = body_line(&m.body, m.sig_line);
-                    m.body_close_line = body_close(&m.body);
+                    m.body_lines = body_lines(&m.body);
                 }
                 for p in &mut c.props {
                     if p.span.lo != 0 || p.span.hi != 0 {
@@ -190,10 +197,21 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 }
                 for p in &mut c.body_props {
                     p.decl_line = line_at(p.span.lo);
-                    p.accessor_lines = accessor_lines(p, line_at);
+                    p.accessor_lines = accessor_lines(p, line_at, body_lines);
                 }
+                // An entry's class body declares methods and properties of its own, with the same
+                // lines as a class member.
                 for e in &mut c.enum_entries {
                     e.decl_line = line_at(e.span.lo);
+                    for m in &mut e.methods {
+                        m.sig_line = line_at(m.span.lo);
+                        m.decl_line = body_line(&m.body, m.sig_line);
+                        m.body_lines = body_lines(&m.body);
+                    }
+                    for p in &mut e.props {
+                        p.decl_line = line_at(p.span.lo);
+                        p.accessor_lines = accessor_lines(p, line_at, body_lines);
+                    }
                 }
                 // A secondary constructor is a declaration of its own, and its lines are its own:
                 // kotlinc anchors the synthetic `$default` overload on the `constructor` keyword,
@@ -225,21 +243,22 @@ pub(super) fn attach(file: &mut File, src: &str) {
             Decl::Fun(f) => {
                 f.sig_line = line_at(f.span.lo);
                 f.decl_line = body_line(&f.body, f.sig_line);
-                f.body_close_line = body_close(&f.body);
+                f.body_lines = body_lines(&f.body);
             }
             // A top-level property's accessors and `<clinit>` store map to its declaration line.
             Decl::Property(p) => {
                 p.decl_line = line_at(p.span.lo);
-                p.accessor_lines = accessor_lines(p, line_at);
+                p.accessor_lines = accessor_lines(p, line_at, body_lines);
             }
         }
     }
 }
 
-/// The header lines of `property`'s accessors written with a body of their own.
+/// The header and end lines of `property`'s accessors written with a body of their own.
 fn accessor_lines(
     property: &crate::ast::PropDecl,
     line_at: impl Fn(u32) -> u32,
+    body_lines: impl Fn(&FunBody) -> crate::ast::FunBodyLines,
 ) -> crate::ast::AccessorLines {
     let getter = property
         .getter_span
@@ -250,7 +269,21 @@ fn accessor_lines(
         .as_ref()
         .filter(|setter| setter.body.is_some())
         .map_or(0, |setter| line_at(setter.span.lo));
-    crate::ast::AccessorLines { getter, setter }
+    let getter_end = property
+        .getter
+        .as_ref()
+        .map_or(0, |body| body_lines(body).end);
+    let setter_end = property
+        .setter
+        .as_ref()
+        .and_then(|setter| setter.body.as_ref())
+        .map_or(0, |body| body_lines(body).end);
+    crate::ast::AccessorLines {
+        getter,
+        setter,
+        getter_end,
+        setter_end,
+    }
 }
 
 #[cfg(test)]

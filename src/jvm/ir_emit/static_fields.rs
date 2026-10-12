@@ -408,6 +408,9 @@ fn emit_default_static_setter(
     let fref = cw.fieldref(owner, field_name, &desc);
     st.putstatic(fref, slot_words(jt) as i32);
     st.ret_void();
+    // kotlinc writes the setter's `LocalVariableTable` as it finishes the method, so the
+    // `<set-?>` name joins the pool right after the body's constants.
+    cw.seed_utf8("<set-?>");
     finish_code_sig::<0x0019>(cw, &sname, &format!("({desc})V"), &mut st, words, signature);
     cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
     if let Some(annotations) = annotations {

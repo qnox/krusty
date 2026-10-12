@@ -541,6 +541,10 @@ impl Emitter<'_> {
             let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
             self.bind(after, code);
             if let Some(slot) = result_slot.filter(|_| !inline_cleanup_result) {
+                // A declaration's initializer line is marked before its saved value is read.
+                if self.declared_try == Some(expression) {
+                    self.mark_expression_start(expression, code);
+                }
                 load(rt, slot, code);
             }
             if inline_cleanup_result && discarded {
