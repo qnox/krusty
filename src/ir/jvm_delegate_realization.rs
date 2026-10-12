@@ -7,6 +7,7 @@
 
 use super::{ClassId, ExprId, FunId, IrFile};
 use crate::fir::PropertyId;
+use crate::fx_hash::{HashMap, HashSet};
 
 /// Which delegated properties the JVM realized without delegate storage, and their generated
 /// `get<X>$delegate` methods.
@@ -14,14 +15,14 @@ use crate::fir::PropertyId;
 pub(crate) struct JvmInPlaceDelegates {
     /// Facade statics that held such a delegate. They stay in [`IrFile::statics`] so no static
     /// index moves, but the JVM declares no field for them.
-    retired_statics: std::collections::HashSet<u32>,
-    package_methods: std::collections::HashMap<PropertyId, FunId>,
+    retired_statics: HashSet<u32>,
+    package_methods: HashMap<PropertyId, FunId>,
     /// `(declaring class, index into its properties)`.
-    member_methods: std::collections::HashMap<(ClassId, u32), FunId>,
+    member_methods: HashMap<(ClassId, u32), FunId>,
     /// Each generated method and the getter it is named after.
-    methods: std::collections::HashMap<FunId, FunId>,
+    methods: HashMap<FunId, FunId>,
     /// Constructor statements that evaluate such a delegate where its field was initialized.
-    evaluations: std::collections::HashSet<ExprId>,
+    evaluations: HashSet<ExprId>,
 }
 
 impl IrFile {

@@ -12,8 +12,7 @@
 //! hoisting, which then finds no delegate field to move. The method is recorded with its getter, so
 //! value-class lowering renames it from the getter's mangled name (`getX-<hash>$delegate`).
 
-use std::collections::{HashMap, HashSet};
-
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
     ClassId, ExprId, FnParamInfo, IrConst, IrExpr, IrFile, IrFunction, IrGeneratedParameterRole,
     IrLocalPropertyLayout, IrParameterIdentity, IrTypeOp,
@@ -109,7 +108,7 @@ fn realize_package_delegates(ir: &mut IrFile) {
 }
 
 fn realize_member_delegates(ir: &mut IrFile) {
-    let mut removed = HashMap::<ClassId, HashSet<u32>>::new();
+    let mut removed = HashMap::<ClassId, HashSet<u32>>::default();
     for class in 0..ir.classes.len() {
         let class = class as ClassId;
         for property in 0..ir.classes[class as usize].properties.len() {
