@@ -14,6 +14,8 @@ pub(super) struct PrimaryConstructorDebug<'a> {
     /// Extra ctor LineNumberTable entries (body-property initializers + the trailing `return`),
     /// with their real pcs captured during emission. Empty ⇒ the ctor gets kotlinc's single entry.
     pub(super) lines: &'a [(u16, u32)],
+    /// Offsets in `lines` where a store writes its line again after an inlined value.
+    pub(super) restored_lines: &'a [u16],
     pub(super) init_locals: &'a [(u16, u16, u16, String, String)],
 }
 
@@ -28,6 +30,7 @@ pub(super) fn attach_synth_debug_tables(
     let PrimaryConstructorDebug {
         method: primary_ctor_debug,
         lines: ctor_lines,
+        restored_lines,
         init_locals,
     } = constructor;
     let line = c.decl_line;
@@ -98,8 +101,11 @@ pub(super) fn attach_synth_debug_tables(
             let mut entries = vec![(ctor_pc, ctor_start_line)];
             entries.extend_from_slice(ctor_lines);
             // kotlinc never emits two consecutive entries for the same line — a run of stores on the
-            // class-declaration line (a single-line `class C(val a: Int)`) collapses to one entry.
-            entries.dedup_by_key(|(_, l)| *l);
+            // class-declaration line (a single-line `class C(val a: Int)`) collapses to one entry —
+            // except where a store writes its line again after an inlined value.
+            entries.dedup_by(|(pc, line), (_, previous)| {
+                line == previous && !restored_lines.contains(pc)
+            });
             cw.set_method_lines("<init>", ctor_desc, &entries);
         }
     }

@@ -4098,6 +4098,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `getProgressionLastElement`'s unsigned argument coercions are not calls. The counted-loop lowering
   records those nodes as `SyntheticOriginKind::InlinedCall`; the JVM emitter applies the rule.
   `tests/unsigned_loop_lines_e2e.rs` (full-byte against kotlinc).
+- **A property initializer's store repeats its line after an inlined value.** The inlined call
+  forgets the constructor's line, so kotlinc's `putfield` writes the property's line again and the
+  constructor's table holds that line twice in a row (`val failed: MutableList<F> =
+  mutableListOf()`). The constructor's same-line collapse keeps that entry; a value that is not
+  inlined (`ArrayList()`) keeps one. `tests/inlined_property_initializer_line_e2e.rs` (full-byte
+  against kotlinc).
 - **A local stores an inlined generic result on the call's line.** The inlined body forgets the
   caller's line, and kotlinc's `visitVariable` marks the declaration before it narrows the erased
   result, so the `checkcast` starts that line and the store does not open another entry.
