@@ -3,7 +3,9 @@
 //! nothing else. The call is resolved to the one candidate the arguments map onto, so neither an
 //! unresolved-static message nor a "none of the following candidates is applicable" list precedes
 //! the mismatch: not for a static, an instance member, an overloaded member, or a constructor, and
-//! not when the call is the body of a declaration whose result type is inferred.
+//! not when the call is the body of a declaration whose result type is inferred. A generic call keeps
+//! its explicit type argument, and a package-private static the arguments do not fit reports only
+//! the argument, as kotlinc does.
 
 use super::common;
 
@@ -32,6 +34,10 @@ const API: &str = "package p;\n\
         public String one(@NotNull String value, int count) { return value; }\n\
         public String over(@NotNull String value) { return value; }\n\
         public String over(int first, int second) { return \"\"; }\n\
+        static String hidden(@NotNull String value) { return value; }\n\
+        public <T> T parse(@NotNull String value) { return null; }\n\
+        public <T> T parse(int first, int second) { return null; }\n\
+        public static <T> T parseStatic(@NotNull String value) { return null; }\n\
     }\n";
 
 const SOURCE: &str = r#"import p.Api
@@ -52,6 +58,18 @@ fun inferredStatic() = Api.stat(null)
 fun inferredMember(api: Api) = api.one(null, 1)
 
 fun inferredOverload(api: Api) = api.over(null)
+
+fun packagePrivateMismatch() {
+    Api.hidden(null)
+}
+
+fun packagePrivateAccess() {
+    Api.hidden("x")
+}
+
+fun inferredGeneric(api: Api) = api.parse<String>(null).length
+
+fun inferredStaticGeneric() = Api.parseStatic<String>(null).length
 "#;
 
 fn assert_null_argument_diagnostics(annotation: &str) {
@@ -76,18 +94,27 @@ fn assert_null_argument_diagnostics(annotation: &str) {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    let message = "null cannot be a value of a non-null type 'String'.";
+    let null_argument = "null cannot be a value of a non-null type 'String'.";
+    let package_private =
+        "cannot access 'static fun hidden(p0: String): String!': it is package-private in 'p.Api'.";
     let expected = [
-        (4, 14),
-        (8, 13),
-        (9, 14),
-        (12, 25),
-        (14, 33),
-        (16, 40),
-        (18, 43),
+        (4, 14, null_argument),
+        (8, 13, null_argument),
+        (9, 14, null_argument),
+        (12, 25, null_argument),
+        (14, 33, null_argument),
+        (16, 40, null_argument),
+        (18, 43, null_argument),
+        // An inaccessible candidate the arguments do not fit reports only the argument; the access
+        // error belongs to the call that would otherwise apply.
+        (21, 16, null_argument),
+        (25, 9, package_private),
+        // The rejected generic call keeps its explicit `T`: `.length` resolves on `String`.
+        (28, 51, null_argument),
+        (30, 55, null_argument),
     ]
     .into_iter()
-    .map(|(line, column)| common::CompilerError {
+    .map(|(line, column, message)| common::CompilerError {
         file: "NullArguments.kt".to_string(),
         line,
         column,
