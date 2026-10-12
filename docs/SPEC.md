@@ -16947,6 +16947,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Corpus: `primitiveTypes/equalityWithObject/generated/*`, `binaryOp/eqNullableShortToShort.kt`,
   `binaryOp/eqNullableToPrimitiveWithSideEffects.kt`, `safeCall/safeCallEqPrimitive.kt`,
   `safeCall/safeCallNotEqPrimitive.kt`, `casts/literalExpressionAsGenericArgument/*`.
+- **A companion property assigned only by `init` blocks is an outer-class static.** kotlinc's
+  `MoveOrCopyCompanionObjectFieldsLowering` moves every class companion's backing field to the
+  outer class, with or without an initializer. A property with no initializer gets no static
+  initializer of its own; the companion's `init` blocks run in the outer `<clinit>` and write the
+  static in source order, and the companion reaches it through `access$get…$cp`/`access$set…$cp`.
+  Test: `tests/companion_init_assigned_property_e2e.rs`. Corpus:
+  `statics/anonymousInitializerInClassObject.kt`.
+- **A protected or internal companion property is an outer-class static too.** The move covers
+  every visibility. The companion's synthesized accessors keep the property's visibility (a
+  protected getter and setter; an internal pair is module-mangled, `getX$main`), and the outer
+  class's `access$get…$cp`/`access$set…$cp` bridges keep the unmangled name. A private setter is
+  still synthesized as a public method until the private-default-setter elision lands. Test:
+  `tests/companion_property_visibility_e2e.rs`. Corpus: `regressions/kt5395.kt` (`protected val`).
+- **An enum class's companion properties are enum statics.** kotlinc moves an enum companion's
+  backing fields like any class companion's, and runs the companion initializer in the enum's
+  `<clinit>` after the entries, `$VALUES`, `$ENTRIES` and the `Companion` store, interleaving
+  property stores and `init` blocks in source order. A hoisted store's line entry does not add
+  the closing-line entry a generated static's store does. The enum's static fields are emitted in
+  declaration order, and a companion `const val` is a `ConstantValue` field the `<clinit>` does
+  not store. Test: `tests/enum_companion_property_e2e.rs`. Corpus:
+  `enum/companionAccessingEnumValue.kt`, `enum/enumEntriesInCompanion.kt`,
+  `enum/initEntriesInCompanionObject.kt`.
+- **A class initializer does not store a static's JVM default value.** kotlinc's
+  `ExpressionCodegen.visitSetField` drops a field initializer in `<clinit>` whose constant is the
+  field type's default (`0`, `false`, `'\u0000'`, `+0.0`, `null`). The class and enum
+  `<clinit>`s apply the same elision the file facade already does, so a hoisted companion
+  `var count = 0` has no store. Test: `tests/companion_default_initializer_e2e.rs`.
 - **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
   kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
   `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and

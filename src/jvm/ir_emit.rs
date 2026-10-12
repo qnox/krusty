@@ -3738,31 +3738,7 @@ fn emit_enum_class(
             nullability,
         );
     }
-    // A `@Serializable enum`'s `$cachedSerializer$delegate` follows the property fields and precedes
-    // the entry constants: `Companion, value, $cachedSerializer$delegate, <entries>`.
-    for s in ir.statics.iter().filter(|s| s.owner_matches(&fq)) {
-        // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path).
-        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
-        let acc = if s.visibility.is_private() {
-            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
-        } else {
-            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        };
-        // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
-        // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
-        // annotation — the same treatment the class and facade field tables give their statics.
-        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let ann = (!s.is_lateinit && field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
-            .then_some("Lorg/jetbrains/annotations/NotNull;");
-        cw.add_field_late_sig(
-            acc,
-            &s.name,
-            &ir_type_desc(&s.ty),
-            signatures.field.as_deref().filter(|_| !s.property_delegate),
-            None,
-            ann,
-        );
-    }
+    static_fields::emit_enum_static_fields(ir, &fq, &signature_formatter, &mut cw);
     // One static-final constant per entry, plus the private `$VALUES` array. kotlinc visits the
     // fields after the methods, so each name interns where a body first references it (`$values`
     // reads every entry), or at the field visit.
@@ -4163,6 +4139,7 @@ fn emit_enum_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
+    static_fields::emit_hoisted_companion_bridges(ir, &fq, &mut cw);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
@@ -4187,7 +4164,8 @@ fn emit_enum_class(
             Ty::Unit,
             c.enum_entries
                 .iter()
-                .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
+                .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied())
+                .chain(ir.companion_clinit_body(c.fq_name)),
         );
         e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
             env.signature_symbols,
@@ -4306,35 +4284,34 @@ fn emit_enum_class(
         // it (`$cachedSerializer$delegate`) — the reverse of a plain class's `<clinit>` order, and
         // the same precedence the leading field block uses.
         emit_companion_init(e.cw, &mut clinit, &fq, c);
-        // A generated static's store gets its OWN `<clinit>` line entry, the way each entry's
-        // construction does, and the trailing `return` maps to the class's closing line. `<clinit>`'s
-        // table is CURATED through `set_method_lines` — `add_method` DROPS a `<clinit>` builder's
-        // line marks — so pushing entries here is the only thing that reaches the attribute.
+        // A static's store gets its OWN `<clinit>` line entry, as each entry's construction does;
+        // after a generated (not hoisted) one the trailing `return` maps to the closing line.
+        // `add_method` DROPS a `<clinit>` builder's line marks: only `set_method_lines` lands them.
         let mut stepped_away = false;
         for &(static_index, s) in &owner_statics {
-            let Some(init) = s.init else {
+            let Some(init) = static_fields::stored_clinit_initializer(ir, s) else {
                 continue;
             };
             if s.line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(s.line) {
                 clinit_lines.push((clinit.bytes.len() as u16, s.line));
-                stepped_away = true;
+                stepped_away |= !ir.is_jvm_companion_hoisted_static(static_index);
             }
             e.emit_static_initializer_store(&fq, static_index, init, &mut clinit);
         }
-        // The trailing `return` is mapped back only when a store STEPPED AWAY from the entries'
-        // line. An enum with no generated statics has a single-entry table, and adding a closing
-        // entry there is four bytes kotlinc does not write.
+        if let Some(body) = ir.companion_clinit_body(c.fq_name) {
+            e.emit_companion_clinit_body(c, &fq, body, &mut clinit, &mut clinit_lines);
+        }
+        // The trailing `return` is mapped back only when a generated store STEPPED AWAY from the
+        // entries' line; otherwise kotlinc writes no closing entry.
         if stepped_away
             && c.decl_end_line != 0
             && clinit_lines.last().map(|&(_, line)| line) != Some(c.decl_end_line)
         {
-            // The frontend records the source declaration's end while syntax is available; the
-            // backend consumes that checked source fact instead of guessing from entry lines.
+            // The frontend's recorded source end, not a guess from entry lines.
             clinit_lines.push((clinit.bytes.len() as u16, c.decl_end_line));
         }
         clinit.ret_void();
-        // `max_locals` is exactly what the body allocated — entry-arg spills enter the frame, and a
-        // `<clinit>` that spills nothing has no locals at all (kotlinc writes 0, not a floor of 2).
+        // `max_locals` is exactly what the body allocated (kotlinc writes 0, not a floor of 2).
         clinit.ensure_locals(e.frame.max());
         clinit.link();
         clinit

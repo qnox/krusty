@@ -17,8 +17,9 @@ struct Candidate {
     companion: ClassId,
     property: usize,
     field: u32,
-    initializer: ExprId,
-    initializer_store: ExprId,
+    /// The declaration's initializer and its store in the companion body. A property assigned
+    /// only by `init` blocks has neither: those assignments become static stores in place.
+    initializer: Option<(ExprId, ExprId)>,
     name: String,
     ty: Ty,
     is_var: bool,
@@ -26,6 +27,8 @@ struct Candidate {
     /// A private property has no companion accessor. In-class reads become static reads of the
     /// hoisted field, and another class reaches it through `access$get…$cp`.
     is_private: bool,
+    /// The visibility of a synthesized setter; a getter has the property's own.
+    setter_visibility: Visibility,
     source_order: u32,
     decl_line: u32,
     /// `@JvmField`: the hoisted static IS the property's public surface — a PUBLIC field with no
@@ -177,7 +180,7 @@ pub(crate) fn lower_companion_properties(
         let Some(companion_name) = outer_class.companion_class else {
             continue;
         };
-        if outer_class.is_enum || outer_class.is_value {
+        if outer_class.is_value {
             continue;
         }
         // Annotation classes are distinct in common IR but are JVM interfaces for storage rules.
@@ -241,17 +244,21 @@ pub(crate) fn lower_companion_properties(
             let Some(field) = declaration.backing_field else {
                 continue;
             };
-            let Some(initializer) = declaration.initializer else {
-                continue;
-            };
             let backing = &companion_class.fields[field as usize];
             let visibility = declaration.visibility;
             let is_jvm_field = jvm_field_eligible(declaration, backing);
             let inert_receiver = receiver_is_inert(ir, companion, field);
-            let initializer_store = initializer_store(ir, companion, field, initializer);
-            // A private companion property is hoisted too: kotlinc stores it as a private
-            // static of the outer class, not as a companion instance field. An interface
-            // companion cannot host that field, and this loop never selects one.
+            let initializer = match declaration.initializer {
+                Some(initializer) => match initializer_store(ir, companion, field, initializer) {
+                    Some(store) => Some((initializer, store)),
+                    None => continue,
+                },
+                None => None,
+            };
+            // Every visibility is hoisted: kotlinc stores a private, protected or internal
+            // property as a private static of the outer class too, not as a companion instance
+            // field. An interface companion cannot host that field, and this loop never selects
+            // one.
             // A custom getter or setter does not keep the field on the companion. kotlinc
             // still stores it as a private static of the outer class, and the accessor body
             // reads that static through `access$…$cp`.
@@ -260,28 +267,21 @@ pub(crate) fn lower_companion_properties(
             // when it cannot (`I?` over `Int`). The value-class pass records which of the two
             // this static is; leaving the field on the companion made a property reference call
             // an instance accessor the class does not have.
-            if (!visibility.is_public() && !declaration.is_private && !is_jvm_field)
-                || declaration.is_open
-                || backing.is_lateinit()
-                || (!is_jvm_field && !inert_receiver)
-            {
+            if declaration.is_open || backing.is_lateinit() || (!is_jvm_field && !inert_receiver) {
                 continue;
             }
-            let Some(initializer_store) = initializer_store else {
-                continue;
-            };
             candidates.push(Candidate {
                 outer,
                 companion,
                 property,
                 field,
                 initializer,
-                initializer_store,
                 name: declaration.name.clone(),
                 ty: declaration.ty,
                 is_var: declaration.is_var,
                 visibility,
                 is_private: declaration.is_private,
+                setter_visibility: declaration.setter_visibility,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
                 is_jvm_field,
@@ -318,13 +318,13 @@ pub(crate) fn lower_companion_properties(
                 companion,
                 property,
                 field,
-                initializer,
-                initializer_store,
+                initializer: Some((initializer, initializer_store)),
                 name: backing.name.clone(),
                 ty: backing.ty,
                 is_var: false,
                 visibility: Visibility::Private,
                 is_private: true,
+                setter_visibility: Visibility::Private,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
                 is_jvm_field: false,
@@ -345,7 +345,7 @@ pub(crate) fn lower_companion_properties(
         ir.statics.push(IrStatic {
             name: candidate.name.clone(),
             ty: candidate.ty,
-            init: Some(candidate.initializer),
+            init: candidate.initializer.map(|(initializer, _)| initializer),
             is_var: candidate.is_var,
             is_const: false,
             is_lateinit: false,
@@ -408,7 +408,7 @@ pub(crate) fn lower_companion_properties(
     // is cleared so the value is not stored twice.
     let removed_stores: HashSet<_> = candidates
         .iter()
-        .map(|candidate| candidate.initializer_store)
+        .filter_map(|candidate| candidate.initializer.map(|(_, store)| store))
         .collect();
     let affected_companions: HashSet<_> = candidates
         .iter()
@@ -567,6 +567,7 @@ pub(crate) fn lower_companion_properties(
                 ir.fn_params
                     .insert(getter, crate::ir::FnParamInfo::identities(Vec::new()));
                 ir.fn_source_order.insert(getter, candidate.source_order);
+                ir.set_method_visibility(getter, candidate.visibility);
                 getter
             });
             let setter = (candidate.is_var && candidate.declared_setter.is_none()).then(|| {
@@ -605,6 +606,11 @@ pub(crate) fn lower_companion_properties(
                     ]),
                 );
                 ir.fn_source_order.insert(setter, candidate.source_order);
+                // A private default setter is not a method kotlinc emits at all; until that
+                // elision lands, other classes still call this one, so it stays public.
+                if !candidate.setter_visibility.is_private() {
+                    ir.set_method_visibility(setter, candidate.setter_visibility);
+                }
                 // kotlinc writes the setter's `<set-?>` local with the setter, before the next
                 // member, so its table is recorded as the body is emitted.
                 ir.fn_debug_locals.insert(setter);
@@ -613,12 +619,15 @@ pub(crate) fn lower_companion_properties(
             (getter, setter)
         });
 
-        let mut initializer = candidate.initializer;
-        if retain_initializer_stores.contains(&candidate.companion) {
-            // The store stays in the companion body, which `<clinit>` runs with the instance
-            // already in value 0. A separate static initializer would store the value again.
-            ir.statics[static_index as usize].init = None;
-        } else {
+        // A property only `init` blocks assign has no static initializer: those stores were
+        // rewritten in place above.
+        // In a retained body the store stays, run by `<clinit>` with the instance already in
+        // value 0; a separate static initializer would store the value again.
+        let separate_initializer = candidate
+            .initializer
+            .filter(|_| !retain_initializer_stores.contains(&candidate.companion));
+        ir.statics[static_index as usize].init = None;
+        if let Some((mut initializer, _)) = separate_initializer {
             if crate::ir::read_values(ir, initializer).contains(&0) {
                 let outer = ir.classes[candidate.outer as usize].fq_name;
                 let companion = ir.classes[candidate.companion as usize].fq_name;
@@ -670,9 +679,9 @@ pub(crate) fn lower_companion_properties(
 /// stored the companion instance. Property initializers and `init` blocks stay in source order
 /// inside the body. The companion constructor is left as `super()` only.
 ///
-/// Interface companions keep object storage and run their initializer in their own `<clinit>`.
-/// Enum companions stay on the enum's existing `<clinit>` order. A named object's companion stays
-/// with that object's initializer.
+/// An enum class runs it after its entries, `$VALUES` and `$ENTRIES`, where it stores the
+/// companion instance. Interface companions keep object storage and run their initializer in
+/// their own `<clinit>`. A named object's companion stays with that object's initializer.
 fn schedule_class_companion_initializers(
     ir: &mut IrFile,
     realizations: &crate::jvm::property_realizations::PropertyRealizations,
@@ -954,7 +963,6 @@ fn initializer_needs_companion_instance(
 fn outer_runs_companion_initializer(outer: &crate::ir::IrClass) -> bool {
     !outer.is_interface
         && !outer.is_annotation
-        && !outer.is_enum
         && !outer.is_value
         && !outer.is_object
         && outer.companion_class.is_some()
