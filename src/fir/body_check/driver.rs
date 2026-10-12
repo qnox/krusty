@@ -431,15 +431,17 @@ fn check_and_dispatch_body_in_session_with_source(
             Ok(())
         }
         BodyKind::EnumEntry => check_and_dispatch_enum_entry(
-            file,
-            info,
-            source,
+            EnumEntryBodySource {
+                file,
+                info,
+                source,
+                index,
+                active,
+            },
             work,
-            index,
             origins,
             ordinary_sink,
             session,
-            active,
         ),
         BodyKind::Constructor => check_and_dispatch_constructor_body(
             ConstructorBodySource {
@@ -492,18 +494,30 @@ fn enum_entry_for_work<'a>(
     Some((class_declaration, class, entry))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn check_and_dispatch_enum_entry(
-    file: &File,
-    info: &TypeInfo,
+/// The source an enum-entry constructor call is checked against: the transiently parsed file, its
+/// semantic tables, and the stable declarations it belongs to.
+struct EnumEntryBodySource<'a> {
+    file: &'a File,
+    info: &'a TypeInfo,
     source: SourceFileId,
+    index: &'a ResolvedModuleIndex,
+    active: Option<&'a ActiveSourceDeclarations>,
+}
+
+fn check_and_dispatch_enum_entry(
+    enum_source: EnumEntryBodySource<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
-    active: Option<&ActiveSourceDeclarations>,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let EnumEntryBodySource {
+        file,
+        info,
+        source,
+        index,
+        active,
+    } = enum_source;
     let anchor = index
         .declaration_anchor(work.declaration)
         .ok_or(CheckedBodyDriverFailure::MissingBody)?;
