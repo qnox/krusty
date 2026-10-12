@@ -533,12 +533,12 @@ impl Checker<'_> {
     ) {
         let mut current = Some(classifier);
         while let Some(classifier) = current {
-            self.add_annotation_requirements(
-                self.classifier_applied_annotations(classifier)
-                    .iter()
-                    .map(|annotation| annotation.annotation),
-                requirements,
-            );
+            self.with_classifier_applied_annotations(classifier, |annotations| {
+                self.add_annotation_requirements(
+                    annotations.iter().map(|annotation| annotation.annotation),
+                    requirements,
+                );
+            });
             current = classifier.nested_owner();
         }
     }
@@ -559,41 +559,45 @@ impl Checker<'_> {
 
     /// The requirement an annotation class states with `@RequiresOptIn`, when it is a marker.
     fn opt_in_requirement(&self, annotation: TypeName) -> Option<OptInRequirement> {
-        let requires = self
-            .classifier_applied_annotations(annotation)
-            .into_iter()
-            .find(|applied| applied.annotation == type_name("kotlin/RequiresOptIn"))?;
-        let mut requirement = OptInRequirement {
-            marker: annotation,
-            warning: false,
-            message: None,
-        };
-        for (name, value) in &requires.arguments {
-            match (name.as_str(), value) {
-                ("level", crate::types::AnnotationValue::Enum(_, entry)) => {
-                    requirement.warning = entry == "WARNING";
+        let requires_opt_in = type_name("kotlin/RequiresOptIn");
+        self.with_classifier_applied_annotations(annotation, |annotations| {
+            let requires = annotations
+                .iter()
+                .find(|applied| applied.annotation == requires_opt_in)?;
+            let mut requirement = OptInRequirement {
+                marker: annotation,
+                warning: false,
+                message: None,
+            };
+            for (name, value) in &requires.arguments {
+                match (name.as_str(), value) {
+                    ("level", crate::types::AnnotationValue::Enum(_, entry)) => {
+                        requirement.warning = entry == "WARNING";
+                    }
+                    ("message", crate::types::AnnotationValue::String(message)) => {
+                        requirement.message = Some(message.to_lossy());
+                    }
+                    _ => {}
                 }
-                ("message", crate::types::AnnotationValue::String(message)) => {
-                    requirement.message = Some(message.to_lossy());
-                }
-                _ => {}
             }
-        }
-        Some(requirement)
+            Some(requirement)
+        })
     }
 
-    /// A classifier's annotations with their arguments: a current-module classifier's as its
-    /// declaration published them, a dependency's as its provider recorded them.
-    fn classifier_applied_annotations(
+    /// `visit` over a classifier's annotations with their arguments, borrowed where they are
+    /// kept: a current-module classifier's as its declaration published them, a dependency's as
+    /// its provider recorded them.
+    fn with_classifier_applied_annotations<R>(
         &self,
         classifier: TypeName,
-    ) -> Vec<crate::types::ResolvedAnnotation> {
+        visit: impl FnOnce(&[crate::types::ResolvedAnnotation]) -> R,
+    ) -> R {
         let Some(declaration) = self.resolver().classifier(classifier) else {
-            return Vec::new();
+            return visit(&[]);
         };
         match declaration.stable_declaration.zip(self.resolved_index) {
-            Some((stable, index)) => index.declaration_applied_annotations(stable).to_vec(),
-            None => declaration.annotations.clone(),
+            Some((stable, index)) => visit(index.declaration_applied_annotations(stable)),
+            None => visit(&declaration.annotations),
         }
     }
 
