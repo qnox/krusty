@@ -1914,19 +1914,14 @@ impl BodyFirChecker<'_> {
                     } else {
                         let (provenance, comparison, unsigned_compare) =
                             self.in_range_comparison(expression)?;
-                        let value = if self.info.platform_narrowings.contains_key(value) {
-                            self.value_at_selected_boundary(*value, comparison)?
-                        } else {
-                            self.expression(*value)?
-                        };
                         FirExprKind::InRange {
                             operation: Self::range_operation(*kind),
                             provenance,
                             comparison,
                             unsigned_compare,
-                            value,
-                            start: self.expression(*start)?,
-                            end: self.expression(*end)?,
+                            value: self.direct_range_operand(*value, comparison)?,
+                            start: self.direct_range_operand(*start, comparison)?,
+                            end: self.direct_range_operand(*end, comparison)?,
                             negated: *negated,
                         }
                     }

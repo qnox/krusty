@@ -97,6 +97,9 @@ fn platform_floating_nan_not_in_negates_the_positive_membership() {
             public static Float nanFloat() { return Float.NaN; }\
             public static Double absent() { return null; }\
             public static Float absentFloat() { return null; }\
+            public static Object absentObject() { return null; }\
+            public static Object text() { return \"1\"; }\
+            public static Object integer() { return Integer.valueOf(1); }\
         }"
         .to_string(),
     )];
@@ -135,6 +138,78 @@ fun box(): String = if (absentDoubleThrows() && absentFloatThrows()) "OK" else "
     common::expect_true_e2e(
         "platform Float and Double nulls fail their non-null range comparisons",
         null_source,
+        std::slice::from_ref(&directory),
+    );
+    let null_bound_code_source = r#"
+fun absentDoubleStart(): Boolean = 1.5 in PlatformValue.absent()..2.0
+fun absentDoubleEnd(): Boolean = 1.5 in 1.0..PlatformValue.absent()
+fun absentFloatStart(): Boolean = 1.5f in PlatformValue.absentFloat()..2.0f
+fun absentFloatEnd(): Boolean = 1.5f in 1.0f..PlatformValue.absentFloat()
+"#;
+    common::assert_class_code_matches_kotlinc_jdk_cp(
+        "PlatformFloatingRangeBounds",
+        null_bound_code_source,
+        "PlatformFloatingRangeBoundsKt",
+        std::slice::from_ref(&directory),
+    );
+    let null_bound_source = r#"
+fun absentDoubleStartThrows(): Boolean = try {
+    1.5 in PlatformValue.absent()..2.0
+    false
+} catch (_: NullPointerException) {
+    true
+}
+fun absentDoubleEndThrows(): Boolean = try {
+    1.5 in 1.0..PlatformValue.absent()
+    false
+} catch (_: NullPointerException) {
+    true
+}
+fun absentFloatStartThrows(): Boolean = try {
+    1.5f in PlatformValue.absentFloat()..2.0f
+    false
+} catch (_: NullPointerException) {
+    true
+}
+fun absentFloatEndThrows(): Boolean = try {
+    1.5f in 1.0f..PlatformValue.absentFloat()
+    false
+} catch (_: NullPointerException) {
+    true
+}
+fun box(): String = if (
+    absentDoubleStartThrows() && absentDoubleEndThrows() &&
+    absentFloatStartThrows() && absentFloatEndThrows()
+) "OK" else "FAIL"
+"#;
+    common::expect_true_e2e(
+        "platform Float and Double null bounds fail their range comparisons",
+        null_bound_source,
+        std::slice::from_ref(&directory),
+    );
+    let widened_platform_source = r#"
+fun nullIn(): Boolean = PlatformValue.absentObject() in 1..2
+fun textIn(): Boolean = PlatformValue.text() in 1..2
+fun integerIn(): Boolean = PlatformValue.integer() in 1..2
+fun nullNotIn(): Boolean = PlatformValue.absentObject() !in 1..2
+fun textNotIn(): Boolean = PlatformValue.text() !in 1..2
+fun integerNotIn(): Boolean = PlatformValue.integer() !in 1..2
+fun box(): String = if (
+    !nullIn() && !textIn() && integerIn() &&
+    nullNotIn() && textNotIn() && !integerNotIn()
+) "OK" else "FAIL"
+"#;
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(
+            widened_platform_source,
+            std::slice::from_ref(&directory),
+        ),
+        "OK",
+        "platform widened reference oracle",
+    );
+    common::expect_true_e2e(
+        "platform widened range values preserve boxed instanceof membership",
+        widened_platform_source,
         std::slice::from_ref(&directory),
     );
     if let Some(root) = directory.parent() {

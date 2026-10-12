@@ -7,6 +7,21 @@ use crate::libraries::CompilerIntrinsic;
 use crate::resolve::ResolvedCall;
 
 impl BodyFirChecker<'_> {
+    /// Materialize a direct range-comparison operand at the non-null boundary selected by the
+    /// frontend. The range and contains calls are bypassed only after resolution records their
+    /// argument/receiver decisions; checked FIR must preserve those decisions for every operand.
+    pub(super) fn direct_range_operand(
+        &mut self,
+        expression: ExprId,
+        comparison: ResolvedTy,
+    ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
+        if self.info.platform_narrowings.contains_key(&expression) {
+            self.value_at_selected_boundary(expression, comparison)
+        } else {
+            self.expression(expression)
+        }
+    }
+
     /// The fully checked comparison selected for direct range membership. Keep the conversion of
     /// the provider-selected unsigned comparator beside the other checked progression contracts.
     pub(super) fn in_range_comparison(

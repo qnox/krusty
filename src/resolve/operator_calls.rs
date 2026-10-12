@@ -652,6 +652,19 @@ impl<'a> Checker<'a> {
                     self.resolved_builtin_operator_accesses
                         .insert((e, convention.key), access);
                 }
+                // Direct comparison bypasses the selected range call, so publish the non-null
+                // boundaries it would impose on both bounds. Use the already selected comparison
+                // type: for a mixed floating range this preserves the platform check before the
+                // same Float-to-Double widening the comparison requires.
+                for operand in [start, end] {
+                    self.narrow_platform_value(comparison, operand, PlatformNarrowing::Argument);
+                }
+                // Numeric membership similarly bypasses the selected contains call. The alternate
+                // direct arm is a widened reference (`Any! in 1..2`): it must stay boxed for the
+                // checked `instanceof Int` path and therefore has no scalar value boundary.
+                if operands_are_numeric {
+                    self.narrow_platform_value(comparison, value, PlatformNarrowing::Argument);
+                }
                 self.resolved_in_range_comparisons.insert(
                     e,
                     ResolvedInRangeComparison {
