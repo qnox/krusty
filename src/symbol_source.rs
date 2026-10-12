@@ -150,9 +150,9 @@ pub trait SymbolSource {
         lower
     }
 
-    /// The declared upper bounds of type variable `name` after the first, which `Ty::TyParam`
-    /// carries (`where T : A, T : B` adds `B`). Empty for a variable the provider does not declare.
-    fn type_variable_extra_bounds(&self, _name: &str) -> Vec<Ty> {
+    /// Every declared upper bound of type variable `name` (`where T : A, T : B` declares both).
+    /// Empty for a variable the provider does not declare.
+    fn type_variable_bounds(&self, _name: &str) -> Vec<Ty> {
         Vec::new()
     }
 
@@ -357,10 +357,10 @@ impl SymbolSource for CompositeSource<'_> {
             .unwrap_or(lower)
     }
 
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
         self.children
             .iter()
-            .map(|source| source.type_variable_extra_bounds(name))
+            .map(|source| source.type_variable_bounds(name))
             .find(|bounds| !bounds.is_empty())
             .unwrap_or_default()
     }
@@ -448,8 +448,8 @@ impl SymbolSource for CachedCompositeSource<'_> {
         self.source.platform_flexible_upper_bound(lower)
     }
 
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
-        self.source.type_variable_extra_bounds(name)
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.source.type_variable_bounds(name)
     }
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {

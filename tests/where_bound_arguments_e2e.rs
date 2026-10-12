@@ -26,6 +26,20 @@ fun box(): String {
 }
 
 #[test]
+fn a_local_type_variable_is_an_argument_for_any_of_its_bounds() {
+    let src = r#"fun takeCs(c: CharSequence) = c.length
+
+fun outer(): Int {
+    fun <T> inner(x: T): Int where T : Comparable<T>, T : CharSequence = takeCs(x)
+    return inner("OK")
+}
+
+fun box(): String = if (outer() == 2) "OK" else "local bounds"
+"#;
+    common::expect_box_same_as_kotlinc(src, "where_bound_local_function");
+}
+
+#[test]
 fn source_constructor_primary_selection_sees_a_type_variables_later_bound() {
     let src = r#"class Cell<T>(val value: T, marker: CharSequence) {
     constructor(value: T, marker: Int) : this(value, marker.toString())
@@ -74,7 +88,7 @@ fun <T> length(a: T & Any): Int where T : Comparable<T>?, T : CharSequence? = ta
 fun <T : Comparable<String>?> compared(a: T & Any): Int where T : CharSequence? = takeComparable(a)
 
 fun box(): String {
-    val n = length<String?>("abc")
+    val n = length<String>("abc")
     if (n != 3) return "length $n"
     val c = compared<String?>("b")
     if (c != 0) return "compared $c"
@@ -82,4 +96,32 @@ fun box(): String {
 }
 "#;
     common::expect_box_same_as_kotlinc(src, "where_bound_definitely_non_null");
+}
+
+#[test]
+fn a_chained_variable_meets_a_class_bound_written_after_an_interface() {
+    let src = r#"fun takeI(i: Int) = i + 1
+fun <T : X, X : Comparable<Int>> next(a: T) where X : Int = takeI(a)
+fun <T : X, X> nextWhere(a: T) where X : Comparable<Int>, X : Int = takeI(a)
+
+fun box(): String {
+    val results = listOf(next(1), nextWhere(2))
+    return if (results == listOf(2, 3)) "OK" else "$results"
+}
+"#;
+    common::expect_box_same_as_kotlinc(src, "where_bound_chained_class_bound");
+}
+
+#[test]
+fn a_reordered_bound_is_recarried_inside_another_parameters_class_bound() {
+    let src = r#"interface Marker
+open class Box<T>(val value: T)
+class IntBox : Box<Int>(41), Marker
+
+fun <X, T> take(box: T): X
+    where X : Comparable<Int>, X : Int, T : Marker, T : Box<X> = box.value
+
+fun box(): String = if (take<Int, IntBox>(IntBox()) == 41) "OK" else "nested bound"
+"#;
+    common::expect_box_same_as_kotlinc(src, "where_bound_nested_recarry");
 }

@@ -54,7 +54,7 @@ impl crate::assignable::TypeOracle for SourceConstructorMatcher<'_> {
             .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))])
     }
 
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
-        self.symbols.type_parameter_extra_bounds(name)
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.symbols.type_parameter_bounds(name)
     }
 }

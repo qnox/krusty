@@ -507,28 +507,14 @@ fn classifier_bound_is_interface(
         })
 }
 
-/// Put the concrete class bound first in each metadata-facing type-parameter intersection. Kotlin's
-/// source `where` clause is unordered semantically, while both JVM erasure and Kotlin metadata's
-/// type-parameter decoding use the primary (first) bound as the runtime upper bound. Keeping an
-/// interface first would publish `<T : Comparable<T>, T : Number>` with `Comparable` erasure even
-/// though the declaration realizes as `Number`.
 fn order_primary_class_bounds(
     signature: &mut GenericSig,
     source_headers: &HashMap<TypeName, SourceClassHeader>,
     source: &dyn SymbolSource,
 ) {
-    for bounds in &mut signature.formal_bounds {
-        let Some(primary) = bounds.iter().position(|bound| {
-            bound
-                .non_null()
-                .kotlin_class_internal()
-                .is_some_and(|_| !classifier_bound_is_interface(source_headers, source, *bound))
-        }) else {
-            continue;
-        };
-        let primary = bounds.remove(primary);
-        bounds.insert(0, primary);
-    }
+    type_parameter_bounds::order_primary_class_bounds(signature, |bound| {
+        classifier_bound_is_interface(source_headers, source, bound)
+    });
 }
 
 impl Checker<'_> {
@@ -2674,11 +2660,11 @@ pub struct SymbolTable {
     /// collected. Forward property inference may need to classify a later-file source singleton; this
     /// identity table avoids both source-order dependence and the old global simple-name object set.
     source_class_headers: HashMap<TypeName, SourceClassHeader>,
-    /// Declared upper bounds after the first of each source type parameter that has several,
-    /// keyed by its semantic identity. `Ty::TyParam` carries only the first; assignability reads
-    /// the rest here. Classifier parameters are recorded as their classifier is inserted, callable
-    /// parameters by [`SymbolTable::index_callable_type_parameter_bounds`] once collection is done.
-    type_parameter_extra_bounds: type_parameter_bounds::ExtraBoundsIndex,
+    /// Every declared upper bound of each source type parameter that has several, keyed by its
+    /// semantic identity. `Ty::TyParam` carries only one; assignability reads all of them here.
+    /// Classifier parameters are recorded as their classifier is inserted, callable parameters by
+    /// [`SymbolTable::index_callable_type_parameter_bounds`] once collection is done.
+    declared_type_parameter_bounds: type_parameter_bounds::DeclaredBoundsIndex,
     /// Parser classifier coordinates retained only while Pass 1 inspection/capture analysis is
     /// active, bound once to the compact header's stable semantic identity. This prevents that
     /// legacy retained-AST lane from rebuilding an anonymous/local classifier from its parser
@@ -2865,7 +2851,7 @@ impl Default for SymbolTable {
             classes: HashMap::default(),
             source_packages: crate::fx_hash::HashSet::default(),
             source_class_headers: HashMap::default(),
-            type_parameter_extra_bounds: type_parameter_bounds::ExtraBoundsIndex::default(),
+            declared_type_parameter_bounds: type_parameter_bounds::DeclaredBoundsIndex::default(),
             stable_parser_classifier_identities: HashMap::default(),
             source_class_aliases: HashMap::default(),
             source_alias_fqns: HashMap::default(),
@@ -3128,20 +3114,25 @@ impl SymbolTable {
     pub fn insert_class_sig(&mut self, internal: TypeName, sig: ClassSig) -> Option<ClassSig> {
         debug_assert_eq!(internal, sig.internal);
         self.register_source_package_for_owner(internal);
-        self.type_parameter_extra_bounds.record_classifier(&sig);
+        self.declared_type_parameter_bounds.record_classifier(&sig);
         self.classes.insert(internal, sig)
     }
 
-    /// Record the bounds after the first of every collected source callable's type parameters.
+    /// Record every bound of each collected source callable's type parameters that has several.
     /// Called once callable signatures carry their generic shapes and before any body is inferred.
     pub(crate) fn index_callable_type_parameter_bounds(&mut self) {
-        let callables = type_parameter_bounds::ExtraBoundsIndex::from_callables(self);
-        self.type_parameter_extra_bounds.extend(callables);
+        let callables = type_parameter_bounds::DeclaredBoundsIndex::from_callables(self);
+        self.declared_type_parameter_bounds.extend(callables);
     }
 
     /// The declared bounds after the first of source type parameter `identity`.
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
-        self.type_parameter_extra_bounds.get(identity)
+        self.declared_type_parameter_bounds.extra(identity)
+    }
+
+    /// Every declared bound of source type parameter `identity` that has several.
+    pub(crate) fn type_parameter_bounds(&self, identity: &str) -> Vec<Ty> {
+        self.declared_type_parameter_bounds.all(identity)
     }
 
     pub fn ext_prop(&self, recv: Ty, name: &str) -> Option<(Ty, bool)> {
@@ -12355,21 +12346,26 @@ impl<'a> Checker<'a> {
 
     /// The declared bounds of type parameter `identity` after its first, from its stable header.
     fn declared_tparam_extra_bounds(&self, identity: &str) -> Vec<Ty> {
-        if let Some(bounds) = self.resolved_index.and_then(|index| {
-            let parameter = index.type_parameter_by_semantic_name(identity)?;
-            let header = index.type_parameter_header(parameter)?;
-            Some(
-                header
-                    .bounds
-                    .iter()
-                    .skip(1)
-                    .map(|bound| bound.ty.get())
-                    .collect::<Vec<_>>(),
-            )
-        }) {
+        if let Some(mut bounds) = self
+            .resolved_index
+            .and_then(|index| index.type_parameter_declared_bounds(identity))
+        {
+            if !bounds.is_empty() {
+                bounds.remove(0);
+            }
             return bounds;
         }
         self.module.type_parameter_extra_bounds(identity)
+    }
+
+    /// Every declared bound of type parameter `identity`, from its stable header.
+    fn declared_tparam_bounds(&self, identity: &str) -> Vec<Ty> {
+        if let Some(bounds) = self.lexical_type_parameter_bounds.all(identity) {
+            return bounds;
+        }
+        self.resolved_index
+            .and_then(|index| index.type_parameter_declared_bounds(identity))
+            .unwrap_or_else(|| self.module.type_parameter_bounds(identity))
     }
 
     fn check_member(
@@ -23291,6 +23287,8 @@ impl<'a> Checker<'a> {
                 })
                 .collect(),
         );
+        self.lexical_type_parameter_bounds
+            .record(&f.type_params, &semantic_tparams);
         // Collect outer local names (everything currently in scope that isn't one of f's params).
         let own_params: crate::fx_hash::HashSet<String> =
             f.params.iter().map(|p| p.name.clone()).collect();
@@ -32956,6 +32954,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_type_bounds: HashMap::default(),
         resolved_declaration_types: HashMap::default(),
         resolved_declaration_type_parameters: HashMap::default(),
+        lexical_type_parameter_bounds: Default::default(),
         class_literal_targets: HashMap::default(),
         applied_annotations: Default::default(),
         bound_annotation_identities: HashMap::default(),
@@ -35286,6 +35285,13 @@ impl<'a> CheckerModuleSymbols<'a> {
         }
     }
 
+    fn type_parameter_bounds(&self, identity: &str) -> Vec<Ty> {
+        match self {
+            Self::Legacy(source) => source.type_parameter_bounds(identity),
+            Self::Streamed(source) => source.type_parameter_bounds(identity),
+        }
+    }
+
     fn annotation_retention(
         &self,
         classifier: TypeName,
@@ -35319,8 +35325,8 @@ impl<'a> CheckerModuleSymbols<'a> {
 }
 
 impl SymbolSource for CheckerModuleSymbols<'_> {
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
-        self.type_parameter_extra_bounds(name)
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.type_parameter_bounds(name)
     }
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
@@ -35469,6 +35475,10 @@ struct Checker<'a> {
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,
+    /// All bounds of body-local type parameters, keyed by declaration-owned semantic identity.
+    /// Local functions have no stable module header, but assignability still needs the same bound
+    /// inventory while their bodies are checked.
+    lexical_type_parameter_bounds: type_parameter_bounds::LexicalBoundsIndex,
     class_literal_targets: HashMap<ExprId, TypeName>,
     applied_annotations: annotation_applications::CheckedAnnotationApplications,
     /// Exact Pass-1 binding for each annotation occurrence owned by a bounded metadata fragment.
@@ -36178,8 +36188,8 @@ impl crate::assignable::TypeOracle for Checker<'_> {
             .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))])
     }
 
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
-        self.declared_tparam_extra_bounds(name)
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.declared_tparam_bounds(name)
     }
 
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {

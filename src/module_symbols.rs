@@ -78,6 +78,10 @@ impl<'a> ModuleSymbols<'a> {
         self.syms.type_parameter_extra_bounds(identity)
     }
 
+    pub(crate) fn type_parameter_bounds(&self, identity: &str) -> Vec<Ty> {
+        self.syms.type_parameter_bounds(identity)
+    }
+
     pub(crate) fn annotation_retention(
         &self,
         classifier: TypeName,
@@ -1240,8 +1244,8 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
-        self.type_parameter_extra_bounds(name)
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.type_parameter_bounds(name)
     }
 
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {

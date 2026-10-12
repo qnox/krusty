@@ -54,9 +54,11 @@ pub trait TypeOracle {
         lower
     }
 
-    /// The upper bounds of type variable `name` after its first, which `Ty::TyParam` carries
-    /// (`where T : A, T : B` adds `B`). A variable is a subtype of every one of its bounds.
-    fn type_variable_extra_bounds(&self, _name: &str) -> Vec<Ty> {
+    /// Every declared upper bound of type variable `name` (`where T : A, T : B` declares both),
+    /// in no particular order. `Ty::TyParam` carries one of them, which need not be the first a
+    /// declaration lists. Empty when the oracle does not know the variable. A variable is a
+    /// subtype of every one of its bounds.
+    fn type_variable_bounds(&self, _name: &str) -> Vec<Ty> {
         Vec::new()
     }
 }
@@ -78,20 +80,21 @@ fn variable_bound_assignable(
     upper != sub && assignable_inner(cx, oracle, upper, sup)
 }
 
-/// The intersection of type variable `name`'s declared bounds: `bound`, which `Ty::TyParam`
-/// carries, and the oracle's later ones, each passed through `shape`.
+/// The intersection of type variable `name`'s bounds: `bound`, which `Ty::TyParam` carries, and
+/// every bound the oracle reports as declared, each passed through `shape`. The carried bound is
+/// one of the declared ones, and the canonical intersection keeps one copy of each.
 fn declared_upper_bound(
     oracle: &dyn TypeOracle,
     name: &str,
     bound: Ty,
     shape: impl Fn(Ty) -> Ty,
 ) -> Ty {
-    let extra = oracle.type_variable_extra_bounds(name);
-    if extra.is_empty() {
+    let declared = oracle.type_variable_bounds(name);
+    if declared.is_empty() {
         return shape(bound);
     }
     let bounds = std::iter::once(bound)
-        .chain(extra)
+        .chain(declared)
         .map(shape)
         .collect::<Vec<_>>();
     Ty::intersection(&bounds)

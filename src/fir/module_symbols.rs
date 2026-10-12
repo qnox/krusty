@@ -135,19 +135,16 @@ impl<'a> StreamedModuleSymbols<'a> {
     }
 
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
-        let Some(parameter) = self.index.type_parameter_by_semantic_name(identity) else {
-            return Vec::new();
-        };
+        let mut bounds = self.type_parameter_bounds(identity);
+        if !bounds.is_empty() {
+            bounds.remove(0);
+        }
+        bounds
+    }
+
+    pub(crate) fn type_parameter_bounds(&self, identity: &str) -> Vec<Ty> {
         self.index
-            .type_parameter_header(parameter)
-            .map(|header| {
-                header
-                    .bounds
-                    .iter()
-                    .skip(1)
-                    .map(|bound| bound.ty.get())
-                    .collect()
-            })
+            .type_parameter_declared_bounds(identity)
             .unwrap_or_default()
     }
 
@@ -1775,8 +1772,8 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
-        self.type_parameter_extra_bounds(name)
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.type_parameter_bounds(name)
     }
 
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {

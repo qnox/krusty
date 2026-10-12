@@ -136,10 +136,10 @@ impl SymbolSource for ResolverSource<'_> {
         }
     }
 
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
         match self {
-            Self::Direct(source) => source.type_variable_extra_bounds(name),
-            Self::Memoized(source) => source.type_variable_extra_bounds(name),
+            Self::Direct(source) => source.type_variable_bounds(name),
+            Self::Memoized(source) => source.type_variable_bounds(name),
         }
     }
 

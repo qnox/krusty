@@ -155,8 +155,8 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         self.0.platform_flexible_upper_bound(lower)
     }
-    fn type_variable_extra_bounds(&self, name: &str) -> Vec<Ty> {
-        self.0.type_variable_extra_bounds(name)
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.0.type_variable_bounds(name)
     }
 }
 
