@@ -108,8 +108,7 @@ use overload_selection::{
     IndexedConvention, SelectionMode,
 };
 use property_candidates::{
-    generic_property_more_specific, property_overloads, source_property_visible,
-    specialize_property,
+    generic_property_more_specific, source_property_visible, specialize_property,
 };
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
 pub(crate) use resolved_symbol::ErrorReceiverSelection;
@@ -2212,18 +2211,7 @@ impl<'a> SymbolResolver<'a> {
                 );
                 let top_level_call = self.pick_top_level(name, &fs, args, type_args, None);
                 let overloads = fs.overloads;
-                let values = levels
-                    .into_iter()
-                    .map(|symbols| {
-                        symbols
-                            .into_iter()
-                            .flat_map(|symbols| property_overloads(&symbols.callables))
-                            .filter(|property| property.kind == PropKind::TopLevel)
-                            .filter(|property| self.property_visible(property))
-                            .collect::<Vec<_>>()
-                    })
-                    .find(|properties| !properties.is_empty())
-                    .unwrap_or_default();
+                let values = self.nearest_top_level_properties(levels);
                 if overloads.is_empty() && top_level_call.is_none() && values.is_empty() {
                     return None;
                 }

@@ -13015,15 +13015,10 @@ impl<'a> Checker<'a> {
                         })
                 },
                 || {
-                    resolver
-                        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-                        .map(crate::symbol_resolver::Symbol::values)
-                        .is_some_and(|properties| {
-                            properties.iter().any(|property| {
-                                property.kind == crate::libraries::PropKind::TopLevel
-                                    && property.receiver.is_none()
-                            })
-                        })
+                    resolver.top_level_properties(name).iter().any(|property| {
+                        property.kind == crate::libraries::PropKind::TopLevel
+                            && property.receiver.is_none()
+                    })
                 },
             )
             .is_some()
@@ -13544,9 +13539,7 @@ impl<'a> Checker<'a> {
         }
         let properties = self
             .resolver_in_scope(std::slice::from_ref(&package))
-            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-            .map(crate::symbol_resolver::Symbol::values)
-            .unwrap_or_default();
+            .top_level_properties(name);
         let selection = self.select_top_level_property_candidates(scope, properties);
         self.record_receiverless_property_read(expression, name, selection)
     }
@@ -41748,11 +41741,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         name: &str,
     ) -> TopLevelPropertySelection {
-        let properties = self
-            .resolver()
-            .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-            .map(crate::symbol_resolver::Symbol::values)
-            .unwrap_or_default();
+        let properties = self.resolver().top_level_properties(name);
         self.select_top_level_property_candidates(scope, properties)
     }
 
@@ -56212,14 +56201,7 @@ impl<'a> Checker<'a> {
         // Reuse the semantic slot mapper and partial-applicability predicate for every source form;
         // positional calls need the same boundary as named/default/trailing-lambda calls, otherwise
         // a callable reference is checked expectation-free before its provider member is selected.
-        let mut members = self
-            .resolver()
-            .resolve_symbol(receiver, name, &[], type_args)
-            .map(crate::symbol_resolver::Symbol::overloads)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
-            .collect::<Vec<_>>();
+        let mut members = self.resolver().member_overloads(receiver, name);
         if let (crate::symbol_resolver::SymRecv::Value(receiver), false) =
             (receiver, members.is_empty())
         {
@@ -63003,9 +62985,7 @@ impl<'a> Checker<'a> {
                 // handoff; no later phase searches by property name.
                 let top_level_properties = self
                     .resolver()
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[], &[])
-                    .map(crate::symbol_resolver::Symbol::values)
-                    .unwrap_or_default()
+                    .top_level_properties(&name)
                     .into_iter()
                     .filter(|property| {
                         property.kind == crate::libraries::PropKind::TopLevel

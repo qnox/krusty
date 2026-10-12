@@ -113,13 +113,11 @@ impl ProductionSignatureSemantics<'_> {
         let external_value = self
             .with_resolver(scope, |resolver| {
                 resolver
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, root, &[], &[])
-                    .map(crate::symbol_resolver::Symbol::values)
-                    .is_some_and(|properties| {
-                        properties.iter().any(|property| {
-                            property.kind == crate::libraries::PropKind::TopLevel
-                                && property.receiver.is_none()
-                        })
+                    .top_level_properties(root)
+                    .iter()
+                    .any(|property| {
+                        property.kind == crate::libraries::PropKind::TopLevel
+                            && property.receiver.is_none()
                     })
                     .then_some(())
             })
@@ -3622,14 +3620,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         let top_level_value = self.with_resolver(scope, |resolver| {
             resolver
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, root, &[], &[])
-                .map(crate::symbol_resolver::Symbol::values)
-                .filter(|properties| {
-                    properties
-                        .iter()
-                        .any(|property| property.kind == crate::libraries::PropKind::TopLevel)
-                })
-                .map(|_| ())
+                .top_level_properties(root)
+                .iter()
+                .any(|property| property.kind == crate::libraries::PropKind::TopLevel)
+                .then_some(())
         });
         crate::trace_compiler!(
             "callable_ref",

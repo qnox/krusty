@@ -1,6 +1,9 @@
 //! Accessibility filtering before argument mapping and overload selection.
 
-use super::{Callables, FunctionInfo, SymbolResolver, Ty};
+use super::{
+    level_functions, receiver_allows_member_dispatch, Callables, FnKind, FunctionInfo, SymRecv,
+    SymbolResolver, Ty,
+};
 
 pub(crate) struct ReceiverCallableInventory {
     pub(crate) accessible: Callables,
@@ -20,6 +23,42 @@ impl SymbolResolver<'_> {
 
     pub(crate) fn receiver_callables(&self, receiver: Ty, name: &str) -> Callables {
         self.receiver_callable_inventory(receiver, name).accessible
+    }
+
+    /// The member function overloads `recv.name` denotes: the accessible member part of
+    /// [`SymbolResolver::select_symbol`]'s overload family, without selecting a call among them.
+    pub(crate) fn member_overloads(&self, recv: SymRecv, name: &str) -> Vec<FunctionInfo> {
+        let members = |functions: &[FunctionInfo]| {
+            functions
+                .iter()
+                .filter(|overload| overload.kind == FnKind::Member)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        match recv {
+            SymRecv::Value(ty) | SymRecv::ImplicitValue(ty) => {
+                if !receiver_allows_member_dispatch(ty) {
+                    return Vec::new();
+                }
+                members(
+                    self.receiver_callable_inventory(ty, name)
+                        .accessible
+                        .functions(),
+                )
+            }
+            SymRecv::TopLevel => self
+                .symbol_levels_in_scope(name)
+                .iter()
+                .find(|symbols| level_functions(symbols).next().is_some())
+                .map(|symbols| {
+                    level_functions(symbols)
+                        .filter(|overload| overload.kind == FnKind::Member)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            SymRecv::Type(_) | SymRecv::TypeName(_) => Vec::new(),
+        }
     }
 
     pub(super) fn retain_accessible_extensions(
