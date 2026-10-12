@@ -350,10 +350,7 @@ pub(crate) fn lower_companion_properties(
             },
             setter: if candidate.declared_setter.is_some() {
                 crate::ir::IrStaticAccessor::Declared
-            } else if candidate.initializer.is_none()
-                && !candidate.is_private
-                && candidate.setter_visibility.is_private()
-            {
+            } else if !candidate.is_private && candidate.setter_visibility.is_private() {
                 crate::ir::IrStaticAccessor::Absent
             } else {
                 crate::ir::IrStaticAccessor::Default
@@ -589,7 +586,7 @@ pub(crate) fn lower_companion_properties(
             });
             let setter = (candidate.is_var
                 && candidate.declared_setter.is_none()
-                && !(candidate.initializer.is_none() && candidate.setter_visibility.is_private()))
+                && !candidate.setter_visibility.is_private())
             .then(|| {
                 let value = ir.add_expr(IrExpr::GetValue(1));
                 let write = ir.add_expr(IrExpr::SetStatic {
@@ -626,11 +623,7 @@ pub(crate) fn lower_companion_properties(
                     ]),
                 );
                 ir.fn_source_order.insert(setter, candidate.source_order);
-                // An initializer-backed private default setter is still the public JVM bridge
-                // used by nested classes. Only the initializer-less case above has no method.
-                if !candidate.setter_visibility.is_private() {
-                    ir.set_method_visibility(setter, candidate.setter_visibility);
-                }
+                ir.set_method_visibility(setter, candidate.setter_visibility);
                 // kotlinc writes the setter's `<set-?>` local with the setter, before the next
                 // member, so its table is recorded as the body is emitted.
                 ir.fn_debug_locals.insert(setter);

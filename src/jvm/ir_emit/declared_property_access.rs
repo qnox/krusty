@@ -278,7 +278,8 @@ pub(super) struct HoistedCompanionStorage {
     /// The outer class that declares the field.
     pub(super) owner: TypeName,
     /// A class other than `owner` reaches the field through `access$get…$cp` / `access$set…$cp`:
-    /// the property is private, so it has no accessor of its own.
+    /// the property (for a read) or its default setter (for a write) is private, so that side has
+    /// no callable companion accessor.
     pub(super) bridged: bool,
 }
 
@@ -340,7 +341,11 @@ pub(super) fn hoisted_companion_storage(
     Some(HoistedCompanionStorage {
         index,
         owner,
-        bridged: declared.is_private && !ir.is_jvm_field_static(index),
+        bridged: (if writable {
+            declared.setter_visibility.is_private()
+        } else {
+            declared.is_private
+        }) && !ir.is_jvm_field_static(index),
     })
 }
 

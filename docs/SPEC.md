@@ -17081,9 +17081,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A protected or internal companion property is an outer-class static too.** The move covers
   every visibility. The companion's synthesized accessors keep the property's visibility (a
   protected getter and setter; an internal pair is module-mangled, `getX$main`), and the outer
-  class's `access$get…$cp`/`access$set…$cp` bridges keep the unmangled name. An initializer-less,
-  bodiless private setter has no method and is recorded as absent from the static realization;
-  the initializer-backed shape retains the public JVM bridge used by nested classes. Test:
+  class's `access$get…$cp`/`access$set…$cp` bridges keep the unmangled name. A bodiless private
+  setter has no companion method and is recorded as absent from the static realization, whether
+  or not the property has an initializer; a nested class writes through the outer field's public
+  synthetic bridge. Test:
   `tests/companion_property_visibility_e2e.rs`. Corpus: `regressions/kt5395.kt` (`protected val`).
 - **An enum class's companion properties are enum statics.** kotlinc moves an enum companion's
   backing fields like any class companion's, and runs the companion initializer in the enum's
