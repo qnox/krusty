@@ -524,27 +524,13 @@ fn static_field_annotations<'a>(
     owner: &'a IrClass,
     static_index: u32,
 ) -> Option<&'a crate::ir::FieldAnnotations> {
-    let field = &ir.statics[static_index as usize].name;
-    if ir.is_jvm_companion_hoisted_static(static_index) {
-        // Enum companion fields are inventoried on the enum because their physical storage joins
-        // the enum's own late field table. Ordinary class companions retain the inventory on the
-        // nested companion declaration.
-        if owner.is_enum {
-            return owner
-                .field_annotations
-                .iter()
-                .find(|annotations| annotations.field == *field);
-        }
-        return owner
-            .companion_class
-            .and_then(|companion| ir.class_id_by_name(companion))
-            .and_then(|companion| {
-                ir.classes[companion as usize]
-                    .field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == *field)
-            });
+    if let Some((companion, property)) = ir.jvm_companion_static_declaration(static_index) {
+        return companion
+            .field_annotations
+            .iter()
+            .find(|annotations| annotations.field == property.name);
     }
+    let field = &ir.statics[static_index as usize].name;
     owner
         .field_annotations
         .iter()

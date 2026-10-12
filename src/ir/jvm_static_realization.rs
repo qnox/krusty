@@ -34,6 +34,24 @@ impl IrFile {
             .copied()
     }
 
+    /// The exact companion property declaration whose storage `index` realizes on the JVM.
+    /// Consumers that need declaration-owned facts use this recorded edge instead of recovering
+    /// an owner or property from the physical static's spelling.
+    pub(crate) fn jvm_companion_static_declaration(
+        &self,
+        index: u32,
+    ) -> Option<(&super::IrClass, &super::IrProperty)> {
+        let (&(companion, property), _) = self
+            .jvm_companion_property_statics
+            .iter()
+            .find(|(_, static_index)| **static_index == index)?;
+        let class = self
+            .classes
+            .iter()
+            .find(|class| class.fq_name == companion)?;
+        Some((class, class.properties.get(property as usize)?))
+    }
+
     pub(crate) fn set_jvm_static_field_name(&mut self, index: u32, name: String) {
         self.jvm_static_field_names.insert(index, name);
     }
