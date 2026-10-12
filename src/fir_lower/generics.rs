@@ -26,7 +26,7 @@ fn referenced_bound_type_parameters(
     let own = own
         .iter()
         .map(|parameter| parameter.semantic_name.as_str())
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let mut names = Vec::new();
     for ordinal in 0.. {
         let Some(parameter) = index.type_parameter(declaration, ordinal) else {
@@ -41,7 +41,7 @@ fn referenced_bound_type_parameters(
     }
 
     let mut parameters = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut cursor = 0;
     while let Some(&name) = names.get(cursor) {
         cursor += 1;

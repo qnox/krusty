@@ -9,8 +9,8 @@ use crate::types::{Ty, TypeName};
 impl Checker<'_> {
     /// Every sealed descendant of `roots`, transitively (the roots themselves included). A sealed class
     /// may nest a further sealed class, so the hierarchy under a sealed subject is a tree, not a list.
-    fn sealed_descendants(&self, roots: &[TypeName]) -> std::collections::HashSet<TypeName> {
-        let mut seen = std::collections::HashSet::new();
+    fn sealed_descendants(&self, roots: &[TypeName]) -> crate::fx_hash::HashSet<TypeName> {
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut pending = roots.to_vec();
         while let Some(subclass) = pending.pop() {
             if !seen.insert(subclass) {
@@ -47,7 +47,7 @@ impl Checker<'_> {
         // covers part of the hierarchy.
         let descendants = self.sealed_descendants(&subclasses);
 
-        let mut covered = std::collections::HashSet::new();
+        let mut covered = crate::fx_hash::HashSet::default();
         let mut covers_null = false;
         if let Some(path) = subject_expression.and_then(|subject| self.expr_access_path(subject)) {
             for exclusion in self.lookup_flow_exclusions(scope, &path) {
@@ -110,7 +110,7 @@ impl Checker<'_> {
         fn uncovered_leaves(
             checker: &Checker<'_>,
             subclass: TypeName,
-            covered: &std::collections::HashSet<TypeName>,
+            covered: &crate::fx_hash::HashSet<TypeName>,
             depth: u32,
             out: &mut Vec<TypeName>,
         ) {
@@ -170,7 +170,7 @@ impl Checker<'_> {
             return None;
         }
 
-        let mut covered = std::collections::HashSet::new();
+        let mut covered = crate::fx_hash::HashSet::default();
         let mut covers_null = false;
         if let Some(path) = subject_expression.and_then(|subject| self.expr_access_path(subject)) {
             for exclusion in self.lookup_flow_exclusions(scope, &path) {
@@ -224,7 +224,7 @@ impl Checker<'_> {
         if subject.non_null() != Ty::Boolean {
             return None;
         }
-        let mut covered = std::collections::HashSet::new();
+        let mut covered = crate::fx_hash::HashSet::default();
         let mut covers_null = false;
         if let Some(path) = subject_expression.and_then(|subject| self.expr_access_path(subject)) {
             for exclusion in self.lookup_flow_exclusions(scope, &path) {

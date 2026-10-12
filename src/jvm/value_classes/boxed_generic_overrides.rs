@@ -20,13 +20,13 @@ pub(super) fn mark(
     slot_types: &mut [HashMap<u32, Ty>],
     suspend_fids: &HashSet<u32>,
 ) {
-    let generic_vcs: std::collections::HashSet<TypeName> = ir
+    let generic_vcs: crate::fx_hash::HashSet<TypeName> = ir
         .classes
         .iter()
         .filter(|c| c.is_value && !c.type_params.is_empty())
         .map(|c| c.fq_name)
         .collect();
-    let mut boxed_generic_overrides = HashSet::new();
+    let mut boxed_generic_overrides = HashSet::default();
     for c in &ir.classes {
         for b in &c.bridges {
             // A VALUE-CLASS-returning override is MANGLED with fully UNBOXED params — kotlinc keeps it

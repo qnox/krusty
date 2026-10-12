@@ -335,7 +335,7 @@ pub(super) fn synth_value_members(
             .take()
             .filter(|_| has_init)
         {
-            let mut reach = HashSet::new();
+            let mut reach = HashSet::default();
             collect_reachable_scoped(&ir.exprs, init_root, &mut reach);
             // `this` is the temporary; the parameter, which is the class's sole property, is read
             // as that property of the temporary. Later locals keep their slots.
@@ -804,7 +804,7 @@ pub(super) fn synth_value_members(
 }
 
 fn max_value_slot(ir: &IrFile, roots: &[ExprId]) -> u32 {
-    let mut reachable = HashSet::new();
+    let mut reachable = HashSet::default();
     for &root in roots {
         collect_reachable_scoped(&ir.exprs, root, &mut reachable);
     }
@@ -821,7 +821,7 @@ fn max_value_slot(ir: &IrFile, roots: &[ExprId]) -> u32 {
 }
 
 fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32, decl_line: u32) {
-    let mut reachable = HashSet::new();
+    let mut reachable = HashSet::default();
     collect_reachable_scoped(&ir.exprs, root, &mut reachable);
     for id in reachable {
         let index = match &mut ir.exprs[id as usize] {
@@ -867,7 +867,7 @@ fn mark_line(ir: &mut IrFile, statement: ExprId, line: u32) {
 }
 
 fn reachable_returns(ir: &IrFile, root: ExprId) -> Vec<ExprId> {
-    let mut reachable = HashSet::new();
+    let mut reachable = HashSet::default();
     collect_reachable_scoped(&ir.exprs, root, &mut reachable);
     let mut returns = reachable
         .into_iter()
@@ -1049,7 +1049,7 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
 /// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —
 /// reframing an instance-lowered body (`this` at slot 0) as a static one (params at slot 0).
 pub(super) fn shift_slots(ir: &mut IrFile, root: ExprId) {
-    let mut reach = HashSet::new();
+    let mut reach = HashSet::default();
     collect_reachable_scoped(&ir.exprs, root, &mut reach);
     for id in reach {
         match &mut ir.exprs[id as usize] {
@@ -1114,7 +1114,7 @@ mod tests {
             Some(crate::types::SemanticCallRole::KotlinAnyEquals);
         assert_eq!(
             ir.any_member_overrides(owner),
-            HashMap::from([(function, crate::ir::IrValueClassAnyMember::Equals)])
+            HashMap::from_iter([(function, crate::ir::IrValueClassAnyMember::Equals)])
         );
     }
 }

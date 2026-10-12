@@ -44,7 +44,7 @@ impl Checker<'_> {
             })
             .find_map(|o| {
                 let semantic = o.semantic_signature();
-                let mut binds = std::collections::HashMap::new();
+                let mut binds = crate::fx_hash::HashMap::default();
                 if let Some(recv_sig) = semantic.receiver {
                     crate::symbol_resolver::unify_ty(recv_sig, receiver, &mut binds);
                 }
@@ -383,7 +383,7 @@ impl Checker<'_> {
             })
             .map(|(_, formal)| formal)
             .cloned()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         if let (Some(receiver), Some(receiver_sig)) = (receiver, semantic.receiver) {
             crate::symbol_resolver::unify_ty_from_symbols(
                 &self.fed_source(),
@@ -818,7 +818,7 @@ impl Checker<'_> {
                     .map(|sam| (sam.params, sam.ret)),
             })
             .collect::<Vec<_>>();
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         for (formal, actual) in symbolic.bindings {
             let shapes_lambda_expectation =
                 lambda_expectations

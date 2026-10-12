@@ -63,7 +63,7 @@ fn merge_active_constraints(
     source: &dyn crate::symbol_source::SymbolSource,
     bindings: &mut crate::symbol_resolver::GSigBinds,
     constraints: crate::symbol_resolver::AssignabilityConstraints,
-    active: &std::collections::HashSet<&str>,
+    active: &crate::fx_hash::HashSet<&str>,
 ) {
     let inferred =
         constraints
@@ -90,7 +90,7 @@ fn merge_active_constraints(
 
 pub(super) fn collect_type_parameters(
     ty: Ty,
-    parameters: &mut std::collections::HashSet<&'static str>,
+    parameters: &mut crate::fx_hash::HashSet<&'static str>,
 ) {
     match ty {
         Ty::TyParam(name, _) => {
@@ -398,7 +398,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::symbol_resolver::CallArgKind],
     ) -> PostponedCallableFamily {
         let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
-        let mut active = std::collections::HashSet::new();
+        let mut active = crate::fx_hash::HashSet::default();
         if let Some(inputs) = constraint_frame.and_then(|(owner, index)| {
             self.scoped_constraint_inputs
                 .borrow()
@@ -439,7 +439,7 @@ impl ProductionSignatureSemantics<'_> {
                 // A non-generic extension's receiver still constrains the active variables that
                 // the actual receiver mentions (`Buildee<UserKlass>.f()` on `Buildee<FT>`).
                 if let Some(declared_receiver) = candidate.receiver {
-                    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                    let mut bindings = crate::symbol_resolver::GSigBinds::default();
                     let constraints =
                         crate::symbol_resolver::collect_assignability_constraints_from_symbols(
                             &source,
@@ -451,7 +451,7 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 continue;
             };
-            let mut bindings = crate::symbol_resolver::GSigBinds::new();
+            let mut bindings = crate::symbol_resolver::GSigBinds::default();
             // Active builder variables normally remain lower constraints: seeding every known
             // value here would let the first nested call reject a later sibling before PCLA sees
             // the complete set. A result-only nested call is different. It has no input evidence
@@ -466,7 +466,7 @@ impl ProductionSignatureSemantics<'_> {
                 if !argument.is_expected_type_callable() || argument.result_is_input_constrained() {
                     continue;
                 }
-                let mut contextual = std::collections::HashSet::new();
+                let mut contextual = crate::fx_hash::HashSet::default();
                 collect_type_parameters(*parameter, &mut contextual);
                 for formal in contextual {
                     if let Some(value) = known.get(formal).copied() {
@@ -652,7 +652,7 @@ impl ProductionSignatureSemantics<'_> {
         let constraints = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
             &source, declared, receiver,
         );
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         merge_active_constraints(&source, &mut bindings, constraints, &active);
         self.commit_postponed_bindings(scope, bindings);
     }
@@ -662,7 +662,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
     ) -> Vec<String> {
-        let mut active = std::collections::HashSet::new();
+        let mut active = crate::fx_hash::HashSet::default();
         if let Some(inputs) =
             self.active_scoped_constraint_frame(scope.owner)
                 .and_then(|(owner, index)| {

@@ -4,7 +4,7 @@
 //! the declaration body where they were written. This module inventories that compact context for
 //! Pass 1 without retaining a body or keying persistent state by transient statement IDs.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{
     ClassDecl, ClassInit, Decl, DeclId, ExprId, File, FunBody, PropDecl, Stmt, StmtId,
@@ -22,7 +22,7 @@ pub(crate) struct PassOneLocalClassContext {
         HashMap<crate::fir::DeclarationId, Vec<EnclosingTypeParameterDeclaration>>,
     pub(super) sibling_classifiers: HashMap<crate::fir::DeclarationId, Vec<(String, TypeName)>>,
     pub(super) anonymous_owners: HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
-    pub(super) anonymous_declarations: std::collections::HashSet<crate::fir::DeclarationId>,
+    pub(super) anonymous_declarations: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 }
 
 impl PassOneLocalClassContext {
@@ -386,7 +386,7 @@ fn class_type_parameter_scope(
 pub(super) fn local_class_enclosing_tparams(
     file: &File,
 ) -> HashMap<DeclId, Vec<EnclosingTypeParameterDeclaration>> {
-    let mut result = HashMap::new();
+    let mut result = HashMap::default();
 
     let record =
         |body: &FunBody,
@@ -534,7 +534,7 @@ pub(super) fn local_class_enclosing_tparams(
 pub(super) fn local_class_sibling_declarations(
     file: &File,
 ) -> HashMap<DeclId, Vec<(String, DeclId)>> {
-    let mut result = HashMap::new();
+    let mut result = HashMap::default();
     if file.local_class_decls.is_empty() {
         return result;
     }

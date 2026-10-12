@@ -1,6 +1,6 @@
 //! The program-wide numbering of interface members, above every class's own slots.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::ResolvedPropertyOverrideTarget;
 use crate::ir::{ClassId, IrFile};
@@ -33,9 +33,9 @@ pub(super) fn place_interface_slots(
     // Relative numbering, assigned interface by interface so an extending interface inherits the
     // slots of the one it extends.
     let mut members: Vec<InterfaceMember> = Vec::new();
-    let mut relative: Vec<HashMap<SlotKey, u32>> = vec![HashMap::new(); ir.classes.len()];
+    let mut relative: Vec<HashMap<SlotKey, u32>> = vec![HashMap::default(); ir.classes.len()];
     for &id in order.iter().filter(|&&id| is_interface(id)) {
-        let mut own: HashMap<SlotKey, u32> = HashMap::new();
+        let mut own: HashMap<SlotKey, u32> = HashMap::default();
         for &base in &interfaces[id as usize] {
             for (key, slot) in &relative[base as usize] {
                 own.insert(key.clone(), *slot);

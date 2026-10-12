@@ -80,7 +80,7 @@ impl IrFile {
     pub(crate) fn any_member_overrides(
         &self,
         owner: TypeName,
-    ) -> std::collections::HashMap<FunId, super::IrValueClassAnyMember> {
+    ) -> crate::fx_hash::HashMap<FunId, super::IrValueClassAnyMember> {
         use crate::types::SemanticCallRole;
         self.function_overrides
             .get(&owner)

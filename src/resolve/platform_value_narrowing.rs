@@ -212,7 +212,7 @@ impl super::ContextualCallShape {
 /// here, so the two cannot disagree on which declared types accept `null`.
 pub(super) fn expected_type_rejects_null(expected: Ty) -> bool {
     let mut current = expected;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     loop {
         match current {
             Ty::Unit

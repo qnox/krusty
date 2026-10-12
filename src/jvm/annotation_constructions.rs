@@ -4,7 +4,7 @@
 //! interface and cannot itself be allocated, so this pass creates kotlinc's one implementation class
 //! per annotation per source file and retargets every tagged construction to that physical class.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::{IrClass, IrCtorArg, IrEnclosure, IrExpr, IrField, IrFile};
 use crate::types::{type_name, Ty, TypeName};
@@ -23,7 +23,7 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
         .enumerate()
         .map(|(index, class)| (class.fq_name_id(), index))
         .collect::<HashMap<_, _>>();
-    let mut lexical_owners = HashMap::<TypeName, Option<TypeName>>::new();
+    let mut lexical_owners = HashMap::<TypeName, Option<TypeName>>::default();
     for site in sites.values() {
         for &scope in &site.scopes {
             let candidate_rank = scope
@@ -41,7 +41,7 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
         }
     }
 
-    let mut implementations = HashMap::<TypeName, TypeName>::new();
+    let mut implementations = HashMap::<TypeName, TypeName>::default();
     let mut generated = Vec::new();
     for expression in 0..ir.exprs.len() as u32 {
         // A construction evaluated nowhere in this source (inside an annotation declaration's

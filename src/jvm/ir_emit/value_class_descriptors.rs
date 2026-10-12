@@ -2,7 +2,7 @@
 //! internal name and the descriptor its `box-impl` takes (`unboxedTypeOfInlineClass`). A
 //! non-null underlying value class is unboxed in turn; a nullable one stays boxed.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::IrFile;
 use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
@@ -26,7 +26,7 @@ pub(super) fn of(ir: &IrFile) -> ValueClassDescriptors {
 /// The type a value class's `box-impl` takes; `None` for a cyclic declaration graph.
 fn unboxed_type(ir: &IrFile, class: Ty) -> Option<Ty> {
     let mut classifier = class.obj_internal()?;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if !seen.insert(classifier) {
             return None;

@@ -67,8 +67,8 @@ impl super::ResolvedModuleIndex {
 pub(super) fn stabilize_local_class_names(
     file: &File,
     source: SourceFileId,
-    stable_by_transient: &std::collections::HashMap<DeclId, DeclarationId>,
-    nested_owners: &std::collections::HashMap<DeclId, DeclarationId>,
+    stable_by_transient: &crate::fx_hash::HashMap<DeclId, DeclarationId>,
+    nested_owners: &crate::fx_hash::HashMap<DeclId, DeclarationId>,
 ) -> Vec<(DeclarationId, LocalClassNameProvenance)> {
     let stable = |declaration: DeclId| stable_by_transient.get(&declaration).copied();
     let mut plans = file
@@ -106,7 +106,7 @@ pub(super) fn stabilize_local_class_names(
         let local_owners = plans
             .iter()
             .map(|(declaration, _)| *declaration)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let existing = local_owners.clone();
         let mut additions = Vec::new();
         let before = pending.len();
@@ -145,7 +145,7 @@ pub(super) fn assert_complete_local_classifier_provenance(
     let named = plans
         .iter()
         .map(|(declaration, _)| *declaration)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     for stub in stubs.iter().filter(|stub| {
         stub.kind == super::DeclarationKind::Classifier
             && stub.flags.has(super::DeclarationFlags::LOCAL_CLASS)

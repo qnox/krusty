@@ -9,8 +9,8 @@ mod qualified_calls;
 mod safe_index;
 
 use crate::ast::{BinOp, Expr, ExprId, File, Stmt, TrFlags, TypeRef, UnOp};
+use crate::fx_hash::{HashMap, HashSet};
 use crate::types::Ty;
-use std::collections::{HashMap, HashSet};
 
 use super::coverage::ExpressionForm;
 use super::signature_source::{source_function, source_property, source_signature_expression};
@@ -225,8 +225,8 @@ impl SignatureConstraintExtractor {
             self.lexical_types.clear();
             self.local_classifier_stack.clear();
             self.extracting_local_effects.clear();
-            let mut parameters = HashMap::new();
-            let mut callables = HashMap::new();
+            let mut parameters = HashMap::default();
+            let mut callables = HashMap::default();
             let function = source_function(file, stub.range);
             if let Some(function) = function {
                 for (index, parameter) in function.params.iter().enumerate() {
@@ -357,7 +357,7 @@ impl SignatureConstraintExtractor {
             }
             self.lexical_values.push(parameters);
             self.lexical_callables.push(callables);
-            self.lexical_types.push(HashMap::new());
+            self.lexical_types.push(HashMap::default());
             // A private inline function still approximates: each call site materializes its own
             // anonymous class, so the synthetic classifier is not a result type the caller can name.
             self.approximate_anonymous_result = stub.visibility
@@ -546,7 +546,7 @@ impl SignatureConstraintExtractor {
                 self.extracting_local_effects.remove(&declaration);
                 continue;
             }
-            let mut bindings = HashMap::new();
+            let mut bindings = HashMap::default();
             for parameter in &method.params {
                 let ty = self.compact_type(&parameter.ty, scope, origin);
                 bindings.insert(parameter.name.clone().into_boxed_str(), ty);
@@ -572,7 +572,7 @@ impl SignatureConstraintExtractor {
             };
             bindings.entry("this".into()).or_insert(dispatch_receiver);
             self.lexical_values.push(bindings);
-            self.lexical_types.push(HashMap::new());
+            self.lexical_types.push(HashMap::default());
             self.local_classifier_stack.push(classifier);
             // A local-class member keeps an anonymous result regardless of declared visibility.
             let approximate = std::mem::replace(&mut self.approximate_anonymous_result, false);
@@ -676,7 +676,7 @@ impl SignatureConstraintExtractor {
             scope: member_scope,
         });
         let enclosing_receivers = self.lexical_receivers();
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         if let Some(&constructor) = self.source_primary_constructors.get(&class.span) {
             for (index, parameter) in class.props.iter().enumerate() {
                 bindings.insert(
@@ -692,9 +692,9 @@ impl SignatureConstraintExtractor {
         self.lexical_values.push(bindings);
         self.lexical_types
             .push(if file.is_anonymous_object_class(classifier) {
-                HashMap::new()
+                HashMap::default()
             } else {
-                HashMap::from([(
+                HashMap::from_iter([(
                     class
                         .name
                         .rsplit('.')
@@ -1042,7 +1042,7 @@ impl SignatureConstraintExtractor {
             crate::parser::expanded_type_alias_target(
                 &declarations,
                 ty,
-                &mut std::collections::HashMap::new(),
+                &mut crate::fx_hash::HashMap::default(),
             )
         });
         let expanded = expanded.as_ref().unwrap_or(ty);
@@ -1164,7 +1164,7 @@ impl SignatureConstraintExtractor {
         ty: SigExprId,
     ) -> Result<SigExprId, ExpressionForm> {
         let refines_implicit_receiver = name.as_ref() == "this";
-        self.lexical_values.push(HashMap::from([(name, ty)]));
+        self.lexical_values.push(HashMap::from_iter([(name, ty)]));
         let result = self.expression(file, expression, scope, origin);
         self.lexical_values.pop();
         let result = result?;
@@ -2106,8 +2106,10 @@ impl SignatureConstraintExtractor {
                 results.push(self.expression(file, *body, scope, origin)?);
                 for catch in catches {
                     let ty = self.compact_type(&catch.ty, scope, origin);
-                    self.lexical_values
-                        .push(HashMap::from([(catch.name.clone().into_boxed_str(), ty)]));
+                    self.lexical_values.push(HashMap::from_iter([(
+                        catch.name.clone().into_boxed_str(),
+                        ty,
+                    )]));
                     let result = self.expression(file, catch.body, scope, origin);
                     self.lexical_values.pop();
                     results.push(result?);
@@ -2154,9 +2156,9 @@ impl SignatureConstraintExtractor {
                 })
             }
             Expr::Block { stmts, trailing } => {
-                self.lexical_values.push(HashMap::new());
-                self.lexical_callables.push(HashMap::new());
-                self.lexical_types.push(HashMap::new());
+                self.lexical_values.push(HashMap::default());
+                self.lexical_callables.push(HashMap::default());
+                self.lexical_types.push(HashMap::default());
                 let mut effects = Vec::new();
                 let mut terminal_lambda_return = false;
                 for (statement_index, statement) in stmts.iter().enumerate() {
@@ -2279,8 +2281,10 @@ impl SignatureConstraintExtractor {
                                 scope,
                                 origin: origin(file.stmt_spans[statement.0 as usize]),
                             });
-                            self.lexical_values
-                                .push(HashMap::from([(name.clone().into_boxed_str(), element)]));
+                            self.lexical_values.push(HashMap::from_iter([(
+                                name.clone().into_boxed_str(),
+                                element,
+                            )]));
                             let body = self.expression(file, *body, scope, origin);
                             self.lexical_values.pop();
                             effects.push(body?);
@@ -2298,8 +2302,10 @@ impl SignatureConstraintExtractor {
                                 self.member_call(iterable, "iterator", [], scope, statement_origin);
                             let element =
                                 self.member_call(iterator, "next", [], scope, statement_origin);
-                            self.lexical_values
-                                .push(HashMap::from([(name.clone().into_boxed_str(), element)]));
+                            self.lexical_values.push(HashMap::from_iter([(
+                                name.clone().into_boxed_str(),
+                                element,
+                            )]));
                             let body = self.expression(file, *body, scope, origin);
                             self.lexical_values.pop();
                             effects.push(body?);
@@ -2575,7 +2581,7 @@ impl SignatureConstraintExtractor {
         scope: SignatureScopeId,
         origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
     ) -> Result<SigExprId, ExpressionForm> {
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         let mut parameters = function
             .params
             .iter()
@@ -2631,8 +2637,8 @@ impl SignatureConstraintExtractor {
         scope: SignatureScopeId,
         origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
     ) {
-        let mut bindings = HashMap::new();
-        let mut callables = HashMap::new();
+        let mut bindings = HashMap::default();
+        let mut callables = HashMap::default();
         for parameter in &function.params {
             let ty = self.compact_type(&parameter.ty, scope, origin);
             if parameter.ty.fun_has_receiver() {
@@ -2653,7 +2659,7 @@ impl SignatureConstraintExtractor {
         }
         self.lexical_values.push(bindings);
         self.lexical_callables.push(callables);
-        self.lexical_types.push(HashMap::new());
+        self.lexical_types.push(HashMap::default());
         if let crate::ast::FunBody::Expr(body) | crate::ast::FunBody::Block(body) = function.body {
             let _ = self.expression(file, body, scope, origin);
         }
@@ -2704,7 +2710,7 @@ impl SignatureConstraintExtractor {
             .scope(scope)
             .expect("a lambda must retain its declaration scope")
             .owner;
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         let mut parameter_types = Vec::with_capacity(params.len().max(1));
         if contextual && implicit_parameter_allowed {
             let parameter = self

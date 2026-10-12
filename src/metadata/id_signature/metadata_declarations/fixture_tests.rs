@@ -12,7 +12,7 @@
 //!     -Xfragment-refines=native:common -o signatures Signatures.kt NativeSignatures.kt
 //! ```
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 use std::path::Path;
 
 use super::super::{KlibAccessorIdSignature, KlibPublicIdSignature};

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ast::{Expr, ExprId, File, StmtId};
 use crate::types::Ty;
@@ -76,16 +76,16 @@ impl Default for LambdaReturnScopes {
         Self {
             labels: Vec::new(),
             function_label: None,
-            returned_types: HashMap::new(),
-            expected_types: HashMap::new(),
+            returned_types: HashMap::default(),
+            expected_types: HashMap::default(),
             bare_target: ReturnTarget::Function,
             active_chain: Vec::new(),
             active_bodies: Vec::new(),
             active_constraints: Vec::new(),
             active_inlined: Vec::new(),
             collected_returns: None,
-            exits: HashMap::new(),
-            unit_from_exits: HashSet::new(),
+            exits: HashMap::default(),
+            unit_from_exits: HashSet::default(),
         }
     }
 }

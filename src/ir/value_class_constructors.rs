@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::types::{Ty, TypeName};
 

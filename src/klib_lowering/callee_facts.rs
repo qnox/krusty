@@ -9,7 +9,7 @@
 //! signature it does not hold is a callee only its header describes. Nothing is reconstructed from
 //! the callee's name or shape.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature};
 

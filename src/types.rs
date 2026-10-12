@@ -831,7 +831,7 @@ impl Ty {
     /// Substitute known type parameters and erase an unbound parameter to its non-null upper bound.
     /// This is a type-shape operation used while publishing and specializing metadata; it is not an
     /// overload-selection decision.
-    pub fn substitute_erased(self, bindings: &std::collections::HashMap<String, Ty>) -> Ty {
+    pub fn substitute_erased(self, bindings: &crate::fx_hash::HashMap<String, Ty>) -> Ty {
         match self {
             Ty::TyParam(name, bound) => bindings
                 .get(name)
@@ -1020,7 +1020,7 @@ impl Ty {
     /// a source type occurrence (see [`Self::admits_null`]).
     pub fn upper_bound_admits_null(self) -> bool {
         let mut current = self;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         loop {
             match current {
                 Ty::Nullable(_) | Ty::PlatformNullable(_) | Ty::Null => return true,
@@ -2839,7 +2839,7 @@ mod tests {
     fn substitution_preserves_definitely_non_null_type_parameter_occurrence() {
         let declared = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let argument = Ty::nullable(Ty::ty_param("F", Ty::obj("kotlin/Any")));
-        let bindings = std::collections::HashMap::from([("T".to_string(), argument)]);
+        let bindings = crate::fx_hash::HashMap::from_iter([("T".to_string(), argument)]);
 
         assert_eq!(
             ty_subst(declared, &bindings),

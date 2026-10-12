@@ -108,8 +108,8 @@ pub(crate) struct ClassDeclarationRecord {
     supertypes: Vec<Ty>,
     annotations: MetadataAnnotations,
     pub(crate) primary_ctor_annotations: MetadataAnnotations,
-    local_classifiers: std::collections::HashSet<TypeName>,
-    enum_entry_bodies: std::collections::HashSet<TypeName>,
+    local_classifiers: crate::fx_hash::HashSet<TypeName>,
+    enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
     is_enum: bool,
 }
 
@@ -377,14 +377,14 @@ impl ClassDeclarationRecord {
 fn declared_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
     // Member-extension-PROPERTY accessors are described as `Property` records, never as
     // functions — kotlinc emits no `Function` record for `getDoubled` of `val Int.doubled`.
-    let ext_prop_accessor_fids: std::collections::HashSet<u32> = ir
+    let ext_prop_accessor_fids: crate::fx_hash::HashSet<u32> = ir
         .member_ext_props
         .get(&c.fq_name_id())
         .into_iter()
         .flatten()
         .flat_map(|prop| std::iter::once(prop.getter).chain(prop.setter))
         .collect();
-    let property_accessor_fids: std::collections::HashSet<u32> = c
+    let property_accessor_fids: crate::fx_hash::HashSet<u32> = c
         .properties
         .iter()
         .flat_map(|property| property.getter.into_iter().chain(property.setter))
@@ -393,7 +393,7 @@ fn declared_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
         .checked_callable_functions
         .values()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     // Metadata Function records come only from exact source-callable realizations. Accessors have
     // Property records, while generated declarations use the explicit publication contract below.
     let mut declared_fids: Vec<u32> = c
@@ -733,7 +733,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .iter()
         .map(|(_, _, _, type_param)| *type_param)
         .collect();
-    let callables: std::collections::HashMap<u32, crate::fir::CallableId> = ir
+    let callables: crate::fx_hash::HashMap<u32, crate::fir::CallableId> = ir
         .checked_callable_functions
         .iter()
         .map(|(&callable, &function)| (function, callable))

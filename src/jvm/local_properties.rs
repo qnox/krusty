@@ -45,8 +45,8 @@ pub(super) fn realize(
 /// own (`SuspendLambda`) after this realization runs, so its body reaches the enclosing class's
 /// private members from outside even though its expressions still belong to that class here. A
 /// lambda inlined into its caller instead keeps the caller's class, where the access stays direct.
-fn suspend_lambda_body_expressions(ir: &IrFile) -> std::collections::HashSet<ExprId> {
-    let mut expressions = std::collections::HashSet::new();
+fn suspend_lambda_body_expressions(ir: &IrFile) -> crate::fx_hash::HashSet<ExprId> {
+    let mut expressions = crate::fx_hash::HashSet::default();
     let mut pending: Vec<ExprId> = ir
         .suspend_funs
         .iter()

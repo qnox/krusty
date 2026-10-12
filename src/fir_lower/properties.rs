@@ -1,7 +1,7 @@
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, FirBody, ResolvedModuleIndex, SourceFileId,
 };
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::{
     ExprId, FunId, IrCheckedOperation, IrCheckedProperty, IrExpr, IrField, IrFile, IrFunction,
@@ -109,7 +109,7 @@ pub(super) fn set_accessor_parameter_identities(
 pub(super) fn predeclare_properties(
     index: &ResolvedModuleIndex,
     source: SourceFileId,
-    inline_payload_declarations: &std::collections::HashSet<DeclarationId>,
+    inline_payload_declarations: &crate::fx_hash::HashSet<DeclarationId>,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     for declaration in super::declarations_for_lowering(index, source, inline_payload_declarations)
@@ -219,7 +219,7 @@ fn publish_foreign_accessor_layouts(
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
     let mut accessors: HashMap<crate::fir::PropertyId, (Option<FunId>, Option<FunId>)> =
-        HashMap::new();
+        HashMap::default();
     for (&declaration, &function) in &ir.inline_property_access.accessor_functions {
         let Some(anchor) = index.declaration_anchor(declaration) else {
             continue;
@@ -314,8 +314,8 @@ pub(super) fn finalize_properties(
         .collect::<Result<Vec<_>, FirFileLoweringFailure>>()?;
     properties.sort_by_key(|(source_order, anchor, _, _)| (*source_order, anchor.sibling));
 
-    let mut realizations = HashMap::new();
-    let mut initialization: HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>> = HashMap::new();
+    let mut realizations = HashMap::default();
+    let mut initialization: HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>> = HashMap::default();
     for (source_order, anchor, property_id, property) in properties {
         let declaration = property.declaration;
         let decl_line = property.decl_line;
@@ -1821,7 +1821,7 @@ fn rebase_initializer_values(
     if offset == 0 {
         return Ok(());
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut pending = vec![root];
     let mut expressions = Vec::new();
     while let Some(expression) = pending.pop() {

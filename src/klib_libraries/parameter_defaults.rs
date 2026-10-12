@@ -5,7 +5,7 @@
 //! the argument passes itself. Any other default (a call, a reference to another parameter) is
 //! not a closed value and stays unpublished, so such a call is rejected rather than miscompiled.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::libraries::DefaultValue;
 use crate::metadata::id_signature::KlibPublicIdSignature;
@@ -236,7 +236,9 @@ mod tests {
             nullable_member_returns: Vec::new(),
         };
         KotlinPackage {
-            classes: [("fixture/Box".to_owned(), classifier)].into(),
+            classes: [("fixture/Box".to_owned(), classifier)]
+                .into_iter()
+                .collect(),
             ..KotlinPackage::default()
         }
     }

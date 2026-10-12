@@ -1,6 +1,6 @@
 //! Release-specific class indexes for the JDK `lib/ct.sym` public API archive.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -28,7 +28,7 @@ fn release_symbol(release: u8) -> Option<u8> {
 
 fn global_cache() -> &'static Mutex<HashMap<EntryKey, Arc<CtSymIndex>>> {
     static CACHE: OnceLock<Mutex<HashMap<EntryKey, Arc<CtSymIndex>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| Mutex::new(HashMap::default()))
 }
 
 pub(super) fn cached_ct_sym_index(path: &Path, release: u8) -> Option<Arc<CtSymIndex>> {

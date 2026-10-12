@@ -4,7 +4,7 @@
 //! recover text or reparse a body. They are attached once, after checking, and travel with the body
 //! into lowering so a backend can record source positions without access to the source itself.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::diag::Span;
 

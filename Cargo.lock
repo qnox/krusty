@@ -810,6 +810,7 @@ dependencies = [
 name = "krusty"
 version = "0.0.1"
 dependencies = [
+ "ahash",
  "backtrace",
  "cranelift-codegen",
  "cranelift-frontend",

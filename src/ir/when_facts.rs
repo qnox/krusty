@@ -2,8 +2,8 @@
 //! identity, for a backend to emit it without re-deciding.
 
 use super::ExprId;
+use crate::fx_hash::HashMap;
 use crate::types::Ty;
-use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IrWhenFacts {

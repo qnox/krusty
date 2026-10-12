@@ -30,7 +30,7 @@ pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType
         constructors: Vec::new(),
         hidden_member_properties: Default::default(),
         hidden_deprecated_callables: Default::default(),
-        declared_callables: std::collections::HashMap::new(),
+        declared_callables: crate::fx_hash::HashMap::default(),
         declared_callable_order: Vec::new(),
         members,
         companion: Vec::new(),
@@ -113,7 +113,7 @@ impl JvmLibraries {
             },
         );
         classifier.companion_object = self.cp.builtin_companion_object(internal);
-        classifier.constants = std::collections::HashMap::new();
+        classifier.constants = crate::fx_hash::HashMap::default();
         // The builtin's own modality, as a class file would state it: `kotlin.Throwable` stays
         // open when no JDK supplies `java/lang/Throwable`.
         let is_interface = class_access & crate::jvm::classfile::ACC_INTERFACE != 0;
@@ -163,7 +163,7 @@ pub(super) fn builtin_library_type(
         constructors,
         hidden_member_properties: Default::default(),
         hidden_deprecated_callables: Default::default(),
-        declared_callables: std::collections::HashMap::new(),
+        declared_callables: crate::fx_hash::HashMap::default(),
         declared_callable_order: Vec::new(),
         members,
         companion: Vec::new(),

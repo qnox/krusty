@@ -3,7 +3,7 @@
 //! This is the contract between the emitter, which knows each call's reified arguments, and the
 //! symbolic inliner, the only code that specializes an inline body for them.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 /// Reified arguments at one inline call site, in the forms the body's markers consume.
 #[derive(Clone, Debug, Default)]

@@ -1,6 +1,6 @@
 //! Checked receiver-frame identity carried across nested callable boundaries.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::CapturedCallableOwner;
 
@@ -33,9 +33,9 @@ impl BodyFirChecker<'_> {
     /// classifier chain; publish the exact declaration path for each such coordinate so a nested
     /// capture never degrades it to type/depth lookup in lowering.
     pub(super) fn receiver_frame(&self) -> ReceiverFrame {
-        let mut structural_paths = HashMap::new();
-        let mut capture_depths = HashMap::new();
-        let mut capture_receivers = HashMap::new();
+        let mut structural_paths = HashMap::default();
+        let mut capture_depths = HashMap::default();
+        let mut capture_receivers = HashMap::default();
         let extension_count = u32::from(self.body.receiver_type().is_some());
         let context_count = u32::try_from(self.body.context_receiver_types().len())
             .expect("too many checked-body context receivers");

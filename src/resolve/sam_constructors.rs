@@ -139,7 +139,7 @@ pub(super) fn select_sam_constructor(
         signature.has_receiver,
         signature.suspend,
     );
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     let inference_actual = Ty::fun_with_shape(
         actual_function.params.clone(),
         actual_function.ret,

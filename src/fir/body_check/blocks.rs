@@ -1,6 +1,6 @@
 //! Checked FIR for blocks, including a block whose value is a fun-interface lambda.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::*;
 
@@ -11,9 +11,9 @@ impl BodyFirChecker<'_> {
         statements: &[StmtId],
         trailing: Option<ExprId>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        self.scopes.push(HashMap::new());
-        self.delegate_scopes.push(HashMap::new());
-        self.local_callable_scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
+        self.delegate_scopes.push(HashMap::default());
+        self.local_callable_scopes.push(HashMap::default());
         let result = self.checked_block_with_shared_operands(expression, statements, trailing);
         self.scopes.pop();
         self.delegate_scopes.pop();

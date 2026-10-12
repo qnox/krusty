@@ -4,7 +4,7 @@
 //! origins are the narrow exception: common IR carries them so a target can locate a diagnostic
 //! after representation has selected a physical declaration.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::{DeclarationId, ResolvedModuleIndex};
 use crate::diag::Span;

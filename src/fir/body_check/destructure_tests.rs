@@ -89,7 +89,7 @@ fn multiple_smartcast_destructure_projects_each_component_receiver() {
         "read",
     );
 
-    let mut components = std::collections::HashMap::new();
+    let mut components = crate::fx_hash::HashMap::default();
     for raw in 0..body.expression_count() {
         let Some(FirExpr {
             kind: FirExprKind::Call(call),

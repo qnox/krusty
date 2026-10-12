@@ -1,6 +1,6 @@
 //! Private delegate declarations owned by realized source and specialized closure classes.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{FunId, IrExpr, IrFile, IrLocalDelegatePlan, IrModuleSource};
 use crate::types::{Ty, TypeName};
@@ -48,7 +48,7 @@ impl Requirements {
 }
 
 fn source_function(ir: &IrFile, mut function: FunId) -> FunId {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(copy) = ir.specialized_functions.get(&function) {
         assert!(
             seen.insert(function),
@@ -112,11 +112,11 @@ pub(super) fn bind(ir: &mut IrFile) -> Result<BoundPlans, ()> {
         .collect::<Vec<_>>();
     let mut bound = BoundPlans {
         templates: templates.iter().map(|(plan, _)| *plan).collect(),
-        owned: HashMap::new(),
-        property_owners: HashMap::new(),
+        owned: HashMap::default(),
+        property_owners: HashMap::default(),
     };
     for (function, source, owner) in closures {
-        let mut replacements = HashMap::new();
+        let mut replacements = HashMap::default();
         for (template, declaration) in &templates {
             if declaration.declaration_lambda != Some(source) {
                 continue;

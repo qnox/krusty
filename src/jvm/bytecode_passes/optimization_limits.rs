@@ -13,7 +13,8 @@
 //! kotlinc multiplies the counts as a 32-bit `Int`, so a product past `Int.MAX_VALUE` wraps. Here
 //! every product is checked instead, and a method whose weight does not fit is declined.
 
-use std::collections::{BTreeSet, HashMap};
+use crate::fx_hash::HashMap;
+use std::collections::BTreeSet;
 
 use crate::jvm::method_node::{LabelId, MethodNode, Node};
 

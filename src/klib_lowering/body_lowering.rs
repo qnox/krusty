@@ -10,7 +10,7 @@
 //! ([`loops`]), string templates ([`string_templates`]) and type operators
 //! ([`type_operators`]).
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 mod blocks;
 mod calls;
@@ -88,7 +88,7 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
             linker,
             locals: LocalValues::after(header.parameter_count()),
             loops: Vec::new(),
-            breakable_loops: HashSet::new(),
+            breakable_loops: HashSet::default(),
         }
     }
 

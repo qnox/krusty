@@ -15,7 +15,7 @@
 //! fact is an emission error: the backend never reconstructs it from the physical representation,
 //! and never switches the call to another lowering.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::*;
 

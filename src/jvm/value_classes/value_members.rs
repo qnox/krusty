@@ -8,8 +8,8 @@
 //! (an `Any` argument, local, or return; a captured value class handed to a reference slot) is
 //! therefore coerced exactly as it is in a lambda lifted into an ordinary class.
 
+use crate::fx_hash::HashSet;
 use crate::ir::IrFile;
-use std::collections::HashSet;
 
 /// Every function a value class declares as a member: its source members (later realized as
 /// static carrier functions) and its synthesized members. The body-local static helpers the

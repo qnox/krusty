@@ -194,7 +194,7 @@ impl fmt::Write for BoundedText {
 /// has to be identical across runs and processes, and no seeded or randomized hasher would be.
 fn source_hash(source: &str) -> u64 {
     use std::hash::Hasher as _;
-    let mut hasher = crate::name_tree::FxHasher::default();
+    let mut hasher = crate::fx_hash::FxHasher::default();
     hasher.write(source.as_bytes());
     hasher.finish()
 }

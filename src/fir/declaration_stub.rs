@@ -9,7 +9,7 @@ use super::signature::InferredSignatureKind;
 
 /// Exact same-parse binding from parser declarations to their stable Pass-1 identities.
 pub(crate) type ParserDeclarationIdentities =
-    std::collections::HashMap<crate::ast::DeclId, DeclarationId>;
+    crate::fx_hash::HashMap<crate::ast::DeclId, DeclarationId>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BodyKind {

@@ -11,7 +11,7 @@ pub(crate) use crate::libraries::CollectionBarrierOutcome as BarrierOutcome;
 
 /// JVM method-entry guards for collection overrides whose erased descriptor needs no bridge.
 #[derive(Default)]
-pub(crate) struct MethodEntryBarriers(std::collections::HashMap<FunId, CollectionBarrierPlan>);
+pub(crate) struct MethodEntryBarriers(crate::fx_hash::HashMap<FunId, CollectionBarrierPlan>);
 
 impl MethodEntryBarriers {
     pub(crate) fn plan(&self, function: FunId) -> Option<CollectionBarrierPlan> {

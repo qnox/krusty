@@ -1719,8 +1719,8 @@ fn render_class_hover(class: &ClassDecl, name: &str, source: &str) -> String {
     let type_parameters = render_type_parameters(
         class.type_params(),
         class.type_param_bounds(),
-        &HashSet::new(),
-        &HashSet::new(),
+        &Default::default(),
+        &Default::default(),
         "",
     );
     let constructor = if class.props.is_empty() {
@@ -1883,8 +1883,8 @@ fn render_visibility(visibility: Visibility) -> &'static str {
 fn render_type_parameters(
     parameters: &[String],
     bounds: &[(String, TypeRef)],
-    non_null: &HashSet<String>,
-    reified: &HashSet<String>,
+    non_null: &krusty::fx_hash::HashSet<String>,
+    reified: &krusty::fx_hash::HashSet<String>,
     suffix: &str,
 ) -> String {
     if parameters.is_empty() {

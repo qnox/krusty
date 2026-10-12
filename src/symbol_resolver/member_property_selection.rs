@@ -54,7 +54,7 @@ impl SymbolResolver<'_> {
         property_applicable: &dyn Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
     ) -> Option<SelectedMemberProperty> {
         let mut queue = std::collections::VecDeque::from([(recv, 0u32)]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         let mut nearer: Vec<(std::sync::Arc<crate::libraries::LibraryType>, Ty)> = Vec::new();
         let mut synthetic_fallback: Option<(SelectedMemberProperty, bool)> = None;
         let mut inaccessible_declaration: Option<SelectedMemberProperty> = None;

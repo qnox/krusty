@@ -1,7 +1,8 @@
 //! What an instruction does to control flow, and where a method's labels stand: the facts every
 //! pass over a [`MethodNode`] walks the body by.
 
-use std::collections::{BTreeSet, HashMap};
+use crate::fx_hash::HashMap;
+use std::collections::BTreeSet;
 
 use super::nodes::{Insn, LabelId, MethodNode, Node};
 

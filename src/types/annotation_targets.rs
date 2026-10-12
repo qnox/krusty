@@ -277,8 +277,8 @@ impl AnnotationTargets {
 /// when reporting them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeclaredTargetPolicies {
-    valid: std::collections::HashMap<super::TypeName, AnnotationTargets>,
-    invalid_recovery: std::collections::HashMap<super::TypeName, AnnotationTargets>,
+    valid: crate::fx_hash::HashMap<super::TypeName, AnnotationTargets>,
+    invalid_recovery: crate::fx_hash::HashMap<super::TypeName, AnnotationTargets>,
 }
 
 impl DeclaredTargetPolicies {

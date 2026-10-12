@@ -5,7 +5,7 @@
 //! request is quadratic in the module: a data-class property and its constructor are published
 //! once per file, and each publication used to walk the whole class table.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::DeclarationId;
 use crate::types::{Ty, TypeName};
@@ -35,7 +35,7 @@ impl StableMemberIndex {
     /// Record the first match in the same order as the former linear scans. A declaration lives in
     /// one table; `or_insert` keeps that first sighting when a later table repeats it.
     pub(super) fn build(table: &SymbolTable) -> Self {
-        let mut properties = HashMap::new();
+        let mut properties = HashMap::default();
         let mut remember_property = |declaration, fact: PropertyFact| {
             properties.entry(declaration).or_insert(fact);
         };
@@ -128,7 +128,7 @@ impl StableMemberIndex {
             }
         }
 
-        let mut constructors = HashMap::new();
+        let mut constructors = HashMap::default();
         for class in table.classes.values() {
             if let Some(declaration) = class.primary_constructor_declaration {
                 constructors

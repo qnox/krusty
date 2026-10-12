@@ -88,14 +88,14 @@ pub(super) fn extension_bindings_are_determinate(
     }
     // Unify each position on its own: a formal reached from two positions must reach the same type
     // from both, which the accumulated map cannot show once the first binding has taken.
-    let mut settled: GSigBinds = GSigBinds::new();
+    let mut settled: GSigBinds = GSigBinds::default();
     let positions = semantic
         .receiver
         .map(|shape| (shape, receiver))
         .into_iter()
         .chain(semantic.params.iter().copied().zip(args.iter().copied()));
     for (shape, actual) in positions {
-        let mut one = GSigBinds::new();
+        let mut one = GSigBinds::default();
         unify_ty(shape, actual, &mut one);
         for (formal, bound) in one {
             if let Some(&previous) = settled.get(formal.as_str()) {

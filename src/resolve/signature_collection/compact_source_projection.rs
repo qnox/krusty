@@ -5,7 +5,7 @@
 //! re-walking the transient parse, and disappears with the rest of the legacy publisher.
 
 use super::*;
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 pub(in crate::resolve) fn publish_compact_parser_classifier_identities(
     contexts: Option<&[PassOneLocalClassContext]>,
@@ -232,7 +232,7 @@ pub(in crate::resolve) fn compact_declaration_lexical_class_names(
     mut exists: impl FnMut(TypeName) -> bool,
 ) -> Vec<TypeName> {
     let mut stable_chain = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut current = Some(declaration);
     while let Some(candidate) = current {
         if !seen.insert(candidate) {
@@ -349,7 +349,7 @@ pub(in crate::resolve) fn normalize_referenced_library_annotations(
         .resolved_annotations
         .values()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     for annotation in referenced {
         if table.annotation_retentions.contains_key(&annotation) {
             continue;

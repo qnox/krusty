@@ -1,7 +1,7 @@
 //! Memoized `(namespace, name)` lookups over the signed inventory.
 
+use crate::fx_hash::HashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::builtin_realizations;

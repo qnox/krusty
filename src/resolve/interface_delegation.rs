@@ -5,7 +5,8 @@
 //! declaration per Kotlin override slot, and publishes only pending-free forwarding facts. Common
 //! lowering must never repeat this walk.
 
-use std::collections::{HashSet, VecDeque};
+use crate::fx_hash::HashSet;
+use std::collections::VecDeque;
 
 mod delegate_calls;
 
@@ -64,7 +65,7 @@ fn function_slot(function: &FunctionInfo) -> FunctionSlot {
 
 fn hierarchy_names(source: &dyn SymbolSource, root: Ty) -> Option<Vec<String>> {
     let mut queue = VecDeque::from([root]);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut names = Vec::new();
     while let Some(current) = queue.pop_front() {
         let classifier = current.kotlin_class_internal()?;
@@ -106,7 +107,7 @@ fn hierarchy_names(source: &dyn SymbolSource, root: Ty) -> Option<Vec<String>> {
 fn interface_hierarchy(source: &dyn SymbolSource, root: Ty) -> Option<Vec<Ty>> {
     let mut interfaces = Vec::new();
     let mut queue = VecDeque::from([root]);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(current) = queue.pop_front() {
         let owner = current.kotlin_class_internal()?;
         if !seen.insert(owner) {
@@ -243,7 +244,7 @@ fn resolved_types(types: impl IntoIterator<Item = Ty>) -> Option<Box<[ResolvedTy
 /// This is semantic hierarchy state, not a source-name or provisional-type fallback.
 fn applied_owner_type(source: &dyn SymbolSource, root: Ty, owner: TypeName) -> Option<Ty> {
     let mut queue = VecDeque::from([root]);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     while let Some(current) = queue.pop_front() {
         let current_owner = current.kotlin_class_internal()?;
         if current_owner == owner {

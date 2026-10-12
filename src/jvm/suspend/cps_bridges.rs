@@ -1,9 +1,9 @@
 //! Suspend override bridges realized over the CPS signature their targets now have.
 
 use super::{continuation_ty, object_ty};
+use crate::fx_hash::HashSet;
 use crate::ir::IrFile;
 use crate::types::TypeName;
-use std::collections::HashSet;
 
 /// Convert already-derived suspend override bridges from their declared Kotlin signature to the JVM
 /// CPS signature. Bridge derivation intentionally runs before value-class realization, so that pass can

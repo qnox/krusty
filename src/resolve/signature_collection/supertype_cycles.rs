@@ -74,7 +74,7 @@ pub(in crate::resolve) fn break_supertype_cycles(
             .get(&internal)
             .and_then(|sig| sig.super_internal)
             .is_some_and(same_component);
-        let cyclic_interfaces: std::collections::HashSet<TypeName> = table
+        let cyclic_interfaces: crate::fx_hash::HashSet<TypeName> = table
             .classes
             .get(&internal)
             .map(|sig| {
@@ -119,7 +119,7 @@ pub(in crate::resolve) fn break_supertype_cycles(
 }
 
 pub(in crate::resolve) fn supertype_graph(table: &SymbolTable) -> HashMap<TypeName, Vec<TypeName>> {
-    let mut graph = HashMap::new();
+    let mut graph = HashMap::default();
     let mut pending = table.classes.keys().copied().collect::<Vec<_>>();
     while let Some(current) = pending.pop() {
         if graph.contains_key(&current) {
@@ -136,8 +136,8 @@ pub(in crate::resolve) fn supertype_graph(table: &SymbolTable) -> HashMap<TypeNa
 /// validator itself must not put one Rust stack frame per declaration.
 pub(in crate::resolve) fn supertype_components(
     graph: &HashMap<TypeName, Vec<TypeName>>,
-) -> (HashMap<TypeName, usize>, std::collections::HashSet<usize>) {
-    let mut visited = std::collections::HashSet::new();
+) -> (HashMap<TypeName, usize>, crate::fx_hash::HashSet<usize>) {
+    let mut visited = crate::fx_hash::HashSet::default();
     let mut order = Vec::with_capacity(graph.len());
     for root in graph.keys().copied() {
         if !visited.insert(root) {
@@ -169,8 +169,8 @@ pub(in crate::resolve) fn supertype_components(
         }
     }
 
-    let mut component_of = HashMap::new();
-    let mut cyclic = std::collections::HashSet::new();
+    let mut component_of = HashMap::default();
+    let mut cyclic = crate::fx_hash::HashSet::default();
     let mut next_component = 0;
     for root in order.into_iter().rev() {
         if component_of.contains_key(&root) {

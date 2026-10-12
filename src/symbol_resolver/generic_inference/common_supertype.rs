@@ -6,7 +6,8 @@
 //! classifiers join at every most-specific shared supertype, which is an intersection when more
 //! than one remains (`A : X, Y` and `B : X, Y` join at `X & Y`).
 
-use std::collections::{HashSet, VecDeque};
+use crate::fx_hash::HashSet;
+use std::collections::VecDeque;
 
 use super::super::hierarchy_projection::{direct_supertypes, intersection_components};
 use super::super::SourceOracle;
@@ -408,7 +409,7 @@ fn supertype_closure(
     name: TypeName,
     direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
 ) -> Option<HashSet<TypeName>> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut pending = vec![name];
     let any = crate::types::wk::any();
     while let Some(current) = pending.pop() {
@@ -426,7 +427,7 @@ fn supertype_closure(
 
 fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
     let mut queue = VecDeque::from([root.non_null()]);
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut types = Vec::new();
     let any = Ty::obj_name(crate::types::wk::any());
     while let Some(current) = queue.pop_front() {

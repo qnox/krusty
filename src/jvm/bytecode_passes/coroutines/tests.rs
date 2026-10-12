@@ -193,7 +193,7 @@ fn listing(method: &MethodNode) -> String {
         }
     }
     // A label stands at the position of the next instruction.
-    let mut positions = std::collections::HashMap::new();
+    let mut positions = crate::fx_hash::HashMap::default();
     let mut position = 0;
     for node in &kept {
         match node {

@@ -43,7 +43,7 @@ impl StreamedModuleProjectionCacheRef<'_> {
 pub(crate) struct StreamedModuleProjectionCache {
     declaration_count: std::cell::Cell<usize>,
     classifiers: std::cell::RefCell<
-        std::collections::HashMap<TypeName, std::sync::Arc<crate::libraries::LibraryType>>,
+        crate::fx_hash::HashMap<TypeName, std::sync::Arc<crate::libraries::LibraryType>>,
     >,
 }
 
@@ -516,8 +516,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             })
             .collect::<Vec<_>>();
         direct.sort_by_key(|(order, _, _)| *order);
-        let mut direct_function_names = std::collections::HashSet::new();
-        let mut direct_property_names = std::collections::HashSet::new();
+        let mut direct_function_names = crate::fx_hash::HashSet::default();
+        let mut direct_property_names = crate::fx_hash::HashSet::default();
         let mut ordered_names = Vec::new();
         for (_, kind, name) in direct {
             match kind {

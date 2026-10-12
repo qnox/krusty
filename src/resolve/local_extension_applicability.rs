@@ -82,7 +82,7 @@ pub(super) fn applicable_local_extension_signature(
         let declared = signature.source_receiver?;
         return receiver_admits(receiver, declared).then(|| signature.clone());
     };
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     unify_ty_from_symbols(
         source,
         generic.receiver.expect("filtered generic receiver"),

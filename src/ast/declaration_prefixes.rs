@@ -6,8 +6,8 @@
 //! parser records both where it consumes the list.
 
 use crate::diag::Span;
+use crate::fx_hash::HashMap;
 use crate::types::Visibility;
-use std::collections::HashMap;
 
 /// One declaration's modifier list, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

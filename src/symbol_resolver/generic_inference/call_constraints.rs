@@ -148,8 +148,8 @@ impl ConstraintPosition {
 #[derive(Default)]
 struct CallInferenceConstraints {
     lower: GSigBinds,
-    lower_inputs: std::collections::HashMap<String, Vec<(Ty, ConstraintOrigin)>>,
-    upper: std::collections::HashMap<String, Vec<Ty>>,
+    lower_inputs: crate::fx_hash::HashMap<String, Vec<(Ty, ConstraintOrigin)>>,
+    upper: crate::fx_hash::HashMap<String, Vec<Ty>>,
 }
 
 /// Type-variable constraints implied by one semantic assignability relation (`actual <: expected`).
@@ -159,7 +159,7 @@ struct CallInferenceConstraints {
 /// `MutableCollection<in String>` constrains that same enclosing `E` in the opposite position.
 pub(crate) struct AssignabilityConstraints {
     pub lower: GSigBinds,
-    pub upper: std::collections::HashMap<String, Vec<Ty>>,
+    pub upper: crate::fx_hash::HashMap<String, Vec<Ty>>,
 }
 
 pub(crate) fn collect_assignability_constraints_from_symbols(
@@ -285,9 +285,9 @@ pub(crate) struct InferredCallBindings {
     /// Every lower constraint before it is approximated to one denotable binding. Callers that
     /// model Kotlin's non-denotable intersection result consume these only after candidate
     /// selection; ordinary applicability continues to use `bindings`.
-    pub lower_inputs: std::collections::HashMap<String, Vec<Ty>>,
-    pub upper_only: std::collections::HashSet<String>,
-    pub upper_bounds: std::collections::HashMap<String, Vec<Ty>>,
+    pub lower_inputs: crate::fx_hash::HashMap<String, Vec<Ty>>,
+    pub upper_only: crate::fx_hash::HashSet<String>,
+    pub upper_bounds: crate::fx_hash::HashMap<String, Vec<Ty>>,
     pub bound_violation: Option<GenericBoundViolation>,
 }
 

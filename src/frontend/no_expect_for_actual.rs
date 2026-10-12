@@ -181,8 +181,8 @@ pub(super) fn report_unmarked_implementations(
 pub(in crate::frontend) fn expected_members(
     files: &[File],
     headers: &crate::fir::StreamedHeaderModule,
-) -> std::collections::HashMap<crate::fir::DeclarationId, String> {
-    let mut expected = std::collections::HashMap::new();
+) -> crate::fx_hash::HashMap<crate::fir::DeclarationId, String> {
+    let mut expected = crate::fx_hash::HashMap::default();
     for (index, file) in files.iter().enumerate() {
         let source = crate::fir::SourceFileId::from_raw(index as u32);
         let identities = headers.source_declarations(source);
@@ -191,7 +191,7 @@ pub(in crate::frontend) fn expected_members(
             .iter()
             .enumerate()
             .map(|(slot, declaration)| (*declaration, slot))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fx_hash::HashMap<_, _>>();
         for expectation in &file.expect_decls {
             let Decl::Class(class) = file.decl(expectation.declaration) else {
                 continue;
@@ -261,7 +261,7 @@ pub(super) fn collect(
             .iter()
             .enumerate()
             .map(|(slot, declaration)| (*declaration, slot))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fx_hash::HashMap<_, _>>();
         // Which hoisted classifier is a `companion object` is an edge its OWNER records; the
         // companion itself is an ordinary singleton declaration. The reference compiler renders
         // the word, so the edge is read back here rather than guessed from the name `Companion`,
@@ -273,7 +273,7 @@ pub(super) fn collect(
                 Decl::Class(class) => class.companion,
                 Decl::Fun(_) | Decl::Property(_) => None,
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         for &declaration in &file.actual_decls {
             let (name, anchor, target) = match file.decl(declaration) {
                 Decl::Fun(function) => (
@@ -391,7 +391,7 @@ pub(super) fn collect(
 pub(super) fn report_unactualized_members(
     owed: &[crate::fir::UnactualizedMembers],
     unmatched: &[UnmatchedActual],
-    expected: &std::collections::HashMap<crate::fir::DeclarationId, String>,
+    expected: &crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     diags: &mut DiagSink,
@@ -443,8 +443,8 @@ pub(super) fn report_unactualized_members(
 
 pub(super) fn report(
     unmatched: &[UnmatchedActual],
-    actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
-    incompatible_members: &std::collections::HashSet<crate::fir::DeclarationId>,
+    actualized: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    incompatible_members: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     diags: &mut DiagSink,

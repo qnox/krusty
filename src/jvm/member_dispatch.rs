@@ -19,7 +19,7 @@ use crate::types::TypeName;
 /// resolver or interpreting an emitted name.
 pub(super) struct CheckedDispatchClassifiers<'a> {
     stable: &'a dyn BackendClassifierSource,
-    file: std::collections::HashMap<TypeName, DispatchClassifierFact>,
+    file: crate::fx_hash::HashMap<TypeName, DispatchClassifierFact>,
 }
 
 #[derive(Clone)]
@@ -35,8 +35,8 @@ struct DispatchClassifierFact {
 
 impl<'a> CheckedDispatchClassifiers<'a> {
     pub(super) fn new(ir: &crate::ir::IrFile, stable: &'a dyn BackendClassifierSource) -> Self {
-        let mut file = std::collections::HashMap::new();
-        let mut published_by = std::collections::HashMap::new();
+        let mut file = crate::fx_hash::HashMap::default();
+        let mut published_by = crate::fx_hash::HashMap::default();
         for (class_id, class) in ir.classes.iter().enumerate().filter(|(_, class)| {
             !class.is_source_declared || crate::metadata::local_classifiers::is_local(ir, class)
         }) {
@@ -174,7 +174,7 @@ pub(super) fn inherits(
     ancestor: TypeName,
 ) -> Result<bool, MissingClassifier> {
     let mut pending = vec![class];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(current) = pending.pop() {
         if !seen.insert(current) {
             continue;
@@ -219,7 +219,7 @@ pub(super) fn inherits(
 mod tests {
     use super::*;
     use crate::backend::BackendClassifierFact;
-    use std::collections::HashMap;
+    use crate::fx_hash::HashMap;
     use std::sync::Arc;
 
     #[derive(Default)]

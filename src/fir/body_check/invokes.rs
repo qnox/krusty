@@ -279,7 +279,7 @@ impl BodyFirChecker<'_> {
                                 .type_parameter_semantic_name(parameter)
                                 .map(|name| (name.to_owned(), substitution.value.get()))
                         })
-                        .collect::<std::collections::HashMap<_, _>>();
+                        .collect::<crate::fx_hash::HashMap<_, _>>();
                     crate::types::ty_subst_keep_unbound(signature.result.get(), &bindings)
                 }
                 FirCallTarget::External { result, .. }

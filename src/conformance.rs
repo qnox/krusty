@@ -854,7 +854,7 @@ pub struct ModuleUnit {
 /// REPRESENTATIVE: the first built unit whose chain folds it in (its declarations live in that
 /// unit's output). Self-references left by the remap are dropped.
 pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
-    use std::collections::{HashMap, HashSet};
+    use crate::fx_hash::{HashMap, HashSet};
     let dependson_targets: HashSet<&str> = modules
         .iter()
         .flat_map(|m| m.depends_on.iter().map(String::as_str))
@@ -881,13 +881,13 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
         .iter()
         .filter(|m| !dependson_targets.contains(m.name.as_str()))
         .map(|m| {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             let mut chain = Vec::new();
             add_chain(modules, &m.name, &mut seen, &mut chain);
             (m, chain)
         })
         .collect();
-    let mut representative: HashMap<&str, &str> = HashMap::new();
+    let mut representative: HashMap<&str, &str> = HashMap::default();
     for (u, chain) in &built {
         for m in chain {
             representative
@@ -912,8 +912,8 @@ pub fn module_units(modules: &[ModuleBlock]) -> Vec<ModuleUnit> {
             // Own deps first (chain ends with the module itself), then the folded source sets'.
             let mut deps: Vec<String> = Vec::new();
             let mut friends: Vec<String> = Vec::new();
-            let mut seen = HashSet::new();
-            let mut seen_friends = HashSet::new();
+            let mut seen = HashSet::default();
+            let mut seen_friends = HashSet::default();
             for m in chain.iter().rev() {
                 for d in &m.deps {
                     let r = representative

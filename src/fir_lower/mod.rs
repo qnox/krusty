@@ -84,8 +84,8 @@ pub use error::*;
 pub use sink::*;
 
 use crate::fir::{BodyOwnerId, FirBody, FirExprId, FirStatementId, ResolvedModuleIndex};
+use crate::fx_hash::HashMap;
 use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp};
-use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoweredFirBody {
@@ -144,7 +144,7 @@ pub(super) fn resolved_parameter_identity(
 pub(super) fn declarations_for_lowering(
     index: &ResolvedModuleIndex,
     source: crate::fir::SourceFileId,
-    inline_payload: &std::collections::HashSet<crate::fir::DeclarationId>,
+    inline_payload: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 ) -> Vec<crate::fir::DeclarationId> {
     let mut ids = index.declarations_in_source(source).to_vec();
     if inline_payload.is_empty() {
@@ -211,8 +211,8 @@ pub(crate) fn lower_body_with_context(
         index,
         ir,
         has_dispatch_receiver,
-        HashMap::new(),
-        vec![HashMap::new()],
+        HashMap::default(),
+        vec![HashMap::default()],
         local_callables.realizations.clone(),
     );
     let root_is_default = body.is_default_fragment();
@@ -581,7 +581,7 @@ impl<'a> BodyLowering<'a> {
             implicit_receiver_capture_slots,
             shared_locals: directly_shared_locals(body),
             binding_stability: binding_stability::inventory(body),
-            local_class_captures: HashMap::new(),
+            local_class_captures: HashMap::default(),
             local_callable_scopes,
             published_local_callables,
             control_path: Vec::new(),
@@ -593,7 +593,7 @@ impl<'a> BodyLowering<'a> {
             expression_depth: 0,
             root_block: root_scope_block(body),
             lowered_root_block: None,
-            operand_bound_calls: HashMap::new(),
+            operand_bound_calls: HashMap::default(),
             unit_method_lambda: None,
         }
     }
@@ -854,7 +854,7 @@ fn lower_captured_receiver(
 fn directly_shared_locals(
     body: &FirBody,
 ) -> HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy> {
-    let mut shared = HashMap::new();
+    let mut shared = HashMap::default();
     let add = |shared: &mut HashMap<_, _>, nested: &FirBody| {
         for capture in nested
             .captures()

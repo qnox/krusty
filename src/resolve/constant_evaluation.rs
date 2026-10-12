@@ -5,7 +5,7 @@
 //! `const val` publication from growing a second syntax-only resolver and prevents an overloaded
 //! `plus`/`compareTo` from being mistaken for a builtin constant operation.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ast::{BinOp, Expr, ExprId, File, TemplatePart, UnOp};
 use crate::kt_string::KtStringBuf;

@@ -539,7 +539,7 @@ pub struct ClassBodies {
     bytes: std::sync::Arc<Vec<u8>>,
     cp: std::sync::Arc<[C]>,
     defining_class: String,
-    methods: std::collections::HashMap<(Box<str>, Box<str>), CodeRange>,
+    methods: crate::fx_hash::HashMap<(Box<str>, Box<str>), CodeRange>,
     bootstrap_methods: Vec<(u16, Vec<u16>)>,
     source_file: Option<String>,
     dependency_source_map: Option<std::sync::Arc<crate::jvm::source_map::DependencyMap>>,
@@ -586,7 +586,10 @@ impl ClassBodies {
             skip_attributes(&mut r).ok()?;
         }
         let nmethods = r.u2().ok()?;
-        let mut methods = std::collections::HashMap::with_capacity(nmethods as usize);
+        let mut methods = crate::fx_hash::HashMap::with_capacity_and_hasher(
+            nmethods as usize,
+            Default::default(),
+        );
         for _ in 0..nmethods {
             r.u2().ok()?; // access
             let name = utf8(r.u2().ok()?);

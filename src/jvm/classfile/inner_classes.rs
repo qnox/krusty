@@ -1,6 +1,7 @@
 //! The `InnerClasses` table: which nested classes a class names, and in what order.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use super::ClassWriter;
@@ -37,7 +38,7 @@ pub(super) struct LocalDeclarations {
     declaring: Rc<HashMap<String, String>>,
     /// Specialized suspend lambdas regenerated into a caller. The caller references them without
     /// an `InnerClasses` row; the class itself and classes it encloses still list the row.
-    call_sites: Rc<std::collections::HashSet<String>>,
+    call_sites: Rc<crate::fx_hash::HashSet<String>>,
     /// The table orders the file's writers computed, shared by all of them.
     orders: Rc<TableOrders>,
 }
@@ -188,7 +189,7 @@ impl ClassWriter {
     /// Specialized suspend lambdas a caller constructs without listing them.
     pub(crate) fn set_call_site_classes(
         &mut self,
-        call_sites: Rc<std::collections::HashSet<String>>,
+        call_sites: Rc<crate::fx_hash::HashSet<String>>,
     ) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.call_sites = call_sites;
@@ -308,7 +309,7 @@ impl ClassWriter {
             .map(|spec| self.retains_inner_class_with_presence(spec, self.names_class(&spec.inner)))
             .collect();
         let mut pending: Vec<usize> = (0..specs.len()).filter(|&row| retained[row]).collect();
-        let mut seeded: HashSet<&str> = HashSet::new();
+        let mut seeded: HashSet<&str> = HashSet::default();
         while let Some(row) = pending.pop() {
             let spec = &specs[row];
             for seed in std::iter::once(spec.inner.as_str()).chain(spec.outer.as_deref()) {
@@ -400,7 +401,8 @@ impl ClassWriter {
             }
             let candidates = self.inner_class_candidates.clone();
             let keys = qualified_names(&self.inner_class_candidates, &local.paths);
-            let mut distinct_keys = HashSet::with_capacity(keys.len());
+            let mut distinct_keys =
+                HashSet::with_capacity_and_hasher(keys.len(), Default::default());
             let tied = !keys.iter().all(|key| distinct_keys.insert(key.as_str()));
             // Pool order follows the methods, the order kotlinc's codegen meets their classes.
             let met: HashMap<String, usize> = self
@@ -468,7 +470,7 @@ fn declaration_order(
     let mut blocked = vec![false; rows.len()];
     for (child, (_, _, spec)) in rows.iter().enumerate() {
         let mut current = declaring.get(&spec.inner).map(String::as_str);
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while let Some(parent) = current {
             assert!(
                 seen.insert(parent),
@@ -563,7 +565,7 @@ mod tests {
         // The old pairwise comparator formed a cycle here: Parent < Child by ancestry,
         // Child < Unrelated and Unrelated < Parent by qualified name.
         let rows = vec![row("z", "Parent"), row("a", "Child"), row("m", "Unrelated")];
-        let declaring = HashMap::from([("Child".to_string(), "Parent".to_string())]);
+        let declaring = HashMap::from_iter([("Child".to_string(), "Parent".to_string())]);
 
         let ordered = declaration_order(rows, &declaring)
             .into_iter()
@@ -576,7 +578,7 @@ mod tests {
     #[test]
     fn an_unlisted_intermediate_owner_still_orders_its_listed_ancestor_first() {
         let rows = vec![row("a", "Child"), row("z", "Root")];
-        let declaring = HashMap::from([
+        let declaring = HashMap::from_iter([
             ("Child".to_string(), "Intermediate".to_string()),
             ("Intermediate".to_string(), "Root".to_string()),
         ]);

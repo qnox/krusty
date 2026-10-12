@@ -20,8 +20,8 @@
 //! recoverable diagnostic. [`TypeEngine::resolve`] is therefore the single place that turns "no
 //! answer" into [`Resolution::Declined`]; no caller invents a type when the computation gave none.
 
+use crate::fx_hash::{HashMap, HashSet};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 use crate::types::Ty;
 

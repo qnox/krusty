@@ -10,7 +10,7 @@
 //! Declarations are joined to metadata exclusively through their public [`KlibPublicIdSignature`].
 //! Source spellings, owner strings, and parameter names are never used as a substitute identity.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::klib::{KlibArchive, KlibError};
 
@@ -315,7 +315,7 @@ fn read_bodies(archive: &KlibArchive, mode: DecodeMode) -> Result<KlibIrBodies, 
             bodies: &bodies,
         };
         let ids = packed_field(&files[index], "files.knf", 1, "declaration ids")?;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         for id in ids {
             if !seen.insert(id) {
                 return Err(KlibIrDecodeError::malformed(
@@ -583,7 +583,7 @@ fn decode_function(
     if parameter_symbols.len() != expected_parameters {
         return Ok(());
     }
-    let mut unique_parameters = std::collections::HashSet::new();
+    let mut unique_parameters = crate::fx_hash::HashSet::default();
     if parameter_symbols
         .iter()
         .any(|symbol| !unique_parameters.insert(*symbol))
@@ -1062,7 +1062,10 @@ mod tests {
         let exact = decode_public_id_signature(signatures[0], &strings)
             .unwrap()
             .unwrap();
-        assert_eq!(decoded.public_declarations, HashSet::from([exact.clone()]));
+        assert_eq!(
+            decoded.public_declarations,
+            HashSet::from_iter([exact.clone()])
+        );
         assert!(exact.matches_exact(&["fixture"], &["rangeTo"], 41, 0));
         assert!(!exact.matches_exact(&["fixture"], &["rangeTo"], 42, 0));
     }

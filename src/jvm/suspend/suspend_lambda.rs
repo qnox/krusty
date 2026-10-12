@@ -21,12 +21,12 @@ use super::cps::{
     TransformedMachine,
 };
 use super::{append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty};
+use crate::fx_hash::HashSet;
 use crate::ir::{
     ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
 };
 use crate::jvm::lambda_classes::{nests_lifted_functions, site, Site};
 use crate::types::{Ty, TypeName};
-use std::collections::HashSet;
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 
@@ -275,7 +275,7 @@ pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> (Vec<u32>, HashSet
             _ => None,
         })
         .collect();
-    let mut enclosing = std::collections::HashMap::new();
+    let mut enclosing = crate::fx_hash::HashMap::default();
     for (function, declaration) in ir.functions.iter().enumerate() {
         let Some(body) = declaration.body else {
             continue;
@@ -288,7 +288,7 @@ pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> (Vec<u32>, HashSet
     }
     let depth = |mut fid: u32| {
         let mut depth = 0usize;
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         while let Some(&outer) = enclosing.get(&fid) {
             if !seen.insert(outer) {
                 break;

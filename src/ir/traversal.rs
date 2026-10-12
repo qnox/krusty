@@ -253,10 +253,10 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
 }
 
 /// Every value the tree under `root` reads.
-pub fn read_values(ir: &IrFile, root: ExprId) -> std::collections::HashSet<u32> {
+pub fn read_values(ir: &IrFile, root: ExprId) -> crate::fx_hash::HashSet<u32> {
     let mut pending = vec![root];
-    let mut seen = std::collections::HashSet::new();
-    let mut read = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
+    let mut read = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -350,7 +350,7 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
 }
 
 fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
-    let mut locals = std::collections::HashSet::new();
+    let mut locals = crate::fx_hash::HashSet::default();
     collect_default_locals(ir, e, &mut locals);
     default_expr_stub_safe_with_locals(ir, e, n, &locals)
 }
@@ -359,7 +359,7 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
 /// synthetic stub frame: the emitter visits their `Variable`/`catch` declarations before their
 /// uses. A lambda's inline body has its own value namespace and is not emitted by the stub, so only
 /// the lambda's capture expressions belong to this walk.
-fn collect_default_locals(ir: &IrFile, e: ExprId, locals: &mut std::collections::HashSet<u32>) {
+fn collect_default_locals(ir: &IrFile, e: ExprId, locals: &mut crate::fx_hash::HashSet<u32>) {
     match &ir.exprs[e as usize] {
         IrExpr::Variable { index, .. } => {
             locals.insert(*index);
@@ -384,7 +384,7 @@ fn default_expr_stub_safe_with_locals(
     ir: &IrFile,
     e: ExprId,
     n: u32,
-    locals: &std::collections::HashSet<u32>,
+    locals: &crate::fx_hash::HashSet<u32>,
 ) -> bool {
     match &ir.exprs[e as usize] {
         IrExpr::GetValue(i) if *i >= n && !locals.contains(i) => {
@@ -454,7 +454,7 @@ fn default_expr_stub_safe_with_locals(
 /// this namespace, while its `inline_body` uses the lambda function's own slots and return
 /// boundary, so a rewrite of this body's values never reaches through that boundary.
 pub(crate) fn value_namespace_expressions(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut pending = vec![body];
     let mut expressions = Vec::new();
     while let Some(current) = pending.pop() {
@@ -492,7 +492,7 @@ fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(
         e: ExprId,
         threshold: u32,
         by: &dyn Fn(u32) -> u32,
-        visited: &mut std::collections::HashSet<ExprId>,
+        visited: &mut crate::fx_hash::HashSet<ExprId>,
     ) {
         // Operands may be shared deliberately (for example, the receiver of the read and write halves
         // of an access increment). The arena is therefore a DAG, not necessarily a tree: rewrite each
@@ -540,7 +540,7 @@ fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(
         }
     }
 
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::fx_hash::HashSet::default();
     shift(ir, e, threshold, map, &mut visited);
 }
 

@@ -93,7 +93,7 @@ pub(super) fn record_boundaries(
 /// the box a caller makes there as it is, rather than unboxing it to the carrier the slot shares.
 pub(super) fn record_method_parameters(
     ir: &mut IrFile,
-    functions: &std::collections::HashSet<FunId>,
+    functions: &crate::fx_hash::HashSet<FunId>,
     parameters: &[Vec<Ty>],
 ) {
     for (id, expression) in ir.exprs.iter().enumerate() {

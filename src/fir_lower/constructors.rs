@@ -16,7 +16,7 @@ mod enclosing_superclass_capture_tests;
 pub(super) fn predeclare_constructors(
     index: &ResolvedModuleIndex,
     source: crate::fir::SourceFileId,
-    inline_payload_declarations: &std::collections::HashSet<DeclarationId>,
+    inline_payload_declarations: &crate::fx_hash::HashSet<DeclarationId>,
     ir: &mut IrFile,
     allow_deferred_body_local: bool,
 ) -> Result<(), FirFileLoweringFailure> {

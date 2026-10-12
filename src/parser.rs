@@ -5,10 +5,10 @@
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
+use crate::fx_hash::HashMap;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
-use std::collections::HashMap;
 
 mod anonymous_functions;
 mod class_recovery;
@@ -402,7 +402,7 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
             owners.push((stmt, owner.clone(), None, None));
         }
     }
-    let owner_of: std::collections::HashMap<StmtId, (String, Option<String>, Option<DeclId>)> =
+    let owner_of: crate::fx_hash::HashMap<StmtId, (String, Option<String>, Option<DeclId>)> =
         owners
             .into_iter()
             .map(|(statement, owner, classifier_scope, enclosing)| {
@@ -420,7 +420,7 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
         .collect();
     // Two local classes of the same name under the same owner (declared in sibling blocks) still
     // need telling apart; the statement index is unique by construction.
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut taken: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
     for (stmt, mut c) in hoisted {
         let mut name = match owner_of.get(&stmt) {
             Some((owner, _, _)) => format!("{owner}.{}", c.name),
@@ -524,7 +524,7 @@ fn local_class_stmts(file: &File, root: ExprId) -> Vec<StmtId> {
     out
 }
 
-type TypeAliasShapes = std::collections::HashMap<String, (Vec<String>, TypeRef)>;
+type TypeAliasShapes = crate::fx_hash::HashMap<String, (Vec<String>, TypeRef)>;
 
 /// Replace every leaf reference to one of `params` in `ty` with the corresponding use-site type
 /// argument. The occurrence's nullability, variance, and source span stay on the substituted node:
@@ -713,7 +713,7 @@ struct Parser<'a> {
     /// not need a permanent parentheses node, but postfix parsing must distinguish `f() { ... }`
     /// (a trailing argument of `f`) from `(f()) { ... }` (an `invoke` on the value returned by
     /// `f`). This state is parser-local and disappears with the parser.
-    parenthesized_expressions: std::collections::HashSet<u32>,
+    parenthesized_expressions: crate::fx_hash::HashSet<u32>,
     /// Each function parsed so far in this unit, for [`crate::ast::BinaryReferenceTokens`].
     function_spans: Vec<Span>,
     lambda_label_scopes: lambda_literals::LambdaLabelScopes,
@@ -2552,8 +2552,8 @@ impl<'a> Parser<'a> {
             } else {
                 (
                     Vec::new(),
-                    std::collections::HashSet::new(),
-                    std::collections::HashSet::new(),
+                    crate::fx_hash::HashSet::default(),
+                    crate::fx_hash::HashSet::default(),
                     Vec::new(),
                     Vec::new(),
                 )
@@ -2971,8 +2971,8 @@ impl<'a> Parser<'a> {
         } else {
             (
                 Vec::new(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
+                crate::fx_hash::HashSet::default(),
+                crate::fx_hash::HashSet::default(),
                 Vec::new(),
                 Vec::new(),
             )
@@ -3450,8 +3450,8 @@ impl<'a> Parser<'a> {
         } else {
             (
                 Vec::new(),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
+                crate::fx_hash::HashSet::default(),
+                crate::fx_hash::HashSet::default(),
                 Vec::new(),
                 Vec::new(),
             )

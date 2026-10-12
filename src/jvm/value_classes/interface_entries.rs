@@ -39,7 +39,7 @@ pub(super) fn materialize(
             }
         }
     }
-    let mut targets = HashMap::new();
+    let mut targets = HashMap::default();
     for (class, implementation, bridge_parameters) in entries {
         // The static member's physical signature, less the carrier it receives first.
         let target = &ir.functions[implementation as usize];

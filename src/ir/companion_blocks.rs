@@ -6,7 +6,7 @@
 //! statics and records them in the class's `@Metadata`. A written `companion fun C.f()` /
 //! `companion val C.p` is a package declaration and is not recorded here.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{ClassId, FunId, IrPackageProperty, Ty, TypeName};
 

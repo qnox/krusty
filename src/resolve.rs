@@ -7,7 +7,7 @@
 //! exact-type (no implicit numeric widening); integer literals default to `Int`; `+` is string
 //! concat if either side is `String`; `if` with both branches needs a common type.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::ast::*;
@@ -1476,7 +1476,7 @@ pub struct ClassSig {
     /// The declared companion classifier, independent of whether it owns any methods or properties.
     pub companion_internal: Option<TypeName>,
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
-    pub lateinit_props: std::collections::HashSet<String>,
+    pub lateinit_props: crate::fx_hash::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
     pub interfaces: crate::types::TypeNameList,
     /// Declaration-scoped type arguments, parallel to [`Self::interfaces`].
@@ -1629,10 +1629,10 @@ impl ClassSig {
             annotation_class_arguments: Vec::new(),
             generated_nested_classifiers: Vec::new(),
             props: Vec::new(),
-            declared_props: HashMap::new(),
-            contextual_props: HashMap::new(),
-            constants: HashMap::new(),
-            member_ext_props: HashMap::new(),
+            declared_props: HashMap::default(),
+            contextual_props: HashMap::default(),
+            constants: HashMap::default(),
+            member_ext_props: HashMap::default(),
             member_ext_funs,
             has_primary_ctor: false,
             primary_constructor_declaration: None,
@@ -1671,12 +1671,12 @@ impl ClassSig {
             type_parameter_extra_bounds,
             captured_type_parameters,
             metadata_captured_type_parameters: Vec::new(),
-            generic_props: HashMap::new(),
-            nullable_tparam_props: HashMap::new(),
-            generic_property_shapes: HashMap::new(),
+            generic_props: HashMap::default(),
+            nullable_tparam_props: HashMap::default(),
+            generic_property_shapes: HashMap::default(),
             value_field: None,
             full_value: false,
-            generic_methods: HashMap::new(),
+            generic_methods: HashMap::default(),
         }
     }
 
@@ -2221,7 +2221,7 @@ fn local_function_candidate_score(
 pub struct ClassNames {
     base: std::rc::Rc<HashMap<String, TypeName>>,
     user: HashMap<String, TypeName>,
-    ambiguous: std::collections::HashSet<String>,
+    ambiguous: crate::fx_hash::HashSet<String>,
     /// Resolution binding from source lookup spelling to a qualified alias declaration identity.
     alias_bindings: HashMap<String, TypeName>,
     /// Expansion templates keyed by qualified alias declaration identity. A source spelling never
@@ -2245,12 +2245,12 @@ impl ClassNames {
     pub fn new(base: std::rc::Rc<HashMap<String, TypeName>>) -> ClassNames {
         ClassNames {
             base,
-            user: HashMap::new(),
-            ambiguous: std::collections::HashSet::new(),
-            alias_bindings: HashMap::new(),
-            alias_expansions: HashMap::new(),
-            source_alias_identities: HashMap::new(),
-            unresolved_segments: HashMap::new(),
+            user: HashMap::default(),
+            ambiguous: crate::fx_hash::HashSet::default(),
+            alias_bindings: HashMap::default(),
+            alias_expansions: HashMap::default(),
+            source_alias_identities: HashMap::default(),
+            unresolved_segments: HashMap::default(),
         }
     }
 
@@ -2416,7 +2416,7 @@ impl ClassNames {
         };
         ClassNames {
             base: std::rc::Rc::new(merged),
-            user: HashMap::new(),
+            user: HashMap::default(),
             ambiguous,
             alias_bindings,
             alias_expansions,
@@ -2735,7 +2735,7 @@ pub struct SymbolTable {
     /// How many mutation brackets are open — see [`SymbolTable::begin_module_mutation`].
     module_mutation_depth: std::cell::Cell<usize>,
     pub funs: HashMap<String, Vec<Signature>>,
-    conflicting_top_level_keys: std::collections::HashSet<TopLevelFunctionConflictKey>,
+    conflicting_top_level_keys: crate::fx_hash::HashSet<TopLevelFunctionConflictKey>,
     conflicting_top_level_key_by_source: HashMap<(u32, u32), TopLevelFunctionConflictKey>,
     conflicting_top_level_candidates:
         HashMap<TopLevelFunctionConflictKey, TopLevelFunctionConflictCandidates>,
@@ -2747,7 +2747,7 @@ pub struct SymbolTable {
     /// Authoritative package namespace declared by the source files, including ancestor packages.
     /// Signature collection seeds the complete set before it queries provisional declarations, so
     /// package lookup stays O(1) while the class/callable tables continue to mutate.
-    pub(crate) source_packages: std::collections::HashSet<TypeName>,
+    pub(crate) source_packages: crate::fx_hash::HashSet<TypeName>,
     /// Declaration-header facts keyed by classifier identity, available before full signatures are
     /// collected. Forward property inference may need to classify a later-file source singleton; this
     /// identity table avoids both source-order dependence and the old global simple-name object set.
@@ -2801,7 +2801,7 @@ pub struct SymbolTable {
     pub alias_expansion_spellings: HashMap<TypeName, (crate::spelling::Spelled, Vec<String>, Ty)>,
     anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
     anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
-    anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
+    anonymous_object_capture_discovered: crate::fx_hash::HashSet<(u32, DeclId)>,
     /// Top-level properties (name → type, is_var, is_const), backed by static fields on the file facade.
     /// `is_const` distinguishes a `const val` (public field, no accessor, cross-file `getstatic`) from a
     /// plain `val`/`var` (private field, read/written through `getX`/`setX`).
@@ -2809,7 +2809,7 @@ pub struct SymbolTable {
     /// Top-level properties keyed by source declaration. Context parameters are ordinary leading
     /// accessor parameters; an empty list is the regular property case.
     pub source_props: HashMap<(u32, u32), SourcePropertySig>,
-    pub context_prop_names: std::collections::HashSet<String>,
+    pub context_prop_names: crate::fx_hash::HashSet<String>,
     /// Why an implicitly typed property could not be resolved, keyed by its source declaration.
     /// The authoritative checker consumes this fact once; reads keep the ordinary error type and
     /// do not reconstruct the failure from a spelling or emit cascades.
@@ -2870,12 +2870,12 @@ pub struct SymbolTable {
     /// registration". Keeping the authoritative negative result beside the positive map lets the
     /// checker diagnose only the former without reimplementing backend emission policy or accepting
     /// a facade class name leaked through a generic symbol origin.
-    unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
+    unemitted_fn_facades_by_decl: crate::fx_hash::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
     /// Bare generic value operands for source members.
     pub(crate) source_generic_member_value_operand_slots: GenericMemberValueOperandSlots,
-    pub source_projected_return_hazards: std::collections::HashSet<(u32, u32)>,
+    pub source_projected_return_hazards: crate::fx_hash::HashSet<(u32, u32)>,
     pub ext_prop_facades_by_decl: HashMap<(u32, u32), TypeName>,
     /// Physical facade selected for every top-level source property. Semantic property resolution is
     /// declaration-keyed; the JVM backend fills this map so cross-file accessor emission never has to
@@ -2931,49 +2931,49 @@ impl Default for SymbolTable {
             module_shape_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
             module_mutation_depth: std::cell::Cell::new(0),
-            funs: HashMap::new(),
-            conflicting_top_level_keys: std::collections::HashSet::new(),
-            conflicting_top_level_key_by_source: HashMap::new(),
-            conflicting_top_level_candidates: HashMap::new(),
-            classes: HashMap::new(),
-            source_packages: std::collections::HashSet::new(),
-            source_class_headers: HashMap::new(),
-            stable_parser_classifier_identities: HashMap::new(),
-            source_class_aliases: HashMap::new(),
-            source_alias_fqns: HashMap::new(),
-            source_alias_expansions: HashMap::new(),
-            stable_declared_spellings: HashMap::new(),
-            type_use_annotation_spans: HashMap::new(),
-            alias_expansion_spellings: HashMap::new(),
-            anonymous_object_types: HashMap::new(),
-            anonymous_object_captures: HashMap::new(),
-            anonymous_object_capture_discovered: std::collections::HashSet::new(),
-            props: HashMap::new(),
-            source_props: HashMap::new(),
-            context_prop_names: std::collections::HashSet::new(),
-            property_inference_failures: HashMap::new(),
-            toplevel_jvm_names: HashMap::new(),
-            enums: HashMap::new(),
+            funs: HashMap::default(),
+            conflicting_top_level_keys: crate::fx_hash::HashSet::default(),
+            conflicting_top_level_key_by_source: HashMap::default(),
+            conflicting_top_level_candidates: HashMap::default(),
+            classes: HashMap::default(),
+            source_packages: crate::fx_hash::HashSet::default(),
+            source_class_headers: HashMap::default(),
+            stable_parser_classifier_identities: HashMap::default(),
+            source_class_aliases: HashMap::default(),
+            source_alias_fqns: HashMap::default(),
+            source_alias_expansions: HashMap::default(),
+            stable_declared_spellings: HashMap::default(),
+            type_use_annotation_spans: HashMap::default(),
+            alias_expansion_spellings: HashMap::default(),
+            anonymous_object_types: HashMap::default(),
+            anonymous_object_captures: HashMap::default(),
+            anonymous_object_capture_discovered: crate::fx_hash::HashSet::default(),
+            props: HashMap::default(),
+            source_props: HashMap::default(),
+            context_prop_names: crate::fx_hash::HashSet::default(),
+            property_inference_failures: HashMap::default(),
+            toplevel_jvm_names: HashMap::default(),
+            enums: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
             sam_with_receiver_annotations: Vec::new(),
-            ext_funs: HashMap::new(),
-            source_ext_funs: HashMap::new(),
-            ext_props: HashMap::new(),
+            ext_funs: HashMap::default(),
+            source_ext_funs: HashMap::default(),
+            ext_props: HashMap::default(),
             class_names: ClassNames::default(),
-            resolved_annotations: HashMap::new(),
-            declaration_visibility_suppressions: HashMap::new(),
-            annotation_retentions: HashMap::new(),
+            resolved_annotations: HashMap::default(),
+            declaration_visibility_suppressions: HashMap::default(),
+            annotation_retentions: HashMap::default(),
             annotation_targets: crate::types::DeclaredTargetPolicies::default(),
-            fn_facades: HashMap::new(),
-            fn_facades_by_decl: HashMap::new(),
-            unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
-            source_generic_value_operand_slots: HashMap::new(),
-            source_generic_member_value_operand_slots: HashMap::new(),
-            source_projected_return_hazards: std::collections::HashSet::new(),
-            ext_prop_facades_by_decl: HashMap::new(),
-            prop_facades_by_decl: HashMap::new(),
-            prop_facades: HashMap::new(),
+            fn_facades: HashMap::default(),
+            fn_facades_by_decl: HashMap::default(),
+            unemitted_fn_facades_by_decl: crate::fx_hash::HashSet::default(),
+            source_generic_value_operand_slots: HashMap::default(),
+            source_generic_member_value_operand_slots: HashMap::default(),
+            source_projected_return_hazards: crate::fx_hash::HashSet::default(),
+            ext_prop_facades_by_decl: HashMap::default(),
+            prop_facades_by_decl: HashMap::default(),
+            prop_facades: HashMap::default(),
         }
     }
 }
@@ -3352,7 +3352,7 @@ impl SymbolTable {
         name: &str,
     ) -> Option<(TypeName, &DeclaredPropertySig)> {
         let mut pending = vec![internal];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(current) = pending.pop() {
             if !seen.insert(current) {
                 continue;
@@ -3398,7 +3398,7 @@ impl SymbolTable {
 /// arguments naming a reified parameter (a nested reified splice would need `is`/`as` markers) and
 /// any other expression-position use reject the function.
 fn reified_uses_are_class_literals(file: &File, f: &FunDecl) -> bool {
-    fn scan(file: &File, e: ExprId, reified: &std::collections::HashSet<String>) -> bool {
+    fn scan(file: &File, e: ExprId, reified: &crate::fx_hash::HashSet<String>) -> bool {
         if let Some(type_args) = file.call_type_args.get(&e.0) {
             if type_args
                 .iter()
@@ -3453,7 +3453,7 @@ fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
         file: &File,
         e: ExprId,
         tparams: &[String],
-        reified: &std::collections::HashSet<String>,
+        reified: &crate::fx_hash::HashSet<String>,
     ) -> bool {
         if file.anonymous_object_classes.contains_key(&e) {
             return true;
@@ -3505,7 +3505,7 @@ fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
         file: &File,
         s: StmtId,
         tparams: &[String],
-        reified: &std::collections::HashSet<String>,
+        reified: &crate::fx_hash::HashSet<String>,
     ) -> bool {
         if matches!(
             file.stmt(s),
@@ -3818,7 +3818,7 @@ impl SourceConstructorMatcher<'_> {
     }
 
     fn hierarchy(&self, start: TypeName) -> Vec<TypeName> {
-        let mut seen = std::collections::HashSet::from([start]);
+        let mut seen = crate::fx_hash::HashSet::from_iter([start]);
         let mut result = vec![start];
         let mut cursor = 0usize;
         while let Some(&current) = result.get(cursor) {
@@ -4139,7 +4139,7 @@ pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
 /// Map a file's EXPLICIT imports `simple name -> internal name` (e.g. `Calc -> util/Calc`). A
 /// wildcard import (`a.b.*`) has no simple name — those are represented by [`import_levels`].
 pub fn import_map(file: &File) -> HashMap<String, String> {
-    let mut m = HashMap::new();
+    let mut m = HashMap::default();
     for import in &file.import_paths {
         if import.wildcard {
             continue;
@@ -4433,14 +4433,14 @@ fn map_param_list_args(
 fn collect_lambda_outer_writes(
     file: &File,
     e: ExprId,
-    outer_names: &std::collections::HashSet<String>,
-    out: &mut std::collections::HashSet<String>,
+    outer_names: &crate::fx_hash::HashSet<String>,
+    out: &mut crate::fx_hash::HashSet<String>,
 ) {
     fn ce(
         file: &File,
         e: ExprId,
-        active: &std::collections::HashSet<String>,
-        out: &mut std::collections::HashSet<String>,
+        active: &crate::fx_hash::HashSet<String>,
+        out: &mut crate::fx_hash::HashSet<String>,
     ) {
         match file.expr(e) {
             Expr::Block { stmts, trailing } => {
@@ -4499,8 +4499,8 @@ fn collect_lambda_outer_writes(
     fn cs(
         file: &File,
         s: StmtId,
-        active: &mut std::collections::HashSet<String>,
-        out: &mut std::collections::HashSet<String>,
+        active: &mut crate::fx_hash::HashSet<String>,
+        out: &mut crate::fx_hash::HashSet<String>,
     ) {
         match file.stmt(s) {
             Stmt::IncDec { name, .. } => {
@@ -4920,7 +4920,7 @@ const EXPLICIT_PROPERTY_TYPE_MESSAGE: &str =
 
 impl SourceOrderIndex {
     fn of(files: &[File]) -> Self {
-        let mut positions = HashMap::new();
+        let mut positions = HashMap::default();
         for (file_index, file) in files.iter().enumerate() {
             for &declaration in &file.decls {
                 let Decl::Property(property) = file.decl(declaration) else {
@@ -4981,7 +4981,7 @@ struct DeferredInferenceDriver<'a> {
     methods: &'a HashMap<(TypeName, String), (u32, DeclId, u32)>,
     source_order: &'a SourceOrderIndex,
     rejected_reads: &'a std::cell::RefCell<HashMap<DeclKey, Vec<(Span, String)>>>,
-    recursive_dependents: &'a std::cell::RefCell<std::collections::HashSet<DeclKey>>,
+    recursive_dependents: &'a std::cell::RefCell<crate::fx_hash::HashSet<DeclKey>>,
 }
 
 impl DeferredInferenceDriver<'_> {
@@ -5581,11 +5581,11 @@ fn resolve_deferred_properties(
         })
         .map(|entry| (entry.key, entry))
         .collect::<HashMap<_, _>>();
-    let mut by_name: HashMap<String, DeclKey> = HashMap::new();
-    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut by_member: HashMap<(TypeName, String), DeclKey> = HashMap::new();
-    let mut ambiguous_members: std::collections::HashSet<(TypeName, String)> =
-        std::collections::HashSet::new();
+    let mut by_name: HashMap<String, DeclKey> = HashMap::default();
+    let mut ambiguous: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
+    let mut by_member: HashMap<(TypeName, String), DeclKey> = HashMap::default();
+    let mut ambiguous_members: crate::fx_hash::HashSet<(TypeName, String)> =
+        crate::fx_hash::HashSet::default();
     for entry in deferred {
         if !resolve_local_declarations
             && declaration_is_body_local(&files[entry.file_index as usize], DeclId(entry.key.decl))
@@ -5631,11 +5631,12 @@ fn resolve_deferred_properties(
     }
     // Functions whose expression body the walk could not type. Their return reads as undetermined,
     // and a property initialized by a call to one needs it resolved first.
-    let mut undetermined_functions: HashMap<String, (u32, DeclId)> = HashMap::new();
+    let mut undetermined_functions: HashMap<String, (u32, DeclId)> = HashMap::default();
     let mut undetermined_function_decls: Vec<(u32, DeclId)> = Vec::new();
-    let mut undetermined_functions_by_name: HashMap<String, Vec<(u32, DeclId)>> = HashMap::new();
-    let mut ambiguous_functions: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut undetermined_functions_by_name: HashMap<String, Vec<(u32, DeclId)>> =
+        HashMap::default();
+    let mut ambiguous_functions: crate::fx_hash::HashSet<String> =
+        crate::fx_hash::HashSet::default();
     for (file_index, file) in files.iter().enumerate() {
         for &declaration in &file.decls {
             let Decl::Fun(function) = file.decl(declaration) else {
@@ -5668,12 +5669,13 @@ fn resolve_deferred_properties(
     // The same for MEMBER functions, keyed by the declaring class. The key comes from the table's
     // own record of which declaration produced each classifier, so a nested or same-named class
     // cannot be confused with another file's.
-    let mut undetermined_methods: HashMap<(TypeName, String), (u32, DeclId, u32)> = HashMap::new();
+    let mut undetermined_methods: HashMap<(TypeName, String), (u32, DeclId, u32)> =
+        HashMap::default();
     let mut undetermined_method_decls: Vec<UndeterminedMethod> = Vec::new();
     let mut undetermined_methods_by_name: HashMap<(TypeName, String), Vec<UndeterminedMethod>> =
-        HashMap::new();
-    let mut ambiguous_methods: std::collections::HashSet<(TypeName, String)> =
-        std::collections::HashSet::new();
+        HashMap::default();
+    let mut ambiguous_methods: crate::fx_hash::HashSet<(TypeName, String)> =
+        crate::fx_hash::HashSet::default();
     for (internal, signature) in &table.classes {
         let Some(declaration) = signature.source_decl else {
             continue;
@@ -5776,8 +5778,8 @@ fn resolve_deferred_properties(
     }
     let engine = TypeEngine::new();
     let source_order = SourceOrderIndex::of(files);
-    let rejected_reads = std::cell::RefCell::new(HashMap::new());
-    let recursive_dependents = std::cell::RefCell::new(std::collections::HashSet::new());
+    let rejected_reads = std::cell::RefCell::new(HashMap::default());
+    let recursive_dependents = std::cell::RefCell::new(crate::fx_hash::HashSet::default());
     let resolutions = {
         let driver = DeferredInferenceDriver {
             files,
@@ -7612,9 +7614,9 @@ pub struct TypeInfo {
     /// References whose value must implement Kotlin's reflection interfaces. This decision is
     /// recorded when the natural/expected reflection type is selected and survives later expected-
     /// function rechecks of the same parser expression.
-    reflective_callable_references: std::collections::HashSet<ExprId>,
+    reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
     /// `when`s the checker proved exhaustive, by an `else` or by covering their subject.
-    exhaustive_whens: std::collections::HashSet<ExprId>,
+    exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
     /// Complete numeric equality plans for subject-form `when` conditions after earlier failed type
     /// tests. Keyed by the condition expression.
     when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
@@ -7645,7 +7647,7 @@ pub struct TypeInfo {
     /// Local classifiers actually entered through their lexical statement path during this
     /// bounded check. An empty capture list is still semantically meaningful, so capture maps
     /// alone cannot identify every checked local declaration that must be published to FIR.
-    pub(crate) checked_local_class_declarations: std::collections::HashSet<DeclId>,
+    pub(crate) checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     /// Stable semantic identities of body-local classifiers checked in the active Pass-2 unit.
     /// Interfaces have no constructor result from which publication could recover this identity;
     /// carrying the already-selected classifier is therefore the uniform declaration handoff.
@@ -7667,7 +7669,7 @@ pub struct TypeInfo {
     /// never reinterpret a source label.
     pub stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     pub expr_return_targets: HashMap<ExprId, ReturnTarget>,
-    discarded_exprs: std::collections::HashSet<ExprId>,
+    discarded_exprs: crate::fx_hash::HashSet<ExprId>,
     /// The RESOLVED type of a `val`/`var` local that carries an explicit type annotation, keyed by the
     /// `Stmt::Local`. The lowerer reuses this instead of re-resolving the annotation — so a library type
     /// the checker resolves through imports (`var res: Result<T>? = null`) keeps its (value-)class type
@@ -7748,7 +7750,7 @@ pub struct TypeInfo {
     /// inspection consumers. Emission analysis leaves this shared map empty because parser
     /// coordinates must not survive Pass 2.
     inspection_source_declarations: std::sync::Arc<HashMap<crate::fir::DeclarationId, (u32, u32)>>,
-    used_extension_receivers: std::collections::HashSet<(u32, u32)>,
+    used_extension_receivers: crate::fx_hash::HashSet<(u32, u32)>,
     /// Synthetic operator calls selected while checking a source expression that does not itself contain
     /// a call node for every desugared operation. Example: reference `x in a..b` resolves both
     /// `a.rangeTo(b)` and `<range>.contains(x)` from one `Expr::InRange`; lowering reads these selections
@@ -7829,7 +7831,7 @@ pub struct TypeInfo {
     /// arguments even though they share the same erased JVM array. Treating such an argument as an
     /// element nests the array and can fail only at runtime. Expression ids are file-unique, so the
     /// selected argument itself is a provider-neutral handoff for every callable origin.
-    pub resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
+    pub resolved_whole_array_vararg_args: crate::fx_hash::HashSet<ExprId>,
     /// Expressions whose PLATFORM type (`T!`) the source commits to a declared non-null type — a
     /// property/local with an explicit type, a value argument, a return, an assignment. kotlinc
     /// guards exactly these positions with a not-null assertion so a Java null fails where it enters
@@ -7838,7 +7840,7 @@ pub struct TypeInfo {
     /// says, is lowering's decision (a call result names its callee, a plain value read has no name).
     pub platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
     /// Calls whose value carries kotlinc's `EnhancedNullability` (see `enhanced_values`).
-    pub enhanced_values: std::collections::HashSet<ExprId>,
+    pub enhanced_values: crate::fx_hash::HashSet<ExprId>,
     /// The calls each interface delegation's forwarders make on the delegate value, keyed by that
     /// value; see [`interface_delegate_calls`].
     pub interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
@@ -8764,7 +8766,7 @@ impl TypeInfo {
     /// Expression ids whose SYNTHETIC operator target is a `suspend` callee — `a < b` desugared to
     /// `compareTo`, a `for`-loop `iterator`/`next`, and friends. These have no call node of their own,
     /// so a scan over call shapes cannot reach them.
-    pub fn suspending_operator_exprs(&self) -> std::collections::HashSet<ExprId> {
+    pub fn suspending_operator_exprs(&self) -> crate::fx_hash::HashSet<ExprId> {
         self.resolved_operator_calls
             .iter()
             .filter(|(_, call)| call.suspends())
@@ -8773,7 +8775,7 @@ impl TypeInfo {
     }
     /// Statement ids whose synthetic operator target is a `suspend` callee — `b[i] = v` (`set`) in the
     /// operator map, `b += v` (`plusAssign`) in the statement-lowering map.
-    pub fn suspending_operator_stmts(&self) -> std::collections::HashSet<StmtId> {
+    pub fn suspending_operator_stmts(&self) -> crate::fx_hash::HashSet<StmtId> {
         self.resolved_stmt_operator_calls
             .iter()
             .filter(|(_, call)| call.suspends())
@@ -9869,14 +9871,14 @@ struct Wanted {
 /// `(I)I`, not `(Object)Object`); every other parameter erases to `java/lang/Object`.
 #[derive(Default, Clone)]
 pub struct TParams {
-    erasure: std::collections::HashMap<String, Ty>,
+    erasure: crate::fx_hash::HashMap<String, Ty>,
     /// The subset declared `reified` (only an `inline fun` may). A class literal `T::class` is
     /// valid only on one of these. Kept HERE rather than beside the parameters so the two cannot
     /// Bounds BEYOND the first, for a parameter declared with several (`where T : A, T : B`). Kotlin
     /// gives such a parameter an INTERSECTION bound; `Ty::TyParam` carries a single one — the erasure,
     /// which is the FIRST, matching kotlinc's JVM rule. Member lookup consults these so a member
     /// declared only on a later bound still resolves.
-    extra_bounds: std::collections::HashMap<String, Vec<Ty>>,
+    extra_bounds: crate::fx_hash::HashMap<String, Vec<Ty>>,
 }
 
 impl TParams {
@@ -9978,7 +9980,7 @@ impl TParams {
                 // (`<T1 : C, T2 : T1>`): follow the chain to the first bound that is a real
                 // class/primitive so `T2` erases to `C`, not `Any`. Cycle-guarded (`<A : B, B : A>`).
                 let mut cur = n.as_str();
-                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                let mut seen: crate::fx_hash::HashSet<&str> = crate::fx_hash::HashSet::default();
                 let erased = loop {
                     let b = bounds.iter().find_map(|(bn, b)| (bn == cur).then_some(b));
                     match b {
@@ -10072,7 +10074,7 @@ impl TParams {
         bounds: &[(String, TypeRef)],
     ) -> Option<Ty> {
         let mut current = name;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         loop {
             if !seen.insert(current) {
                 return None;
@@ -10092,7 +10094,7 @@ impl TParams {
                 continue;
             }
             let mut erased = self.erasure.get(&bound.name).copied()?;
-            let mut bound_names = std::collections::HashSet::new();
+            let mut bound_names = crate::fx_hash::HashSet::default();
             while let Ty::TyParam(parameter, upper) = erased {
                 if !bound_names.insert(parameter) {
                     return None;
@@ -10131,7 +10133,7 @@ impl TParams {
             bounds: &[(String, TypeRef)],
             enclosing: &dyn Fn(&str) -> Option<Ty>,
             resolve: &dyn Fn(&str) -> Option<TypeName>,
-            visiting: &mut std::collections::HashSet<String>,
+            visiting: &mut crate::fx_hash::HashSet<String>,
         ) -> Ty {
             tparam_bound_semantic_with(bound, resolve, &mut |candidate| {
                 if let Some(ty) = enclosing(candidate) {
@@ -10151,7 +10153,7 @@ impl TParams {
             bounds: &[(String, TypeRef)],
             resolve: &dyn Fn(&str) -> Option<TypeName>,
             enclosing: &dyn Fn(&str) -> Option<Ty>,
-            visiting: &mut std::collections::HashSet<String>,
+            visiting: &mut crate::fx_hash::HashSet<String>,
         ) -> Ty {
             let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
             if !visiting.insert(name.to_string()) {
@@ -10201,7 +10203,7 @@ impl TParams {
                                 bounds,
                                 resolve,
                                 enclosing,
-                                &mut std::collections::HashSet::new(),
+                                &mut crate::fx_hash::HashSet::default(),
                             ),
                         )
                     } else {
@@ -10211,7 +10213,7 @@ impl TParams {
                             bounds,
                             enclosing,
                             resolve,
-                            &mut std::collections::HashSet::new(),
+                            &mut crate::fx_hash::HashSet::default(),
                         )
                     }
                 })
@@ -10258,7 +10260,7 @@ impl TParams {
             .iter()
             .enumerate()
             .map(|(index, source)| (source.as_str(), key(index, source)))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<crate::fx_hash::HashMap<_, _>>();
         let mut out = self.clone();
         for source in names {
             out.insert_binding(
@@ -10349,7 +10351,7 @@ pub(crate) fn declared_tparam_semantic_bound(
     resolve: &dyn Fn(&str) -> Option<TypeName>,
 ) -> Option<Ty> {
     let mut current = name;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     loop {
         let bound = bounds
             .iter()
@@ -10386,7 +10388,7 @@ fn declared_tparam_semantic_bounds(
         names: &[String],
         bounds: &[(String, TypeRef)],
         resolve: &dyn Fn(&str) -> Option<TypeName>,
-        visiting: &mut std::collections::HashSet<String>,
+        visiting: &mut crate::fx_hash::HashSet<String>,
         out: &mut Vec<Ty>,
     ) {
         if !visiting.insert(current.to_string()) {
@@ -10420,7 +10422,7 @@ fn declared_tparam_semantic_bounds(
         names,
         bounds,
         resolve,
-        &mut std::collections::HashSet::new(),
+        &mut crate::fx_hash::HashSet::default(),
         &mut out,
     );
     out
@@ -10594,7 +10596,7 @@ impl CheckerScope<'_> {
     }
 
     fn lexical_tparam_identities(&self) -> Vec<String> {
-        let mut identities = std::collections::HashSet::new();
+        let mut identities = crate::fx_hash::HashSet::default();
         for rung in self.classifier_rungs() {
             rung.own_bindings(Ns::Classifier, |_, binding| {
                 if let ScopeBinding::TypeParam { bound, .. } = binding {
@@ -10803,10 +10805,10 @@ fn semantic_member_ext_funs_in(
     name: &str,
 ) -> (Vec<MemberExtFunSig>, HashMap<String, Ty>) {
     let Some(owner) = owner_ty.obj_internal() else {
-        return (Vec::new(), HashMap::new());
+        return (Vec::new(), HashMap::default());
     };
     let Some(declaration) = source.classifier(owner) else {
-        return (Vec::new(), HashMap::new());
+        return (Vec::new(), HashMap::default());
     };
     let class_bindings = declaration
         .type_params
@@ -10831,7 +10833,7 @@ fn applied_symbol_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(TypeNam
         return Vec::new();
     };
     let mut pending = std::collections::VecDeque::from([(root_owner, root, 0)]);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     let mut hierarchy = Vec::new();
     while let Some((owner, applied, depth)) = pending.pop_front() {
         if !seen.insert(owner) {
@@ -11066,7 +11068,7 @@ fn unify_member_extension_slot(
 }
 
 fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while seen.insert(ty) {
         let next = crate::symbol_resolver::ty_subst_keep_unbound(ty, bindings);
         if next == ty {
@@ -13871,7 +13873,7 @@ impl<'a> Checker<'a> {
         plan: &ConstructionExpectations,
         actuals: &[Ty],
     ) -> crate::symbol_resolver::GSigBinds {
-        let mut binds = crate::symbol_resolver::GSigBinds::new();
+        let mut binds = crate::symbol_resolver::GSigBinds::default();
         if plan.type_params.is_empty() {
             return binds;
         }
@@ -13879,7 +13881,7 @@ impl<'a> Checker<'a> {
         // merge: an argument whose own type is still open (`Wrapper("x")` for
         // `Store<RootDto, …>`) must not widen what the call site already establishes. Apply both
         // after argument inference, with explicit source spelling last.
-        let mut expected_bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut expected_bindings = crate::symbol_resolver::GSigBinds::default();
         {
             let source = self.fed_source();
             crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
@@ -13891,7 +13893,7 @@ impl<'a> Checker<'a> {
                 &mut expected_bindings,
             );
         }
-        let mut explicit = crate::symbol_resolver::GSigBinds::new();
+        let mut explicit = crate::symbol_resolver::GSigBinds::default();
         if let Some(refs) = self.file.call_type_args.get(&call.0).cloned() {
             for (name, type_ref) in plan.type_params.iter().zip(refs.iter()) {
                 let ty = self.type_ref_ty_silent(scope, type_ref);
@@ -14005,9 +14007,9 @@ impl<'a> Checker<'a> {
             expected,
             actual,
         );
-        let mut shadowed_formals = std::collections::HashSet::new();
+        let mut shadowed_formals = crate::fx_hash::HashSet::default();
         for constraints in self.postponed_call_constraints.iter().rev() {
-            let mut declared_bounds = HashMap::new();
+            let mut declared_bounds = HashMap::default();
             collect_declared_bounds(expected, &constraints.formals, &mut declared_bounds);
             collect_declared_bounds(actual, &constraints.formals, &mut declared_bounds);
 
@@ -16199,7 +16201,7 @@ impl<'a> Checker<'a> {
                 // Innermost first. A constructor property stored before this expression shadows
                 // its parameter; the nearer property is not a lexical capture, and the parameter
                 // behind it must not be captured either.
-                let mut property_shadows = std::collections::HashSet::new();
+                let mut property_shadows = crate::fx_hash::HashSet::default();
                 scope.visit_bindings(Ns::Value, |name, binding| {
                     let Some(local) = binding.value() else { return };
                     // A dispatch property is reached through the enclosing instance, not captured
@@ -16550,7 +16552,7 @@ impl<'a> Checker<'a> {
                     };
                     let expected = self.apply_postponed_call_bindings(capture.stored_ty());
                     let expected = if expected.mentions_ty_param() {
-                        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                        let mut bindings = crate::symbol_resolver::GSigBinds::default();
                         crate::symbol_resolver::unify_ty(expected, actual, &mut bindings);
                         crate::symbol_resolver::ty_subst_keep_unbound(expected, &bindings)
                     } else {
@@ -19200,7 +19202,7 @@ impl<'a> Checker<'a> {
                         .as_ref()
                         .and_then(|signature| signature.generic_sig.as_ref())
                     {
-                        let mut constraints = HashMap::<String, Vec<CallArgKind>>::new();
+                        let mut constraints = HashMap::<String, Vec<CallArgKind>>::default();
                         for (source, &argument) in args.iter().enumerate() {
                             let Some(value) = folded_integer_literal(self.file, argument) else {
                                 continue;
@@ -19303,7 +19305,7 @@ impl<'a> Checker<'a> {
                 } else if let Some(generic) =
                     known_sig.as_ref().and_then(|sig| sig.generic_sig.as_ref())
                 {
-                    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                    let mut bindings = crate::symbol_resolver::GSigBinds::default();
                     if let Some(type_arguments) = self.file.call_type_args.get(&call.0).cloned() {
                         for (formal, argument) in generic.formals.iter().zip(type_arguments) {
                             if argument.is_inference_placeholder() {
@@ -19376,7 +19378,7 @@ impl<'a> Checker<'a> {
                     }
                     bindings
                 } else {
-                    crate::symbol_resolver::GSigBinds::new()
+                    crate::symbol_resolver::GSigBinds::default()
                 };
                 let mut postponed_constraints = PostponedCallConstraints::default();
                 let toplevel_lambda_pts: Option<Vec<Vec<Ty>>> = toplevel_lambda_shape
@@ -20727,8 +20729,8 @@ impl<'a> Checker<'a> {
                     .keys()
                     .chain(postponed_constraints.upper.keys())
                     .cloned()
-                    .collect::<std::collections::HashSet<_>>();
-                let mut postponed_solutions = crate::symbol_resolver::GSigBinds::new();
+                    .collect::<crate::fx_hash::HashSet<_>>();
+                let mut postponed_solutions = crate::symbol_resolver::GSigBinds::default();
                 for formal in constrained_formals {
                     let upper = postponed_constraints
                         .upper
@@ -21398,7 +21400,7 @@ impl<'a> Checker<'a> {
                         CallableCandidateSelection::Selected(Box::new(SelectedCallable {
                             info,
                             bindings,
-                            intersection_bindings: HashMap::new(),
+                            intersection_bindings: HashMap::default(),
                             candidate_index: None,
                         }))
                     })
@@ -23394,7 +23396,7 @@ impl<'a> Checker<'a> {
                 .collect(),
         );
         // Collect outer local names (everything currently in scope that isn't one of f's params).
-        let own_params: std::collections::HashSet<String> =
+        let own_params: crate::fx_hash::HashSet<String> =
             f.params.iter().map(|p| p.name.clone()).collect();
         // The nearest binding wins. A member reached through the receiver hides an outer local of
         // the same spelling, including the constructor parameter a stored property shadows.
@@ -23409,8 +23411,7 @@ impl<'a> Checker<'a> {
                 FunBody::None => None,
             };
             for n in &outer_names {
-                let single: std::collections::HashSet<String> =
-                    std::iter::once(n.clone()).collect();
+                let single: crate::fx_hash::HashSet<String> = std::iter::once(n.clone()).collect();
                 let used = body.is_some_and(|expression| {
                     local_fun_body_uses_any(self.file, expression, &single)
                 }) || f
@@ -24490,7 +24491,7 @@ fun after(): Int = 2
             .anonymous_object_classes
             .values()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let named = file
             .decls
             .iter()
@@ -24562,11 +24563,11 @@ val result = object { fun value(): String = captured }
             constructors: Vec::new(),
             hidden_member_properties: Default::default(),
             hidden_deprecated_callables: Default::default(),
-            declared_callables: HashMap::new(),
+            declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
-            constants: HashMap::new(),
+            constants: HashMap::default(),
             sam_eligible: false,
             callable_signature: None,
             callable_signatures: Vec::new(),
@@ -24684,7 +24685,7 @@ val result = object { fun value(): String = captured }
     fn classifier_import_resolution_ignores_callable_only_higher_precedence_candidates() {
         let resolved = classifier_from_imports(
             "Thing",
-            &HashMap::new(),
+            &HashMap::default(),
             &[
                 vec![crate::types::type_name("callable")].into(),
                 vec![crate::types::type_name("fallback")].into(),
@@ -24701,7 +24702,7 @@ val result = object { fun value(): String = captured }
     fn classifier_import_resolution_collapses_aliases_to_the_same_target() {
         let resolved = classifier_from_imports(
             "Thing",
-            &HashMap::new(),
+            &HashMap::default(),
             &[vec![
                 crate::types::type_name("alias_a"),
                 crate::types::type_name("alias_b"),
@@ -24719,7 +24720,7 @@ val result = object { fun value(): String = captured }
     fn classifier_import_resolution_rejects_distinct_same_level_candidates() {
         let resolved = classifier_from_imports(
             "Thing",
-            &HashMap::new(),
+            &HashMap::default(),
             &[vec![
                 crate::types::type_name("distinct_a"),
                 crate::types::type_name("distinct_b"),
@@ -27304,7 +27305,7 @@ fun box(): String {
                         (
                             crate::types::TypeNameList::new(),
                             Vec::new(),
-                            HashMap::from([(
+                            HashMap::from_iter([(
                                 "prop".to_string(),
                                 crate::libraries::Callables::Properties(
                                     crate::libraries::PropertySet {
@@ -27322,7 +27323,7 @@ fun box(): String {
                         (
                             vec![foo].into(),
                             vec![Ty::obj_args_name(foo, &[Ty::String])],
-                            HashMap::new(),
+                            HashMap::default(),
                             crate::types::TypeParameters::default(),
                         )
                     };
@@ -27346,7 +27347,7 @@ fun box(): String {
                         .unwrap_or_default(),
                     members: vec![],
                     companion: vec![],
-                    constants: HashMap::new(),
+                    constants: HashMap::default(),
                     sam_eligible: false,
                     callable_signature: None,
                     callable_signatures: Vec::new(),
@@ -27477,7 +27478,7 @@ fun box(): String {
                     declared_callable_order: names.iter().map(|name| (*name).to_string()).collect(),
                     members: vec![],
                     companion,
-                    constants: HashMap::new(),
+                    constants: HashMap::default(),
                     sam_eligible: false,
                     callable_signature: None,
                     callable_signatures: Vec::new(),
@@ -32099,7 +32100,13 @@ pub(crate) fn semantic_common_supertype(
     a: Ty,
     b: Ty,
 ) -> Option<Ty> {
-    semantic_common_supertype_inner(source, oracle, a, b, &mut std::collections::HashSet::new())
+    semantic_common_supertype_inner(
+        source,
+        oracle,
+        a,
+        b,
+        &mut crate::fx_hash::HashSet::default(),
+    )
 }
 
 /// Semantic non-null form used by `!!`, Elvis, and signature constraints. A bare type parameter
@@ -32114,7 +32121,7 @@ pub(crate) fn semantic_common_supertype_inner(
     oracle: &dyn crate::assignable::TypeOracle,
     a: Ty,
     b: Ty,
-    visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    visiting: &mut crate::fx_hash::HashSet<(Ty, Ty)>,
 ) -> Option<Ty> {
     if a == b {
         return Some(a);
@@ -32304,7 +32311,7 @@ pub(crate) fn applied_common_supertype(
         oracle,
         left,
         right,
-        &mut std::collections::HashSet::new(),
+        &mut crate::fx_hash::HashSet::default(),
     )
 }
 
@@ -32313,7 +32320,7 @@ pub(crate) fn applied_common_supertype_inner(
     oracle: &dyn crate::assignable::TypeOracle,
     left: Ty,
     right: Ty,
-    visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    visiting: &mut crate::fx_hash::HashSet<(Ty, Ty)>,
 ) -> Option<Ty> {
     if !visiting.insert((left, right)) {
         return None;
@@ -32328,7 +32335,7 @@ pub(crate) fn applied_common_supertype_unguarded(
     oracle: &dyn crate::assignable::TypeOracle,
     left: Ty,
     right: Ty,
-    visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    visiting: &mut crate::fx_hash::HashSet<(Ty, Ty)>,
 ) -> Option<Ty> {
     // Nullability does not change a classifier's hierarchy. Restore the operands' result
     // nullability after finding their common classifier.
@@ -32355,7 +32362,7 @@ pub(crate) fn applied_common_supertype_unguarded(
                 .skip(1)
                 .map(|(ancestor, _, _)| ancestor)
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let most_specific = common
         .iter()
         .copied()
@@ -32381,7 +32388,7 @@ pub(crate) fn join_applied_classifier(
     owner: TypeName,
     left: Ty,
     right: Ty,
-    visiting: &mut std::collections::HashSet<(Ty, Ty)>,
+    visiting: &mut crate::fx_hash::HashSet<(Ty, Ty)>,
 ) -> Option<Ty> {
     if left == right {
         return Some(left.non_null());
@@ -32402,8 +32409,8 @@ pub(crate) fn join_applied_classifier(
         return None;
     }
     let mut arguments = Vec::with_capacity(left_args.len());
-    let mut left_formals = crate::symbol_resolver::GSigBinds::new();
-    let mut right_formals = crate::symbol_resolver::GSigBinds::new();
+    let mut left_formals = crate::symbol_resolver::GSigBinds::default();
+    let mut right_formals = crate::symbol_resolver::GSigBinds::default();
     for (index, (&left, &right)) in left_args.iter().zip(right_args).enumerate() {
         let declared_bound = classifier
             .type_param_bounds
@@ -32819,14 +32826,16 @@ fn member_extension_property(
                         }),
                 );
             }
-            let class_bindings = source.classifier(owner).map_or_else(HashMap::new, |class| {
-                class
-                    .type_params
-                    .iter()
-                    .cloned()
-                    .zip(owner_ty.type_args().iter().copied())
-                    .collect()
-            });
+            let class_bindings = source
+                .classifier(owner)
+                .map_or_else(HashMap::default, |class| {
+                    class
+                        .type_params
+                        .iter()
+                        .cloned()
+                        .zip(owner_ty.type_args().iter().copied())
+                        .collect()
+                });
             for sig in &declarations {
                 let mut applicability_bindings = class_bindings.clone();
                 crate::symbol_resolver::unify_ty(
@@ -33234,7 +33243,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         demand_rejects: None,
         inference_only: false,
         inference_incomplete: false,
-        member_bound_retries: std::collections::HashSet::new(),
+        member_bound_retries: crate::fx_hash::HashSet::default(),
         stable_receiver_callable_cache: Default::default(),
         stable_callable_shape_cache: Default::default(),
         stable_federated_symbol_cache: Default::default(),
@@ -33271,25 +33280,25 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expr_visits: vec![0; file.expr_arena.len()],
         #[cfg(feature = "trace")]
         expr_stack: Vec::new(),
-        callable_reference_types: HashMap::new(),
-        reflective_callable_references: std::collections::HashSet::new(),
-        exhaustive_whens: std::collections::HashSet::new(),
-        when_subject_numeric_equalities: HashMap::new(),
-        resolved_type_tys: HashMap::new(),
-        unresolved_type_segments: HashMap::new(),
+        callable_reference_types: HashMap::default(),
+        reflective_callable_references: crate::fx_hash::HashSet::default(),
+        exhaustive_whens: crate::fx_hash::HashSet::default(),
+        when_subject_numeric_equalities: HashMap::default(),
+        resolved_type_tys: HashMap::default(),
+        unresolved_type_segments: HashMap::default(),
         active_lexical_policies: Vec::new(),
-        lexical_policy_facts: HashMap::new(),
+        lexical_policy_facts: HashMap::default(),
         command_line_opt_ins: std::cell::OnceCell::new(),
-        resolved_type_bounds: HashMap::new(),
-        resolved_declaration_types: HashMap::new(),
-        resolved_declaration_type_parameters: HashMap::new(),
-        class_literal_targets: HashMap::new(),
-        applied_annotations: HashMap::new(),
-        bound_annotation_identities: HashMap::new(),
+        resolved_type_bounds: HashMap::default(),
+        resolved_declaration_types: HashMap::default(),
+        resolved_declaration_type_parameters: HashMap::default(),
+        class_literal_targets: HashMap::default(),
+        applied_annotations: HashMap::default(),
+        bound_annotation_identities: HashMap::default(),
         ret_ty: Ty::Unit,
-        type_parameter_owners: HashMap::new(),
+        type_parameter_owners: HashMap::default(),
         expected: None,
-        callable_reference_literal_constraints: HashMap::new(),
+        callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
         imports,
         import_levels,
@@ -33303,107 +33312,107 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         this_labels: Vec::new(),
         lexical_class_context: Vec::new(),
         classifier_header_owner: None,
-        exact_anonymous_class_roots: std::collections::HashSet::new(),
+        exact_anonymous_class_roots: crate::fx_hash::HashSet::default(),
         extension_receiver_labels: Vec::new(),
-        local_function_receivers: std::collections::HashSet::new(),
+        local_function_receivers: crate::fx_hash::HashSet::default(),
         field_ty: None,
         field_receiver_identity: None,
         in_script_body: false,
-        expr_lowers: HashMap::new(),
-        resolved_sam_conversions: HashMap::new(),
-        inferred_fun_rets: HashMap::new(),
-        inferred_ext_fun_rets: HashMap::new(),
-        inferred_method_rets: HashMap::new(),
-        inferred_source_member_rets: HashMap::new(),
-        inferred_stable_declaration_rets: HashMap::new(),
-        inferred_member_ext_fun_rets: HashMap::new(),
-        checked_local_properties: HashMap::new(),
-        checked_local_methods: HashMap::new(),
-        body_local_default_providers: HashMap::new(),
-        checked_local_constructors: HashMap::new(),
-        call_site_lexical_formals: HashMap::new(),
-        local_method_dependencies: HashMap::new(),
-        checking_local_method_dependencies: std::collections::HashSet::new(),
-        checked_local_method_dependencies: std::collections::HashSet::new(),
+        expr_lowers: HashMap::default(),
+        resolved_sam_conversions: HashMap::default(),
+        inferred_fun_rets: HashMap::default(),
+        inferred_ext_fun_rets: HashMap::default(),
+        inferred_method_rets: HashMap::default(),
+        inferred_source_member_rets: HashMap::default(),
+        inferred_stable_declaration_rets: HashMap::default(),
+        inferred_member_ext_fun_rets: HashMap::default(),
+        checked_local_properties: HashMap::default(),
+        checked_local_methods: HashMap::default(),
+        body_local_default_providers: HashMap::default(),
+        checked_local_constructors: HashMap::default(),
+        call_site_lexical_formals: HashMap::default(),
+        local_method_dependencies: HashMap::default(),
+        checking_local_method_dependencies: crate::fx_hash::HashSet::default(),
+        checked_local_method_dependencies: crate::fx_hash::HashSet::default(),
         rechecks_completed_local_methods: false,
-        resolved_body_local_supertypes: HashMap::new(),
-        body_local_type_aliases: HashMap::new(),
-        checked_local_supertypes: HashMap::new(),
-        stmt_lowers: HashMap::new(),
-        stmt_return_targets: HashMap::new(),
-        expr_return_targets: HashMap::new(),
-        discarded_exprs: std::collections::HashSet::new(),
-        narrowed_read_base: HashMap::new(),
-        declined_read_targets: HashMap::new(),
-        silent_error_exprs: std::collections::HashSet::new(),
-        local_decl_types: HashMap::new(),
-        property_decl_types: HashMap::new(),
-        explicit_backing_field_types: HashMap::new(),
-        contextual_constructor_signatures: HashMap::new(),
-        resolved_call_type_args: HashMap::new(),
-        resolved_call_type_argument_bounds: HashMap::new(),
-        inferred_expression_intersections: HashMap::new(),
-        selected_value_smartcasts: HashMap::new(),
-        selected_numeric_conversions: HashMap::new(),
-        selected_function_value_conversions: HashMap::new(),
-        narrowed_this_member: HashMap::new(),
-        resolved_calls: HashMap::new(),
-        unbound_value_lambda_call_formals: HashMap::new(),
+        resolved_body_local_supertypes: HashMap::default(),
+        body_local_type_aliases: HashMap::default(),
+        checked_local_supertypes: HashMap::default(),
+        stmt_lowers: HashMap::default(),
+        stmt_return_targets: HashMap::default(),
+        expr_return_targets: HashMap::default(),
+        discarded_exprs: crate::fx_hash::HashSet::default(),
+        narrowed_read_base: HashMap::default(),
+        declined_read_targets: HashMap::default(),
+        silent_error_exprs: crate::fx_hash::HashSet::default(),
+        local_decl_types: HashMap::default(),
+        property_decl_types: HashMap::default(),
+        explicit_backing_field_types: HashMap::default(),
+        contextual_constructor_signatures: HashMap::default(),
+        resolved_call_type_args: HashMap::default(),
+        resolved_call_type_argument_bounds: HashMap::default(),
+        inferred_expression_intersections: HashMap::default(),
+        selected_value_smartcasts: HashMap::default(),
+        selected_numeric_conversions: HashMap::default(),
+        selected_function_value_conversions: HashMap::default(),
+        narrowed_this_member: HashMap::default(),
+        resolved_calls: HashMap::default(),
+        unbound_value_lambda_call_formals: HashMap::default(),
         postponed_diagnostics: PostponedDiagnostics::default(),
-        eager_eliminated_members: HashMap::new(),
-        implicit_receiver_selections: HashMap::new(),
-        implicit_receiver_identities: HashMap::new(),
-        read_flow_roots: HashMap::new(),
-        read_callable_reference_types: HashMap::new(),
-        anonymous_super_read_provenance: HashMap::new(),
-        stable_property_reads: std::collections::HashSet::new(),
+        eager_eliminated_members: HashMap::default(),
+        implicit_receiver_selections: HashMap::default(),
+        implicit_receiver_identities: HashMap::default(),
+        read_flow_roots: HashMap::default(),
+        read_callable_reference_types: HashMap::default(),
+        anonymous_super_read_provenance: HashMap::default(),
+        stable_property_reads: crate::fx_hash::HashSet::default(),
         implicit_receiver_identity_uses: receiver_uses::ReceiverUses::default(),
-        resolved_source_calls: HashMap::new(),
+        resolved_source_calls: HashMap::default(),
         extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
-        resolved_operator_calls: HashMap::new(),
-        resolved_builtin_operator_accesses: HashMap::new(),
-        resolved_in_range_comparisons: HashMap::new(),
-        resolved_stmt_operator_calls: HashMap::new(),
-        resolved_stmt_builtin_operator_accesses: HashMap::new(),
-        resolved_stmt_operator_arg_slots: HashMap::new(),
+        resolved_operator_calls: HashMap::default(),
+        resolved_builtin_operator_accesses: HashMap::default(),
+        resolved_in_range_comparisons: HashMap::default(),
+        resolved_stmt_operator_calls: HashMap::default(),
+        resolved_stmt_builtin_operator_accesses: HashMap::default(),
+        resolved_stmt_operator_arg_slots: HashMap::default(),
         indexed_operator_ambiguous: false,
-        resolved_inc_dec: HashMap::new(),
-        resolved_index_store_get_returns: HashMap::new(),
-        resolved_destructure_components: HashMap::new(),
-        iterator_protocols: HashMap::new(),
-        for_range_iterator_protocols: HashMap::new(),
+        resolved_inc_dec: HashMap::default(),
+        resolved_index_store_get_returns: HashMap::default(),
+        resolved_destructure_components: HashMap::default(),
+        iterator_protocols: HashMap::default(),
+        for_range_iterator_protocols: HashMap::default(),
         iteration_plans: IterationPlans::default(),
-        resolved_constructors: HashMap::new(),
-        resolved_enum_entry_constructors: HashMap::new(),
-        resolved_ctor_delegations: HashMap::new(),
-        resolved_primary_ctor_delegations: HashMap::new(),
-        resolved_super_calls: HashMap::new(),
-        resolved_default_member_calls: HashMap::new(),
-        resolved_constants: HashMap::new(),
-        constant_integer_coercion_reads: std::collections::HashSet::new(),
-        resolved_constant_receivers: HashMap::new(),
-        resolved_enum_entries: HashMap::new(),
-        resolved_call_arg_slots: HashMap::new(),
-        resolved_library_default_literals: HashMap::new(),
-        resolved_whole_array_vararg_args: std::collections::HashSet::new(),
-        platform_narrowings: HashMap::new(),
+        resolved_constructors: HashMap::default(),
+        resolved_enum_entry_constructors: HashMap::default(),
+        resolved_ctor_delegations: HashMap::default(),
+        resolved_primary_ctor_delegations: HashMap::default(),
+        resolved_super_calls: HashMap::default(),
+        resolved_default_member_calls: HashMap::default(),
+        resolved_constants: HashMap::default(),
+        constant_integer_coercion_reads: crate::fx_hash::HashSet::default(),
+        resolved_constant_receivers: HashMap::default(),
+        resolved_enum_entries: HashMap::default(),
+        resolved_call_arg_slots: HashMap::default(),
+        resolved_library_default_literals: HashMap::default(),
+        resolved_whole_array_vararg_args: crate::fx_hash::HashSet::default(),
+        platform_narrowings: HashMap::default(),
         enhanced_locals: Default::default(),
-        interface_delegate_calls: HashMap::new(),
-        synthetic_ext_calls: HashMap::new(),
-        delegate_getvalue_targets: HashMap::new(),
-        delegate_setvalue_targets: HashMap::new(),
-        delegate_provide_targets: HashMap::new(),
+        interface_delegate_calls: HashMap::default(),
+        synthetic_ext_calls: HashMap::default(),
+        delegate_getvalue_targets: HashMap::default(),
+        delegate_setvalue_targets: HashMap::default(),
+        delegate_provide_targets: HashMap::default(),
         delegate_property_reference_type: None,
-        super_ctor_params: HashMap::new(),
-        context_args: HashMap::new(),
-        fn_reassigned: std::collections::HashSet::new(),
+        super_ctor_params: HashMap::default(),
+        context_args: HashMap::default(),
+        fn_reassigned: crate::fx_hash::HashSet::default(),
         fn_closure_reassigned: Vec::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
         public_api_inline_depth: 0,
-        public_inline_access_calls: HashSet::new(),
-        argument_lambda_inlining: HashMap::new(),
+        public_inline_access_calls: HashSet::default(),
+        argument_lambda_inlining: HashMap::default(),
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
@@ -33413,21 +33422,21 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         unreachable_statement_depth: 0,
         discover_anonymous_captures: false,
         discovers_captures_at_construction: false,
-        finalized_anonymous_captures: std::collections::HashSet::new(),
-        discovered_anonymous_captures: HashMap::new(),
-        anonymous_receiver_capture_fields: HashMap::new(),
-        discovered_anonymous_super_forwards: HashMap::new(),
-        discovered_local_class_captures: HashMap::new(),
-        discovered_local_class_capture_bindings: HashMap::new(),
-        finalized_local_class_captures: std::collections::HashSet::new(),
-        local_function_capture_bindings: HashMap::new(),
+        finalized_anonymous_captures: crate::fx_hash::HashSet::default(),
+        discovered_anonymous_captures: HashMap::default(),
+        anonymous_receiver_capture_fields: HashMap::default(),
+        discovered_anonymous_super_forwards: HashMap::default(),
+        discovered_local_class_captures: HashMap::default(),
+        discovered_local_class_capture_bindings: HashMap::default(),
+        finalized_local_class_captures: crate::fx_hash::HashSet::default(),
+        local_function_capture_bindings: HashMap::default(),
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
         next_flow_identity: 0,
-        checked_local_class_declarations: std::collections::HashSet::new(),
-        checked_local_classifier_identities: HashMap::new(),
-        checked_local_classifier_type_arguments: HashMap::new(),
+        checked_local_class_declarations: crate::fx_hash::HashSet::default(),
+        checked_local_classifier_identities: HashMap::default(),
+        checked_local_classifier_type_arguments: HashMap::default(),
         signature_default_expression_depth: 0,
         anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
         capture_scope: None,
@@ -33435,7 +33444,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_depth: 0,
         return_allowed: true,
         lambda_returns: LambdaReturnScopes::default(),
-        lambda_body_results: HashMap::new(),
+        lambda_body_results: HashMap::default(),
     };
     if resolved_index.is_none() {
         let (annotations, arguments): (Vec<_>, Vec<_>) =
@@ -33494,7 +33503,7 @@ fn class_receiver_labels(
     // Extend the receiver tower from that semantic capture record so FIR receives the exact
     // multi-`this$0` depth; generated class spelling and source containment play no role here.
     let mut enclosing = current_internal;
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = crate::fx_hash::HashSet::default();
     while let Some(candidate) = enclosing.filter(|candidate| visited.insert(*candidate)) {
         if let Some(captured) = anonymous_enclosing_instance_classifier(symbols, candidate) {
             if !roots.contains(&captured) {
@@ -33717,9 +33726,9 @@ fn install_anonymous_object_captures(
 /// neither should grow an origin-specific AST walk that can drift as expression shapes are added.
 fn record_expression_targets(
     file: &File,
-    targets: &std::collections::HashSet<ExprId>,
+    targets: &crate::fx_hash::HashSet<ExprId>,
     roots: impl IntoIterator<Item = ExprId>,
-    discovered: &mut std::collections::HashSet<ExprId>,
+    discovered: &mut crate::fx_hash::HashSet<ExprId>,
 ) -> bool {
     let mut expressions = roots.into_iter().collect::<Vec<_>>();
     let mut statements = Vec::new();
@@ -33761,8 +33770,8 @@ fn record_expression_targets(
 fn record_function_capture_targets(
     file: &File,
     function: &FunDecl,
-    targets: &std::collections::HashSet<ExprId>,
-    discovered: &mut std::collections::HashSet<ExprId>,
+    targets: &crate::fx_hash::HashSet<ExprId>,
+    discovered: &mut crate::fx_hash::HashSet<ExprId>,
 ) -> bool {
     let mut roots = Vec::new();
     file.any_fun_expr(function, &mut |expression| {
@@ -33798,8 +33807,8 @@ impl ClassCapturePlan {
     fn for_class(
         file: &File,
         class: &ClassDecl,
-        targets: &std::collections::HashSet<ExprId>,
-        declaration_targets: &std::collections::HashSet<ExprId>,
+        targets: &crate::fx_hash::HashSet<ExprId>,
+        declaration_targets: &crate::fx_hash::HashSet<ExprId>,
     ) -> Self {
         let methods = class
             .methods
@@ -33811,7 +33820,7 @@ impl ClassCapturePlan {
                     .flat_map(|entry| entry.methods.iter()),
             )
             .collect::<Vec<_>>();
-        let mut method_targets = std::collections::HashSet::new();
+        let mut method_targets = crate::fx_hash::HashSet::default();
         let mut selected_methods = methods
             .iter()
             .map(|method| {
@@ -33840,9 +33849,9 @@ impl ClassCapturePlan {
 }
 
 struct CaptureDiscoveryScope {
-    declarations: std::collections::HashSet<DeclId>,
+    declarations: crate::fx_hash::HashSet<DeclId>,
     script_body: bool,
-    class_plans: std::collections::HashMap<DeclId, ClassCapturePlan>,
+    class_plans: crate::fx_hash::HashMap<DeclId, ClassCapturePlan>,
 }
 
 /// Anonymous-class bodies nested under an inline callable are ordinary emission bodies, but their
@@ -33854,15 +33863,15 @@ fn selected_inline_owned_anonymous_classes(
     file: &File,
     index: &crate::fir::ResolvedModuleIndex,
     active: Option<&crate::fir::ActiveSourceDeclarations>,
-    selected_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     anonymous: &AnonymousLexicalClassScope,
 ) -> Vec<(DeclId, Vec<crate::fir::DeclarationId>)> {
-    let mut selected = HashMap::<DeclId, Vec<crate::fir::DeclarationId>>::new();
+    let mut selected = HashMap::<DeclId, Vec<crate::fir::DeclarationId>>::default();
     for &declaration in selected_bodies {
         let mut current = Some(declaration);
         let mut anonymous_class = None;
         let mut inline_owners = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(candidate) = current {
             if !seen.insert(candidate) {
                 break;
@@ -33938,9 +33947,10 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
         .anonymous_object_classes
         .keys()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
-    let mut discovered = std::collections::HashSet::with_capacity(targets.len());
-    let mut class_plans = std::collections::HashMap::new();
+        .collect::<crate::fx_hash::HashSet<_>>();
+    let mut discovered =
+        crate::fx_hash::HashSet::with_capacity_and_hasher(targets.len(), Default::default());
+    let mut class_plans = crate::fx_hash::HashMap::default();
     let declarations = file
         .decls
         .iter()
@@ -33951,7 +33961,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
                 roots.push(expression);
                 false
             });
-            let mut declaration_targets = std::collections::HashSet::new();
+            let mut declaration_targets = crate::fx_hash::HashSet::default();
             let owns_target =
                 record_expression_targets(file, &targets, roots, &mut declaration_targets);
             if owns_target {
@@ -33977,7 +33987,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
                 .copied()
                 .unwrap_or(declaration)
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let script_body = file
         .script_body
         .is_some_and(|body| record_expression_targets(file, &targets, [body], &mut discovered));
@@ -33997,7 +34007,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
         class_plans: if complete {
             class_plans
         } else {
-            std::collections::HashMap::new()
+            crate::fx_hash::HashMap::default()
         },
     }
 }
@@ -34005,7 +34015,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
 #[derive(Default, Clone)]
 struct AnonymousLexicalClassScope {
     owners: HashMap<DeclId, DeclId>,
-    declarations: std::collections::HashSet<DeclId>,
+    declarations: crate::fx_hash::HashSet<DeclId>,
 }
 
 impl AnonymousLexicalClassScope {
@@ -34014,7 +34024,7 @@ impl AnonymousLexicalClassScope {
     /// central cycle protection prevents those phases from disagreeing on malformed/recovered input.
     fn declaration_chain(&self, declaration: DeclId) -> Vec<DeclId> {
         let mut chain = Vec::new();
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = crate::fx_hash::HashSet::default();
         let mut current = Some(declaration);
         while let Some(candidate) = current {
             if !visited.insert(candidate) {
@@ -34037,17 +34047,17 @@ fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
     if file.anonymous_object_classes.is_empty() {
         return AnonymousLexicalClassScope::default();
     }
-    let mut owners = HashMap::new();
+    let mut owners = HashMap::default();
     let declarations = file
         .anonymous_object_classes
         .values()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     let targets = file
         .anonymous_object_classes
         .keys()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     for &owner in &file.decls {
         if !matches!(file.decl(owner), Decl::Class(_)) {
             continue;
@@ -34062,7 +34072,7 @@ fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
             }
             false
         });
-        let mut constructions = std::collections::HashSet::new();
+        let mut constructions = crate::fx_hash::HashSet::default();
         record_expression_targets(file, &targets, roots, &mut constructions);
         for construction in constructions {
             if let Some(&anonymous) = file.anonymous_object_classes.get(&construction) {
@@ -34150,16 +34160,16 @@ fn discover_anonymous_object_captures_at(
     file: &File,
     file_index: u32,
     syms: &mut SymbolTable,
-    selected_declarations: Option<&std::collections::HashSet<Span>>,
-    selected_body_declarations: Option<&std::collections::HashSet<Span>>,
+    selected_declarations: Option<&crate::fx_hash::HashSet<Span>>,
+    selected_body_declarations: Option<&crate::fx_hash::HashSet<Span>>,
 ) -> HashMap<DeclId, Vec<AnonymousObjectCapture>> {
     let declarations = file
         .anonymous_object_classes
         .values()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     if declarations.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
     if syms.pass_one_symbols().is_some_and(|symbols| {
         declarations.iter().all(|declaration| {
@@ -34247,8 +34257,8 @@ pub fn discover_anonymous_object_captures(
 /// bodies into Pass 1.
 pub(crate) fn discover_inline_anonymous_object_captures(
     files: &[File],
-    selected_declarations: &[std::collections::HashSet<Span>],
-    selected_body_declarations: &[std::collections::HashSet<Span>],
+    selected_declarations: &[crate::fx_hash::HashSet<Span>],
+    selected_body_declarations: &[crate::fx_hash::HashSet<Span>],
     syms: &mut SymbolTable,
 ) {
     assert_eq!(files.len(), selected_declarations.len());
@@ -34411,11 +34421,11 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     resolved_index: Option<&crate::fir::ResolvedModuleIndex>,
     diags: &mut DiagSink,
     captures: CaptureDiscovery<'_>,
-    selected_declarations: Option<&std::collections::HashSet<Span>>,
-    selected_body_declarations: Option<&std::collections::HashSet<Span>>,
+    selected_declarations: Option<&crate::fx_hash::HashSet<Span>>,
+    selected_body_declarations: Option<&crate::fx_hash::HashSet<Span>>,
     active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
-    selected_stable_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
-    selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
+    selected_stable_roots: Option<&crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
+    selected_stable_bodies: Option<&crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
     fragment: SourceFragmentMode,
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
 ) -> TypeInfo {
@@ -34637,7 +34647,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 let direct_scope = root.child(ScopeKind::Block);
                 let mut parameters = TParams::default();
                 let mut names = Vec::new();
-                let mut reified = std::collections::HashSet::new();
+                let mut reified = crate::fx_hash::HashSet::default();
                 if let Some(captured) = c.active_classifier_captured_type_parameters(declaration) {
                     for (source, semantic, bound) in captured {
                         parameters.insert_binding(
@@ -35162,9 +35172,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
 pub(crate) fn check_preinferred_inline_declarations_at_with_index(
     file: &File,
     file_index: u32,
-    selected_declarations: &std::collections::HashSet<Span>,
-    selected_body_declarations: &std::collections::HashSet<Span>,
-    selected_stable_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_declarations: &crate::fx_hash::HashSet<Span>,
+    selected_body_declarations: &crate::fx_hash::HashSet<Span>,
+    selected_stable_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
     resolved_index: &crate::fir::ResolvedModuleIndex,
     syms: &mut SymbolTable,
@@ -35193,10 +35203,10 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
 pub(crate) fn check_selected_declarations_in_pass_two(
     file: &File,
     file_index: u32,
-    selected_declarations: &std::collections::HashSet<Span>,
-    selected_body_declarations: &std::collections::HashSet<Span>,
+    selected_declarations: &crate::fx_hash::HashSet<Span>,
+    selected_body_declarations: &crate::fx_hash::HashSet<Span>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_bodies: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_stable_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &mut PassTwoSymbols,
     index: &crate::fir::ResolvedModuleIndex,
     streamed_cache: &crate::fir::StreamedModuleProjectionCache,
@@ -35229,8 +35239,8 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
     file: &File,
     file_index: u32,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_roots: &std::collections::HashSet<crate::fir::DeclarationId>,
-    selected_stable_defaults: &std::collections::HashSet<crate::fir::DeclarationId>,
+    selected_stable_roots: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    selected_stable_defaults: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     syms: &mut SymbolTable,
     index: &crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
@@ -35694,10 +35704,10 @@ struct Checker<'a> {
     diags: &'a mut DiagSink,
     /// Exact inline declaration ranges selected for the temporary Pass-1 body check. `None` is an
     /// ordinary authoritative file check; `Some` defers every other body to Pass 2.
-    selected_body_declarations: Option<std::collections::HashSet<Span>>,
+    selected_body_declarations: Option<crate::fx_hash::HashSet<Span>>,
     /// Stable callable/classifier identities selected for Pass-1 default checking. This replaces
     /// source ranges as the authority whenever `signature_defaults_only` is active.
-    selected_stable_body_declarations: Option<std::collections::HashSet<crate::fir::DeclarationId>>,
+    selected_stable_body_declarations: Option<crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
     /// This selected Pass-1 check owns only parameter-default expressions. Finalized signatures
     /// already supply callable result types, so no ordinary body may be reopened for inference.
     ///
@@ -35741,7 +35751,7 @@ struct Checker<'a> {
     /// can name the parameter it bounds (`T : Comparable<T>`). Without a record of what is already
     /// being retried, that self-reference recursively probes `check_member_with_reporting` forever
     /// instead of reporting an unresolved reference.
-    member_bound_retries: std::collections::HashSet<(Ty, String)>,
+    member_bound_retries: crate::fx_hash::HashSet<(Ty, String)>,
     /// Immutable provider/member queries reused while checking one Pass-2 source unit. The key
     /// includes lexical class access because visibility can change across nested classifier bodies.
     /// Pass-1 and legacy mutable-symbol checks bypass this cache entirely.
@@ -35769,8 +35779,8 @@ struct Checker<'a> {
     #[cfg(feature = "trace")]
     expr_stack: Vec<ExprId>,
     callable_reference_types: HashMap<ExprId, Ty>,
-    reflective_callable_references: std::collections::HashSet<ExprId>,
-    exhaustive_whens: std::collections::HashSet<ExprId>,
+    reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
+    exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
     /// See [`TypeInfo::when_subject_numeric_equalities`].
     when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
@@ -35851,10 +35861,10 @@ struct Checker<'a> {
     classifier_header_owner: Option<TypeName>,
     /// Anonymous classifiers in the current structural ownership chain. Their generated `$` names are
     /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
-    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
+    exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
     extension_receiver_labels: Vec<(usize, Span)>,
     /// Receiver declarations of the local extension functions checked so far, by span.
-    local_function_receivers: std::collections::HashSet<Span>,
+    local_function_receivers: crate::fx_hash::HashSet<Span>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
     field_ty: Option<Ty>,
@@ -35900,8 +35910,8 @@ struct Checker<'a> {
     /// The entries are stable-identity keyed and live only for this bounded Pass-2 checker.
     local_method_dependencies:
         HashMap<crate::fir::DeclarationId, local_method_dependencies::LocalMethodDependency>,
-    checking_local_method_dependencies: std::collections::HashSet<crate::fir::DeclarationId>,
-    checked_local_method_dependencies: std::collections::HashSet<crate::fir::DeclarationId>,
+    checking_local_method_dependencies: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    checked_local_method_dependencies: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// Set while an anonymous object's construction-site scratch check decides which enclosing
     /// receivers the object captures. That decision counts the receiver uses its member bodies make
     /// inside the check, so a member an earlier visit already completed is read again rather than
@@ -35928,7 +35938,7 @@ struct Checker<'a> {
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     expr_return_targets: HashMap<ExprId, ReturnTarget>,
-    discarded_exprs: std::collections::HashSet<ExprId>,
+    discarded_exprs: crate::fx_hash::HashSet<ExprId>,
     /// Declared type of a local read whose type a narrowing shadow replaced (a `t = null` write
     /// narrows the flow type to `Nothing?`). kotlinc still resolves a member against the DECLARED
     /// type before rejecting the access on the narrowed nullable receiver, so the nullable-receiver
@@ -35937,7 +35947,7 @@ struct Checker<'a> {
     /// Declined smart-cast target for a local read, keyed by its exact source span.
     declined_read_targets: HashMap<Span, (String, Ty)>,
     /// Error expressions whose originating diagnostic remains authoritative for later accesses.
-    silent_error_exprs: std::collections::HashSet<ExprId>,
+    silent_error_exprs: crate::fx_hash::HashSet<ExprId>,
     local_decl_types: HashMap<StmtId, Ty>,
     property_decl_types: HashMap<(u32, u32), Ty>,
     explicit_backing_field_types: HashMap<(u32, u32), Ty>,
@@ -35987,7 +35997,7 @@ struct Checker<'a> {
     /// consumes the decision without rescanning a later scope or comparing source spellings.
     anonymous_super_read_provenance: HashMap<ExprId, AnonymousSuperReadProvenance>,
     /// Member property reads whose selected declaration reads the same value twice.
-    stable_property_reads: std::collections::HashSet<ExprId>,
+    stable_property_reads: crate::fx_hash::HashSet<ExprId>,
     /// Semantic uses of exact lexical receiver bindings; see [`receiver_uses`].
     implicit_receiver_identity_uses: receiver_uses::ReceiverUses,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
@@ -36022,14 +36032,14 @@ struct Checker<'a> {
     /// Selected reads of `const val`s carrying Kotlin's `ImplicitIntegerCoercion` declaration fact.
     /// Constant folding removes the property-get lowering, so applicability keeps this compact fact
     /// independently and publishes the selected argument conversion through the resolved call.
-    constant_integer_coercion_reads: std::collections::HashSet<ExprId>,
+    constant_integer_coercion_reads: crate::fx_hash::HashSet<ExprId>,
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
     resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
     resolved_call_arg_slots: HashMap<ExprId, SelectedArgumentCommitment>,
     /// See [`TypeInfo::resolved_library_default_literals`].
     resolved_library_default_literals:
         HashMap<ExprId, Vec<(usize, crate::libraries::DefaultValue)>>,
-    resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
+    resolved_whole_array_vararg_args: crate::fx_hash::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
     platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
     enhanced_locals: enhanced_values::EnhancedLocals,
@@ -36046,7 +36056,7 @@ struct Checker<'a> {
     /// Names reassigned anywhere in the function body currently being checked (including inside its
     /// closures). A captured `var` is boxed only if it's in here — kotlinc treats a captured-but-never-
     /// reassigned `var` as effectively final (passed by value).
-    fn_reassigned: std::collections::HashSet<String>,
+    fn_reassigned: crate::fx_hash::HashSet<String>,
     /// Captured writes, with their enclosing lambdas and assigned expression when one exists.
     fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
@@ -36101,7 +36111,7 @@ struct Checker<'a> {
     /// Anonymous objects whose captures were decided without pending inference. A revisit of the
     /// construction keeps their receiver captures: the object's local methods are checked once, so
     /// a revisit cannot see those methods select a receiver again.
-    finalized_anonymous_captures: std::collections::HashSet<DeclId>,
+    finalized_anonymous_captures: crate::fx_hash::HashSet<DeclId>,
     discovered_anonymous_captures: HashMap<DeclId, Vec<AnonymousObjectCapture>>,
     /// Exact lexical receiver identity -> storage field for each anonymous classifier while its
     /// nested declarations are checked. This is checker-only provenance: the semantic capture
@@ -36113,15 +36123,15 @@ struct Checker<'a> {
     /// These let a selected closure dependency be remapped into the caller's lexical tower without
     /// publishing parser ids, source ranges, or names as semantic identities.
     discovered_local_class_capture_bindings: HashMap<DeclId, Vec<Option<u32>>>,
-    finalized_local_class_captures: std::collections::HashSet<DeclId>,
+    finalized_local_class_captures: crate::fx_hash::HashSet<DeclId>,
     /// Resolver-only binding identities parallel to lifted local-function capture vectors.
     local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,
     receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds,
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
-    try_body_writes: Vec<std::collections::HashSet<lexical_bindings::BindingIdentity>>,
+    try_body_writes: Vec<crate::fx_hash::HashSet<lexical_bindings::BindingIdentity>>,
     next_flow_identity: u32,
-    checked_local_class_declarations: std::collections::HashSet<DeclId>,
+    checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
     checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
     /// Nonzero only while the selected Pass-1 traversal checks a retained parameter default.
@@ -36174,10 +36184,10 @@ struct BodyState {
     static_singleton_this: Option<SingletonValue>,
     allow_lambda_mutation: bool,
     symbolic_signature_inference: bool,
-    fn_reassigned: std::collections::HashSet<String>,
+    fn_reassigned: crate::fx_hash::HashSet<String>,
     fn_closure_reassigned: Vec<(String, Vec<ExprId>, Option<ExprId>)>,
     lexical_class_context: Vec<TypeName>,
-    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
+    exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
 }
 
 enum MemberSlotCall {
@@ -36278,7 +36288,7 @@ fn construction_argument_typing_order(is_lambda: &[bool], symbolic: &[Option<Ty>
         names
     };
     let mut ordered: Vec<usize> = (0..is_lambda.len()).filter(|&i| !is_lambda[i]).collect();
-    let mut covered: std::collections::HashSet<&'static str> = ordered
+    let mut covered: crate::fx_hash::HashSet<&'static str> = ordered
         .iter()
         .flat_map(|&slot| names_of(slot, false))
         .collect();
@@ -37123,7 +37133,7 @@ impl<'a> Checker<'a> {
                 .into_iter()
                 .filter_map(|(owner, applied)| {
                     let next = next.get(&owner).copied()?;
-                    let mut visiting = std::collections::HashSet::new();
+                    let mut visiting = crate::fx_hash::HashSet::default();
                     join_applied_classifier(&source, self, owner, applied, next, &mut visiting)
                         .map(|joined| (owner, joined))
                 })
@@ -37137,7 +37147,7 @@ impl<'a> Checker<'a> {
                     .skip(1)
                     .map(|(ancestor, _, _)| ancestor)
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let mut views = common
             .into_iter()
             .filter(|(owner, _)| !dominated.contains(owner))
@@ -37147,7 +37157,7 @@ impl<'a> Checker<'a> {
                 })
             })
             .collect::<Vec<_>>();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         views.retain(|view| seen.insert(*view));
         views.sort_by_key(|view| view.source_name());
         views
@@ -39037,7 +39047,7 @@ impl<'a> Checker<'a> {
                 })
             };
         let mut applicable = Vec::new();
-        let mut sam_converted = std::collections::HashSet::new();
+        let mut sam_converted = crate::fx_hash::HashSet::default();
         for (index, mut candidate) in overloads.iter().cloned().enumerate() {
             if self.file.infix_calls.contains(&call.0) && !candidate.flags.infix {
                 continue;
@@ -39105,7 +39115,7 @@ impl<'a> Checker<'a> {
             let whole_arrays =
                 named_whole_array_varargs(&parameters, argument_names, &initial_shape.call_sig);
             let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, type_args);
-            let mut identity_bindings = crate::symbol_resolver::GSigBinds::new();
+            let mut identity_bindings = crate::symbol_resolver::GSigBinds::default();
             let source = self.fed_source();
             // Inside the callee's own declaration (a recursive `f(x)` in `fun <T> f`), its formals
             // are fixed lexical types; this call solves fresh variables for them.
@@ -39176,7 +39186,7 @@ impl<'a> Checker<'a> {
             // its first bound is the runtime/erasure view and this candidate-local table carries the
             // remaining proven constituents. The witness never leaves selection; checked FIR gets
             // the primary type plus explicit additional bounds below.
-            let mut flow_intersections = HashMap::<&'static str, Vec<Ty>>::new();
+            let mut flow_intersections = HashMap::<&'static str, Vec<Ty>>::default();
             let inference_actuals = parameters
                 .iter()
                 .copied()
@@ -39366,7 +39376,7 @@ impl<'a> Checker<'a> {
             // are declaration-site equalities that participate in builder/call inference. Collect
             // only those annotated slots as lower bindings, leaving unannotated lambda parameters
             // and ordinary function values on the variance-aware constraint path above.
-            let mut explicit_lambda_bindings = crate::symbol_resolver::GSigBinds::new();
+            let mut explicit_lambda_bindings = crate::symbol_resolver::GSigBinds::default();
             for (argument, &visible_parameter) in parameters.iter().enumerate() {
                 let Some(declared_annotations) =
                     self.file.lambda_param_types.get(&args[argument].0)
@@ -39471,7 +39481,7 @@ impl<'a> Checker<'a> {
             }
             let inferred_lower_inputs = inferred.lower_inputs.clone();
             let upper_argument_bindings = if candidate.projected_return_hazard {
-                crate::symbol_resolver::GSigBinds::new()
+                crate::symbol_resolver::GSigBinds::default()
             } else {
                 inferred.tightest_upper_bindings(&source)
             };
@@ -39586,7 +39596,7 @@ impl<'a> Checker<'a> {
                         Err(()) => continue,
                     };
                 let mut nested_bindings = if concrete_nested.is_some() {
-                    crate::symbol_resolver::GSigBinds::new()
+                    crate::symbol_resolver::GSigBinds::default()
                 } else {
                     match crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                         &source,
@@ -40011,7 +40021,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             if score.uses_sam_conversion() {
-                let mut inferred_from_sam = crate::symbol_resolver::GSigBinds::new();
+                let mut inferred_from_sam = crate::symbol_resolver::GSigBinds::default();
                 for (sam, actual) in score.sam_signatures.iter().zip(arg_tys) {
                     let Some(sam) = sam else { continue };
                     crate::symbol_resolver::unify_ty(
@@ -40170,7 +40180,7 @@ impl<'a> Checker<'a> {
                     {
                         declared = declared.array_read_elem().unwrap_or(declared);
                     }
-                    Some(crate::types::ty_subst(declared, &HashMap::new()))
+                    Some(crate::types::ty_subst(declared, &HashMap::default()))
                 })
                 .collect::<Option<Vec<_>>>()?;
             let inferred_ret = crate::symbol_resolver::instantiate_slot(
@@ -40403,7 +40413,7 @@ impl<'a> Checker<'a> {
                         })
                         .then_some(index)
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             maximal = maximal
                 .into_iter()
                 .enumerate()
@@ -40429,7 +40439,7 @@ impl<'a> Checker<'a> {
                         })
                         .then_some(index)
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             maximal = maximal
                 .into_iter()
                 .enumerate()
@@ -40446,7 +40456,7 @@ impl<'a> Checker<'a> {
                     .then(|| {
                         candidate
                             .semantic_receiver()
-                            .map(|receiver| crate::types::ty_subst(receiver, &HashMap::new()))
+                            .map(|receiver| crate::types::ty_subst(receiver, &HashMap::default()))
                     })
                     .flatten();
                 let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
@@ -40510,7 +40520,7 @@ impl<'a> Checker<'a> {
                                     candidate
                                         .semantic_receiver()
                                         .map(|receiver| {
-                                            crate::types::ty_subst(receiver, &HashMap::new())
+                                            crate::types::ty_subst(receiver, &HashMap::default())
                                         })
                                 })
                                 .flatten()
@@ -41704,7 +41714,7 @@ impl<'a> Checker<'a> {
             return;
         }
         let source = self.fed_source();
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         for (&declared, (_, actual)) in context_types.iter().zip(selected) {
             crate::symbol_resolver::unify_ty_from_symbols(
                 &source,
@@ -42189,7 +42199,7 @@ impl<'a> Checker<'a> {
         let Some(generic) = signature.generic_sig.as_ref() else {
             return (signature.params.clone(), signature.ret);
         };
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         if let Some((declared, actual)) = generic.receiver.zip(receiver) {
             crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
         }
@@ -42418,7 +42428,7 @@ impl<'a> Checker<'a> {
                 self.unbound_contextual_result_signature(*argument)
                     .is_some()
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let selected_arguments_valid =
             self.with_lambda_mutation(selected.flags.inline.can_inline(), |checker| {
                 checker.expect_selected_call_args(
@@ -43015,7 +43025,7 @@ impl<'a> Checker<'a> {
         if candidates.is_empty() {
             return false;
         }
-        let mut seen_keys = std::collections::HashSet::new();
+        let mut seen_keys = crate::fx_hash::HashSet::default();
         let legacy_symbols = self.module.legacy_symbols();
         let conflict_keys = candidates
             .iter()
@@ -43084,7 +43094,7 @@ impl<'a> Checker<'a> {
         let prefix = INAPPLICABLE_OVERLOAD_PREFIX;
         let mut displays: Vec<String> = Vec::with_capacity(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
         let mut display_bytes = 0usize;
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         for key in conflict_keys {
             let Some(conflicts) = self
                 .module
@@ -43314,13 +43324,13 @@ impl<'a> Checker<'a> {
             self.file.call_has_trailing_lambda.contains(&call.0),
             explicit_refs.as_ref().map_or(0, Vec::len),
         ) {
-            return HashMap::new();
+            return HashMap::default();
         }
         let Some(function) = self.source_function_decl(selected) else {
-            return HashMap::new();
+            return HashMap::default();
         };
         if function.type_params.is_empty() {
-            return HashMap::new();
+            return HashMap::default();
         }
         let context_count = selected.context_count.min(selected.callable.params.len());
         let value_signature = selected.call_sig.suffix(context_count);
@@ -43331,7 +43341,7 @@ impl<'a> Checker<'a> {
             self.file.call_has_trailing_lambda.contains(&call.0),
             &value_signature,
         ) else {
-            return HashMap::new();
+            return HashMap::default();
         };
         let mapped = argument_parameters
             .into_iter()
@@ -43347,7 +43357,7 @@ impl<'a> Checker<'a> {
                 .and_then(|index| signature.formals.get(index))
         };
         let mut bindings = selected_bindings.clone();
-        let mut explicitly_bound = std::collections::HashSet::new();
+        let mut explicitly_bound = crate::fx_hash::HashSet::default();
         if let Some(refs) = &explicit_refs {
             for (index, type_ref) in refs.iter().enumerate() {
                 let Some(formal) = signature.formals.get(index) else {
@@ -43391,7 +43401,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let mut expectations = HashMap::new();
+        let mut expectations = HashMap::default();
         for (parameter, argument) in mapped {
             let Some(declared) = function
                 .params
@@ -44161,7 +44171,7 @@ impl<'a> Checker<'a> {
             applied: Ty,
             dispatch_receiver_identity: Option<(usize, usize)>,
             inherited: bool,
-            seen: &mut std::collections::HashSet<TypeName>,
+            seen: &mut crate::fx_hash::HashSet<TypeName>,
             properties: &mut Vec<ScopedProperty>,
         ) {
             let Some(owner) = applied.non_null().kotlin_class_internal() else {
@@ -44306,7 +44316,7 @@ impl<'a> Checker<'a> {
             applied,
             selected_receiver.map(|receiver| receiver.identity),
             false,
-            &mut std::collections::HashSet::new(),
+            &mut crate::fx_hash::HashSet::default(),
             &mut properties,
         );
         properties
@@ -44688,9 +44698,9 @@ impl<'a> Checker<'a> {
         body: ExprId,
         name: &str,
     ) -> bool {
-        let single: std::collections::HashSet<String> = std::iter::once(name.to_string()).collect();
+        let single: crate::fx_hash::HashSet<String> = std::iter::once(name.to_string()).collect();
         let written = {
-            let mut out = std::collections::HashSet::new();
+            let mut out = crate::fx_hash::HashSet::default();
             collect_lambda_outer_writes(self.file, body, &single, &mut out);
             out.contains(name)
         };
@@ -45968,7 +45978,7 @@ impl<'a> Checker<'a> {
         let mut owners = Vec::new();
         for lexical in self.lexical_source_class_names() {
             let mut queue = std::collections::VecDeque::from([(Ty::obj_name(lexical), true)]);
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             while let Some((current, root)) = queue.pop_front() {
                 let Some(owner) = current.kotlin_class_internal() else {
                     continue;
@@ -47266,7 +47276,7 @@ impl<'a> Checker<'a> {
         // parser-era class signature.
         let source = self.fed_source();
         let mut pending = vec![receiver.non_null()];
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = crate::fx_hash::HashSet::default();
         while let Some(current) = pending.pop() {
             let Some(classifier) = current.obj_internal() else {
                 continue;
@@ -47461,7 +47471,7 @@ impl<'a> Checker<'a> {
         let mut candidates = Vec::new();
         let mut declined = Vec::new();
         self.collect_condition_narrowings(scope, cond, truth, &mut candidates, &mut declined);
-        let nonnull: std::collections::HashSet<NarrowPath> = candidates
+        let nonnull: crate::fx_hash::HashSet<NarrowPath> = candidates
             .iter()
             .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
             .collect();
@@ -47497,7 +47507,7 @@ impl<'a> Checker<'a> {
                 .filter_map(|(index, current)| {
                     crate::assignable::is_subtype(&context, self, ty, current).then_some(index)
                 })
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             if !dominated.is_empty() {
                 result = result
                     .into_iter()
@@ -47762,7 +47772,7 @@ impl<'a> Checker<'a> {
         anonymous_prefix: usize,
         span: Span,
     ) {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         for (index, parameter) in params.iter().enumerate() {
             if index < anonymous_prefix && parameter.name == "_" {
                 continue;
@@ -48330,7 +48340,7 @@ impl<'a> Checker<'a> {
         self.check_duplicate_param_names(&f.params, f.context_count, f.span);
         // Duplicate type-parameter names (`fun <T, T> f()`) are illegal (conflicting declaration).
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             for tp in &f.type_params {
                 if !seen.insert(tp.as_str()) {
                     self.diags.error(
@@ -49736,7 +49746,7 @@ impl<'a> Checker<'a> {
         // conflicting declaration). `cl.props` holds every primary-ctor parameter (property
         // and plain) in order.
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             for pp in &cl.props {
                 if !seen.insert(pp.name.as_str()) {
                     self.diags.error(
@@ -49763,7 +49773,7 @@ impl<'a> Checker<'a> {
         }
         // Duplicate class type-parameter names (`class C<T, T>`) are illegal.
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             for tp in &cl.type_params {
                 if !seen.insert(tp.as_str()) {
                     self.diags.error(
@@ -49775,7 +49785,7 @@ impl<'a> Checker<'a> {
         }
         // Duplicate enum entry names (`enum class E { A, B, A }`) are illegal.
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = crate::fx_hash::HashSet::default();
             for entry in &cl.enum_entries {
                 if !seen.insert(entry.name.as_str()) {
                     self.diags.error(
@@ -50076,7 +50086,7 @@ impl<'a> Checker<'a> {
                         .is_some_and(|(_, _, reified)| reified)
                 })
                 .cloned()
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<crate::fx_hash::HashSet<_>>();
             let captured_type_parameters = if let Some(parameters) =
                 self.active_classifier_captured_type_parameters(d)
             {
@@ -50214,7 +50224,7 @@ impl<'a> Checker<'a> {
             });
             self.publish_class_type_parameter_owner(scope, cl);
             scope.declare_context_receivers(&class_context_receivers);
-            let mut context_names = std::collections::HashSet::new();
+            let mut context_names = crate::fx_hash::HashSet::default();
             for receiver in &class_context_receivers {
                 let Some(name) = receiver.name() else {
                     continue;
@@ -51528,7 +51538,7 @@ impl<'a> Checker<'a> {
             // A *deferred* `val` (no initializer/getter/setter) is definitely-assigned once in a
             // constructor body, so it is assignable WITHIN a secondary constructor (kotlinc allows
             // it) — same relaxation the primary-ctor body uses below.
-            let sc_deferred_val: std::collections::HashSet<&str> = cl
+            let sc_deferred_val: crate::fx_hash::HashSet<&str> = cl
                 .body_props
                 .iter()
                 .filter(|bp| {
@@ -51785,7 +51795,7 @@ impl<'a> Checker<'a> {
             // A *deferred* `val` (declared with no initializer/getter — `val a: Int`) is assigned
             // exactly once in an `init` block, so it is treated as assignable WITHIN the constructor
             // body (kotlinc's definite-assignment allows it; a normal `val` stays immutable).
-            let deferred_val: std::collections::HashSet<&str> = cl
+            let deferred_val: crate::fx_hash::HashSet<&str> = cl
                 .body_props
                 .iter()
                 .filter(|bp| {
@@ -54242,7 +54252,7 @@ impl<'a> Checker<'a> {
         // expected classifier is the constructed classifier itself: `Success()` may be expected as
         // `Step<Owner>` through `Success<I> : Terminal<I> : Step<I>`. Falling back to I's recursive
         // bound before applying that result constraint loses the concrete Owner permanently.
-        let mut expected_bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut expected_bindings = crate::symbol_resolver::GSigBinds::default();
         self.constrain_source_constructor_result(class, expected_result, &mut expected_bindings);
         crate::trace_compiler!(
             "expected_call",
@@ -54280,7 +54290,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|(name, ty)| (name.clone(), *ty)),
         );
-        let mut contextual_actuals = HashMap::new();
+        let mut contextual_actuals = HashMap::default();
         for (slot, &(shape, definitely_non_null)) in parameter_shapes.iter().enumerate() {
             let Some((argument, _)) = self.source_constructor_argument(slot, slots, args, arg_tys)
             else {
@@ -54332,7 +54342,7 @@ impl<'a> Checker<'a> {
             .erasure
             .values()
             .filter_map(|binding| binding.ty_param_name())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let lexically_fixed_seed = bindings
             .iter()
             .map(|binding| {
@@ -54808,7 +54818,7 @@ impl<'a> Checker<'a> {
     ) -> HashMap<String, Ty> {
         let captured = &class.captured_type_parameters.type_params;
         if captured.is_empty() {
-            return HashMap::new();
+            return HashMap::default();
         }
         if let Some(outer_owner) = class.inner_of {
             let applied_outer = bound_outer
@@ -55023,7 +55033,7 @@ impl<'a> Checker<'a> {
             expected,
             actual,
         );
-        let mut shadowed_formals = std::collections::HashSet::new();
+        let mut shadowed_formals = crate::fx_hash::HashSet::default();
         let mut frames = std::mem::take(&mut self.postponed_call_constraints);
         for constraints in frames.iter_mut().rev() {
             constraints.constrain_assignable(
@@ -57131,7 +57141,7 @@ impl<'a> Checker<'a> {
     ) -> Option<(
         Signature,
         crate::symbol_resolver::GSigBinds,
-        std::collections::HashSet<String>,
+        crate::fx_hash::HashSet<String>,
     )> {
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let explicit_type_arguments = self
@@ -57174,7 +57184,7 @@ impl<'a> Checker<'a> {
                     continue;
                 };
 
-                let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                let mut bindings = crate::symbol_resolver::GSigBinds::default();
                 let semantic_params = if let Some(generic) = signature.generic_sig.as_ref() {
                     bindings = crate::symbol_resolver::seeded_gsig_binds(
                         generic,
@@ -61705,7 +61715,7 @@ impl<'a> Checker<'a> {
 
         let source = self.fed_source();
         let mut pending = std::collections::VecDeque::from([expected]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(current) = pending.pop_front() {
             let internal = current.obj_internal()?;
             if !seen.insert(internal) {
@@ -61896,7 +61906,7 @@ impl<'a> Checker<'a> {
                     sam.has_receiver,
                     sam.suspend,
                 );
-                let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                let mut bindings = crate::symbol_resolver::GSigBinds::default();
                 crate::symbol_resolver::unify_inferred_ty(
                     declared,
                     expected_argument,
@@ -62123,7 +62133,7 @@ impl<'a> Checker<'a> {
                 .map_or(selected.params.as_slice(), |signature| {
                     signature.params.as_slice()
                 });
-            let mut alias_bindings = crate::symbol_resolver::GSigBinds::new();
+            let mut alias_bindings = crate::symbol_resolver::GSigBinds::default();
             for (&declared, &actual) in declared_parameters.iter().zip(inference_parameters) {
                 let declared =
                     crate::symbol_resolver::ty_subst_keep_unbound(declared, &class_bindings);
@@ -66196,17 +66206,17 @@ impl<'a> Checker<'a> {
         member: &crate::libraries::LibraryMember,
     ) -> crate::symbol_resolver::GSigBinds {
         let Some(owner) = member.owner else {
-            return crate::symbol_resolver::GSigBinds::new();
+            return crate::symbol_resolver::GSigBinds::default();
         };
         let source = self.fed_source();
         let Some((_, applied, _)) = crate::symbol_resolver::applied_hierarchy(&source, receiver)
             .into_iter()
             .find(|(candidate, _, _)| *candidate == owner)
         else {
-            return crate::symbol_resolver::GSigBinds::new();
+            return crate::symbol_resolver::GSigBinds::default();
         };
         let Some(class) = self.resolver().classifier(owner) else {
-            return crate::symbol_resolver::GSigBinds::new();
+            return crate::symbol_resolver::GSigBinds::default();
         };
         let mut bindings = crate::symbol_resolver::classifier_bindings(&class, applied);
         if let Some(signature) = member.generic_sig.as_ref() {
@@ -66550,7 +66560,7 @@ impl<'a> Checker<'a> {
                     );
                     return Ok(LibraryConstructorSelection::Rejected);
                 }
-                let mut enclosing_context_formals = std::collections::HashSet::new();
+                let mut enclosing_context_formals = crate::fx_hash::HashSet::default();
                 let actuals = args
                     .iter()
                     .zip(&argument_slots)
@@ -67255,7 +67265,7 @@ impl<'a> Checker<'a> {
                     .and_then(|member| member.generic_sig.as_ref().map(|generic| (generic, member)))
                     .filter(|(generic, member)| generic.params.len() == member.params.len())
                 {
-                    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                    let mut bindings = crate::symbol_resolver::GSigBinds::default();
                     if let Some(explicit) = resolved_partial_explicit.as_ref() {
                         for (formal, actual) in class.type_params.iter().zip(explicit) {
                             if !actual.mentions_error() && !actual.mentions_pending() {
@@ -67300,7 +67310,7 @@ impl<'a> Checker<'a> {
                 && class.ctor_param_shapes.len() == class.ctor_params.len()
                 && self.symbolic_signature_inference
             {
-                let mut bindings = HashMap::new();
+                let mut bindings = HashMap::default();
                 let arg_names = self.file.call_arg_names.get(&call.0);
                 for (source_index, argument) in args.iter().enumerate() {
                     let parameter_index = arg_names
@@ -67406,7 +67416,7 @@ impl<'a> Checker<'a> {
                         if applied.obj_internal() != expected_owner {
                             continue;
                         }
-                        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                        let mut bindings = crate::symbol_resolver::GSigBinds::default();
                         crate::symbol_resolver::unify_inferred_ty(
                             applied,
                             expected.non_null(),
@@ -67572,7 +67582,7 @@ impl<'a> Checker<'a> {
                     .chain(self.implicit_receiver_types(scope))
                     .find_map(|receiver| {
                         let mut pending = std::collections::VecDeque::from([receiver]);
-                        let mut seen = std::collections::HashSet::new();
+                        let mut seen = crate::fx_hash::HashSet::default();
                         while let Some(applied) = pending.pop_front() {
                             let owner = applied.non_null().kotlin_class_internal()?;
                             if owner == outer_owner {

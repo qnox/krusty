@@ -5,7 +5,7 @@
 //! cast operand cannot be null. Avoiding the guard here also avoids dead diagnostic strings and
 //! method references in the class pool, which is part of kotlinc byte equality.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrExpr, IrFile, IrTypeOp};
 
@@ -31,7 +31,7 @@ impl ValueStores {
     /// capture expressions belong to the enclosing body's proof.
     pub(super) fn collect(ir: &IrFile, roots: &[u32]) -> Self {
         let mut stores = Self::default();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut pending = roots.to_vec();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
@@ -74,7 +74,7 @@ impl ValueStores {
 impl Emitter<'_> {
     /// Whether checked IR itself proves this operand non-null.
     pub(super) fn semantic_non_null(&self, expression: u32) -> bool {
-        self.semantic_non_null_within(expression, &mut HashSet::new(), &mut HashSet::new())
+        self.semantic_non_null_within(expression, &mut HashSet::default(), &mut HashSet::default())
     }
 
     fn semantic_non_null_within(
@@ -155,7 +155,7 @@ impl Emitter<'_> {
         if !declared.is_reference() {
             return declared;
         }
-        self.common_stored_reference_ty(value, declared, &mut HashSet::new())
+        self.common_stored_reference_ty(value, declared, &mut HashSet::default())
             .unwrap_or(declared)
     }
 

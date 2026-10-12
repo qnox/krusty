@@ -1,7 +1,7 @@
 //! Direct classifier parents published from compact Pass-1 syntax, with the superclass kept in its
 //! written slot among the interfaces.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use super::{semantic_type_with_classifier_captures, ProductionSignatureSemantics};
 use crate::resolve::ClassSig;

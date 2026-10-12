@@ -1,8 +1,8 @@
 use krusty::diag::{line_col, DiagSink, Severity};
+use krusty::fx_hash::HashMap;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::lexer::lex;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -282,7 +282,7 @@ fn emit_frontend_dependency(
         let emitted = outputs
             .iter()
             .filter_map(|(path, _)| path.strip_suffix(".class"))
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<krusty::fx_hash::HashSet<_>>();
         let Some(headers) = krusty::jvm::java_stub::stub_classes(
             java_blocks,
             krusty::jvm::java_stub::StubMode::Strict,
@@ -360,7 +360,7 @@ fn first_error_module(
     let features = krusty::features::LangFeatures::from_source(src);
     let uid = UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_survey_mod_{}_{uid}", std::process::id()));
-    let mut dirmap: HashMap<String, PathBuf> = HashMap::new();
+    let mut dirmap: HashMap<String, PathBuf> = HashMap::default();
     let units = krusty::conformance::module_units(&modules);
     let result = (|| {
         for (module_index, m) in units.iter().enumerate() {
@@ -1102,7 +1102,7 @@ fn run() {
                     .spawn_scoped(scope, move || {
                         // `Classpath` contains thread-local `Rc` state. Each worker reuses its own
                         // small set rather than sharing it or rebuilding it for every corpus file.
-                        let mut cp_cache = HashMap::new();
+                        let mut cp_cache = HashMap::default();
                         loop {
                             let index = next.fetch_add(1, Ordering::Relaxed);
                             let Some(file) = files.get(index) else { break };
@@ -1154,7 +1154,7 @@ fn run() {
     let mut attempted = 0u32;
     let mut passed = 0u32;
     let mut not_applicable = 0u32;
-    let mut errors: HashMap<String, Vec<String>> = HashMap::new();
+    let mut errors: HashMap<String, Vec<String>> = HashMap::default();
     for (file, outcome) in results {
         match outcome {
             SurveyOutcome::Passed => {

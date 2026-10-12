@@ -8,7 +8,7 @@
 //! recorded temporary, or re-read a stable binding). The JVM backend's bytecode temporaries pass
 //! owns removing physical store/load pairs; it consumes the lowered shape and never re-decides it.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::{FirBody, FirDestructureEntry, FirExprKind, FirLoopHeader, FirStatementKind};
 use crate::ir::IrBindingStability;
@@ -16,7 +16,7 @@ use crate::ir::IrBindingStability;
 use super::BodyLowering;
 
 pub(super) fn inventory(body: &FirBody) -> HashMap<crate::fir::LocalValueId, IrBindingStability> {
-    let mut bindings = HashMap::new();
+    let mut bindings = HashMap::default();
     let mut record = |value, stability| {
         let previous = bindings.insert(value, stability);
         debug_assert!(

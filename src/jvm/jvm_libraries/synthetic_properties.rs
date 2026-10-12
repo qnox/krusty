@@ -7,7 +7,7 @@
 //! property name. Arity, return type and static ownership are checked on the declaration that the
 //! index names. The setter of a property is named from its getter's own spelling.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -77,7 +77,7 @@ impl AccessorInventory {
     /// Inventory the given method spellings. Each property keeps its getters in kotlinc's lookup
     /// order: the `isX` method itself, then the `get` spellings in declaration order.
     pub(super) fn from_methods<'a>(methods: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut getters: HashMap<String, Vec<String>> = HashMap::new();
+        let mut getters: HashMap<String, Vec<String>> = HashMap::default();
         for method in methods {
             let Some(property) = accessor_property_name(method) else {
                 continue;
@@ -127,7 +127,7 @@ fn accessor_precedence(property: &str, getter: &str) -> u8 {
 /// index spans the whole hierarchy rather than one declaring classifier.
 pub(super) fn hierarchy_inventory(source: &dyn SymbolSource, receiver: Ty) -> AccessorInventory {
     let mut methods = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut pending = vec![receiver.non_null()];
     while let Some(current) = pending.pop() {
         let Some(internal) = current.kotlin_class_internal() else {

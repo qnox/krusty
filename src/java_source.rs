@@ -1,7 +1,7 @@
 //! Java source syntax shared by compiler stubs and editor analysis.
 
 use crate::diag::Span;
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 const ACC_PUBLIC: u16 = 0x0001;
 const ACC_PRIVATE: u16 = 0x0002;
@@ -363,7 +363,7 @@ pub fn parse_source_file(source: &str) -> Option<JavaSourceFile> {
         }
     }
     for reference in &body_refs {
-        collect_source_type_references(reference, &HashSet::new(), None, &mut references);
+        collect_source_type_references(reference, &HashSet::default(), None, &mut references);
     }
     references.sort_unstable_by_key(|reference| {
         (reference.span.lo, reference.span.hi, reference.path.clone())

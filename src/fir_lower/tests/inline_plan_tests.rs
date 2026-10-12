@@ -11,7 +11,7 @@ fn selected_call_ledger(ir: &IrFile, root: crate::ir::ExprId) -> Vec<SelectedCal
     fn visit(
         ir: &IrFile,
         expression: crate::ir::ExprId,
-        seen: &mut std::collections::HashSet<crate::ir::ExprId>,
+        seen: &mut crate::fx_hash::HashSet<crate::ir::ExprId>,
         ledger: &mut Vec<SelectedCall>,
     ) {
         if !seen.insert(expression) {
@@ -42,7 +42,12 @@ fn selected_call_ledger(ir: &IrFile, root: crate::ir::ExprId) -> Vec<SelectedCal
     }
 
     let mut ledger = Vec::new();
-    visit(ir, root, &mut std::collections::HashSet::new(), &mut ledger);
+    visit(
+        ir,
+        root,
+        &mut crate::fx_hash::HashSet::default(),
+        &mut ledger,
+    );
     ledger
 }
 

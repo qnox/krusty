@@ -6,7 +6,7 @@ use crate::diag::{DiagSink, Diagnostic, Severity, Span};
 #[derive(Default)]
 pub(super) struct PostponedDiagnostics {
     entries: Vec<(ExprId, Vec<Diagnostic>)>,
-    captured: std::collections::HashSet<ExprId>,
+    captured: crate::fx_hash::HashSet<ExprId>,
 }
 
 impl PostponedDiagnostics {

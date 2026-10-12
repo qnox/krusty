@@ -37,7 +37,7 @@ fn function_candidates(
 ) -> Vec<OverriddenCallRealization> {
     let mut candidates = Vec::new();
     let mut pending = vec![target];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(current) = pending.pop() {
         if !seen.insert(current) {
             continue;
@@ -71,7 +71,7 @@ fn property_getter_candidates(
 ) -> Vec<OverriddenCallRealization> {
     let mut candidates = Vec::new();
     let mut pending = vec![target];
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::fx_hash::HashSet::default();
     while let Some(current) = pending.pop() {
         if !seen.insert(current) {
             continue;
@@ -125,7 +125,7 @@ pub(super) fn realize(
         .checked_callable_functions
         .iter()
         .map(|(&callable, &function)| (function, callable))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     let mut plans = Vec::new();
     for (raw, expression) in ir.exprs.iter().enumerate() {
         let id = u32::try_from(raw).expect("too many common IR expressions");
@@ -219,8 +219,8 @@ pub(super) fn realize(
 mod tests {
     use super::*;
     use crate::backend::{BackendClassifierFact, BackendClassifierSource};
+    use crate::fx_hash::HashMap;
     use crate::libraries::ClassifierAccess;
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[derive(Default)]

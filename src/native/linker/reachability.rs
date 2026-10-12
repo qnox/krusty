@@ -6,7 +6,7 @@
 //! function, so a section stands for one function. A reference by address (a function pointer
 //! stored in data) counts as a use, so the answer errs towards reachable.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use object::read::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
 use object::SectionIndex;
@@ -21,7 +21,7 @@ pub(super) fn reachable_globals(
 ) -> Result<HashSet<String>, ProgramLinkError> {
     // Every section defining each global name; a weak and a strong definition are both kept,
     // which can only make more reachable.
-    let mut definitions: HashMap<&str, Vec<(usize, SectionIndex)>> = HashMap::new();
+    let mut definitions: HashMap<&str, Vec<(usize, SectionIndex)>> = HashMap::default();
     for (file_index, file) in files.iter().enumerate() {
         for symbol in file.symbols() {
             if symbol.is_local() || symbol.is_undefined() {

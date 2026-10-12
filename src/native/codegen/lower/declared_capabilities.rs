@@ -11,8 +11,8 @@ use super::classifier_shapes;
 /// Dependency types this file puts a class of its own behind, by resolved identity.
 pub(super) fn implemented_dependencies(
     ir: &IrFile,
-) -> std::collections::HashSet<crate::types::TypeName> {
-    let mut owners = std::collections::HashSet::new();
+) -> crate::fx_hash::HashSet<crate::types::TypeName> {
+    let mut owners = crate::fx_hash::HashSet::default();
     for edge in ir.function_overrides.values().flatten() {
         if matches!(
             edge.overridden,
@@ -36,8 +36,8 @@ pub(super) fn implemented_dependencies(
 pub(super) fn implemented_collections(
     ir: &IrFile,
     classifiers: &dyn crate::backend::BackendClassifierSource,
-) -> std::collections::HashSet<super::super::super::intrinsics::CollectionShape> {
-    let mut shapes = std::collections::HashSet::new();
+) -> crate::fx_hash::HashSet<super::super::super::intrinsics::CollectionShape> {
+    let mut shapes = crate::fx_hash::HashSet::default();
     for edge in ir.function_overrides.values().flatten() {
         if matches!(
             edge.overridden,

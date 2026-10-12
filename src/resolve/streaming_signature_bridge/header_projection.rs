@@ -865,7 +865,7 @@ pub(in crate::resolve) fn streamed_declaration_annotation_class_literals(
 pub(in crate::resolve) fn streamed_resolved_declaration_annotations(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
-    bindings: &std::collections::HashMap<(u32, u32, u32), TypeName>,
+    bindings: &crate::fx_hash::HashMap<(u32, u32, u32), TypeName>,
 ) -> Vec<TypeName> {
     let source = headers
         .stub(declaration)

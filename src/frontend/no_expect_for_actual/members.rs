@@ -229,8 +229,8 @@ fn member_modality(
 /// nothing said about it.
 pub(super) fn report_members(
     members: &[Member],
-    actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
-    incompatible: &std::collections::HashSet<crate::fir::DeclarationId>,
+    actualized: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    incompatible: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     declarations: &ResolvedDeclarations<'_>,
     owner: Option<crate::fir::DeclarationId>,
     diags: &mut DiagSink,
@@ -292,8 +292,8 @@ enum Rendered {
 fn render_member(
     member: &Member,
     stable: Option<crate::fir::DeclarationId>,
-    actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
-    incompatible: &std::collections::HashSet<crate::fir::DeclarationId>,
+    actualized: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    incompatible: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     class: &crate::resolve::ClassSig,
     declarations: &ResolvedDeclarations<'_>,
 ) -> Result<Rendered, &'static str> {

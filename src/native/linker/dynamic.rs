@@ -19,7 +19,7 @@
 //! different behaviour; recording the version is what makes the binding the one a C toolchain
 //! would produce.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use object::read::{Object, ObjectSymbol};
 use object::{SymbolKind, SymbolSection};
@@ -91,7 +91,7 @@ impl Imports {
         files: &[Elf],
         libraries: &[ImportLibrary],
     ) -> Result<Self, ProgramLinkError> {
-        let mut defined = HashSet::new();
+        let mut defined = HashSet::default();
         for file in files {
             for symbol in file.symbols() {
                 if !symbol.is_local() && !symbol.is_undefined() {
@@ -100,8 +100,8 @@ impl Imports {
             }
         }
         let mut imports = Self::default();
-        let mut seen = HashSet::new();
-        let mut needed: HashMap<usize, usize> = HashMap::new();
+        let mut seen = HashSet::default();
+        let mut needed: HashMap<usize, usize> = HashMap::default();
         for file in files {
             for symbol in file.symbols() {
                 if symbol.is_local()

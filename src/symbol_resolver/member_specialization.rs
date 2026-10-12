@@ -331,7 +331,7 @@ pub(crate) fn instantiate_slot(
         };
     }
     let ty = signature.map_or(ty, |signature| {
-        let bounds: std::collections::HashMap<String, Ty> = signature
+        let bounds: crate::fx_hash::HashMap<String, Ty> = signature
             .formals
             .iter()
             .zip(&signature.formal_bounds)
@@ -498,7 +498,7 @@ fn specialize_fixed_extension(
     if signature.params.len() != arguments.len() {
         return None;
     }
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     super::unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
     for (&declared, &actual) in signature.params.iter().zip(arguments) {
         super::unify_ty_from_symbols(source, declared, actual, &mut bindings);
@@ -653,7 +653,7 @@ mod projected_member_view_tests {
     }
 
     fn bindings(projected: Ty) -> GSigBinds {
-        GSigBinds::from([("T".to_string(), projected)])
+        GSigBinds::from_iter([("T".to_string(), projected)])
     }
 
     #[test]

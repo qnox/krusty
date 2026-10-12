@@ -5,7 +5,7 @@
 //! template. A conflict is the use-site projection that this application itself composed with the
 //! opposite declaration-site projection; it is not inferred by scanning the finished type.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ast::TypeRef;
 use crate::diag::{DiagnosticIdentity, Span};
@@ -253,7 +253,7 @@ pub(super) fn conflicting_use_site_spans(
     bindings: &HashMap<String, Ty>,
     projection_spans: &HashMap<Span, Span>,
 ) -> Vec<Span> {
-    let mut conflicting = HashSet::new();
+    let mut conflicting = HashSet::default();
     note_template_conflicts(expansion, bindings, &mut conflicting);
     formals
         .iter()

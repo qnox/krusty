@@ -4,7 +4,7 @@
 //! file facade) in `<v#N>` order, the order their reflected references are numbered in. Each has
 //! at least its getter's reference, so the references common IR carries name them all.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::LocalDelegatedPropertyId;
 use crate::ir::{IrExpr, IrFile};
@@ -24,7 +24,7 @@ impl LocalDelegatedProperties {
         let mut numbered: HashMap<
             TypeName,
             HashMap<LocalDelegatedPropertyId, (u32, LocalPropertyMeta)>,
-        > = HashMap::new();
+        > = HashMap::default();
         for expression in &ir.exprs {
             let IrExpr::LocalPropertyReference(reference) = expression else {
                 continue;

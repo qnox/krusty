@@ -1,7 +1,7 @@
 //! The value-index namespace of one function: the types of its parameters and locals, the next
 //! free index, and the default a fresh local starts from.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
@@ -77,7 +77,7 @@ pub(super) fn function_value_types_with(
     let function = &ir.functions[fid as usize];
     let physical_receiver = function.dispatch_receiver.filter(|_| !function.is_static);
     let receiver_offset = u32::from(physical_receiver.is_some());
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     if let Some(receiver) = physical_receiver {
         out.insert(0, Ty::obj_name(receiver));
     }

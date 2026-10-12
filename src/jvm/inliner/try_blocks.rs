@@ -9,7 +9,7 @@
 //! edge only from a store or from the node right after a range's start, which must be the `nop`
 //! rather than a line number for a handler to be reached at all.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::jvm::method_node::{LabelId, MethodNode, Node};
 
@@ -23,7 +23,7 @@ pub(super) fn move_try_starts_to_their_first_instruction(
 ) -> Result<(), InlineError> {
     // One try per handler; a range whose handler an earlier range already has belongs to that try
     // (a `finally` split around a jump), and its start does not open a try.
-    let mut handlers = HashSet::new();
+    let mut handlers = HashSet::default();
     let mut try_starts: Vec<LabelId> = Vec::new();
     for block in &node.try_catch_blocks {
         if !handlers.insert(block.handler) {
@@ -33,7 +33,7 @@ pub(super) fn move_try_starts_to_their_first_instruction(
             try_starts.push(block.start);
         }
     }
-    let mut moved: HashMap<LabelId, LabelId> = HashMap::new();
+    let mut moved: HashMap<LabelId, LabelId> = HashMap::default();
     for start in try_starts {
         let positions = label_positions(node);
         let from = positions[start.index()].ok_or_else(|| {

@@ -195,7 +195,7 @@ impl crate::plugins::FrontendCallResolver for Checker<'_> {
         let mut type_arguments = Vec::new();
         let mut type_argument_bounds = Vec::new();
         if let Some(signature) = call.member.generic_sig.as_ref() {
-            let mut bindings = crate::symbol_resolver::GSigBinds::new();
+            let mut bindings = crate::symbol_resolver::GSigBinds::default();
             for (&declared, &actual) in signature.params.iter().zip(&call.member.params) {
                 crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
             }

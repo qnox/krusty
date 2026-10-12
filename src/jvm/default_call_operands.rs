@@ -6,7 +6,7 @@
 //! operand position into which it inserts a CPS continuation. Emission therefore never guesses
 //! provenance from a zero/null constant, a type or name, and common IR never carries JVM ABI facts.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::ExprId;
 

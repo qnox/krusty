@@ -8,7 +8,7 @@
 //! The status is applied once, where the frontend publishes each declaration's header, so the
 //! checker, lowering and every backend read the transformed modality.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{DeclarationFlags, DeclarationId, DeclarationKind, StreamedHeaderModule};
 use crate::types::TypeName;

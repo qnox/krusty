@@ -7,7 +7,7 @@
 
 use crate::ast::{ClassDecl, ExprId, Param};
 use crate::diag::Span;
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 pub(super) fn retain_default_span(
     default: Option<ExprId>,

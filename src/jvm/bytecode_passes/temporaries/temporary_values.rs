@@ -5,7 +5,8 @@
 //! reaches a merge with another value, an `iinc`, or the start of a named local is dirty and not a
 //! temporary.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use crate::fx_hash::HashSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::instruction_graph::InstructionGraph;
 use super::null_check_folds::analysis_within_limit;
@@ -118,7 +119,7 @@ pub(super) fn analyze(
 ) -> Option<BTreeMap<usize, Vec<usize>>> {
     let graph = InstructionGraph::build(method)?;
     let n = graph.len();
-    let mut kept: HashSet<LabelId> = HashSet::new();
+    let mut kept: HashSet<LabelId> = HashSet::default();
     for node in &method.nodes {
         match node {
             Node::Insn(insn) => kept.extend(insn.jump_targets()),

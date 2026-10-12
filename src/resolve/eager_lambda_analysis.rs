@@ -26,7 +26,7 @@
 //! The analysis narrows the overload family the rest of call resolution sees. The probe's
 //! diagnostics are dropped: the lambda is checked again against the candidate finally selected.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ast::{Expr, ExprId, Stmt};
 use crate::libraries::{
@@ -280,7 +280,7 @@ impl Checker<'_> {
         {
             return None;
         }
-        let mut analyzed = HashSet::new();
+        let mut analyzed = HashSet::default();
         while candidates.len() > 1 {
             let Some((argument, results)) =
                 self.analyze_first_ready_lambda(scope, call, &candidates, &mut analyzed)

@@ -20,8 +20,8 @@ pub fn emit_file(ir: &IrFile) -> String {
             let provider = ir.checked_callable_functions.get(&provider).copied()?;
             Some((target, provider))
         })
-        .collect::<std::collections::HashMap<_, _>>();
-    let class_methods: std::collections::HashSet<u32> = ir
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+    let class_methods: crate::fx_hash::HashSet<u32> = ir
         .classes
         .iter()
         .flat_map(|class| class.methods.iter().copied())

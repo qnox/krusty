@@ -5,7 +5,7 @@
 //! the lambda kotlinc inlines, it takes each parameter unboxed, and whoever inlines it unboxes the
 //! incoming box once at the `invoke` (`StackValue.coerce`).
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::ir::IrFile;
 use crate::types::Ty;

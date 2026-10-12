@@ -5,7 +5,7 @@
 //! contain provisional body-local entries for a source that has not streamed yet. This module copies
 //! only finalized classifier records before Pass 2 starts and rejects every nested pending/error type.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::libraries::{
@@ -143,11 +143,11 @@ impl BackendModuleFacts {
     pub(crate) fn from_resolved_index(
         index: &crate::fir::ResolvedModuleIndex,
     ) -> Result<Self, BackendFactError> {
-        let mut classifiers = HashMap::new();
-        let mut body_local_classifiers = HashSet::new();
-        let mut source_value_classes = HashMap::new();
-        let mut metadata_readable_value_classes = HashSet::new();
-        let mut source_declarations = HashMap::new();
+        let mut classifiers = HashMap::default();
+        let mut body_local_classifiers = HashSet::default();
+        let mut source_value_classes = HashMap::default();
+        let mut metadata_readable_value_classes = HashSet::default();
+        let mut source_declarations = HashMap::default();
         let mut generated_classifiers = Vec::new();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
@@ -329,9 +329,9 @@ impl BackendModuleFacts {
         source: impl IntoIterator<Item = (TypeName, LibraryType)>,
         body_local_classifiers: impl IntoIterator<Item = TypeName>,
     ) -> Result<Self, BackendFactError> {
-        let mut classifiers = HashMap::new();
-        let mut source_value_classes = HashMap::new();
-        let mut metadata_readable_value_classes = HashSet::new();
+        let mut classifiers = HashMap::default();
+        let mut source_value_classes = HashMap::default();
+        let mut metadata_readable_value_classes = HashSet::default();
         for (classifier, shape) in source {
             if classifiers.contains_key(&classifier) {
                 continue;
@@ -352,7 +352,7 @@ impl BackendModuleFacts {
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
             metadata_readable_value_classes,
-            source_declarations: HashMap::new(),
+            source_declarations: HashMap::default(),
         })
     }
 

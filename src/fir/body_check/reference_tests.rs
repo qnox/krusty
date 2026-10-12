@@ -1020,7 +1020,7 @@ fn inline_generic_property_reference_publishes_the_selected_getter_splice() {
     assert_eq!(expression_substitution.reified, substitution.reified);
     assert_eq!(expression_substitution.value, substitution.value);
 
-    let mut referenced = std::collections::HashSet::new();
+    let mut referenced = crate::fx_hash::HashSet::default();
     body.collect_referenced_module_callables(&mut referenced);
     assert_eq!(referenced, [splice.callable].into_iter().collect());
 }

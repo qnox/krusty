@@ -1,6 +1,6 @@
 //! Top-level properties published by the KLIB provider.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 use std::path::Path;
 
 use super::*;
@@ -513,7 +513,7 @@ fn fixture_libraries() -> (KlibLibraries, HashSet<KlibAccessorIdSignature>) {
         .collect();
     let libraries = KlibLibraries::from_packages(packages).expect("the fixture is signable");
     let trees = read_declaration_trees(&archive).expect("the fixture's IR decodes");
-    let mut accessors = HashSet::new();
+    let mut accessors = HashSet::default();
     for tree in trees.trees() {
         let KlibIrMember::Property(property) = &tree.declaration else {
             continue;

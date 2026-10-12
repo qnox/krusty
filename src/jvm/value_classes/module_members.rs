@@ -38,7 +38,7 @@ pub(crate) fn inherited_member_impl_name(declared: &str, entry: &str) -> String 
 /// The type a declared parameter or result occupies in the member's JVM descriptor: a value class
 /// is its carrier, as the declaring file's value-class pass lowers it; any other type is unchanged.
 fn module_member_carrier(ir: &IrFile, ty: Ty) -> Ty {
-    let mut declarations = Under::new();
+    let mut declarations = Under::default();
     let mut pending = Vec::new();
     crate::ir::referenced_classifiers::collect_classifier_names(ty, &mut pending);
     while let Some(classifier) = pending.pop() {

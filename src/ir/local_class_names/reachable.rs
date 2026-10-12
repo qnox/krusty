@@ -56,7 +56,7 @@ impl IrFile {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut closure = HashSet::new();
+        let mut closure = HashSet::default();
         let mut pending = roots.into_iter().collect::<Vec<_>>();
         while let Some(expression) = pending.pop() {
             if !owned_expressions.contains(&expression) || !closure.insert(expression) {
@@ -69,11 +69,11 @@ impl IrFile {
             });
         }
 
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut pending = closure.iter().copied().collect::<Vec<_>>();
-        let mut local_clones = HashMap::new();
+        let mut local_clones = HashMap::default();
         let mut new_detached = Vec::new();
-        let mut reachable_implementations = HashSet::new();
+        let mut reachable_implementations = HashSet::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -320,7 +320,7 @@ fn detach_lambda_impl(ir: &mut IrFile, source: FunId) -> FunId {
     shape.body = shape
         .body
         .map(|body| super::super::clone_expression_dag(ir, body).0);
-    let target = super::super::clone::clone_class_method(ir, source, shape, &HashMap::new());
+    let target = super::super::clone::clone_class_method(ir, source, shape, &HashMap::default());
     // `inline_only` and `must_inline` describe how the source lambda's existing sites were
     // consumed. This detached implementation belongs to a newly copied site and must remain
     // available until that site's own representation pass either consumes or realizes it. Keeping

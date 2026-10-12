@@ -179,7 +179,7 @@ impl PostponedCallConstraints {
         expected: Ty,
         actual: Ty,
         inferred: &crate::symbol_resolver::AssignabilityConstraints,
-        shadowed_formals: &std::collections::HashSet<String>,
+        shadowed_formals: &crate::fx_hash::HashSet<String>,
     ) {
         crate::trace_compiler!(
             "lambda_apply",

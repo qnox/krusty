@@ -5,7 +5,7 @@
 //! else public is named in the header and not declared, so a caller sees the refusal instead of an
 //! ABI guess. `internal` and `private` functions are absent: they are not part of the ABI.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::IrFile;
 use crate::types::{Ty, Visibility};

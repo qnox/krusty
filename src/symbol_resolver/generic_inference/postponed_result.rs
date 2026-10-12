@@ -50,7 +50,7 @@ pub(crate) fn nested_result_from_concrete_parameter(
     outer_formals: &[String],
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Result<Option<Ty>, ()> {
-    let mut binds = GSigBinds::new();
+    let mut binds = GSigBinds::default();
     if !bind_concrete_parameter(nested, nested.ret, parameter, outer_formals, &mut binds) {
         return Err(());
     }

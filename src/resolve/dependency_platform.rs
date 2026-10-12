@@ -1,9 +1,9 @@
+use crate::fx_hash::HashMap as FxHashMap;
 use crate::libraries::{
     Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind, PropertyInfo,
     PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
 };
 use crate::module_symbols::ModuleSymbols;
-use crate::name_tree::FxHashMap;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
 use std::rc::Rc;
@@ -605,8 +605,8 @@ impl SemanticPlatform for DependencyPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_hash::HashMap;
     use crate::libraries::{Origin, TypeKind};
-    use std::collections::HashMap;
 
     #[derive(Default)]
     struct TypeVisibility {
@@ -678,11 +678,11 @@ mod tests {
             constructors: Vec::new(),
             hidden_member_properties: Default::default(),
             hidden_deprecated_callables: Default::default(),
-            declared_callables: HashMap::new(),
+            declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
-            constants: HashMap::new(),
+            constants: HashMap::default(),
             sam_eligible: false,
             callable_signature: None,
             callable_signatures: Vec::new(),

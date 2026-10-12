@@ -11,7 +11,7 @@
 //! to. The result is the state the verifier will hold at every instruction, which is exactly the
 //! state any target transform must preserve.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::ControlGraph;
 use crate::jvm::classfile::VerifType;
@@ -294,7 +294,8 @@ impl FrameTypes {
         if graph.exit() != insns.len() {
             return None;
         }
-        let mut recorded: HashMap<usize, FrameState> = HashMap::with_capacity(frames.len());
+        let mut recorded: HashMap<usize, FrameState> =
+            HashMap::with_capacity_and_hasher(frames.len(), Default::default());
         for (index, locals, stack) in frames {
             // One frame per position, and it has to be the one the class file carries. Several
             // labels can be bound at ONE bytecode offset, and the verifier holds their MERGE there

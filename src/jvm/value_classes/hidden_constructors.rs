@@ -7,7 +7,7 @@
 //! anonymous object's captures and a lambda class's are added after that lowering, as carriers, so
 //! they never hide the constructor.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ExprId, IrClass, IrFile};
 use crate::types::{Ty, TypeName};

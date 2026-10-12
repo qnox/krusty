@@ -5,7 +5,7 @@
 //! copies retain a typed prototype and use its access boundary. A lambda's private helper and
 //! reflection table are instead owned by each exact source or specialized closure realization.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{
     Callee, ExprId, FnParamInfo, IrExpr, IrFile, IrFunction, IrLiftingSequence, IrModuleSource,
@@ -112,7 +112,7 @@ pub(crate) fn realize(
     }
 
     let mut helper_access = HelperAccess::default();
-    let mut realizations = HashMap::new();
+    let mut realizations = HashMap::default();
     for key in uses {
         let plan = plans.get(key as usize).ok_or(())?;
         let lambda_path = closure_plans.lambda_path_start(key);
@@ -296,7 +296,7 @@ fn emitted_expressions(ir: &IrFile) -> HashSet<ExprId> {
         roots.push(body);
     }
 
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     for root in roots {
         let mut pending = vec![root];
         while let Some(expression) = pending.pop() {
@@ -434,7 +434,10 @@ mod tests {
         class.init_body = Some(access);
         ir.classes.push(class);
 
-        assert_eq!(emitted_expressions(&ir), HashSet::from([delegate, access]));
+        assert_eq!(
+            emitted_expressions(&ir),
+            HashSet::from_iter([delegate, access])
+        );
     }
 
     #[test]
@@ -452,6 +455,6 @@ mod tests {
         });
         ir.inline_only_fns.insert(function);
 
-        assert_eq!(emitted_expressions(&ir), HashSet::new());
+        assert_eq!(emitted_expressions(&ir), HashSet::default());
     }
 }

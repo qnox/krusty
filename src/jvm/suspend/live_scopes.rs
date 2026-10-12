@@ -148,8 +148,8 @@ impl ScopeWalk<'_> {
             } else {
                 self.params.to_vec()
             },
-            names: std::collections::HashMap::new(),
-            dead: HashSet::new(),
+            names: crate::fx_hash::HashMap::default(),
+            dead: HashSet::default(),
         };
         // NAMED vars spill by SCOPE (kotlinc's rule) — every splice-materialization local kotlinc
         // names is emitted `named` at its lowering site, so scope and liveness agree for them.

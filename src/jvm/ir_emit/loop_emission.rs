@@ -141,7 +141,7 @@ impl Emitter<'_> {
         condition: [Option<ExprId>; 2],
         code: &mut CodeBuilder,
     ) {
-        let mut read = std::collections::HashSet::new();
+        let mut read = crate::fx_hash::HashSet::default();
         let mut pending: Vec<ExprId> = condition.into_iter().flatten().collect();
         while let Some(expression) = pending.pop() {
             if let IrExpr::GetValue(value) = self.ir.expr(expression) {

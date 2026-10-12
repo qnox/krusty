@@ -5,7 +5,7 @@
 //! receivers by the body's first use of each, as kotlinc's local declaration lowering does. The
 //! scope identity, unlike type or name matching, tells same-typed receiver rungs apart.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::diag::Span;
 

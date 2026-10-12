@@ -377,7 +377,7 @@ fn set_type_operand(node: &mut Node, class: &str) -> Result<(), InlineError> {
 /// The nodes of one `typeOf` realization. Temporaries occupy `local_base` upward; the returned
 /// slot is the first one this realization did not use.
 fn type_of_realization(realization: &[TypeOfInsn], local_base: u16) -> (Vec<Node>, u16) {
-    let mut slots = std::collections::HashMap::<u32, u16>::new();
+    let mut slots = crate::fx_hash::HashMap::<u32, u16>::default();
     let mut next = local_base;
     let mut nodes = Vec::new();
     for instruction in realization {
@@ -487,7 +487,7 @@ fn method(op: u8, owner: &str, name: &str, desc: &str) -> Insn {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use crate::fx_hash::HashMap;
 
     use super::*;
     use crate::jvm::method_node::TryCatchBlock;
@@ -514,7 +514,7 @@ mod tests {
             class: "java/lang/Object".into(),
         }));
         let arguments = ReifiedArguments {
-            classes: HashMap::from([(
+            classes: HashMap::from_iter([(
                 "T".to_owned(),
                 ReifiedArgument::Class {
                     internal: "java/lang/String".to_owned(),
@@ -547,7 +547,7 @@ mod tests {
                 class: "java/lang/Object".into(),
             }));
             let arguments = ReifiedArguments {
-                classes: HashMap::from([(
+                classes: HashMap::from_iter([(
                     "T".to_owned(),
                     ReifiedArgument::Class {
                         internal: "java/lang/String".to_owned(),
@@ -604,7 +604,7 @@ mod tests {
             class: "kotlin/jvm/functions/Function1".into(),
         }));
         let arguments = ReifiedArguments {
-            classes: HashMap::from([(
+            classes: HashMap::from_iter([(
                 "T".to_owned(),
                 ReifiedArgument::Class {
                     internal: "kotlin/jvm/functions/Function1".to_owned(),
@@ -673,7 +673,7 @@ mod tests {
             class: "java/lang/Object".into(),
         }));
         let arguments = ReifiedArguments {
-            classes: HashMap::from([(
+            classes: HashMap::from_iter([(
                 "T".to_owned(),
                 ReifiedArgument::Forwarded {
                     name: "R".to_owned(),
@@ -701,7 +701,7 @@ mod tests {
         node.nodes = marker("T", TYPE_OF_MARKER);
         node.nodes.push(Node::Insn(Insn::Op(0x01)));
         let arguments = ReifiedArguments {
-            type_of: HashMap::from([(
+            type_of: HashMap::from_iter([(
                 "T".to_owned(),
                 vec![TypeOfInsn::LdcClass("java/lang/String".to_owned())],
             )]),
@@ -756,7 +756,7 @@ mod tests {
 
     fn child_failure() -> ReifiedArguments {
         ReifiedArguments {
-            classes: HashMap::from([(
+            classes: HashMap::from_iter([(
                 "E".to_owned(),
                 ReifiedArgument::Class {
                     internal: "ChildFailure".to_owned(),
@@ -832,7 +832,7 @@ mod tests {
     fn a_forwarded_catch_renames_the_marker_and_keeps_the_erasure() {
         let mut node = catch_handler("E");
         let arguments = ReifiedArguments {
-            classes: HashMap::from([(
+            classes: HashMap::from_iter([(
                 "E".to_owned(),
                 ReifiedArgument::Forwarded {
                     name: "T".to_owned(),

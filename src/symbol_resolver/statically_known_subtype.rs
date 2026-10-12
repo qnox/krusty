@@ -7,7 +7,7 @@
 //! bound to a star projection becomes a star. The caller then asks whether that type is a subtype of
 //! the target.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::receiver_hierarchy;
 use crate::libraries::function_classifiers::supertype_classifier;
@@ -75,7 +75,7 @@ pub(crate) fn statically_known_subtype(
         Ty::Intersection(parts) => parts.to_vec(),
         other => vec![other],
     };
-    let mut substitution = HashMap::<&str, Ty>::new();
+    let mut substitution = HashMap::<&str, Ty>::default();
     for part in normalized {
         let constructor = part.non_null().kotlin_class_internal();
         let with_variables = constructor.and_then(|constructor| {
@@ -84,7 +84,7 @@ pub(crate) fn statically_known_subtype(
                 .map(|(applied, _)| *applied)
                 .find(|applied| applied.kotlin_class_internal() == Some(constructor))
         });
-        let mut result = HashMap::new();
+        let mut result = HashMap::default();
         if let Some(with_variables) = with_variables {
             let unification = Unification {
                 variables: &formals,
@@ -169,9 +169,9 @@ impl Unification<'_> {
             return true;
         }
         if let Some(Ty::Intersection(parts)) = original_type {
-            let mut merged = HashMap::<String, Ty>::new();
+            let mut merged = HashMap::<String, Ty>::default();
             for &part in parts {
-                let mut local = HashMap::new();
+                let mut local = HashMap::default();
                 if !self.unify(part, with_parameters, &mut local) {
                     return false;
                 }

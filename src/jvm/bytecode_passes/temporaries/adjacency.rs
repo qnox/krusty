@@ -8,7 +8,7 @@
 //! created it. Labels never move while the rules run, so what a run of them in front of an
 //! instruction is made of is fixed when the body is read.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::super::insn_list::{InsnList, NodeId};
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
@@ -35,9 +35,9 @@ pub(super) struct Body {
 impl Body {
     /// `method`'s body, taken out of it to be edited; its tables stay behind.
     pub(super) fn take(method: &mut MethodNode) -> Body {
-        let mut arrivals = HashSet::new();
-        let mut marks = HashSet::new();
-        let mut origins = HashMap::new();
+        let mut arrivals = HashSet::default();
+        let mut marks = HashSet::default();
+        let mut origins = HashMap::default();
         let mut ordinal = 0usize;
         for node in &method.nodes {
             match node {
@@ -53,16 +53,16 @@ impl Body {
                 }
             }
         }
-        let mut protected_starts = HashSet::new();
-        let mut protected_ends = HashSet::new();
-        let mut handlers = HashSet::new();
+        let mut protected_starts = HashSet::default();
+        let mut protected_ends = HashSet::default();
+        let mut handlers = HashSet::default();
         for block in &method.try_catch_blocks {
             protected_starts.insert(block.start);
             protected_ends.insert(block.end);
             handlers.insert(block.handler);
             arrivals.extend([block.start, block.end, block.handler]);
         }
-        let mut local_marks = HashSet::new();
+        let mut local_marks = HashSet::default();
         for local in &method.local_variables {
             marks.extend([local.start, local.end]);
             local_marks.extend([local.start, local.end]);

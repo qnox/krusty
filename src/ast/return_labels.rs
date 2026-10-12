@@ -7,7 +7,7 @@
 
 use super::{ExprId, StmtId};
 use crate::diag::Span;
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 #[derive(Default, Clone)]
 pub(crate) struct ReturnLabelSpans {

@@ -17,7 +17,7 @@ impl crate::fir::CheckedBodySink for UnexpectedOrdinaryInlineBody {
 
 #[derive(Default)]
 struct InlineNestedBodyCollector {
-    roots: std::collections::HashMap<crate::fir::DeclarationId, crate::fir::CallableId>,
+    roots: crate::fx_hash::HashMap<crate::fir::DeclarationId, crate::fir::CallableId>,
     bodies: Vec<(crate::fir::CallableId, crate::fir::FirBody)>,
     missing_owner: Option<crate::fir::DeclarationId>,
 }
@@ -36,7 +36,7 @@ impl crate::fir::CheckedBodySink for InlineNestedBodyCollector {
 fn inline_payload_roots(
     selection: &crate::fir::BodyCheckSelection,
     index: &crate::fir::ResolvedModuleIndex,
-) -> Option<std::collections::HashMap<crate::fir::DeclarationId, crate::fir::CallableId>> {
+) -> Option<crate::fx_hash::HashMap<crate::fir::DeclarationId, crate::fir::CallableId>> {
     selection
         .payload_roots
         .iter()
@@ -79,8 +79,8 @@ impl crate::fir::CheckedBodySink for DefaultArgumentSink<'_> {
 }
 
 struct DefaultCheckSelection {
-    roots: Vec<std::collections::HashSet<crate::fir::DeclarationId>>,
-    bodies: Vec<std::collections::HashSet<crate::fir::DeclarationId>>,
+    roots: Vec<crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
+    bodies: Vec<crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
 }
 
 fn default_check_selection(
@@ -89,8 +89,8 @@ fn default_check_selection(
     headers: &crate::fir::StreamedHeaderModule,
     source_count: usize,
 ) -> Option<DefaultCheckSelection> {
-    let mut roots = vec![std::collections::HashSet::new(); source_count];
-    let mut bodies = vec![std::collections::HashSet::new(); source_count];
+    let mut roots = vec![crate::fx_hash::HashSet::default(); source_count];
+    let mut bodies = vec![crate::fx_hash::HashSet::default(); source_count];
     for work in providers {
         let Some(provider) = index.declaration_anchor(work.provider) else {
             crate::trace_compiler!(

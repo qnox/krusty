@@ -3,8 +3,8 @@
 //! This module disappears when signature expressions are evaluated directly by the ordinary
 //! resolver. It must not grow body checking or lowering responsibilities.
 
+use crate::fx_hash::{HashMap, HashSet};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 use crate::ast::{ClassDecl, Decl, DeclId, File, FunBody, FunDecl, PropDecl, TypeRef};
 use crate::diag::Span;
@@ -367,7 +367,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         let missing = self.extension_receivers_by_declaration.borrow().is_none();
         if missing {
-            let mut receivers = HashMap::new();
+            let mut receivers = HashMap::default();
             for property in self.table.ext_props.values().flatten() {
                 if let Some(declaration) = property.stable_declaration {
                     receivers.entry(declaration).or_insert(property.receiver);
@@ -654,7 +654,7 @@ impl ProductionSignatureSemantics<'_> {
         let names = arguments
             .iter()
             .filter_map(|argument| argument.name)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let candidates = self
             .with_resolver(scope, |resolver| {
                 Some(resolver.accessible_top_level_candidates(spelling))
@@ -1173,7 +1173,7 @@ impl ProductionSignatureSemantics<'_> {
                     candidate.callable.name,
                 );
                 let actual = actual?;
-                let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                let mut bindings = crate::symbol_resolver::GSigBinds::default();
                 for (&parameter, actual) in context_parameters.iter().zip(actual) {
                     crate::symbol_resolver::unify_inferred_ty(parameter, actual, &mut bindings);
                 }
@@ -2114,7 +2114,7 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         if let Some(generic) = member.generic_sig.as_ref() {
             bindings.extend(
                 generic
@@ -2140,7 +2140,7 @@ impl ProductionSignatureSemantics<'_> {
         let result = self.apply_dispatch_receiver(receiver, member, signature.result.get());
         if let Some(expected) = expected {
             if result.mentions_ty_param() {
-                let mut from_result = crate::symbol_resolver::GSigBinds::new();
+                let mut from_result = crate::symbol_resolver::GSigBinds::default();
                 crate::symbol_resolver::unify_inferred_ty_with_source(
                     &semantic_source,
                     result,
@@ -2238,7 +2238,7 @@ impl ProductionSignatureSemantics<'_> {
             );
             return Err(Self::failure());
         };
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_inferred_ty(property.receiver, receiver, &mut bindings);
         crate::fir::ResolvedTy::new(crate::symbol_resolver::ty_subst_keep_unbound(
             signature.result.get(),
@@ -2296,7 +2296,7 @@ impl ProductionSignatureSemantics<'_> {
                         .collect(),
                 )
             });
-        let mut inferred = crate::symbol_resolver::GSigBinds::new();
+        let mut inferred = crate::symbol_resolver::GSigBinds::default();
         for (parameter, argument) in declared_parameters.iter().zip(arguments) {
             crate::symbol_resolver::unify_inferred_ty(*parameter, *argument, &mut inferred);
         }
@@ -3076,7 +3076,7 @@ fn compact_classifier_cycle_edges(
         graph.entry(owner).or_default().extend(parents);
     }
     let (component_of, cyclic_components) = super::supertype_components(&graph);
-    let mut rejected = HashSet::new();
+    let mut rejected = HashSet::default();
     for (declaration, (superclass, interfaces)) in resolved {
         let Some(component) = classifier_types
             .get(declaration)
@@ -3720,7 +3720,7 @@ pub(crate) fn finalized_streamed_signature_index(
             return false;
         };
         let mut current = class.super_internal;
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         while let Some(classifier) = current {
             if !visited.insert(classifier) {
                 return false;
@@ -3791,10 +3791,10 @@ pub(crate) fn finalized_streamed_signature_index(
     let (graph, extraction_failures) = extracted.into_parts();
     let mut required = Vec::new();
     let mut explicit = Vec::new();
-    let mut inferred_parameters = HashMap::new();
+    let mut inferred_parameters = HashMap::default();
     let mut backing_field_declarations = Vec::new();
-    let mut explicit_backing_field_types = HashMap::new();
-    let mut resolved_receivers = HashMap::new();
+    let mut explicit_backing_field_types = HashMap::default();
+    let mut resolved_receivers = HashMap::default();
     let mut failed = extraction_failures
         .into_iter()
         .map(|failure| {
@@ -3872,23 +3872,23 @@ pub(crate) fn finalized_streamed_signature_index(
             entries.push(spelling.to_owned());
         }
     }
-    let empty_extension_receivers = HashMap::new();
+    let empty_extension_receivers = HashMap::default();
     let explicit_type_semantics = ProductionSignatureSemantics {
         headers,
         table,
         classifier_types: &classifier_types,
-        parameters: HashMap::new(),
+        parameters: HashMap::default(),
         extension_receivers: &empty_extension_receivers,
-        source_orders: HashMap::new(),
-        signature_origins: HashMap::new(),
-        scoped_receivers: RefCell::new(HashMap::new()),
-        scoped_constraint_inputs: RefCell::new(HashMap::new()),
-        scoped_constraints: RefCell::new(HashMap::new()),
-        completed_scoped_constraints: RefCell::new(HashMap::new()),
+        source_orders: HashMap::default(),
+        signature_origins: HashMap::default(),
+        scoped_receivers: RefCell::new(HashMap::default()),
+        scoped_constraint_inputs: RefCell::new(HashMap::default()),
+        scoped_constraints: RefCell::new(HashMap::default()),
+        completed_scoped_constraints: RefCell::new(HashMap::default()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
-        source_contracts: RefCell::new(HashMap::new()),
+        source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),
         extension_receivers_by_declaration: RefCell::new(None),
@@ -4467,7 +4467,7 @@ pub(crate) fn finalized_streamed_signature_index(
             Err(_) => failed.push(stub.id),
         }
     }
-    let mut resolved_classifier_parents = HashMap::new();
+    let mut resolved_classifier_parents = HashMap::default();
     for (declaration, parents) in graph.explicit_classifier_parents() {
         let superclass = match parents.superclass {
             Some(expression) => {
@@ -4546,14 +4546,14 @@ pub(crate) fn finalized_streamed_signature_index(
         extension_receivers: &resolved_receivers,
         source_orders,
         signature_origins,
-        scoped_receivers: RefCell::new(HashMap::new()),
-        scoped_constraint_inputs: RefCell::new(HashMap::new()),
-        scoped_constraints: RefCell::new(HashMap::new()),
-        completed_scoped_constraints: RefCell::new(HashMap::new()),
+        scoped_receivers: RefCell::new(HashMap::default()),
+        scoped_constraint_inputs: RefCell::new(HashMap::default()),
+        scoped_constraints: RefCell::new(HashMap::default()),
+        completed_scoped_constraints: RefCell::new(HashMap::default()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
-        source_contracts: RefCell::new(HashMap::new()),
+        source_contracts: RefCell::new(HashMap::default()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
         classifier_stubs_by_source: RefCell::new(None),
         extension_receivers_by_declaration: RefCell::new(None),
@@ -4599,11 +4599,11 @@ pub(crate) fn finalized_streamed_signature_index(
         let failed_declarations = finalization_failures
             .iter()
             .map(|(declaration, _)| *declaration)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         let selected_diagnostics = finalization_failures
             .iter()
             .filter_map(|(_, diagnostic)| *diagnostic)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         for (index, diagnostic) in semantics.diagnostics.borrow().iter().enumerate() {
             let identity = crate::fir::DiagnosticId::from_raw(index as u32 + 1);
             if diagnostic.unconditional
@@ -5382,7 +5382,7 @@ pub(crate) fn finalized_streamed_signature_index(
     let failed_declarations = failed
         .iter()
         .copied()
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<crate::fx_hash::HashSet<_>>();
     for stub in headers.stubs.iter().filter(|stub| {
         stub.kind == DeclarationKind::Function && failed_declarations.contains(&stub.id)
     }) {

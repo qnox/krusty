@@ -837,7 +837,7 @@ pub(super) fn generic_bounds_admit(
         return true;
     };
     let mut binds = seeded_gsig_binds(gsig, type_args);
-    let mut inferred = GSigBinds::new();
+    let mut inferred = GSigBinds::default();
     if let Some(declared_receiver) = gsig.receiver {
         unify_inferred_ty_impl(Some(src), declared_receiver, receiver, &mut inferred);
     }
@@ -949,7 +949,7 @@ pub(super) fn generic_bounds_admit_slots(
         return true;
     };
     let mut binds = seeded_gsig_binds(gsig, type_args);
-    let mut inferred = GSigBinds::new();
+    let mut inferred = GSigBinds::default();
     if let Some(declared_receiver) = gsig.receiver {
         unify_inferred_ty_impl(Some(src), declared_receiver, receiver, &mut inferred);
     }
@@ -1258,7 +1258,7 @@ fn declaration_specificity_params(candidate: &FunctionInfo) -> Vec<Ty> {
         .params
         .iter()
         .skip(candidate.context_count.min(signature.params.len()))
-        .map(|parameter| ty_subst(*parameter, &GSigBinds::new()))
+        .map(|parameter| ty_subst(*parameter, &GSigBinds::default()))
         .collect::<Vec<_>>();
     let vararg = candidate
         .call_sig

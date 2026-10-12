@@ -3,7 +3,7 @@
 //! calling function and the callee (`ClassCodegen.getRegeneratedObjectNameGenerator`) and points
 //! its `EnclosingMethod` at the calling method.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 use std::rc::Rc;
 
 use super::*;

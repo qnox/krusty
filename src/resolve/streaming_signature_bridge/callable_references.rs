@@ -200,7 +200,7 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_ty(expansion, underlying_result, &mut bindings);
         if let (Some(argument), Some(sam)) = (
             argument,
@@ -300,7 +300,7 @@ impl ProductionSignatureSemantics<'_> {
         let context = crate::assignable::TyCtx::new();
         let assignable =
             |actual, target| crate::assignable::is_assignable(&context, &oracle, actual, target);
-        let mut alias_bindings = crate::symbol_resolver::GSigBinds::new();
+        let mut alias_bindings = crate::symbol_resolver::GSigBinds::default();
 
         let sam = crate::symbol_resolver::semantic_sam_signature(&source, expansion);
         crate::trace_compiler!(

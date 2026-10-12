@@ -42,7 +42,7 @@ mod members;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::ResolvedPropertyOverrideTarget;
 use crate::ir::{ClassId, FunId, IrFile};

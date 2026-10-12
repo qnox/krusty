@@ -4,7 +4,7 @@
 //! handed to a backend, this module copies the exact semantic facts needed to realize those edges;
 //! target adapters therefore never reopen [`ResolvedModuleIndex`].
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::fir::{
     CallableId, DeclarationFlags, DeclarationId, FirPropertyReferenceTarget, PropertyId,
@@ -395,9 +395,9 @@ pub(super) fn publish_referenced(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
-    let mut callables = HashSet::new();
-    let mut properties = HashSet::new();
-    let mut classifiers = HashSet::new();
+    let mut callables = HashSet::default();
+    let mut properties = HashSet::default();
+    let mut classifiers = HashSet::default();
     for expression in &ir.exprs {
         match expression {
             IrExpr::Call {

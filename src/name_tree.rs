@@ -1,58 +1,4 @@
-/// FxHash (rustc's non-cryptographic hasher), hand-rolled to keep the crate dependency-lean. The
-/// compiler's map keys are trusted internal data, so DoS-resistant SipHash buys nothing and costs
-/// measurably on the hot name/id lookups.
-#[derive(Default, Clone)]
-pub struct FxHasher {
-    hash: u64,
-}
-
-impl FxHasher {
-    #[inline]
-    fn add(&mut self, word: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
-    }
-}
-
-impl std::hash::Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let mut rest = bytes;
-        while rest.len() >= 8 {
-            self.add(u64::from_le_bytes(rest[..8].try_into().unwrap()));
-            rest = &rest[8..];
-        }
-        if rest.len() >= 4 {
-            self.add(u64::from(u32::from_le_bytes(rest[..4].try_into().unwrap())));
-            rest = &rest[4..];
-        }
-        for &b in rest {
-            self.add(u64::from(b));
-        }
-    }
-    #[inline]
-    fn write_u8(&mut self, n: u8) {
-        self.add(u64::from(n));
-    }
-    #[inline]
-    fn write_u32(&mut self, n: u32) {
-        self.add(u64::from(n));
-    }
-    #[inline]
-    fn write_u64(&mut self, n: u64) {
-        self.add(n);
-    }
-    #[inline]
-    fn write_usize(&mut self, n: usize) {
-        self.add(n as u64);
-    }
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-pub type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
-pub type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuildHasher>;
+use crate::fx_hash::FxHasher;
 
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
@@ -290,19 +236,19 @@ fn child_hash_parts(parent: NameId, parts: &[&[u8]]) -> u64 {
     h.write_u32(parent.0);
     let mut offset = 0usize;
     while offset + 8 <= len {
-        h.add(u64::from_le_bytes(std::array::from_fn(|index| {
+        h.write_u64(u64::from_le_bytes(std::array::from_fn(|index| {
             byte_at(offset + index)
         })));
         offset += 8;
     }
     if offset + 4 <= len {
-        h.add(u64::from(u32::from_le_bytes(std::array::from_fn(
-            |index| byte_at(offset + index),
-        ))));
+        h.write_u32(u32::from_le_bytes(std::array::from_fn(|index| {
+            byte_at(offset + index)
+        })));
         offset += 4;
     }
     while offset < len {
-        h.add(u64::from(byte_at(offset)));
+        h.write_u8(byte_at(offset));
         offset += 1;
     }
     h.finish()

@@ -5,8 +5,8 @@
 //! the call's contract proved, and a declaration's inferred result asks which typealias the call
 //! constructed through.
 
+use crate::fx_hash::HashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use crate::contracts::{Condition, Contract, Effect, ParamRef, ReturnsValue};
 use crate::fir::{OriginId, ResolvedTypeAbbreviation};

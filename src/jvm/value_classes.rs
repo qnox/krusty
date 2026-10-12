@@ -41,6 +41,7 @@ mod type_operation_roles;
 mod unboxing_rewrites;
 mod value_boundaries;
 mod value_members;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::method_descriptors::jvm_tys;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
@@ -60,7 +61,6 @@ pub(crate) use representation::{
     instance_representation, is_boxed_value_class, type_operation_internal_name,
 };
 use result_tail_boxing::box_vc_tail;
-use std::collections::{HashMap, HashSet};
 use suspend_results::{record_suspend_results, suspend_result_representation};
 use unboxing_rewrites::{narrow_wrap, unbox_call, unbox_wrap, unbox_wrap_nullable};
 use value_boundaries::{record_reference_array_element_boundary, record_value_boundary};
@@ -129,10 +129,10 @@ pub(crate) fn lower_value_classes(
     // frontend symbols. A value class declared in ANOTHER file of this module is not in `ir.classes`;
     // the normalized classifier provider supplies its declaration facts without leaking provider
     // origin into representation decisions.
-    module_value_classes: &std::collections::HashMap<TypeName, Ty>,
+    module_value_classes: &crate::fx_hash::HashMap<TypeName, Ty>,
     // Subset whose stable declaration headers describe a value-class shape supported by metadata
     // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
-    module_readable_value_classes: &std::collections::HashSet<TypeName>,
+    module_readable_value_classes: &crate::fx_hash::HashSet<TypeName>,
     bridge_adaptations: &mut crate::jvm::bridge_adaptations::BridgeAdaptations,
     override_results: &mut crate::jvm::override_results::OverrideResults,
     // What the property-reference pass already selected for each synthesized reference class.
@@ -429,7 +429,7 @@ pub(crate) fn lower_value_classes(
     // plain field read). `repr` consults this so a redundant `Cast` over such a getter strips and the sole-
     // field access is identity, keyed on the getter IDENTITY rather than the ambiguous static type.
     let field_getters: FieldGetters = {
-        let mut m = FieldGetters::new();
+        let mut m = FieldGetters::default();
         for (ci, c) in ir.classes.iter().enumerate() {
             // getter-name → (field-index, value-class field type) for value-class-typed fields.
             let getters: HashMap<String, (u32, Ty)> = c
@@ -452,7 +452,7 @@ pub(crate) fn lower_value_classes(
                     let field_name = ir.classes[ci].fields[fi as usize].name.clone();
                     let owner = ir.classes[ci].fq_name;
                     let reads_field = ir.functions[fid as usize].body.is_some_and(|b| {
-                        let mut reach = HashSet::new();
+                        let mut reach = HashSet::default();
                         collect_reachable(&ir.exprs, b, &mut reach);
                         reach.iter().any(|&e| match &ir.exprs[e as usize] {
                             IrExpr::GetField { class, index, .. } => {
@@ -496,7 +496,7 @@ pub(crate) fn lower_value_classes(
     // Function identities for the stored-property getters above. A source operator/member may also be
     // named `get...`; using the owning value class plus the actual sole-field getter name prevents that
     // lexical coincidence from changing whether its body participates in value-class rewriting.
-    let mut vc_sole_getter_fids = HashSet::new();
+    let mut vc_sole_getter_fids = HashSet::default();
     for (class_index, class) in ir.classes.iter().enumerate() {
         if !class.is_value {
             continue;
@@ -504,7 +504,7 @@ pub(crate) fn lower_value_classes(
         for &fid in &class.methods {
             let function = &ir.functions[fid as usize];
             let reads_underlying_field = function.body.is_some_and(|body| {
-                let mut reachable = HashSet::new();
+                let mut reachable = HashSet::default();
                 collect_reachable_scoped(&ir.exprs, body, &mut reachable);
                 reachable
                     .into_iter()
@@ -570,7 +570,7 @@ pub(crate) fn lower_value_classes(
     let vc_methods = value_members::value_class_members(ir);
     // Exprs reachable from a value-class member body reference the BOXED class (`other is X`, `this.field`
     // in the synthesized `equals`) and must NOT be erased — those methods run on the boxed object.
-    let mut vc_body_exprs: HashSet<ExprId> = HashSet::new();
+    let mut vc_body_exprs: HashSet<ExprId> = HashSet::default();
     for &mid in &vc_methods {
         if let Some(Some(root)) = ir.functions.get(mid as usize).map(|f| f.body) {
             collect_reachable(&ir.exprs, root, &mut vc_body_exprs);
@@ -595,8 +595,8 @@ pub(crate) fn lower_value_classes(
     // suspend fun carries a trailing `Continuation` value parameter (a non-inline `_` element). By fid
     // for the declaration sites, and by `(owner, source-name, arity)` for the recompute sites (bridges,
     // fn-references) — keyed BEFORE any name mangling so every site agrees on the same mangled name.
-    let suspend_fids: std::collections::HashSet<u32> = ir.suspend_funs.iter().copied().collect();
-    let suspend_sig: std::collections::HashSet<(Option<TypeName>, String, usize)> = ir
+    let suspend_fids: crate::fx_hash::HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    let suspend_sig: crate::fx_hash::HashSet<(Option<TypeName>, String, usize)> = ir
         .functions
         .iter()
         .enumerate()
@@ -612,7 +612,7 @@ pub(crate) fn lower_value_classes(
         .iter()
         .enumerate()
         .map(|(fid, f)| {
-            let mut m: HashMap<u32, Ty> = HashMap::new();
+            let mut m: HashMap<u32, Ty> = HashMap::default();
             let base = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
             // A lifted lambda's OWN parameters (from this index on) arrive through the `FunctionN` generic
             // `Object` invoke slot, so a reference-underlying value-class parameter is BOXED there — type it
@@ -642,7 +642,7 @@ pub(crate) fn lower_value_classes(
                 m.insert(base + i as u32, slot_ty);
             }
             if let Some(root) = f.body {
-                let mut reach = HashSet::new();
+                let mut reach = HashSet::default();
                 collect_reachable_scoped(&ir.exprs, root, &mut reach);
                 for id in reach {
                     if let IrExpr::Variable { index, ty, .. } = &ir.exprs[id as usize] {
@@ -680,11 +680,11 @@ pub(crate) fn lower_value_classes(
     };
     // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
     // annotation markers and override bridges that name their own target method.
-    let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::new();
+    let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::default();
     // Exact getters whose override pair diverges in semantic type (for example `Vid` over `Vid?`).
     // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
     // owns their compatibility and the implementation getter keeps its ordinary spelling.
-    let mut divergent_getters = HashSet::new();
+    let mut divergent_getters = HashSet::default();
     for (&owner, edges) in &ir.property_overrides {
         let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
             continue;
@@ -717,9 +717,9 @@ pub(crate) fn lower_value_classes(
     // User-written value-class members are realized as static `*-impl` functions over the carrier.
     // Keep their declaration identities so return adaptation follows that realized ABI instead of the
     // boxed-instance convention used by synthesized wrapper members.
-    let mut lowered_value_members = HashSet::new();
+    let mut lowered_value_members = HashSet::default();
     // Functions whose physical name the mangling below changed, by stable identity.
-    let mut renamed_functions = HashSet::new();
+    let mut renamed_functions = HashSet::default();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -924,7 +924,7 @@ pub(crate) fn lower_value_classes(
     // `MethodCall` result is a boxed `X` — a following unboxed-slot use (`val b: X = x.inc()`) must unbox.
     // (Getters are intercepted earlier in `repr` via `field_getters`; the static `-impl`s are `Call`s.)
     let boxed_ret_methods: HashMap<(u32, u32), TypeName> = {
-        let mut m = HashMap::new();
+        let mut m = HashMap::default();
         for (ci, c) in ir.classes.iter().enumerate() {
             for (mi, &fid) in c.methods.iter().enumerate() {
                 if let Some(fq) = ir.functions[fid as usize].ret.non_null().obj_internal() {
@@ -1016,7 +1016,7 @@ pub(crate) fn lower_value_classes(
     // `GetValue`, so every reference to the node (including a nested lambda's capture list) picks up
     // the unboxed value.
     for (fid, slot, x, u) in boxed_own_reads {
-        let mut reads = HashSet::new();
+        let mut reads = HashSet::default();
         if let Some(root) = ir.functions[fid as usize].body {
             collect_reachable_scoped(&ir.exprs, root, &mut reads);
         }
@@ -1122,7 +1122,7 @@ pub(crate) fn lower_value_classes(
     // retains (and its checked suspend fact); step 4 moves the receiver to parameter zero. The
     // declared parameters become the selected declaration's, since an erased `Object` slot is
     // otherwise ambiguous between the carrier itself and a generic box.
-    let mut sibling_member_impls: HashMap<ExprId, String> = HashMap::new();
+    let mut sibling_member_impls: HashMap<ExprId, String> = HashMap::default();
     // Rewrite cross-file calls with value-class signatures to their JVM names and types.
     if !callable_under.is_empty() {
         for (id, e) in ir.exprs.iter_mut().enumerate() {
@@ -1659,7 +1659,7 @@ pub(crate) fn lower_value_classes(
                 entry
                     .args
                     .iter()
-                    .map(|&argument| (argument, HashMap::new())),
+                    .map(|&argument| (argument, HashMap::default())),
             );
         }
     }
@@ -1675,9 +1675,9 @@ pub(crate) fn lower_value_classes(
     // Map each reachable target expr to its body's slot map. A real lambda body belongs only to its
     // lifted function; traversing it from the enclosing `Lambda` expression would interpret the same
     // slot indices in the wrong function scope.
-    let mut target_slots: HashMap<ExprId, usize> = HashMap::new();
+    let mut target_slots: HashMap<ExprId, usize> = HashMap::default();
     for (bi, (root, _)) in s4_bodies.iter().enumerate() {
-        let mut reach = HashSet::new();
+        let mut reach = HashSet::default();
         collect_reachable_scoped(&ir.exprs, *root, &mut reach);
         for id in reach {
             target_slots.entry(id).or_insert(bi);
@@ -1690,7 +1690,7 @@ pub(crate) fn lower_value_classes(
     // retains the declaration result (`T`), while its immediate coercion carries the applied result
     // (`Int`). Value-class property realization needs both: the declaration result selects the
     // erased slot, and the applied result selects the wrapper that physically occupies that slot.
-    let mut applied_call_results = HashMap::new();
+    let mut applied_call_results = HashMap::default();
     // A same-module call can be wrapped in an operand-ordering block. Common lowering records the
     // checked result on that exact block, while its terminal call retains the declaration result.
     // Follow only Block.value chains: conversions are distinct nodes and deliberately stop here.
@@ -1748,11 +1748,11 @@ pub(crate) fn lower_value_classes(
     // property. Their operand is the value-class carrier itself, but the coercion denotes property
     // extraction rather than an ordinary `X -> U` value conversion. Keep this backend-local origin
     // fact until boundary insertion so an Object carrier is not boxed back into `X`.
-    let mut sole_property_coercions = HashSet::new();
+    let mut sole_property_coercions = HashSet::default();
     // Member bodies keep a boxed `this`. A nested constructor still passes a non-null value-class
     // argument as its carrier; collect those edges with the pre-erasure target types. `carrier_unboxes`
     // records sole-property reads and later `BoxOp::Unbox` results for the tail rewrites.
-    let mut carrier_unboxes = CarrierUnboxes::new();
+    let mut carrier_unboxes = CarrierUnboxes::default();
     let mut value_member_constructor_ops: Vec<(ExprId, BoxOp)> = Vec::new();
     for &id in &targets {
         let body = &s4_bodies[target_slots[&id]];
@@ -2626,7 +2626,7 @@ pub(crate) fn lower_value_classes(
             field_getters: &field_getters,
             carrier_unboxes: &carrier_unboxes,
         };
-        let mut reach = HashSet::new();
+        let mut reach = HashSet::default();
         collect_reachable_scoped(&ir.exprs, root, &mut reach);
         for id in reach {
             if let IrExpr::NotNullAssert { operand, .. } = &ir.exprs[id as usize] {
@@ -3486,13 +3486,13 @@ pub(crate) fn lower_value_classes(
         .max()
         .unwrap_or(0)
         + 1;
-    let mut unique_ops = HashSet::new();
+    let mut unique_ops = HashSet::default();
     ops.retain(|operation| unique_ops.insert(*operation));
     substitution_coercions::drop_rebox_round_trips(&mut ops, ir);
     // Each `unbox-impl` realized over a suspend call whose CPS result is the value class's box, as
     // recorded for that exact call. A suspend function returning the same box hands that value
     // back as it is (see `restore_boxed_suspension_tails`).
-    let mut boxed_suspension_unboxes = HashSet::new();
+    let mut boxed_suspension_unboxes = HashSet::default();
     for (id, op) in ops {
         crate::trace_compiler!(
             "value_classes",
@@ -5017,7 +5017,7 @@ fn append_inline_body_scopes(
     while cursor < bodies.len() {
         let root = bodies[cursor].0;
         cursor += 1;
-        let mut reachable = HashSet::new();
+        let mut reachable = HashSet::default();
         collect_reachable_scoped(&ir.exprs, root, &mut reachable);
         for expression in reachable {
             let IrExpr::Lambda {
@@ -5085,7 +5085,7 @@ mod boundary_tests {
         let outer = type_name("fixture/Outer");
         let any = Ty::obj("kotlin/Any");
         let parameter = Ty::ty_param("T", any);
-        let under = Under::from([
+        let under = Under::from_iter([
             (generic, parameter),
             (nullable_generic, Ty::nullable(parameter)),
             (inner, any),

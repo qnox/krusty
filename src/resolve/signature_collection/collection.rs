@@ -72,7 +72,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
     table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
-    let mut declaration_annotation_resolution_attempts = std::collections::HashSet::new();
+    let mut declaration_annotation_resolution_attempts = crate::fx_hash::HashSet::default();
     for file_index in 0..source_packages.len() {
         diags.set_file(file_index as u32);
         let names = &file_class_names[file_index];
@@ -95,7 +95,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     .iter()
                     .map(|annotation| annotation.span)
             })
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         if let Some(headers) = compact_headers {
             let source = crate::fir::SourceFileId::from_raw(file_index as u32);
             for root in headers.detached_type_roots(source) {
@@ -294,7 +294,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     // is a same-*package* same-erasure duplicate. Keyed by (package, name, erased params) so a
     // cross-package homonym (a star-imported function shadowed by a local one) is not a conflict.
     let mut top_level_fun_groups = TopLevelFunctionConflictGroups::default();
-    let mut pending_conflict_diagnostics = HashMap::new();
+    let mut pending_conflict_diagnostics = HashMap::default();
     let mut reserved_conflict_diagnostic_bytes = 0usize;
     let mut retained_conflict_display_bytes = 0usize;
     // Unannotated MEMBER expression getters whose first-pass inference hit `Error` — a referenced
@@ -1107,7 +1107,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         (&header_lexical_owner_ranks, internal),
                         &mut header_class_names,
                     );
-                    let mut referenced_types = std::collections::HashSet::new();
+                    let mut referenced_types = crate::fx_hash::HashSet::default();
                     if let Some(headers) = compact_headers {
                         let source = crate::fir::SourceFileId::from_raw(i as u32);
                         let positions = stubs_by_source
@@ -1400,14 +1400,14 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .type_parameters
                         .iter()
                         .map(String::as_str)
-                        .collect::<std::collections::HashSet<_>>();
+                        .collect::<crate::fx_hash::HashSet<_>>();
                     let projected_capture_names = classifier_header
                         .lexical_type_parameter_captures
                         .iter()
                         .map(String::as_str)
-                        .collect::<std::collections::HashSet<_>>();
+                        .collect::<crate::fx_hash::HashSet<_>>();
                     let parser_hoisted = anonymous_object || file.is_local_declaration(d);
-                    let mut visible_source_names = std::collections::HashSet::new();
+                    let mut visible_source_names = crate::fx_hash::HashSet::default();
                     let mut visible_enclosing_parameters = enclosing_semantic_parameters;
                     for declaration in visible_enclosing_parameters.iter_mut().rev() {
                         declaration.retain(|(source, _, _)| {
@@ -1440,7 +1440,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         // checked body units, so signature collection must neither inspect the
                         // blocks nor reject otherwise-valid Kotlin merely because a member call
                         // precedes a later initializer.
-                        let own_methods: std::collections::HashSet<&str> =
+                        let own_methods: crate::fx_hash::HashSet<&str> =
                             c.methods.iter().map(|m| m.name.as_str()).collect();
                         let is_own_call = |ce: ExprId| matches!(file.expr(ce), Expr::Call { callee, .. } if matches!(file.expr(*callee), Expr::Name(n) if own_methods.contains(n.as_str())));
                         if let Some(last_prop) = c
@@ -1586,9 +1586,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             )
                         })
                         .collect::<HashMap<_, _>>();
-                    let mut contextual_props = HashMap::<String, Vec<DeclaredPropertySig>>::new();
-                    let mut member_ext_props = HashMap::new();
-                    let mut member_ext_keys = std::collections::HashSet::new();
+                    let mut contextual_props =
+                        HashMap::<String, Vec<DeclaredPropertySig>>::default();
+                    let mut member_ext_props = HashMap::default();
+                    let mut member_ext_keys = crate::fx_hash::HashSet::default();
                     // Body properties (`class C { val x = … }`) are also fields/accessors. A computed
                     // property (custom getter, no annotation) infers its type from the getter body.
                     // Initializer scope: ALL primary-ctor params (property or not — they're in scope for a
@@ -2482,11 +2483,13 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             ));
                         }
                     }
-                    let mut methods: MethodMap = MethodMap::new();
+                    let mut methods: MethodMap = MethodMap::default();
                     let mut declared_callable_order = classifier_callable_order;
-                    let mut member_ext_funs: HashMap<String, Vec<MemberExtFunSig>> = HashMap::new();
+                    let mut member_ext_funs: HashMap<String, Vec<MemberExtFunSig>> =
+                        HashMap::default();
                     let mut source_methods = Vec::new();
-                    let mut generic_methods: HashMap<String, Vec<GenericMethod>> = HashMap::new();
+                    let mut generic_methods: HashMap<String, Vec<GenericMethod>> =
+                        HashMap::default();
                     let compact_member_callables = compact_headers.map(|headers| {
                         streamed_owned_callable_declarations(
                             headers,
@@ -3038,7 +3041,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         &frontend_plugin_context,
                         &mut generated_nested_classifiers,
                     );
-                    let mut contributed_companion_methods = MethodMap::new();
+                    let mut contributed_companion_methods = MethodMap::default();
                     let mut contributed_companion_order = Vec::new();
                     for member in contributed_members {
                         let required = member.params.len();
@@ -3109,7 +3112,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             Some((property.name.clone(), value))
                         })
                         .collect::<HashMap<_, _>>();
-                    let lateinit_props: std::collections::HashSet<String> = c
+                    let lateinit_props: crate::fx_hash::HashSet<String> = c
                         .body_props
                         .iter()
                         .filter(|p| p.is_lateinit)
@@ -3142,8 +3145,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .iter()
                                 .any(|parameter| parameter == &r.name)
                     };
-                    let mut generic_props: HashMap<String, (usize, bool)> = HashMap::new();
-                    let mut nullable_tparam_props: HashMap<String, usize> = HashMap::new();
+                    let mut generic_props: HashMap<String, (usize, bool)> = HashMap::default();
+                    let mut nullable_tparam_props: HashMap<String, usize> = HashMap::default();
                     for parameter in classifier_header
                         .primary_parameters
                         .iter()
@@ -3178,7 +3181,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             }
                         }
                     }
-                    let mut generic_property_shapes = HashMap::new();
+                    let mut generic_property_shapes = HashMap::default();
                     for (property, &(shape, _)) in classifier_header
                         .primary_parameters
                         .iter()
@@ -4350,7 +4353,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
             let alias_owner = type_name(&class_internal(file, &class.name));
             extend_lexical_nested_classifier_names(
                 file,
-                &HashMap::from([(alias_owner, 0)]),
+                &HashMap::from_iter([(alias_owner, 0)]),
                 &mut nested_names,
             );
             if file.is_local_declaration(class_declaration) {

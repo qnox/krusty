@@ -14,7 +14,7 @@ use super::*;
 pub fn matched_expect_declarations(
     headers: &StreamedHeaderModule,
     bindings: &ActualizationTypeBindings,
-) -> std::collections::HashSet<DeclarationId> {
+) -> crate::fx_hash::HashSet<DeclarationId> {
     actualized_declaration_pairs(headers, bindings)
         .into_iter()
         .filter_map(|pair| {
@@ -56,7 +56,7 @@ pub struct Actualization {
     /// incompatibility on the implementation and says nothing about the header. Reporting the
     /// header as unactualized as well names the same mismatch twice, from the side that did not
     /// get it wrong.
-    pub incompatible: std::collections::HashSet<DeclarationId>,
+    pub incompatible: crate::fx_hash::HashSet<DeclarationId>,
     /// For each matched classifier pair, the `expect` members that no `actual` member implements,
     /// under the ACTUAL classifier the reference compiler reports them on.
     ///
@@ -71,7 +71,7 @@ pub struct Actualization {
     /// The reference compiler requires an `expect`/`actual` pair to name its type parameters
     /// identically and reports a rename as an incompatibility BETWEEN two declarations it
     /// considers counterparts — not as an implementation that answered for nothing.
-    pub incompatible_members: std::collections::HashSet<DeclarationId>,
+    pub incompatible_members: crate::fx_hash::HashSet<DeclarationId>,
 }
 
 /// One `actual` classifier and the `expect` members it never implemented.
@@ -88,8 +88,8 @@ pub struct UnactualizedMembers {
 /// ambiguous and therefore cannot participate in a declaration match.
 #[derive(Default)]
 pub struct ActualizationTypeBindings {
-    by_type: std::collections::HashMap<(SourceFileId, HeaderTypeId), crate::types::TypeName>,
-    by_declaration: std::collections::HashMap<DeclarationId, crate::types::TypeName>,
+    by_type: crate::fx_hash::HashMap<(SourceFileId, HeaderTypeId), crate::types::TypeName>,
+    by_declaration: crate::fx_hash::HashMap<DeclarationId, crate::types::TypeName>,
 }
 
 impl ActualizationTypeBindings {
@@ -1039,7 +1039,7 @@ pub fn actualization(
         Some((package, kind, name, has_receiver, arity))
     }
 
-    let mut actuals = std::collections::HashMap::<Key, Vec<DeclarationId>>::new();
+    let mut actuals = crate::fx_hash::HashMap::<Key, Vec<DeclarationId>>::default();
     for stub in headers
         .stubs
         .iter()
@@ -1049,9 +1049,9 @@ pub fn actualization(
             actuals.entry(key).or_default().push(stub.id);
         }
     }
-    let mut incompatible = std::collections::HashSet::new();
+    let mut incompatible = crate::fx_hash::HashSet::default();
     let mut unactualized_members: Vec<UnactualizedMembers> = Vec::new();
-    let mut incompatible_members = std::collections::HashSet::new();
+    let mut incompatible_members = crate::fx_hash::HashSet::default();
     let mut select_top_level = |stub: &DeclarationStub, aliases: &[ActualizedAlias]| {
         let candidates = actuals.get(&key(headers, stub)?)?;
         let actual = select_actual(
@@ -1203,10 +1203,10 @@ pub fn actualization(
                 .anchor(stub.id)
                 .is_some_and(|anchor| anchor.owner == Some(pair.expect))
         });
-        let mut actual_children = std::collections::HashMap::<
+        let mut actual_children = crate::fx_hash::HashMap::<
             (DeclarationKind, String, ReceiverKey, usize),
             Vec<DeclarationId>,
-        >::new();
+        >::default();
         // The actual classifier's member scope: what it declares, then what it inherits. kotlinc
         // matches an `expect` member against that whole scope, so a member the actual class
         // inherits from a (non-expect) supertype actualizes it as a fake override. A nearer
@@ -1216,7 +1216,7 @@ pub fn actualization(
             .into_iter()
             .enumerate()
         {
-            let mut owner_children = std::collections::HashMap::<_, Vec<DeclarationId>>::new();
+            let mut owner_children = crate::fx_hash::HashMap::<_, Vec<DeclarationId>>::default();
             for child in headers.stubs.iter().filter(|stub| {
                 headers
                     .declarations

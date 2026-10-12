@@ -1,6 +1,6 @@
 //! Body-local value typing while a checked lambda body is spliced into its caller.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrExpr, IrFile};
 use crate::jvm::classfile::CodeBuilder;
@@ -20,8 +20,8 @@ pub(super) fn collect_body_var_types(
     ir: &IrFile,
     roots: impl IntoIterator<Item = u32>,
 ) -> HashMap<u32, Ty> {
-    let mut declarations = HashMap::new();
-    let mut seen = HashSet::new();
+    let mut declarations = HashMap::default();
+    let mut seen = HashSet::default();
     let mut pending = roots.into_iter().collect::<Vec<_>>();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -49,7 +49,7 @@ impl Emitter<'_> {
         param_slots: &[(u16, Ty)],
         code: &mut CodeBuilder,
     ) -> Ty {
-        self.emit_fn_body_inline_with_aliases(inline_body, param_slots, HashMap::new(), code)
+        self.emit_fn_body_inline_with_aliases(inline_body, param_slots, HashMap::default(), code)
     }
 
     /// [`Self::emit_fn_body_inline`] for a body some of whose captures are literal lambdas it
@@ -76,7 +76,7 @@ impl Emitter<'_> {
         inline_body: u32,
         param_slots: &[(u16, Ty)],
     ) -> Ty {
-        self.in_inline_body_scope(inline_body, param_slots, HashMap::new(), |emitter| {
+        self.in_inline_body_scope(inline_body, param_slots, HashMap::default(), |emitter| {
             emitter.value_ty(inline_body)
         })
     }
@@ -202,7 +202,7 @@ mod tests {
 
         assert_eq!(
             collect_body_var_types(&ir, [outer]),
-            HashMap::from([(0, Ty::Int), (1, Ty::String)])
+            HashMap::from_iter([(0, Ty::Int), (1, Ty::String)])
         );
     }
 }

@@ -15,9 +15,9 @@
 
 use super::receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole};
 use crate::diag::Span;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::types::{Ty, TypeName};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ScopeKind {
@@ -718,7 +718,7 @@ impl<'p, B> Scope<'p, B> {
                 });
             }
         }
-        let mut same_name_depths = HashMap::<String, usize>::new();
+        let mut same_name_depths = HashMap::<String, usize>::default();
         for scope in self.ancestors() {
             for binding in scope.bindings.borrow().iter().rev() {
                 if binding.ns != Ns::Value {
@@ -980,8 +980,8 @@ impl<'p, B> Scope<'p, B> {
 
     /// Every visible straight-line narrowing, innermost fact first and cut by shadowing bindings.
     pub(crate) fn local_narrowings(&self) -> HashMap<String, Ty> {
-        let mut visible = HashMap::new();
-        let mut shadowed = std::collections::HashSet::new();
+        let mut visible = HashMap::default();
+        let mut shadowed = crate::fx_hash::HashSet::default();
         for rung in self.ancestors() {
             for (name, &ty) in rung.flow.borrow().locals.iter() {
                 if !shadowed.contains(name.as_str()) {
@@ -1223,7 +1223,7 @@ impl<'p, B> Scope<'p, B> {
 
     fn implicit_receiver_values(&self) -> Vec<ScopedReceiver> {
         let mut out = Vec::new();
-        let mut same_name_depths = HashMap::<String, usize>::new();
+        let mut same_name_depths = HashMap::<String, usize>::default();
         let push = |out: &mut Vec<ScopedReceiver>,
                     same_name_depths: &mut HashMap<String, usize>,
                     ty,
@@ -1263,7 +1263,7 @@ impl<'p, B> Scope<'p, B> {
                     ..
                 }
             );
-            let mut receiver_binding_counts = HashMap::<String, usize>::new();
+            let mut receiver_binding_counts = HashMap::<String, usize>::default();
             if let Some(name) = scope.current_receiver_name.as_ref() {
                 *receiver_binding_counts.entry(name.clone()).or_default() += 1;
             }

@@ -12,7 +12,7 @@
 //! program built later, for any target from any host, needs no sysroot. Reading an ELF shared
 //! object ([`ImportLibrary::from_elf_shared_object`]) is one way of capturing them.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use object::elf::{FileHeader64, DT_SONAME, ET_DYN, SHT_DYNSYM, STB_GLOBAL, STB_WEAK};
 use object::read::elf::{FileHeader, SectionTable, Sym};
@@ -58,7 +58,7 @@ impl ImportLibrary {
         exports: impl IntoIterator<Item = (String, Export)>,
     ) -> Result<Self, ProgramLinkError> {
         loader_string("library name", &soname, &soname)?;
-        let mut checked = HashMap::new();
+        let mut checked = HashMap::default();
         for (name, export) in exports {
             loader_string("exported name", &name, &soname)?;
             if let Some(version) = &export.version {

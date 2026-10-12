@@ -6,11 +6,11 @@
 //! The IR machine re-enters the state its resume takes, so a direct synchronous result is boxed
 //! first and a function value's box is stored as it is.
 
+use crate::fx_hash::HashSet;
 use crate::ir::{
     Callee, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult,
 };
 use crate::types::{Ty, TypeName};
-use std::collections::HashSet;
 
 /// The value class and the carrier it unboxes to, when `result` crosses as that carrier. A nullable
 /// value class whose carrier cannot hold `null` crosses as its own box, which needs neither.

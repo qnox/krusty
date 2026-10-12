@@ -82,7 +82,7 @@ impl Classpath {
         let kotlin = super::super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(jvm_owner_id)
             .unwrap_or(jvm_owner_id);
         let mut pending = std::collections::VecDeque::from([kotlin]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(current) = pending.pop_front() {
             if !seen.insert(current) {
                 continue;
@@ -133,7 +133,7 @@ impl Classpath {
         kind: MappedBuiltinMemberKind,
     ) -> Option<(TypeName, &'static str)> {
         let mut pending = std::collections::VecDeque::from([declaration_owner]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(current) = pending.pop_front() {
             if !seen.insert(current) {
                 continue;
@@ -169,7 +169,7 @@ impl Classpath {
         kind: MappedBuiltinMemberKind,
     ) -> Option<CollectionBridgePolicy> {
         let mut pending = std::collections::VecDeque::from([declaration_owner]);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while let Some(current) = pending.pop_front() {
             if !seen.insert(current) {
                 continue;
@@ -204,8 +204,8 @@ impl Classpath {
     ) -> Vec<MappedBuiltinMember> {
         let mut mappings = Vec::new();
         let mut pending = std::collections::VecDeque::from([internal]);
-        let mut seen = std::collections::HashSet::new();
-        let mut seen_shapes = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
+        let mut seen_shapes = crate::fx_hash::HashSet::default();
         while let Some(current) = pending.pop_front() {
             if !seen.insert(current) {
                 continue;

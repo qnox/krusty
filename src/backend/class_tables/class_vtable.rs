@@ -1,7 +1,7 @@
 //! One class's dispatch table: its superclass's, with overridden slots replaced and newly declared
 //! members appended.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{ClassId, FunId, IrClass, IrFile, IrFunction};
@@ -63,7 +63,7 @@ pub(super) fn class_table(
                     && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
             })
             .map(|edge| edge.overridden_owner)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         if invokes.len() > 1 {
             return Err(format!(
                 "a class implementing {} function types at once (`{}`)",

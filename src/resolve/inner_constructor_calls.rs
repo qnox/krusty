@@ -60,7 +60,7 @@ pub(super) fn apply_inner_alias_outer_in_source(
         outer_owner,
         &arguments[own_count..own_count + captured_count],
     );
-    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+    let mut bindings = crate::symbol_resolver::GSigBinds::default();
     crate::symbol_resolver::unify_ty_from_symbols(
         source,
         expected_outer,
@@ -495,9 +495,9 @@ impl Checker<'_> {
         };
         let source = self.fed_source();
         let mut level = vec![root];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         while !level.is_empty() {
-            let mut matches = std::collections::HashSet::new();
+            let mut matches = crate::fx_hash::HashSet::default();
             let mut next = Vec::new();
             for owner in level {
                 if !seen.insert(owner) {

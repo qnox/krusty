@@ -2,7 +2,7 @@
 //! lambda (local visibility), its type parameters, receiver, value parameters and result, read by
 //! reflection (`reflect()`) on the lambda object.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::type_reflection::type_parameters_named_by;
 use crate::ir::IrTypeParameter;

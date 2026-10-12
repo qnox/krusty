@@ -316,11 +316,11 @@ pub(crate) struct SymbolQueryCache {
     /// Keyed by NAME, and every miss and hit hashes that string. The default hasher is SipHash,
     /// which is a cryptographic-strength choice this cache does not need: the keys are internal
     /// declaration spellings, never attacker-supplied, and the map lives and dies inside one source
-    /// unit. `FxHashMap` is the same hasher the name tree already uses for exactly this reason.
+    /// unit. The compiler's FxHash map keeps this hot index deterministic and cheap to hash.
     records: std::cell::RefCell<
-        crate::name_tree::FxHashMap<
+        crate::fx_hash::HashMap<
             SymbolNamespace,
-            crate::name_tree::FxHashMap<String, std::rc::Rc<ResolvedSymbols>>,
+            crate::fx_hash::HashMap<String, std::rc::Rc<ResolvedSymbols>>,
         >,
     >,
 }
@@ -503,7 +503,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|name| internal.matches(name))
             {
-                let mut declared_callables = std::collections::HashMap::new();
+                let mut declared_callables = crate::fx_hash::HashMap::default();
                 if let Some(name) = &self.fn_name {
                     declared_callables.insert(
                         name.clone(),
@@ -575,7 +575,7 @@ mod tests {
                     declared_callable_order: Vec::new(),
                     members: vec![],
                     companion: vec![],
-                    constants: std::collections::HashMap::new(),
+                    constants: crate::fx_hash::HashMap::default(),
                     sam_eligible: false,
                     callable_signature: None,
                     callable_signatures: Vec::new(),

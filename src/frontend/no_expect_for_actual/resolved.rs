@@ -19,10 +19,10 @@
 //! compact header inventory, like every other declaration's. Joining those two is the one thing
 //! this module adds, because both halves are the frontend's.
 
+use crate::fx_hash::HashMap;
 use crate::resolve::declaration_index::{ResolvedSourceDeclaration, ResolvedSourceDeclarations};
 use crate::resolve::{ClassSig, SymbolTable};
 use crate::types::{Ty, TypeName};
-use std::collections::HashMap;
 
 /// What one resolved source declaration contributes to a rendering: resolution's own record,
 /// under the name this check has always called it by.
@@ -50,7 +50,7 @@ impl<'symbols> ResolvedDeclarations<'symbols> {
     ) -> Self {
         // The alias's qualified identity, from the inventory's own record of what it declared:
         // the package of the file it is in and the name it published.
-        let mut alias_identities = HashMap::new();
+        let mut alias_identities = HashMap::default();
         for stub in &headers.stubs {
             if stub.kind != crate::fir::DeclarationKind::TypeAlias {
                 continue;

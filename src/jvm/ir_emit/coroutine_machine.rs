@@ -9,7 +9,7 @@
 //! with no machine at all, which is the post-splice bytecode the spill set has to be read from; the
 //! second emits the real method around the answers.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::jvm::classfile::{CodeBuilder, VerifType};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, load, slot_words, store, Emitter};

@@ -4,7 +4,7 @@
 //! implementation on the class whose bytecode references it, including a source lambda whose
 //! implementation is called directly instead of materializing a lambda value.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 
@@ -30,8 +30,8 @@ fn reachable_implementations(
     include_direct_specializations: bool,
 ) -> Vec<FunId> {
     let mut implementations = Vec::new();
-    let mut found = HashSet::new();
-    let mut seen = HashSet::new();
+    let mut found = HashSet::default();
+    let mut seen = HashSet::default();
     let mut stack = roots;
     while let Some(expression) = stack.pop() {
         if !seen.insert(expression) {

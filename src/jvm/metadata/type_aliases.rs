@@ -7,9 +7,9 @@ use super::{
     decode_metadata_type, flags_visibility, parse_type_class_name, type_param_bodies, MetaCtx,
     MetadataResult, TYPE_ALIAS_TYPE_PARAMETER_FIELD, VIS_PUBLIC,
 };
+use crate::fx_hash::HashMap;
 use crate::metadata::decode::{parse_type_node, parse_type_param, ParsedTypeParam, Pb};
 use crate::types::{type_name, Ty, TypeName};
-use std::collections::HashMap;
 use type_annotations::bind_type_annotations;
 
 /// One public `typealias` from a file facade's `Package` metadata.
@@ -172,7 +172,7 @@ fn parse_type_alias_decoded(
     let internal = resolve_class_name(records, d2, class_id as usize)?;
     // The alias's OWN type parameters, by metadata id, so the expansion decodes their uses as
     // `TyParam` rather than as unknown classifiers.
-    let mut parameters: HashMap<u64, String> = HashMap::new();
+    let mut parameters: HashMap<u64, String> = HashMap::default();
     let mut formals = Vec::new();
     for parameter in type_parameters {
         if let Some(parameter_name) = resolve_string(records, d2, parameter.name_id as usize) {
@@ -187,7 +187,7 @@ fn parse_type_alias_decoded(
             records,
             d2,
             &parameters,
-            &HashMap::new(),
+            &HashMap::default(),
             false,
             0,
         )

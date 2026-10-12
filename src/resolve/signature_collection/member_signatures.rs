@@ -356,8 +356,8 @@ pub(in crate::resolve) fn declared_member_callable_headers(
         libraries,
         owner_is_interface,
     } = context;
-    let mut methods = MethodMap::new();
-    let mut extensions: HashMap<String, Vec<MemberExtFunSig>> = HashMap::new();
+    let mut methods = MethodMap::default();
+    let mut extensions: HashMap<String, Vec<MemberExtFunSig>> = HashMap::default();
     let compact_members = compact_headers.map(|headers| {
         streamed_owned_callable_declarations(
             headers,

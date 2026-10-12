@@ -166,8 +166,8 @@ pub struct CommonIrBodySink<'a> {
     ir: &'a mut IrFile,
     failure: Option<FirFileLoweringFailure>,
     local_callables: LocalCallableLoweringContext,
-    inline_payload_declarations: std::collections::HashSet<DeclarationId>,
-    materialized_inline_callables: std::collections::HashSet<CallableId>,
+    inline_payload_declarations: crate::fx_hash::HashSet<DeclarationId>,
+    materialized_inline_callables: crate::fx_hash::HashSet<CallableId>,
 }
 
 impl<'a> CommonIrBodySink<'a> {
@@ -181,8 +181,8 @@ impl<'a> CommonIrBodySink<'a> {
             ir,
             failure: None,
             local_callables: LocalCallableLoweringContext::default(),
-            inline_payload_declarations: std::collections::HashSet::new(),
-            materialized_inline_callables: std::collections::HashSet::new(),
+            inline_payload_declarations: crate::fx_hash::HashSet::default(),
+            materialized_inline_callables: crate::fx_hash::HashSet::default(),
         };
         sink.predeclare_classifiers(index, true)?;
         predeclare_properties(
@@ -319,7 +319,7 @@ impl<'a> CommonIrBodySink<'a> {
             .collect::<Vec<_>>();
         callables.sort_unstable_by_key(|callable| callable.raw());
         callables.dedup();
-        let mut visiting = std::collections::HashSet::new();
+        let mut visiting = crate::fx_hash::HashSet::default();
         for callable in callables {
             self.accept_inline_payload_tree(index, bodies, callable, &mut visiting)?;
         }
@@ -332,11 +332,11 @@ impl<'a> CommonIrBodySink<'a> {
         bodies: &InlineBodyStore,
         caller: &FirBody,
     ) -> Result<(), FirFileLoweringFailure> {
-        let mut pending = std::collections::HashSet::new();
+        let mut pending = crate::fx_hash::HashSet::default();
         caller.collect_referenced_module_callables(&mut pending);
         let mut pending = pending.into_iter().collect::<Vec<_>>();
         pending.sort_unstable_by_key(|callable| callable.raw());
-        let mut visiting = std::collections::HashSet::new();
+        let mut visiting = crate::fx_hash::HashSet::default();
         for callable in pending {
             self.accept_inline_payload_tree(index, bodies, callable, &mut visiting)?;
         }
@@ -352,7 +352,7 @@ impl<'a> CommonIrBodySink<'a> {
         index: &ResolvedModuleIndex,
         bodies: &InlineBodyStore,
         callable: CallableId,
-        visiting: &mut std::collections::HashSet<CallableId>,
+        visiting: &mut crate::fx_hash::HashSet<CallableId>,
     ) -> Result<(), FirFileLoweringFailure> {
         if self.materialized_inline_callables.contains(&callable) {
             return Ok(());
@@ -377,7 +377,7 @@ impl<'a> CommonIrBodySink<'a> {
             self.predeclare_foreign_inline_template(index, callable)?;
         }
         self.predeclare_inline_payload(index, declaration, &body)?;
-        let mut dependencies = std::collections::HashSet::new();
+        let mut dependencies = crate::fx_hash::HashSet::default();
         body.collect_referenced_module_callables(&mut dependencies);
         let defaults = bodies.defaults(callable).map(<[FirBody]>::to_vec);
         if let Some(defaults) = &defaults {
@@ -463,7 +463,7 @@ impl<'a> CommonIrBodySink<'a> {
                     .flatten()
             })
             .unwrap_or(root);
-        let mut declarations = std::collections::HashSet::new();
+        let mut declarations = crate::fx_hash::HashSet::default();
         body.collect_inline_local_declarations(&mut declarations);
         for nested in body.inline_nested_declaration_bodies() {
             let mut declaration = DeclarationId::from_raw(nested.owner().raw());
@@ -711,7 +711,7 @@ impl<'a> CommonIrBodySink<'a> {
                     .insert(key, lowered);
             }
         }
-        let mut newly_declared = std::collections::HashSet::new();
+        let mut newly_declared = crate::fx_hash::HashSet::default();
         let mut pending_local_names = Vec::new();
         for declaration in
             super::declarations_for_lowering(index, self.source, &self.inline_payload_declarations)

@@ -13,8 +13,8 @@ use super::{
 use crate::ast::{DeclId, ExprId, File, StmtId};
 use crate::diag::Span;
 use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
+use crate::fx_hash::HashMap;
 use crate::types::{CapturedContextKind, Ty};
-use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {

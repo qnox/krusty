@@ -117,8 +117,8 @@ pub struct IrModuleConstructor {
 #[derive(Clone, Debug, Default)]
 pub struct IrModuleConstructions {
     /// Construction `ExprId` → the checked constructor declaration it selected.
-    pub selected: std::collections::HashMap<super::ExprId, crate::fir::DeclarationId>,
-    pub records: std::collections::HashMap<crate::fir::DeclarationId, IrModuleConstructor>,
+    pub selected: crate::fx_hash::HashMap<super::ExprId, crate::fir::DeclarationId>,
+    pub records: crate::fx_hash::HashMap<crate::fir::DeclarationId, IrModuleConstructor>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

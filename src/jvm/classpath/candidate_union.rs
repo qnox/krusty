@@ -4,7 +4,7 @@
 //! classpath/package declaration order while admitting each physical JVM callable once, even when
 //! the same library is present through repeated or distinct paths.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::types::TypeName;
 
@@ -54,7 +54,7 @@ pub(super) fn extensions_in_scope(
 ) -> Vec<ExtCandidate> {
     let tree = classpath.package_tree();
     let mut union = CallableUnion::default();
-    let mut seen_packages = HashSet::new();
+    let mut seen_packages = HashSet::default();
     for &package in packages {
         if !seen_packages.insert(package) {
             continue;
@@ -94,7 +94,7 @@ pub(super) fn functions_in_scope(
 ) -> Vec<ExtCandidate> {
     let tree = classpath.package_tree();
     let mut union = CallableUnion::default();
-    let mut seen_packages = HashSet::new();
+    let mut seen_packages = HashSet::default();
     for &package in packages {
         if !seen_packages.insert(package) {
             continue;

@@ -118,7 +118,7 @@ pub(super) fn local_executable_owner(
     source: SourceFileId,
     ids: &mut DeclarationIds,
     declaration: DeclId,
-    classifier_ids: &std::collections::HashMap<DeclId, DeclarationId>,
+    classifier_ids: &crate::fx_hash::HashMap<DeclId, DeclarationId>,
 ) -> Option<DeclarationId> {
     let local = match file.decl(declaration) {
         Decl::Class(class) => class.span,
@@ -279,7 +279,7 @@ fn enclosing_function_identity(
     file: &File,
     source: SourceFileId,
     ids: &mut DeclarationIds,
-    classifier_ids: &std::collections::HashMap<DeclId, DeclarationId>,
+    classifier_ids: &crate::fx_hash::HashMap<DeclId, DeclarationId>,
     enclosing: crate::ast::AnonymousEnclosingFunction,
 ) -> Option<DeclarationId> {
     match enclosing {

@@ -2,7 +2,7 @@
 //! start. Common lowering records the semantic fact once; a backend asks where the line belongs
 //! instead of inferring it from a synthetic origin or expression shape.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{ExprId, IrExpr, IrFile, IrTypeOp};
 

@@ -52,11 +52,11 @@ pub fn run_codegen_loop(
     outer_max: u32,
 ) -> Option<CodegenLoopResult> {
     let mut result = CodegenLoopResult::default();
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_names: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
     // The view may receive the same class from repeated java_step calls (each recompiles the FULL
     // `.java` set — APT's rounds need it whole); dedup by FqName keeps the resolver view clean.
     let dedup_symbols = |symbols: &mut Vec<KsClass>| {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::fx_hash::HashSet::default();
         symbols.retain(|c| seen.insert(c.fq_name.clone()));
     };
     // Compile the module's OWN java before the first KSP round, so its symbols are in the view a

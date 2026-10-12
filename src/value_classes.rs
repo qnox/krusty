@@ -5,8 +5,8 @@
 //! which descriptor/storage ABI realizes it. A backend supplies that policy through
 //! [`RepresentationPolicy`] and owns the resulting physical representation.
 
+use crate::fx_hash::{HashMap, HashSet};
 use crate::types::{Ty, TypeName};
-use std::collections::{HashMap, HashSet};
 
 /// Exact value-class classifier identity to its declared underlying semantic type.
 pub(crate) type UnderlyingTypes = HashMap<TypeName, Ty>;
@@ -60,7 +60,7 @@ pub(crate) fn project_underlying<P: RepresentationPolicy + ?Sized>(
         project(underlying, declarations, policy, seen)
     }
 
-    project(ty, declarations, policy, &mut HashSet::new())
+    project(ty, declarations, policy, &mut HashSet::default())
 }
 
 /// Whether a value class's underlying chain can itself denote `null`.
@@ -82,7 +82,7 @@ pub(crate) fn underlying_chain_accepts_null(ty: Ty, declarations: &UnderlyingTyp
         seen.insert(classifier) && accepts(underlying, declarations, seen)
     }
 
-    accepts(ty, declarations, &mut HashSet::new())
+    accepts(ty, declarations, &mut HashSet::default())
 }
 
 pub(crate) fn nullable_value_requires_distinct_null(
@@ -105,7 +105,7 @@ pub(crate) fn terminal_underlying(
     declaration: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> Option<Ty> {
     let mut classifier = ty.non_null().obj_internal()?;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut underlying = declaration(classifier)?;
     loop {
         if !seen.insert(classifier) {
@@ -150,8 +150,8 @@ pub(crate) fn declarations_are_acyclic(declarations: &UnderlyingTypes) -> bool {
         valid
     }
 
-    let mut visiting = HashSet::new();
-    let mut complete = HashSet::new();
+    let mut visiting = HashSet::default();
+    let mut complete = HashSet::default();
     declarations
         .keys()
         .copied()

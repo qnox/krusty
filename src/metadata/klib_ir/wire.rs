@@ -4,7 +4,7 @@
 //! table or the declaration index; entries are protobuf messages read field by field. This module
 //! owns that container format so declaration and body decoding read only message semantics.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use crate::klib::KlibArchive;
 
@@ -417,7 +417,7 @@ pub(super) fn entries<'a>(
 
 pub(super) fn declaration_index(bytes: &[u8]) -> Result<HashMap<u64, &[u8]>, KlibIrDecodeError> {
     if bytes.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(HashMap::default());
     }
     let count = usize::try_from(u32_at(bytes, 0, "irDeclarations.knd", "declaration count")?)
         .expect("u32 fits");
@@ -435,7 +435,7 @@ pub(super) fn declaration_index(bytes: &[u8]) -> Result<HashMap<u64, &[u8]>, Kli
             "truncated declaration index",
         ));
     }
-    let mut output = HashMap::with_capacity(count);
+    let mut output = HashMap::with_capacity_and_hasher(count, Default::default());
     for index in 0..count {
         let at = 4 + index * 12;
         let id = u64::from(u32_at(bytes, at, "irDeclarations.knd", "declaration id")?);

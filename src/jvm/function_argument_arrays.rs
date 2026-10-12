@@ -6,7 +6,7 @@
 //! realization of the common-IR bridge, so the bridge pass records it here and bridge emission
 //! reads it, rather than common IR carrying it.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::Bridge;
 use crate::types::{Ty, TypeName};

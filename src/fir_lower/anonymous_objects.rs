@@ -1,6 +1,6 @@
 //! Lowering of checked anonymous-object construction and its synthetic constructor inputs.
 
-use std::collections::HashMap;
+use crate::fx_hash::HashMap;
 
 use super::{BodyLowering, FirLoweringFailure};
 use crate::fir::{FirAnonymousObject, ResolvedInterfaceDelegateSource};
@@ -93,7 +93,7 @@ impl BodyLowering<'_> {
             ));
         }
         let mut prelude = Vec::new();
-        let mut temporaries = HashMap::new();
+        let mut temporaries = HashMap::default();
         for argument in &object.super_arguments {
             if temporaries.contains_key(&argument.slot) {
                 continue;

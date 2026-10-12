@@ -947,7 +947,9 @@ mod tests {
     fn assert_allowed_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let allowed: BTreeSet<_> = allowed.iter().copied().collect();
+        // `fx_hash` is the standard hash map and set with a fixed hasher: using one is no more a
+        // dependency on another compiler layer than using `std::collections` is.
+        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
         let actual = crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()
@@ -965,7 +967,7 @@ mod tests {
     fn assert_allowed_external_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let allowed: BTreeSet<_> = allowed.iter().copied().collect();
+        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
         let actual = external_crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()

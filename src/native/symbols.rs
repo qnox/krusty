@@ -4,7 +4,7 @@
 //! only once it is free of both: the runtime's own symbols are reserved first, and a repeat gets a
 //! numbered suffix whose own spelling is checked in turn.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::ir::IrFile;
 

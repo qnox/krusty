@@ -11,8 +11,8 @@ use super::super::SymbolTable;
 pub(super) fn enclosing(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
-) -> std::collections::HashMap<String, Ty> {
-    let mut visible = std::collections::HashMap::new();
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let mut visible = crate::fx_hash::HashMap::default();
     let mut scope = declaration;
     while let Some(header) = index.declaration_header(scope) {
         let Some(current) = header.owner else {

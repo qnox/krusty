@@ -210,7 +210,7 @@ struct JvmClassRealization<'a> {
     c: &'a crate::ir::IrClass,
     run: &'a EmitRun,
     override_results: &'a crate::jvm::override_results::OverrideResults,
-    local_classifiers: std::collections::HashSet<crate::types::TypeName>,
+    local_classifiers: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
 impl<'a> JvmClassRealization<'a> {

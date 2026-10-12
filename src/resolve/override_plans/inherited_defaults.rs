@@ -8,7 +8,7 @@
 //! names the direct superinterface the member is inherited through; no target realization is
 //! chosen here.
 
-use std::collections::HashSet;
+use crate::fx_hash::HashSet;
 
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, ExternalCallableId, InheritedDefaultBody,
@@ -231,7 +231,7 @@ fn sorted_closure(source: &dyn SymbolSource, direct: &[TypeName]) -> Vec<TypeNam
         out.push(interface);
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut out = Vec::new();
     for interface in direct.iter().rev() {
         visit(source, *interface, &mut seen, &mut out);

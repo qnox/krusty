@@ -958,10 +958,10 @@ fn property_implementation(
 /// Bridge-signature erasure: a type parameter becomes its bound's storage type, a nullable keeps its
 /// wrapper. This is the shape a descriptor is written from, so it defines when two signatures COLLIDE.
 pub(super) fn bridge_erasure(ty: Ty) -> Ty {
-    bridge_erasure_visiting(ty, &mut std::collections::HashSet::new())
+    bridge_erasure_visiting(ty, &mut crate::fx_hash::HashSet::default())
 }
 
-fn bridge_erasure_visiting(ty: Ty, visiting: &mut std::collections::HashSet<&'static str>) -> Ty {
+fn bridge_erasure_visiting(ty: Ty, visiting: &mut crate::fx_hash::HashSet<&'static str>) -> Ty {
     match ty {
         // `<T : S>` where `S : Entity` erases to `Entity`, whether `S` is declared on the method
         // or on the enclosing classifier. A cycle (`T : S`, `S : T`) has no class bound.

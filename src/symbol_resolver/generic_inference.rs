@@ -182,7 +182,7 @@ pub(crate) fn infer_constructor_type_args_for_formals(
     if type_params.is_empty() {
         return None;
     }
-    let mut binds = GSigBinds::new();
+    let mut binds = GSigBinds::default();
     for ctor in &ty.constructors {
         let Some(gsig) = &ctor.generic_sig else {
             continue;
@@ -302,7 +302,7 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
             let valid = complete
                 && generic_bindings_satisfy_bounds(&signature, &trial, |actual, bound| {
                     let mut actual = actual.projection_inner().unwrap_or(actual);
-                    let mut seen = std::collections::HashSet::new();
+                    let mut seen = crate::fx_hash::HashSet::default();
                     while let Ty::TyParam(name, upper) = actual {
                         if !seen.insert(name) {
                             break;
@@ -696,7 +696,7 @@ pub(crate) fn callable_reference_expected_bindings(
     parameter: usize,
     explicit_type_arguments: impl ExplicitTypeArgumentFixity,
     bindings: &GSigBinds,
-    selected_by_prior_callable_references: &std::collections::HashSet<String>,
+    selected_by_prior_callable_references: &crate::fx_hash::HashSet<String>,
 ) -> GSigBinds {
     let Some(shape @ Ty::Fun(_)) = signature.params.get(parameter).copied().map(Ty::non_null)
     else {
@@ -726,9 +726,9 @@ pub(crate) fn invariant_expected_result_formals(
     signature: &GenericSig,
     expected: Ty,
     expected_bindings: &GSigBinds,
-) -> std::collections::HashSet<String> {
+) -> crate::fx_hash::HashSet<String> {
     let Some(declared) = return_shape_at_expected_owner(source, signature.ret, expected) else {
-        return std::collections::HashSet::new();
+        return crate::fx_hash::HashSet::default();
     };
     signature
         .formals
@@ -751,9 +751,9 @@ pub(crate) fn unprojected_expected_result_formals(
     signature: &GenericSig,
     expected: Ty,
     expected_bindings: &GSigBinds,
-) -> std::collections::HashSet<String> {
+) -> crate::fx_hash::HashSet<String> {
     let Some(declared) = return_shape_at_expected_owner(source, signature.ret, expected) else {
-        return std::collections::HashSet::new();
+        return crate::fx_hash::HashSet::default();
     };
     signature
         .formals
@@ -931,7 +931,7 @@ pub(crate) fn merge_call_argument_bindings(
                     crate::types::TypeVariance::Invariant => receiver,
                 };
                 let candidate_binding =
-                    std::collections::HashMap::from([(formal.clone(), candidate)]);
+                    crate::fx_hash::HashMap::from_iter([(formal.clone(), candidate)]);
                 let receiver_shape = signature
                     .receiver
                     .map(|receiver| ty_subst_keep_unbound(receiver, &candidate_binding))
@@ -1362,7 +1362,7 @@ pub(crate) fn infer_generic_bindings(
     generic_sig: &GenericSig,
     actuals: impl IntoIterator<Item = (usize, Ty)>,
 ) -> GSigBinds {
-    let mut binds = GSigBinds::new();
+    let mut binds = GSigBinds::default();
     for (parameter, actual) in actuals {
         if let Some(&shape) = generic_sig.params.get(parameter) {
             unify_inferred_ty(shape, actual, &mut binds);
@@ -1380,7 +1380,7 @@ pub(crate) fn infer_generic_call_bindings(
     actuals: impl IntoIterator<Item = (usize, Ty, bool)>,
     vararg_index: Option<usize>,
 ) -> GSigBinds {
-    let mut binds = GSigBinds::new();
+    let mut binds = GSigBinds::default();
     for (parameter, actual, whole_array) in actuals {
         let Some(mut shape) = generic_sig.params.get(parameter).copied() else {
             continue;
@@ -1474,7 +1474,7 @@ pub(crate) fn specialize_typed_call_signature(
         source,
         signature,
         type_arguments,
-        &GSigBinds::new(),
+        &GSigBinds::default(),
         &mut bindings,
         inferred,
     );
@@ -1550,7 +1550,7 @@ pub(crate) fn apply_only_input_type_bindings(
 
         let mut candidates = Vec::new();
         let mut collect = |shape: Ty, actual: Ty| {
-            let mut one_input = GSigBinds::new();
+            let mut one_input = GSigBinds::default();
             unify_ty_from_symbols(source, shape, actual, &mut one_input);
             let Some(candidate) = one_input.get(formal).copied() else {
                 return;
@@ -1756,7 +1756,7 @@ fn infer_generic_return_bindings_impl(
     expected: Ty,
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) -> Option<GSigBinds> {
-    let mut bindings = GSigBinds::new();
+    let mut bindings = GSigBinds::default();
     unify_inferred_ty_impl(source, generic_sig.ret, expected, &mut bindings);
     if bindings.is_empty() {
         return None;
@@ -2027,8 +2027,8 @@ pub(crate) fn widen_invariant_expected_bindings(
 /// last-write-wins binding.
 pub(crate) struct SymbolicReturnConstraints {
     pub bindings: GSigBinds,
-    pub constrained_formals: std::collections::HashSet<String>,
-    pub conflicting_formals: std::collections::HashSet<String>,
+    pub constrained_formals: crate::fx_hash::HashSet<String>,
+    pub conflicting_formals: crate::fx_hash::HashSet<String>,
 }
 
 /// Relate callee-owned return variables to caller-owned symbolic expected types. The two scopes are
@@ -2063,8 +2063,8 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
         declared: Ty,
         expected: Ty,
         formals: &[String],
-        candidates: &mut std::collections::HashMap<String, (Option<Ty>, bool)>,
-        constrained_formals: &mut std::collections::HashSet<String>,
+        candidates: &mut crate::fx_hash::HashMap<String, (Option<Ty>, bool)>,
+        constrained_formals: &mut crate::fx_hash::HashSet<String>,
     ) {
         match (declared, expected) {
             (Ty::TyParam(declared, _), expected_ty)
@@ -2129,8 +2129,8 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
         }
     }
 
-    let mut candidates = std::collections::HashMap::new();
-    let mut constrained_formals = std::collections::HashSet::new();
+    let mut candidates = crate::fx_hash::HashMap::default();
+    let mut constrained_formals = crate::fx_hash::HashSet::default();
     collect(
         declared,
         expected,
@@ -2138,8 +2138,8 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
         &mut candidates,
         &mut constrained_formals,
     );
-    let mut bindings = GSigBinds::new();
-    let mut conflicting_formals = std::collections::HashSet::new();
+    let mut bindings = GSigBinds::default();
+    let mut conflicting_formals = crate::fx_hash::HashSet::default();
     for (formal, (actual, all_symbolic)) in candidates {
         if let Some(actual) = actual.filter(|_| all_symbolic) {
             bindings.insert(formal, actual);

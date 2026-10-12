@@ -1,7 +1,7 @@
 //! Decoded inline-body plan caching for immutable classpath compositions.
 
 use super::{Classpath, EntryKey};
-use crate::name_tree::{FxBuildHasher, FxHasher};
+use crate::fx_hash::{FxBuildHasher, FxHasher};
 use crate::types::{Ty, TypeName};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};

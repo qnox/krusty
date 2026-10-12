@@ -44,7 +44,7 @@ impl JvmLibraries {
         functions: &[crate::jvm::metadata::MetaFn],
         members: &[crate::libraries::LibraryMember],
         kotlin_scope_is_authoritative: bool,
-    ) -> std::collections::HashSet<String> {
+    ) -> crate::fx_hash::HashSet<String> {
         let mut hidden = functions
             .iter()
             .filter(|declaration| {
@@ -52,7 +52,7 @@ impl JvmLibraries {
                     && !self.since_kotlin_withheld(declaration.since_kotlin())
             })
             .map(|declaration| declaration.kotlin_name.clone())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         hidden.extend(
             crate::jvm::metadata::class_properties(class)
                 .iter()

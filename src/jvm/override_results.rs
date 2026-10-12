@@ -15,7 +15,7 @@
 //! answered from the overridden results its module record carries, so a caller or a subclass in any
 //! file agrees with the declaring one.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{CallableId, ExternalCallableId, PropertyId};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};

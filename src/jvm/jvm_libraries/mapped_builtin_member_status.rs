@@ -186,7 +186,7 @@ mod tests {
         let keys = visible_methods()
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         assert_eq!(visible_methods().len(), 22);
         assert_eq!(keys.len(), visible_methods().len());
 
@@ -312,7 +312,7 @@ mod tests {
         let keys = deprecated_hidden_methods()
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         assert_eq!(deprecated_hidden_methods().len(), 2);
         assert_eq!(keys.len(), deprecated_hidden_methods().len());
 
@@ -350,7 +350,7 @@ mod tests {
         let keys = hidden_methods()
             .iter()
             .copied()
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::fx_hash::HashSet<_>>();
         assert_eq!(hidden_methods().len(), 9);
         assert_eq!(keys.len(), hidden_methods().len());
 

@@ -190,7 +190,7 @@ pub struct AnnotationOccurrence {
 /// What the checker made of each source type-use application: `Some` with its folded value, or
 /// `None` for a `SOURCE`-retained one, which `@Metadata` does not record.
 pub(crate) type CheckedTypeUseAnnotations =
-    std::collections::HashMap<AnnotationOccurrence, Option<ResolvedAnnotation>>;
+    crate::fx_hash::HashMap<AnnotationOccurrence, Option<ResolvedAnnotation>>;
 
 impl Spelled {
     /// Replace every bound source application in this tree with its checked value, dropping the
@@ -248,8 +248,8 @@ impl DeclaredSpellings {
 /// bound them; see [`Spelled::annotations`].
 #[derive(Debug, Default)]
 pub(crate) struct RecordedTypeAnnotations {
-    annotations: std::collections::HashMap<u32, Vec<TypeUseAnnotation>>,
-    parameter_names: std::collections::HashMap<u32, Box<str>>,
+    annotations: crate::fx_hash::HashMap<u32, Vec<TypeUseAnnotation>>,
+    parameter_names: crate::fx_hash::HashMap<u32, Box<str>>,
 }
 
 impl RecordedTypeAnnotations {
@@ -283,7 +283,7 @@ impl RecordedTypeAnnotations {
 /// annotations `@Metadata` records on each occurrence.
 #[derive(Clone, Copy)]
 pub(crate) struct SourceSpellings<'a> {
-    pub aliases: &'a std::collections::HashMap<crate::diag::Span, crate::ast::TypeRef>,
+    pub aliases: &'a crate::fx_hash::HashMap<crate::diag::Span, crate::ast::TypeRef>,
     pub annotations: &'a RecordedTypeAnnotations,
 }
 

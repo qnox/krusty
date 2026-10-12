@@ -2,8 +2,8 @@
 //! Targets major version 50 (Java 6). Methods that create lambda objects (new $lambda$N) emit a
 //! StackMapTable attribute so the type-checking verifier on Java 25+ accepts them.
 
+use crate::fx_hash::{HashMap, HashSet};
 use crate::kt_string::KtString;
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -533,7 +533,7 @@ pub struct ClassWriter {
     /// Whether the class itself carries a `Deprecated` attribute (from `@Deprecated`).
     class_deprecated: bool,
     /// `(name_index, desc_index)` of methods carrying a `Deprecated` attribute (from `@Deprecated`).
-    deprecated_methods: std::collections::HashSet<(u16, u16)>,
+    deprecated_methods: crate::fx_hash::HashSet<(u16, u16)>,
     /// Candidate `InnerClasses` entries (the file's nested classes). `finish` emits only those whose
     /// `inner` is actually referenced as a class constant — kotlinc's rule.
     inner_class_candidates: Vec<InnerClassSpec>,
@@ -544,7 +544,7 @@ pub struct ClassWriter {
     /// An applied annotation appears only as a descriptor string inside the annotation attribute —
     /// never as a class constant — yet kotlinc still gives a nested one an `InnerClasses` entry, so
     /// these count as references alongside the pool's class constants.
-    annotation_class_refs: std::collections::HashSet<String>,
+    annotation_class_refs: crate::fx_hash::HashSet<String>,
     /// Entries for the `PermittedSubclasses` attribute.
     permitted_subclasses: Vec<String>,
     /// Class-file major version to emit (default v52; set via [`ClassWriter::set_major`]).
@@ -602,12 +602,12 @@ impl ClassWriter {
             invisible_annotations: Vec::new(),
             bootstrap_methods: Vec::new(),
             class_deprecated: false,
-            deprecated_methods: std::collections::HashSet::new(),
+            deprecated_methods: crate::fx_hash::HashSet::default(),
             inner_class_candidates: Vec::new(),
             inner_class_resolver: None,
             inner_class_table: inner_classes::InnerClassTable::default(),
             value_classes: Rc::default(),
-            annotation_class_refs: std::collections::HashSet::new(),
+            annotation_class_refs: crate::fx_hash::HashSet::default(),
             permitted_subclasses: Vec::new(),
             major: MAJOR_JAVA8,
             source_file: None,
@@ -1583,7 +1583,7 @@ impl ClassWriter {
             .iter()
             .any(|method| !method.method_parameters.is_empty())
             .then(|| self.cp.utf8("MethodParameters"));
-        let mut annotation_default_attrs = HashMap::new();
+        let mut annotation_default_attrs = HashMap::default();
         for default in self
             .methods
             .iter()
