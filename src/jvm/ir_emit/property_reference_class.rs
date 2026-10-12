@@ -220,13 +220,23 @@ fn emit_property_reference_constructor(
 }
 
 impl PropertyCallTarget<'_> {
+    /// Whether `get` consumes the receiver. A static field or a receiverless static bridge
+    /// (`access$get<X>$cp()`, `access$get<X>$p()`) reads no receiver, and kotlinc does not load
+    /// it: a field read drops its receiver, where `set` still evaluates and pops it.
+    fn get_reads_receiver(&self) -> bool {
+        match self.field_access {
+            Some(access) => !access.is_static,
+            None => self.array_length || self.facade.is_none() || !self.params.is_empty(),
+        }
+    }
+
+    /// Read the property. The receiver is on the stack exactly when [`Self::get_reads_receiver`].
     fn emit_get(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, ret: Ty) {
         if let Some(access) = self.field_access {
             let physical = ir_ty_to_jvm(&access.ty);
             let owner = access.owner.render();
             let field = cw.fieldref(&owner, &access.name, &type_descriptor(physical));
             if access.is_static {
-                code.pop();
                 code.getstatic(field, slot_words(physical) as i32);
             } else {
                 emit_object_as(cw, code, Ty::obj_name(access.owner));
@@ -242,7 +252,6 @@ impl PropertyCallTarget<'_> {
             // `access$getX$cp()` takes no receiver. The bound reference still captured the
             // companion instance for reflection; the read itself does not use it.
             if self.params.is_empty() {
-                code.pop();
                 let method = cw.methodref(facade, self.name, self.descriptor);
                 code.invokestatic(method, 0, slot_words(ret) as i32);
             } else {
@@ -410,10 +419,11 @@ pub(super) fn emit_prop_ref_class(
     if let Some(constant) = target.getter_constant.as_ref() {
         constant_emission::emit(constant, &mut get, &mut cw);
     } else {
-        get.aload(1);
-        target
-            .getter(pr)
-            .emit_get(&mut cw, &mut get, target.getter_ret);
+        let getter = target.getter(pr);
+        if getter.get_reads_receiver() {
+            get.aload(1);
+        }
+        getter.emit_get(&mut cw, &mut get, target.getter_ret);
     }
     box_property_reference_value(
         &mut cw,
@@ -501,13 +511,14 @@ fn emit_bound_prop_ref_class(
     if let Some(constant) = target.getter_constant.as_ref() {
         constant_emission::emit(constant, &mut get, &mut cw);
     } else {
-        get.aload(0);
-        // kotlinc names the inherited field through the carrier itself.
-        let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
-        get.getfield(recv_f, 1);
-        target
-            .getter(pr)
-            .emit_get(&mut cw, &mut get, target.getter_ret);
+        let getter = target.getter(pr);
+        if getter.get_reads_receiver() {
+            get.aload(0);
+            // kotlinc names the inherited field through the carrier itself.
+            let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
+            get.getfield(recv_f, 1);
+        }
+        getter.emit_get(&mut cw, &mut get, target.getter_ret);
     }
     box_property_reference_value(
         &mut cw,

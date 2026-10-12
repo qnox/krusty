@@ -17007,6 +17007,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nested class of a named object writes `getstatic Obj.INSTANCE; pop` first. A read through the
   getter bridge, a store the owner writes with its own `putstatic`, and a `this` receiver drop the
   receiver. Test: `tests/bridged_static_write_receiver_e2e.rs`.
+- **A bound property reference over static storage does not load its receiver in `get`.** A
+  static field, `access$get…$cp()` and `access$get…$p()` take no receiver, and kotlinc's field read
+  drops it, so `get` is the bare static read. `set` still evaluates the bound receiver and pops
+  it (`aload_0; getfield receiver; pop`), the field-store shape above. Test:
+  `tests/bound_static_property_reference_get_e2e.rs`.
 - **A backing field's descriptor interns before its nullability annotation.** kotlinc's class
   writer visits the fields after the methods, each as its name, its descriptor and then its
   `@NotNull`/`@Nullable` annotation. A private field no method reads or writes therefore adds its
