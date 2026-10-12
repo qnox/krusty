@@ -92,7 +92,16 @@ fn realize_package_delegates(ir: &mut IrFile) {
                     declaration.property,
                     *getter,
                     *storage,
-                    receiver.map(delegate_method_receiver),
+                    receiver.map(|receiver| {
+                        approximate_delegate_receiver(
+                            receiver,
+                            declaration
+                                .type_params
+                                .iter()
+                                .map(|parameter| parameter.semantic_name.as_str()),
+                            std::iter::empty(),
+                        )
+                    }),
                 )),
                 _ => None,
             },
@@ -146,6 +155,19 @@ fn realize_member_delegates(ir: &mut IrFile) {
     for class in 0..ir.classes.len() {
         let class = class as ClassId;
         let owner = ir.classes[class as usize].fq_name;
+        let owner_receiver = approximate_owner_receiver(ir, owner);
+        let owner_type_parameters = ir
+            .class_signature_name(owner)
+            .into_iter()
+            .flat_map(|signature| &signature.type_params)
+            .map(|parameter| parameter.semantic_name.clone())
+            .chain(
+                ir.classes[class as usize]
+                    .captured_type_params
+                    .iter()
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
         let mut candidates = ir.classes[class as usize]
             .properties
             .iter()
@@ -157,7 +179,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                     field: declaration.delegate_field?,
                     getter: declaration.getter?,
                     last_accessor: declaration.setter.unwrap_or(declaration.getter?),
-                    receivers: vec![Ty::Obj(owner, &[])],
+                    receivers: vec![owner_receiver],
                 })
             })
             .collect::<Vec<_>>();
@@ -174,8 +196,15 @@ fn realize_member_delegates(ir: &mut IrFile) {
                         getter: declaration.getter,
                         last_accessor: declaration.setter.unwrap_or(declaration.getter),
                         receivers: vec![
-                            Ty::Obj(owner, &[]),
-                            delegate_method_receiver(declaration.receiver),
+                            owner_receiver,
+                            approximate_delegate_receiver(
+                                declaration.receiver,
+                                declaration
+                                    .type_params
+                                    .iter()
+                                    .map(|parameter| parameter.semantic_name.as_str()),
+                                owner_type_parameters.iter().map(String::as_str),
+                            ),
                         ],
                     })
                 }),
@@ -257,16 +286,106 @@ fn realize_member_delegates(ir: &mut IrFile) {
     crate::jvm::field_compaction::remove_fields(ir, &removed);
 }
 
-/// A generated delegate method is not itself a generic declaration, so a type-parameter receiver
-/// takes its bound's JVM representation directly. Concrete receivers remain semantic until the
-/// later value-class pass selects their carrier.
-fn delegate_method_receiver(receiver: Ty) -> Ty {
-    match receiver {
-        Ty::TyParam(..) => crate::jvm::physical_type::ir_ty_to_jvm(&receiver),
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if matches!(*inner, Ty::TyParam(..)) => {
-            crate::jvm::physical_type::ir_ty_to_jvm(&receiver)
+/// A generated delegate method is not itself generic. Replace only the property's own type
+/// parameters by their bounds: the surrounding receiver remains available to generic-signature
+/// emission (`List<T>` becomes `List<Any>`, not raw `List`) and a concrete nullable value class
+/// remains boxed when value-class lowering selects its physical slot.
+fn approximate_delegate_receiver<'a>(
+    receiver: Ty,
+    own_type_parameters: impl Iterator<Item = &'a str>,
+    enclosing_type_parameters: impl Iterator<Item = &'a str>,
+) -> Ty {
+    let parameters = own_type_parameters
+        .chain(enclosing_type_parameters)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    approximate_type_parameters(receiver, &parameters, &mut HashSet::default())
+}
+
+/// The dispatch receiver of a static delegate method cannot refer to its owner's class type
+/// parameters. Keep the applied owner shape, substituting each argument with its declared primary
+/// bound, so `Host<A>` becomes `Host<Any>` rather than raw `Host` in the method Signature.
+fn approximate_owner_receiver(ir: &IrFile, owner: crate::types::TypeName) -> Ty {
+    let Some(signature) = ir.class_signature_name(owner) else {
+        return Ty::Obj(owner, &[]);
+    };
+    if signature.type_params.is_empty() {
+        return Ty::Obj(owner, &[]);
+    }
+    let parameters = signature
+        .type_params
+        .iter()
+        .map(|parameter| parameter.semantic_name.clone())
+        .collect::<HashSet<_>>();
+    let arguments = signature
+        .type_params
+        .iter()
+        .map(|parameter| {
+            let bound = crate::jvm::generic_erasure::declared_primary_bound(parameter)
+                .unwrap_or_else(|| Ty::obj_name(crate::types::wk::any()));
+            approximate_type_parameters(bound, &parameters, &mut HashSet::default()).non_null()
+        })
+        .collect::<Vec<_>>();
+    Ty::obj_args_name(owner, &arguments)
+}
+
+fn approximate_type_parameters(
+    ty: Ty,
+    parameters: &HashSet<String>,
+    visiting: &mut HashSet<String>,
+) -> Ty {
+    match ty {
+        Ty::TyParam(name, bound) if parameters.contains(name) => {
+            if !visiting.insert(name.to_owned()) {
+                return Ty::obj_name(crate::types::wk::any());
+            }
+            let approximated = approximate_type_parameters(*bound, parameters, visiting).non_null();
+            visiting.remove(name);
+            approximated
         }
-        _ => receiver,
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| approximate_type_parameters(*parameter, parameters, visiting))
+                .collect(),
+            approximate_type_parameters(signature.ret, parameters, visiting),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        Ty::Nullable(inner) => {
+            Ty::nullable(approximate_type_parameters(*inner, parameters, visiting))
+        }
+        Ty::PlatformNullable(inner) => {
+            Ty::platform_nullable(approximate_type_parameters(*inner, parameters, visiting))
+        }
+        Ty::InProjection(inner) => {
+            Ty::in_projection(approximate_type_parameters(*inner, parameters, visiting))
+        }
+        Ty::OutProjection(inner) => {
+            Ty::out_projection(approximate_type_parameters(*inner, parameters, visiting))
+        }
+        Ty::StarProjection(inner) => {
+            Ty::star_projection(approximate_type_parameters(*inner, parameters, visiting))
+        }
+        Ty::DefinitelyNotNull(inner) => {
+            approximate_type_parameters(*inner, parameters, visiting).non_null()
+        }
+        Ty::Obj(classifier, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            classifier,
+            &arguments
+                .iter()
+                .map(|argument| approximate_type_parameters(*argument, parameters, visiting))
+                .collect::<Vec<_>>(),
+        ),
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| approximate_type_parameters(*part, parameters, visiting))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ty,
     }
 }
 

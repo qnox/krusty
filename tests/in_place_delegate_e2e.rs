@@ -98,18 +98,26 @@ fn member_extension_delegate_is_byte_identical_to_kotlinc() {
     });
 }
 
-/// The generated delegate method is not generic: a property type parameter is erased to its bound
-/// in that method's receiver slot, both for a package extension and for a member extension.
+/// The generated delegate method is not generic: a property type parameter is approximated to its
+/// bound while its surrounding receiver shape remains in the Signature. Concrete type arguments,
+/// a generic dispatch owner, and a nullable value-class receiver keep their own shapes.
 const GENERIC_EXTENSION_DELEGATES: &str = "package store\n\
     \n\
     import kotlin.reflect.KProperty\n\
     \n\
     operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
     \n\
-    val <T> T.packageValue: Int by Unit\n\
+    @JvmInline value class Value(val raw: Int)\n\
     \n\
-    class GenericHost {\n\
+    val <T> T.packageValue: Int by Unit\n\
+    val <T> List<T>.nestedValue: Int by Unit\n\
+    val List<String>.concreteValue: Int by Unit\n\
+    val Value?.nullableValue: Int by Unit\n\
+    \n\
+    class GenericHost<A> {\n\
     \x20   val <T> T.memberValue: Int by Unit\n\
+    \x20   val <T> List<T>.nestedMemberValue: Int by Unit\n\
+    \x20   val A.enclosingValue: Int by Unit\n\
     }\n";
 
 #[test]
