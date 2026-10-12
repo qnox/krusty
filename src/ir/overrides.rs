@@ -23,7 +23,8 @@ pub struct IrPropertyOverride {
     /// Member-extension receivers, as on `ResolvedPropertyOverride`.
     pub declared_receiver: Option<Ty>,
     pub implementation_receiver: Option<Ty>,
-    pub overridden_mutable: bool,
+    /// As on `ResolvedPropertyOverride`: `None` when the overridden property is a `val`.
+    pub overridden_setter_value: Option<crate::fir::ResolvedParameterIdentity>,
     pub implementation_mutable: bool,
     pub has_kotlin_superclass_override: bool,
     pub depth: u32,

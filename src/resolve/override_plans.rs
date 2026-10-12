@@ -240,6 +240,17 @@ fn function_default_bitmap(function: &FunctionInfo) -> Box<[bool]> {
 
 /// `owner`'s own non-private properties named `name` of one kind: member properties, or (with
 /// `member_extensions`) member-extension properties, whose receiver is part of their override slot.
+/// The value parameter of `property`'s setter, or `None` for a `val`.
+pub(super) fn setter_value(
+    property: &PropertyInfo,
+) -> Option<crate::fir::ResolvedParameterIdentity> {
+    property.setter.as_ref().map(|_| {
+        crate::fir::ResolvedParameterIdentity::setter_value(
+            property.setter_parameter_name.as_deref(),
+        )
+    })
+}
+
 fn declared_properties(
     source: &dyn crate::symbol_source::SymbolSource,
     owner: Ty,
@@ -774,7 +785,7 @@ fn publish_inherited_interface_property_plans(
                         implementation_declared.ty,
                         "inherited implementation property type",
                     ),
-                    overridden_mutable: applied.setter.is_some(),
+                    overridden_setter_value: setter_value(&applied),
                     declared_receiver: None,
                     implementation_receiver: None,
                     implementation_mutable: implementation.setter.is_some(),
@@ -949,7 +960,7 @@ fn append_property_override_edges(
                         )
                     }),
                 implementation_receiver,
-                overridden_mutable: applied.setter.is_some(),
+                overridden_setter_value: setter_value(&applied),
                 implementation_mutable,
                 overridden_return_value_status: applied.return_value_status,
                 overridden_visibility: applied.visibility,
