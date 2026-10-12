@@ -49,23 +49,70 @@ impl BodyLowering<'_, '_, '_> {
         let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
             || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
         let left = self.reference(lhs)?;
-        let right = self.reference(rhs)?;
         if self.terminated {
             return Ok(None);
         }
-        if against_null {
-            let condition = comparison(op, true).expect("equality");
-            return Ok(Some(self.builder.ins().icmp(condition, left, right)));
-        }
-        let equal = self
-            .runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])?
-            .expect("`kt_equals` returns a Boolean");
+        // Kotlin/Native's `BuiltinOperatorLowering` realizes `a == b` with a nullable left and a
+        // non-null right operand as `a != null && a.equals(b)`: the right operand is not evaluated
+        // when the left one is `null`.
+        let null_left_skips_right = !against_null
+            && self
+                .checked_type(lhs)
+                .is_some_and(Ty::upper_bound_admits_null)
+            && self
+                .checked_type(rhs)
+                .is_some_and(|ty| !ty.upper_bound_admits_null());
+        let equal = if null_left_skips_right {
+            self.equals_when_left_present(left, rhs)?
+        } else {
+            let right = self.reference(rhs)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            if against_null {
+                let condition = comparison(op, true).expect("equality");
+                return Ok(Some(self.builder.ins().icmp(condition, left, right)));
+            }
+            self.runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])?
+                .expect("`kt_equals` returns a Boolean")
+        };
         Ok(Some(if op == IrBinOp::Ne {
             let one = self.builder.ins().iconst(types::I8, 1);
             self.builder.ins().bxor(equal, one)
         } else {
             equal
         }))
+    }
+
+    /// `left != null && left.equals(rhs)`, with `rhs` evaluated only on the non-null path.
+    fn equals_when_left_present(&mut self, left: Value, rhs: u32) -> Result<Value, Unsupported> {
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I8);
+        let present = self.builder.create_block();
+        let absent = self.builder.create_block();
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let is_null = self.builder.ins().icmp(IntCC::Equal, left, zero);
+        self.builder.ins().brif(is_null, absent, &[], present, &[]);
+
+        self.continue_in(absent);
+        self.builder.seal_block(absent);
+        let unequal = self.builder.ins().iconst(types::I8, 0);
+        self.builder.ins().jump(merge, &[BlockArg::Value(unequal)]);
+
+        self.continue_in(present);
+        self.builder.seal_block(present);
+        let right = self.reference(rhs)?;
+        // A right operand that leaves (`Nothing`) contributes no edge; the null path still merges.
+        if !self.terminated {
+            let equal = self
+                .runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])?
+                .expect("`kt_equals` returns a Boolean");
+            self.builder.ins().jump(merge, &[BlockArg::Value(equal)]);
+        }
+
+        self.continue_in(merge);
+        self.builder.seal_block(merge);
+        Ok(self.builder.block_params(merge)[0])
     }
 
     fn primitive_equality(

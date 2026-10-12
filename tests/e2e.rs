@@ -2986,6 +2986,8 @@ mod enum_companion_property_e2e;
 mod enum_init_block_line_e2e;
 #[path = "inner_outer_field_signature_e2e.rs"]
 mod inner_outer_field_signature_e2e;
+#[path = "nullable_equality_evaluation_order_e2e.rs"]
+mod nullable_equality_evaluation_order_e2e;
 #[path = "primitive_to_object_equality_e2e.rs"]
 mod primitive_to_object_equality_e2e;
 #[path = "special_builtin_call_sites_e2e.rs"]
