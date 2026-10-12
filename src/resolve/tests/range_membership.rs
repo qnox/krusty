@@ -62,6 +62,26 @@ fn floating_membership_without_a_selected_range_operator_fails_closed() {
 }
 
 #[test]
+fn unavailable_context_on_contains_is_reported_once_before_range_rejection() {
+    let (errors, _) = check(
+        "// LANGUAGE: +ContextParameters\n\
+         class Marker\n\
+         class OwnedIntRange\n\
+         operator fun Int.rangeTo(other: Int): OwnedIntRange = OwnedIntRange()\n\
+         context(marker: Marker)\n\
+         operator fun OwnedIntRange.contains(value: Int): Boolean = true\n\
+         fun probe(value: Int): Boolean = value in 1..2",
+    );
+    assert_eq!(
+        errors,
+        [
+            "no implicit value is available for the context parameters",
+            "operator 'contains' cannot be applied to range 'OwnedIntRange' and 'Int'",
+        ]
+    );
+}
+
+#[test]
 fn reference_range_in_records_operator_calls_for_lowering() {
     let mut diagnostics = DiagSink::new();
     let source = "class VR { operator fun contains(v: V): Boolean = true }\n\

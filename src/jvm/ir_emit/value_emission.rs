@@ -818,6 +818,21 @@ impl super::Emitter<'_> {
                         self.mark_dispatch_line(e, code);
                         code.invokestatic(method, (slot_words(*operand) * 2) as i32, 1);
                     }
+                    crate::ir::IrIntrinsic::UnsignedCompare { operand } => {
+                        let [left, right] = args.as_slice() else {
+                            unreachable!("checked unsigned comparison has two arguments")
+                        };
+                        self.emit_value(*left, code);
+                        self.emit_value(*right, code);
+                        let (owner, descriptor, words) = match *operand {
+                            Ty::UInt => ("java/lang/Integer", "(II)I", 2),
+                            Ty::ULong => ("java/lang/Long", "(JJ)I", 4),
+                            _ => unreachable!("checked unsigned comparison carries UInt or ULong"),
+                        };
+                        let method = self.cw.methodref(owner, "compareUnsigned", descriptor);
+                        self.mark_dispatch_line(e, code);
+                        code.invokestatic(method, words, 1);
+                    }
                     crate::ir::IrIntrinsic::CoroutineContext => {
                         unreachable!(
                             "CoroutineContext intrinsic must be realized by the CPS pass before emit"

@@ -19,8 +19,10 @@ mod java_nullability;
 mod mapped_builtin_member_status;
 mod object_methods;
 mod parameter_plans;
+mod provider_normalization;
 #[cfg(test)]
 mod provider_normalization_tests;
+use provider_normalization::normalize_tail;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
@@ -52,7 +54,6 @@ use super::classreader::JavaNullability;
 use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::type_descriptor;
-use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
     FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind,
@@ -309,17 +310,12 @@ impl JvmLibraries {
         names
     }
 
-    /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg` —
-    /// `listOf`/`run`/`println`/… each with its inline/`@InlineOnly` flags and logical
-    /// (continuation-stripped) suspend signature. The building block `symbols` uses so a
-    /// top-level name resolves through the ONE fqn seam without the removed receiver-indexed
-    /// `functions()` query. Candidates come from the per-(jar, package) SOURCE-keyed member index
-    /// (`functions_in_scope`) — only the queried package's facades are consulted (never a whole-
-    /// classpath name index), the source-name keying finds a `@JvmName`-mangled declaration under
-    /// the name a caller writes, and a `$default`/synthetic static (absent from `@Metadata`) is
-    /// keyed by its literal JVM name. The index also surfaces an extension's compiled form; each
-    /// candidate is classified honestly by its metadata receiver, so the caller filters by
-    /// `FnKind` as needed.
+    /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg`, with
+    /// inline flags and logical suspend signatures. The per-(jar, package) SOURCE-keyed member index
+    /// consults only the queried package's facades; source-name keying finds a `@JvmName` declaration
+    /// under the name a caller writes, while `$default`/synthetic statics absent from metadata remain
+    /// keyed by their JVM name. The index also surfaces compiled extensions; metadata receiver facts
+    /// classify every candidate before the caller filters by [`FnKind`].
     fn top_level_overloads(&self, name: &str, pkg: TypeName) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
         let cm = &self.common_expectations;
@@ -536,7 +532,7 @@ impl JvmLibraries {
                 },
                 ..FunctionInfo::plain(kind, None, callable)
             });
-            cm.attach_tail(c.paired_common, namespace, name, &mut overloads);
+            normalize_tail(cm, namespace, name, c.paired_common, &mut overloads);
         }
         for builtin in self.cp.builtin_package_functions(pkg, name) {
             if overloads.iter().any(|candidate| {
@@ -607,8 +603,9 @@ impl JvmLibraries {
                 return_value_status: None,
             };
             function.callable.annotations = builtin.annotations;
-            attach_function_realization(pkg, name, &mut function);
+            let authority = builtin.compiler_builtin_owner;
             overloads.push(function);
+            normalize_tail(cm, namespace, name, authority, &mut overloads);
         }
         overloads
     }
@@ -4253,8 +4250,8 @@ impl JvmLibraries {
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
-                self.common_expectations
-                    .attach_tail(paired, namespace, name, &mut overloads);
+                let common = &self.common_expectations;
+                normalize_tail(common, namespace, name, paired, &mut overloads);
             }
             // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
             // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's
@@ -4292,9 +4289,6 @@ impl JvmLibraries {
             }
         }
         if let SymbolNamespace::Package(package) = namespace {
-            for overload in &mut overloads {
-                attach_function_realization(package, name, overload);
-            }
             for property in &mut props {
                 if let Some(intrinsic) =
                     crate::libraries::builtin_top_level_realization::normalized_property_realization(

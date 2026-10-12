@@ -1151,7 +1151,6 @@ constants/divisionByZero.kt
 constants/doNotTriggerInit.kt
 constants/float.kt
 constants/foldingBinaryOpsUnsigned.kt
-constants/foldingBinaryOpsUnsignedConst.kt
 constants/kt9532.kt
 constants/literalToLongConversion.kt
 constants/privateConst.kt
@@ -3878,7 +3877,6 @@ inlineClasses/kt31994.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt33119.kt
 inlineClasses/kt33119Generic.kt
-inlineClasses/kt34268.kt
 inlineClasses/kt34902.kt
 inlineClasses/kt37998.kt
 inlineClasses/kt37998Generic.kt
@@ -5094,7 +5092,6 @@ ranges/contains/inExtensionRange.kt
 ranges/contains/inFloatingPointRangeWithNaNBound.kt
 ranges/contains/inIntRange.kt
 ranges/contains/inIterable.kt
-ranges/contains/inNonMatchingRange.kt
 ranges/contains/inOptimizableDoubleRange.kt
 ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt
@@ -5106,20 +5103,13 @@ ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
 ranges/contains/inRangeWithNonmatchingArguments.kt
 ranges/contains/inRangeWithSmartCast.kt
-ranges/contains/inUntilMaxValue.kt
-ranges/contains/inUntilMinValue.kt
-ranges/contains/inUntilMinValueNonConst.kt
-ranges/contains/intInByteRangeWithPossibleOverflow.kt
-ranges/contains/intInShortRangeWithPossibleOverflow.kt
 ranges/contains/kt20106.kt
 ranges/contains/nullableInPrimitiveRange.kt
 ranges/contains/rangeContainsString.kt
 ranges/contains/smartCastOnBothEnds.kt
 ranges/contains/smartCastOnBothEndsGeneric.kt
 ranges/contains/uintInUByteRangeWithPossibleOverflow.kt
-ranges/contains/uintInUIntRangeWithPossibleOverflow.kt
 ranges/contains/uintInUShortRangeWithPossibleOverflow.kt
-ranges/contains/ulongInULongRangeWithPossibleOverflow.kt
 ranges/contains/userDefinedContainsExtension.kt
 ranges/evaluationOrder/forInDownTo.kt
 ranges/evaluationOrder/forInDownToReversed.kt
@@ -5791,7 +5781,6 @@ ranges/stepped/unsigned/literal/until/stepToOutsideRange.kt
 ranges/stepped/unsigned/literal/until/stepToSameLast.kt
 ranges/stepped/unsigned/literal/until/stepToSmallerLast.kt
 ranges/stepped/unsigned/literal/until/zeroToMaxValueStepMaxValue.kt
-ranges/unsigned/bitShifting.kt
 ranges/unsigned/expression/emptyDownto.kt
 ranges/unsigned/expression/emptyRange.kt
 ranges/unsigned/expression/inexactDownToMinValue.kt

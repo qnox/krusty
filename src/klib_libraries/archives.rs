@@ -1,8 +1,8 @@
 //! Reading the provider's declarations out of the KLIB containers a compilation selects.
 //!
-//! The caller names the libraries; nothing here knows which target they were built for. A library
-//! that cannot be opened or decoded rejects the whole set: an unreadable dependency surfaces here,
-//! with its path, instead of later as an unresolved reference.
+//! The compilation assigns the selected platform stdlib its trusted input role. A manifest is
+//! self-authored archive data and cannot grant or revoke that role. A library that cannot be opened
+//! or decoded rejects the whole set here instead of surfacing later as an unresolved reference.
 
 use std::path::{Path, PathBuf};
 
@@ -16,9 +16,41 @@ use super::parameter_defaults::ParameterDefaults;
 use super::{KlibLibraries, KlibLibraryError};
 use crate::metadata::klib_ir::{read_declaration_trees_where, KlibIrDecodeError};
 
+/// One compiler input KLIB and the authority the compilation assigned to it.
+pub struct KlibLibraryInput {
+    path: PathBuf,
+    role: KlibLibraryRole,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum KlibLibraryRole {
+    Dependency,
+    PlatformStdlib,
+}
+
+impl KlibLibraryInput {
+    /// An ordinary dependency, never authoritative for compiler-owned declarations.
+    pub fn dependency(path: PathBuf) -> Self {
+        Self {
+            path,
+            role: KlibLibraryRole::Dependency,
+        }
+    }
+
+    /// The exact platform stdlib selected by compilation input assembly.
+    pub fn platform_stdlib(path: PathBuf) -> Self {
+        Self {
+            path,
+            role: KlibLibraryRole::PlatformStdlib,
+        }
+    }
+}
+
 /// Why the selected libraries could not be published.
 #[derive(Debug)]
 pub enum KlibLibrariesOpenError {
+    /// Compilation input assembly designated more than one archive as the platform stdlib.
+    MultiplePlatformStdlibs { first: PathBuf, second: PathBuf },
     /// The container itself is unreadable.
     Archive(KlibError),
     /// A metadata fragment of `library` does not decode.
@@ -39,6 +71,12 @@ pub enum KlibLibrariesOpenError {
 impl std::fmt::Display for KlibLibrariesOpenError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::MultiplePlatformStdlibs { first, second } => write!(
+                formatter,
+                "multiple platform stdlib KLIB inputs: {} and {}",
+                first.display(),
+                second.display()
+            ),
             Self::Archive(error) => error.fmt(formatter),
             Self::Fragment {
                 library,
@@ -62,28 +100,59 @@ impl std::fmt::Display for KlibLibrariesOpenError {
 impl std::error::Error for KlibLibrariesOpenError {}
 
 impl KlibLibraries {
-    /// Publish every package fragment of the KLIBs at `libraries`, zipped or unpacked.
-    pub fn open(libraries: &[PathBuf]) -> Result<Self, KlibLibrariesOpenError> {
+    /// Publish every package fragment of the typed KLIB inputs, zipped or unpacked.
+    pub fn open(libraries: &[KlibLibraryInput]) -> Result<Self, KlibLibrariesOpenError> {
+        let mut platform_stdlib = None;
+        for input in libraries {
+            if input.role != KlibLibraryRole::PlatformStdlib {
+                continue;
+            }
+            if let Some(first) = platform_stdlib {
+                return Err(KlibLibrariesOpenError::MultiplePlatformStdlibs {
+                    first,
+                    second: input.path.clone(),
+                });
+            }
+            platform_stdlib = Some(input.path.clone());
+        }
         let mut packages = Vec::new();
         let mut archives = Vec::with_capacity(libraries.len());
-        for library in libraries {
+        for input in libraries {
+            let library = &input.path;
             let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
-            packages.extend(package_fragments(library, &archive)?);
+            let _manifest = archive
+                .manifest()
+                .map_err(KlibLibrariesOpenError::Archive)?;
+            // Authority comes from compilation input assembly, which selected this exact archive
+            // as the platform stdlib. Manifests are self-authored dependency data: Native, JS and
+            // Wasm also stamp different values, so neither `unique_name` nor `builtins_platform`
+            // can grant or revoke the compiler-owned role.
+            let compiler_builtin_owner = matches!(input.role, KlibLibraryRole::PlatformStdlib);
+            packages.extend(package_fragments(
+                library,
+                &archive,
+                compiler_builtin_owner,
+            )?);
             archives.push(archive);
         }
         let mut inventory = PackageInventory::from_packages(packages)
             .map_err(KlibLibrariesOpenError::Declaration)?;
         // Only a declaration metadata marks as defaulted has a default to read from the IR.
-        let wanted = inventory.defaulted_top_levels();
+        let wanted = inventory.default_selection();
         let mut defaults = ParameterDefaults::default();
-        for (library, archive) in libraries.iter().zip(&archives) {
+        for (input, archive) in libraries.iter().zip(&archives) {
+            let library = &input.path;
             let trees =
                 read_declaration_trees_where(archive, |signature| wanted.contains(signature))
                     .map_err(|error| KlibLibrariesOpenError::Declarations {
                         library: library.to_path_buf(),
                         error,
                     })?;
-            defaults.add_library(&trees);
+            defaults.add_library(
+                &trees,
+                &wanted,
+                input.role == KlibLibraryRole::PlatformStdlib,
+            );
         }
         inventory.attach_defaults(&defaults);
         Ok(Self::over(std::rc::Rc::new(inventory)))
@@ -93,7 +162,8 @@ impl KlibLibraries {
 fn package_fragments(
     library: &Path,
     archive: &KlibArchive,
-) -> Result<Vec<(Vec<String>, KotlinPackage)>, KlibLibrariesOpenError> {
+    compiler_builtin_owner: bool,
+) -> Result<Vec<(Vec<String>, KotlinPackage, bool)>, KlibLibrariesOpenError> {
     archive
         .package_fragments()
         .into_iter()
@@ -117,7 +187,7 @@ fn package_fragments(
                     .map(str::to_owned)
                     .collect()
             };
-            Ok((segments, package))
+            Ok((segments, package, compiler_builtin_owner))
         })
         .collect()
 }

@@ -129,6 +129,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::TrimIndent
         | crate::libraries::CompilerIntrinsic::TrimMargin
         | crate::libraries::CompilerIntrinsic::FloatingRangeMembership
+        | crate::libraries::CompilerIntrinsic::ClosedRangeContains
         | crate::libraries::CompilerIntrinsic::RangeDownTo
         | crate::libraries::CompilerIntrinsic::RangeUntil
         | crate::libraries::CompilerIntrinsic::ProgressionStep

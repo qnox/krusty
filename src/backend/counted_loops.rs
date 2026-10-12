@@ -24,6 +24,7 @@
 //! progression, and `(step > 0 && inductionVar <= last) || (step < 0 && last <= inductionVar)`
 //! when the direction is unknown.
 
+mod contains;
 mod header;
 mod loop_shape;
 mod with_index;
@@ -121,6 +122,54 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
         record_generated_origins(ir, expression as ExprId, first_generated, &inlined_calls);
         record_generated_lines(ir, expression as ExprId, first_generated);
         ir.exprs[expression] = replacement;
+    }
+    realize_memberships(ir, style, &mut next_slot);
+}
+
+/// Realize every checked membership test in a signed, character or floating-point range literal
+/// as kotlinc's `RangeContainsLowering` does. An unsigned one uses the normalized ordering role
+/// authorized by the exact provider-selected comparison carried by checked IR.
+fn realize_memberships(ir: &mut IrFile, style: CounterLoopStyle, next_slot: &mut Option<u32>) {
+    for expression in 0..ir.exprs.len() {
+        let IrExpr::Checked(IrCheckedOperation::RangeContains {
+            operation,
+            value,
+            start,
+            end,
+            negated,
+            counter,
+            unsigned_compare,
+        }) = ir.exprs[expression].clone()
+        else {
+            continue;
+        };
+        let first_generated = ir.exprs.len();
+        let mut realizer = Realizer {
+            next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
+            ir: &mut *ir,
+            style,
+            inlining: HeaderInlining::None,
+            until_steps: UntilSteps::Built,
+            unsigned_compare,
+            inlined_calls: Vec::new(),
+            represented: Vec::new(),
+        };
+        let contains = realizer.range_contains(&contains::Membership {
+            operation,
+            value,
+            start,
+            end,
+            comparison: counter,
+        });
+        *next_slot = Some(realizer.next_slot);
+        if negated {
+            let contains = ir.add_expr(contains);
+            ir.logical_types.insert(contains, Ty::Boolean);
+            ir.replace_with_negation(expression as ExprId, contains);
+        } else {
+            ir.exprs[expression] = contains;
+        }
+        record_generated_origins(ir, expression as ExprId, first_generated, &[]);
     }
 }
 

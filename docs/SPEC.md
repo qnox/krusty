@@ -15175,15 +15175,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and `..<` is a separate presentation spelling. A mixed value such as `3.0f in 1.0..<3.0` is
   outside the range. Primitive `in` becomes a direct comparison only after ordinary selection picks
   the exact provider declaration carrying the matching range-construction or floating-membership
-  realization. A nearer custom `Double`/`Float` operator instead calls its returned range's
-  `contains`, for both `..` and `..<`. Tests:
+  realization, as the next entry describes. A nearer custom `Double`/`Float` operator instead calls
+  its returned range's `contains`, for both `..` and `..<`. Tests:
   `mixed_open_end_membership_selects_range_until`,
-  `uniform_open_end_double_membership_stays_a_comparison`,
+  `uniform_open_end_double_membership_calls_contains`,
   `uniform_open_end_double_range_until_can_be_shadowed`,
   `membership_uses_the_operator_named_by_range_syntax`,
   `open_end_range_membership_e2e::float_in_open_end_double_range_matches_kotlinc`,
   `open_end_range_membership_e2e::shadowed_uniform_double_range_until_matches_kotlinc`,
   box `ranges/contains/generated/doubleRangeUntil.kt`.
+
+- **Membership in a range literal is kotlinc's `RangeContainsLowering`.** `x in a..b`,
+  `x in a..<b` and `x in a until b` over signed integers, `Char` and floating-point numbers compare
+  instead of building the range, when `contains` is the range's own member or a stdlib `kotlin.ranges`
+  closed-range extension (a user `operator fun IntRange.contains(Short)` is called). The comparison
+  runs in the widest numeric type of the bounds and the value (`computeComparisonClass`: `Double`,
+  `Float`, `Long`, then `Int`; `Byte`/`Short` compare as `Int`), so `x: Long in 1..10` compares
+  `1L <= x`. A constant is converted at compile time; any other operand of another type is
+  converted. The test is `a <= x && x <= b` (`x < b` for an exclusive end), a `when` yielding `false`
+  when the first comparison fails; `!in` negates it. An operand that is not a constant or a value
+  read may have side effects and keeps its evaluation order: when the value may, the bounds that may
+  are stored first and the value after them; otherwise, when both bounds may, the lower one is stored
+  and the upper bound's comparison goes first; otherwise nothing is stored. On the JVM a constant
+  inclusive upper bound becomes the exclusive one a step above it (`x < 11`), unless it is its type's
+  maximum. `downTo` builds a progression, which is not a closed range, and a floating-point `..<` an
+  `OpenEndRange`: membership in either calls `contains`. Unsigned membership still compares only
+  operands of one type. The common backend realizes the checked membership for every target, as
+  it realizes counted loops. Tests: `range_literal_membership_e2e` (class bytes and run against
+  kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
 
 - **Source generic signatures participate in call-site substitution.** Module callables retain
   their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call

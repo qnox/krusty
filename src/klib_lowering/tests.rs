@@ -1030,7 +1030,10 @@ pub(super) fn distribution_root() -> Option<PathBuf> {
 pub(super) fn stdlib(root: &std::path::Path) -> (KlibLibraries, KlibDeclarationBodies) {
     let path = root.join("klib/common/stdlib");
     let libraries =
-        KlibLibraries::open(std::slice::from_ref(&path)).unwrap_or_else(|error| panic!("{error}"));
+        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            path.clone(),
+        )])
+        .unwrap_or_else(|error| panic!("{error}"));
     let archive =
         KlibArchive::open(&path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
     let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");

@@ -9,11 +9,12 @@ impl super::Classpath {
         package: TypeName,
         name: &str,
     ) -> Vec<BuiltinPackageFunction> {
-        self.builtins_file_for_package(package)
-            .functions
+        let (file, compiler_builtin_owner) = self.compiler_builtin_package(package);
+        file.functions
             .iter()
             .filter(|function| function.name == name)
             .map(|function| BuiltinPackageFunction {
+                compiler_builtin_owner,
                 generic_sig: function.generic_sig.clone(),
                 only_input_type_formals: function.only_input_type_formals.clone(),
                 params: function

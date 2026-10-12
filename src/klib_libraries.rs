@@ -27,7 +27,7 @@ use crate::metadata::semantic::KotlinPackage;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
-pub use archives::KlibLibrariesOpenError;
+pub use archives::{KlibLibrariesOpenError, KlibLibraryInput};
 pub use declaration_bodies::{KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
 
@@ -50,7 +50,12 @@ impl KlibLibraries {
         packages: Vec<(Vec<String>, KotlinPackage)>,
     ) -> Result<Self, KlibLibraryError> {
         Ok(Self::over(std::rc::Rc::new(
-            inventory::PackageInventory::from_packages(packages)?,
+            inventory::PackageInventory::from_packages(
+                packages
+                    .into_iter()
+                    .map(|(segments, package)| (segments, package, false))
+                    .collect(),
+            )?,
         )))
     }
 

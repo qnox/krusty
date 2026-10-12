@@ -21,6 +21,12 @@ impl Body<'_> {
                 };
                 self.compare(operand, lhs, rhs)
             }
+            IrIntrinsic::UnsignedCompare { operand } => {
+                let (None, [lhs, rhs]) = (receiver, args) else {
+                    return Err("an unsigned comparison with unexpected operands".to_string());
+                };
+                self.unsigned_compare(operand, *lhs, *rhs)
+            }
             IrIntrinsic::StringLength => {
                 let (Some(receiver), []) = (receiver, args) else {
                     return Err("a malformed `String.length` read".to_string());
@@ -54,13 +60,37 @@ impl Body<'_> {
     /// `a.compareTo(b)` on two integral values: `-1`, `0` or `1`. A floating-point `compareTo` is a
     /// total order (`NaN` greatest, `-0.0` below `0.0`), not this, and declines.
     fn compare(&mut self, operand: Ty, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        let value = carrier(operand)?;
+        let value = ordinary_numeric_carrier(operand)?;
         let (greater, less) = match value {
             Some(ValType::I32) => (GT_S32, LT_S32),
             Some(ValType::I64) => (GT_S64, LT_S64),
             _ => return Err(format!("`compareTo` on `{}`", describe(operand))),
         };
         let value = value.expect("matched above");
+        let left = self.local(value);
+        let right = self.local(value);
+        self.value(lhs, operand)?;
+        self.code.local_set(left);
+        self.value(rhs, operand)?;
+        self.code.local_set(right);
+        self.code
+            .local_get(left)
+            .local_get(right)
+            .op(greater)
+            .local_get(left)
+            .local_get(right)
+            .op(less)
+            .op(SUB32);
+        Ok(())
+    }
+
+    /// The normalized selected `UInt`/`ULong` ordering, as `-1`, `0`, or `1`.
+    fn unsigned_compare(&mut self, operand: Ty, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
+        let (value, greater, less) = match operand {
+            Ty::UInt => (ValType::I32, 0x4b, 0x49),
+            Ty::ULong => (ValType::I64, 0x56, 0x54),
+            _ => return Err(format!("an unsigned comparison of `{}`", describe(operand))),
+        };
         let left = self.local(value);
         let right = self.local(value);
         self.value(lhs, operand)?;

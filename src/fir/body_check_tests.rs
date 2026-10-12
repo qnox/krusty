@@ -1506,7 +1506,7 @@ fn mixed_open_end_membership_selects_range_until() {
 }
 
 #[test]
-fn uniform_open_end_double_membership_stays_a_comparison() {
+fn uniform_open_end_double_membership_calls_contains() {
     if crate::toolchain::stdlib_jar().is_none() {
         return;
     }
@@ -1536,19 +1536,13 @@ fn uniform_open_end_double_membership_stays_a_comparison() {
             _ => None,
         })
         .expect("open-end membership");
+    // kotlinc's `RangeContainsLowering` has no handler for a floating-point `rangeUntil`: its
+    // `OpenEndRange` is not a closed range, so membership calls its `contains`.
     assert!(info
         .resolved_operator_call(in_range, "rangeUntil")
-        .is_none());
-    assert!(info.resolved_operator_call(in_range, "rangeTo").is_none());
-    let direct = info
-        .resolved_in_range_comparisons
-        .get(&in_range)
-        .expect("the selected stdlib rangeUntil authorizes direct comparison");
-    assert_eq!(direct.comparison, Ty::Double);
-    assert_eq!(
-        direct.provenance,
-        crate::fir::FirRangeComparisonProvenance::FloatingRangeMembership
-    );
+        .is_some());
+    assert!(info.resolved_operator_call(in_range, "contains").is_some());
+    assert!(!info.resolved_in_range_comparisons.contains_key(&in_range));
 
     let function = file
         .decls
@@ -1584,19 +1578,13 @@ fn uniform_open_end_double_membership_stays_a_comparison() {
     let FirStatementKind::Expression(root) = body.statement(body.roots()[0]).unwrap().kind else {
         panic!("root must contain membership FIR")
     };
-    assert!(matches!(
-        &body.expr(root).unwrap().kind,
-        FirExprKind::InRange {
-            comparison,
-            operation,
-            provenance,
-            ..
-        }
-            if comparison.get() == Ty::Double
-                && *operation == crate::fir::FirRangeOperation::OpenEnd
-                && *provenance
-                    == crate::fir::FirRangeComparisonProvenance::FloatingRangeMembership
-    ));
+    assert!(
+        matches!(
+            body.expr(root).map(|expression| &expression.kind),
+            Some(FirExprKind::ContainmentCall { .. })
+        ),
+        "a floating-point open-end membership is a contains call"
+    );
 }
 
 #[test]

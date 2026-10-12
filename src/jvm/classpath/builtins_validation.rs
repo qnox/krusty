@@ -22,7 +22,7 @@ impl Classpath {
         packages.sort_by(|left, right| left.path_cmp(*right));
         drop(tree);
         for package in packages {
-            self.try_builtins_file_for_package(package)?;
+            self.try_selected_builtins_file_for_package(package)?;
         }
         if self.catalog_complete() {
             self.builtins_validated.set(true);
