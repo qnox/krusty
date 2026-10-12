@@ -115,7 +115,9 @@ impl Checker<'_> {
                 ImplicitPropertyWriteTarget::Member {
                     stable_declaration, ..
                 } => *stable_declaration,
-                _ => None,
+                ImplicitPropertyWriteTarget::Extension { access, .. } => {
+                    access.property.stable_declaration
+                }
             },
             _ => None,
         };
@@ -253,7 +255,8 @@ impl Checker<'_> {
         })
     }
 
-    /// A property's deprecation for `access`: its own, else that of the accessor `access` runs.
+    /// A property's deprecation for `access`: the selected accessor overrides the property's own
+    /// deprecation, as it does in kotlinc's declaration use-site checker.
     fn property_deprecated_use(
         &self,
         declaration: crate::fir::DeclarationId,
@@ -264,11 +267,10 @@ impl Checker<'_> {
             PropertyAccess::Read => 0,
             PropertyAccess::Write => 1,
         };
-        let deprecation = self.source_deprecation(declaration).or_else(|| {
-            index
-                .owned_declaration(declaration, DeclarationKind::Accessor, accessor)
-                .and_then(|accessor| self.source_deprecation(accessor))
-        })?;
+        let deprecation = index
+            .owned_declaration(declaration, DeclarationKind::Accessor, accessor)
+            .and_then(|accessor| self.source_deprecation(accessor))
+            .or_else(|| self.source_deprecation(declaration))?;
         Some(DeprecatedUse {
             symbol: source_declaration_display(index, declaration)?,
             deprecation,
@@ -294,9 +296,18 @@ impl Checker<'_> {
         self.declaration_deprecated_use(declaration)
     }
 
-    /// The deprecation a source declaration's checked annotations declare.
+    /// The deprecation a source declaration's checked annotations declare. A common source's
+    /// reference binds to the `expect` header that an `actual` (or a member of one) replaces, so
+    /// the implementation's deprecation does not apply there.
     fn source_deprecation(&self, declaration: crate::fir::DeclarationId) -> Option<Deprecation> {
-        self.resolved_index?
+        let index = self.resolved_index?;
+        if index.binds_expectation(
+            crate::fir::SourceFileId::from_raw(self.file_index),
+            declaration,
+        ) {
+            return None;
+        }
+        index
             .declaration_applied_annotations(declaration)
             .iter()
             .find_map(crate::types::ResolvedAnnotation::deprecation)
@@ -320,7 +331,11 @@ impl Checker<'_> {
                     self.diags.warning(span, message);
                 }
             }
-            DeprecationLevel::Error | DeprecationLevel::Hidden => self.diags.error(span, message),
+            DeprecationLevel::Error | DeprecationLevel::Hidden => {
+                if !self.suppresses_diagnostic("DEPRECATION_ERROR") {
+                    self.diags.error(span, message);
+                }
+            }
         }
     }
 }

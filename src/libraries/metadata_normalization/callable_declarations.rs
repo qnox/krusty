@@ -299,6 +299,7 @@ pub(crate) fn declared_property(
         compile_time_constant,
         metadata_constant_read: false,
         deprecated_hidden: false,
+        accessor_availability: Default::default(),
         is_final: property.modality == KotlinModality::Final,
         visibility: property.visibility,
         owner: declaration_owner.name(),

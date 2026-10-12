@@ -1450,6 +1450,8 @@ pub struct ResolvedModuleIndex {
     /// The lexical policies each source's file annotations open, resolved once in Pass 1 from the
     /// checked applications. Bounded Pass-2 units do not retain the file annotations' syntax.
     file_lexical_policies: HashMap<SourceFileId, Box<[crate::lexical_policy::LexicalPolicy]>>,
+    /// The sources compiled as common (`dependsOn`) sources of a multiplatform module.
+    common_sources: std::collections::HashSet<SourceFileId>,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
@@ -1867,6 +1869,31 @@ impl ResolvedModuleIndex {
             previous.is_none(),
             "a source's file lexical policies are published once"
         );
+    }
+
+    /// Record that `source` is a common source: its references bind to the `expect` headers the
+    /// module's `actual` declarations replace.
+    pub(crate) fn publish_common_source(&mut self, source: SourceFileId) {
+        self.common_sources.insert(source);
+    }
+
+    /// Whether a reference in `source` to `declaration` binds to the `expect` header that
+    /// `declaration` implements rather than to `declaration` itself: `source` is a common source
+    /// and `declaration`, or a declaration enclosing it, wrote `actual`. The implementation's own
+    /// annotations (its deprecation) then do not apply at that reference.
+    pub(crate) fn binds_expectation(
+        &self,
+        source: SourceFileId,
+        declaration: DeclarationId,
+    ) -> bool {
+        self.common_sources.contains(&source)
+            && std::iter::successors(Some(declaration), |&current| {
+                self.declaration_header(current)?.owner
+            })
+            .any(|current| {
+                self.declaration_header(current)
+                    .is_some_and(|header| header.flags.has(DeclarationFlags::ACTUAL))
+            })
     }
 
     pub(crate) fn file_lexical_policies(

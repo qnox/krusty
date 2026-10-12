@@ -302,6 +302,7 @@ impl Checker<'_> {
         let mut properties = self
             .resolver()
             .static_scope_associated_properties(classifier, name);
+        properties.retain(crate::libraries::PropertyInfo::readable);
         if let Some(nearest) = properties
             .iter()
             .map(|property| property.receiver_rank)
@@ -310,6 +311,30 @@ impl Checker<'_> {
             properties.retain(|property| property.receiver_rank == nearest);
         }
         self.select_top_level_property_candidates(scope, properties)
+    }
+
+    pub(super) fn select_static_scope_property_for_write(
+        &self,
+        scope: &CheckerScope<'_>,
+        classifier: TypeName,
+        name: &str,
+    ) -> TopLevelPropertySelection {
+        let mut properties = self
+            .resolver()
+            .static_scope_associated_properties(classifier, name);
+        properties.retain(crate::libraries::PropertyInfo::write_selectable);
+        if let Some(nearest) = properties
+            .iter()
+            .map(|property| property.receiver_rank)
+            .min()
+        {
+            properties.retain(|property| property.receiver_rank == nearest);
+        }
+        self.select_top_level_property_candidates_for_access(
+            scope,
+            properties,
+            crate::symbol_resolver::PropertyAccess::Write,
+        )
     }
 
     /// The associated property `name` of the nearest lexically open static scope declaring one.
@@ -404,6 +429,22 @@ impl Checker<'_> {
             .resolver()
             .classifier_associated_properties(classifier, name);
         self.select_top_level_property_candidates(scope, properties)
+    }
+
+    pub(super) fn select_qualified_associated_property_for_write(
+        &self,
+        scope: &CheckerScope<'_>,
+        classifier: TypeName,
+        name: &str,
+    ) -> TopLevelPropertySelection {
+        let properties = self
+            .resolver()
+            .classifier_associated_properties(classifier, name);
+        self.select_top_level_property_candidates_for_access(
+            scope,
+            properties,
+            crate::symbol_resolver::PropertyAccess::Write,
+        )
     }
 
     /// `C.name = value` naming `classifier`'s associated property: the receiver-less write the

@@ -251,6 +251,115 @@ fun use(members: Members) {
     );
 }
 
+/// The selected accessor is the used declaration for deprecation purposes. Its annotation wins
+/// over the property's annotation instead of merely filling in a missing property annotation.
+#[test]
+fn selected_accessor_deprecation_overrides_the_property() {
+    assert_matches_kotlinc(
+        r#"class Accessors {
+    @Deprecated("property warning")
+    val selected: Int
+        @Deprecated("getter error", level = DeprecationLevel.ERROR) get() = 1
+}
+
+fun use(a: Accessors) {
+    println(a.selected)
+}
+"#,
+        &["8:15: 'val selected: Int' is deprecated. getter error."],
+        &[],
+    );
+}
+
+/// Kotlin's diagnostic name for both `ERROR` and the applicable classifier form of `HIDDEN` is
+/// `DEPRECATION_ERROR`; one suppression therefore covers both exact semantic levels.
+#[test]
+fn deprecation_error_suppression_covers_error_and_hidden() {
+    assert_matches_kotlinc(
+        r#"@Deprecated("error", level = DeprecationLevel.ERROR)
+fun error() {}
+
+@Deprecated("hidden", level = DeprecationLevel.HIDDEN)
+class Hidden
+
+@Suppress("DEPRECATION_ERROR")
+fun use(): Hidden? {
+    error()
+    return null
+}
+"#,
+        &[],
+        &[],
+    );
+}
+
+/// `HIDDEN` on a constructor removes that constructor from overload candidates; it is not a
+/// selected declaration that subsequently emits a deprecation diagnostic.
+#[test]
+fn hidden_constructor_is_not_a_candidate() {
+    assert_matches_kotlinc(
+        r#"class HiddenConstructor @Deprecated("hidden constructor", level = DeprecationLevel.HIDDEN) constructor()
+
+fun use() {
+    HiddenConstructor()
+}
+"#,
+        &["4:5: unresolved reference 'HiddenConstructor'."],
+        &[],
+    );
+}
+
+/// Getter and setter candidate availability is independent: the opposite accessor on the same
+/// property remains usable when one accessor is `HIDDEN`.
+#[test]
+fn hidden_accessors_are_removed_independently() {
+    assert_matches_kotlinc(
+        r#"class Accessors {
+    var hiddenGet: Int = 0
+        @Deprecated("hidden getter", level = DeprecationLevel.HIDDEN) get
+
+    var hiddenSet: Int = 0
+        @Deprecated("hidden setter", level = DeprecationLevel.HIDDEN) set
+}
+
+fun use(a: Accessors) {
+    println(a.hiddenGet)
+    a.hiddenGet = 1
+    println(a.hiddenSet)
+    a.hiddenSet = 1
+}
+"#,
+        &[
+            "10:15: unresolved reference 'hiddenGet'.",
+            "13:7: unresolved reference 'hiddenSet'.",
+        ],
+        &[],
+    );
+}
+
+/// A bare assignment selected through an implicit receiver retains the same stable extension
+/// declaration identity as an explicit receiver write.
+#[test]
+fn implicit_extension_property_write_reports_deprecation() {
+    assert_matches_kotlinc(
+        r#"class Receiver
+
+@Deprecated("extension error", level = DeprecationLevel.ERROR)
+var Receiver.extension: Int
+    get() = 0
+    set(_) {}
+
+fun use(receiver: Receiver) {
+    with(receiver) {
+        extension = 1
+    }
+}
+"#,
+        &["10:9: 'var Receiver.extension: Int' is deprecated. extension error."],
+        &[],
+    );
+}
+
 /// The deprecated declaration renders in short form, without visibility, `inline`, `infix`,
 /// `const`, `lateinit` or class modifiers.
 #[test]
@@ -347,5 +456,97 @@ suspend fun use(o: O) {
             "69:12: 'class G18 : Any' is deprecated. g18.",
             "70:12: 'class G19<in T, out R : Any> : Any' is deprecated. g19.",
         ],
+    );
+}
+
+const EXPECTATIONS: &str = r#"expect fun warn(): String
+expect fun error(): String
+expect fun hidden(): String
+expect val property: String
+
+expect class Box() {
+    fun value(): String
+}
+
+fun common(): String {
+    if (warn() != "OK") return "Warn fail"
+    if (error() != "OK") return "Error fail"
+    if (hidden() != "OK") return "Hidden fail"
+    return property + Box().value()
+}
+"#;
+
+const ACTUALS: &str = r#"@Deprecated("", level = DeprecationLevel.WARNING)
+actual fun warn(): String = "OK"
+
+@Deprecated("", level = DeprecationLevel.ERROR)
+actual fun error(): String = "OK"
+
+@Deprecated("", level = DeprecationLevel.HIDDEN)
+actual fun hidden(): String = "OK"
+
+@Deprecated("prop")
+actual val property: String = "OK"
+
+actual class Box actual constructor() {
+    @Deprecated("value")
+    actual fun value(): String = "OK"
+}
+
+fun platform(): String = warn() + property + Box().value()
+"#;
+
+/// A common source's reference binds to the `expect` header, which is not deprecated, so a
+/// deprecated `actual` (even a `HIDDEN` one) reports only where platform code uses it, named with
+/// its `actual` modifier.
+#[test]
+fn a_common_use_of_a_deprecated_actual_reports_nothing() {
+    let sources = [("common.kt", EXPECTATIONS), ("lib.kt", ACTUALS)];
+    let dir = common::scratch_dir().expect("scratch directory");
+    let paths = sources
+        .iter()
+        .map(|(name, source)| {
+            let path = dir.join(name);
+            std::fs::write(&path, source).expect("write source");
+            path.to_string_lossy().into_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut arguments = vec![
+        "-Xmulti-platform".to_string(),
+        "-Xexpect-actual-classes".to_string(),
+        format!("-Xcommon-sources={}", paths[0]),
+        "-d".to_string(),
+        dir.join("out").to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+    ];
+    arguments.extend(paths);
+    let (status, reference) =
+        common::kotlinc_compile(&arguments).expect("reference kotlinc available");
+    let _ = std::fs::remove_dir_all(&dir);
+    let render = |severity: &str, diagnostics: Vec<common::CompilerError>| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                format!(
+                    "{}:{}:{}: {severity}: {}",
+                    diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut kotlinc = render("error", common::compiler_errors(&reference));
+    kotlinc.extend(render("warning", common::compiler_warnings(&reference)));
+    let expected = [
+        "lib.kt:18:26: warning: 'actual fun warn(): String' is deprecated.",
+        "lib.kt:18:35: warning: 'actual val property: String' is deprecated. prop.",
+        "lib.kt:18:52: warning: 'actual fun value(): String' is deprecated. value.",
+    ];
+    assert_eq!(status, 0, "kotlinc accepts the source set\n{reference}");
+    assert_eq!(kotlinc, expected, "kotlinc diagnostics");
+    assert_eq!(
+        common::source_set_compile::source_set_diagnostics(&sources, 1),
+        expected,
+        "krusty diagnostics"
     );
 }

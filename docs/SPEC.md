@@ -13227,7 +13227,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `is`/`as`, class literals) at the reference. A property's deprecation covers reads and writes, a
   getter's only reads and a setter's only writes; both render as the property. A constructor call
   reports once, for the more severe of the constructor's and its class's deprecation, rendered as
-  the constructor. Uses inside a deprecated declaration are reported too. A `HIDDEN` function or
+  the constructor. Uses inside a deprecated declaration are reported too. In a multiplatform
+  compilation a use in a common source binds to the `expect` header, so the deprecation of an
+  `actual` declaration, or of a member of one, is not reported there, and a `HIDDEN` top-level
+  `actual` stays a candidate there; platform uses report it, naming the declaration with its
+  `actual` modifier (`'actual fun warn(): String'`, `'actual val p: String'`).
+  A `HIDDEN` function or
   property is no candidate at all (a call selects a visible overload or is unresolved); a `HIDDEN`
   classifier still resolves and each use is an error. The symbol is kotlinc's short declaration
   rendering, without visibility, modality, `inline`, `infix`, `operator`, `const`, `lateinit` or
@@ -13240,7 +13245,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   published on their stable declarations in Pass 1, like those of classifiers and methods. Not yet
   modeled: dependency (Kotlin metadata and Java) deprecation, `@DeprecatedSinceKotlin`, imports,
   `@get:`/`@set:` use-site targets, constructor-property parameters, type aliases, enum entries,
-  operator conventions, `this(...)` delegation and annotation uses.
+  operator conventions, `this(...)` delegation, annotation uses, the deprecation of an
+  `expect` header itself, and the `actual` of a primary constructor in its rendering.
   Test: `tests/deprecation_usage_e2e.rs`.
 - **An abstract member's metadata and nullability match a concrete one's, without the field.** An
   abstract property has no backing field, so kotlinc writes no field entry in its

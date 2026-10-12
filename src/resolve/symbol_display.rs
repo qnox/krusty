@@ -46,13 +46,15 @@ fn function_display(index: &ResolvedModuleIndex, declaration: DeclarationId) -> 
     };
     let receiver = receiver_display(callable.shape.extension_receiver.map(|ty| ty.get()));
     Some(format!(
-        "{context}{suspend}fun {type_parameters}{receiver}{name}({}): {}",
+        "{context}{}{suspend}fun {type_parameters}{receiver}{name}({}): {}",
+        actual_modifier(header.flags),
         parameters[context_count..].join(", "),
         signature.result.get().source_name()
     ))
 }
 
 fn property_display(index: &ResolvedModuleIndex, declaration: DeclarationId) -> Option<String> {
+    let header = index.declaration_header(declaration)?;
     let name = index.declaration_name(declaration)?;
     let property = index.property(index.property_for_declaration(declaration)?)?;
     let signature = index.signature(declaration)?;
@@ -65,13 +67,15 @@ fn property_display(index: &ResolvedModuleIndex, declaration: DeclarationId) -> 
     };
     let receiver = receiver_display(property.extension_receiver.map(|ty| ty.get()));
     Some(format!(
-        "{keyword} {type_parameters}{receiver}{name}: {}",
+        "{}{keyword} {type_parameters}{receiver}{name}: {}",
+        actual_modifier(header.flags),
         signature.result.get().source_name()
     ))
 }
 
 fn constructor_display(index: &ResolvedModuleIndex, declaration: DeclarationId) -> Option<String> {
-    let owner = index.declaration_header(declaration)?.owner?;
+    let header = index.declaration_header(declaration)?;
+    let owner = header.owner?;
     let owner_header = index.declaration_header(owner)?;
     let parameters = value_parameters(index, declaration)?;
     let callable = index.callable_for_declaration(declaration)?;
@@ -86,11 +90,21 @@ fn constructor_display(index: &ResolvedModuleIndex, declaration: DeclarationId) 
         .map(|outer| format!("{}.", outer.source_name()))
         .unwrap_or_default();
     Some(format!(
-        "{outer}constructor{}({}): {}",
+        "{outer}{}constructor{}({}): {}",
+        actual_modifier(header.flags),
         type_parameters_display(index, owner, true),
         parameters[context_count..].join(", "),
         index.classifier_self_type(owner)?.source_name()
     ))
+}
+
+/// kotlinc names an implementation of an `expect` header with the `actual` it wrote.
+fn actual_modifier(flags: DeclarationFlags) -> &'static str {
+    if flags.has(DeclarationFlags::ACTUAL) {
+        "actual "
+    } else {
+        ""
+    }
 }
 
 fn classifier_display(index: &ResolvedModuleIndex, declaration: DeclarationId) -> Option<String> {

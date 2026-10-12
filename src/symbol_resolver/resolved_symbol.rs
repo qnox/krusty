@@ -151,14 +151,24 @@ impl Symbol {
 
     pub fn value(self) -> Option<PropertyInfo> {
         match self {
-            Self::Member(mut facets) if facets.values.len() == 1 => facets.values.pop(),
+            Self::Member(mut facets) => {
+                facets.values.retain(PropertyInfo::readable);
+                if facets.values.len() == 1 {
+                    facets.values.pop()
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 
     pub fn values(self) -> Vec<PropertyInfo> {
         match self {
-            Self::Member(facets) => facets.values,
+            Self::Member(mut facets) => {
+                facets.values.retain(PropertyInfo::readable);
+                facets.values
+            }
             _ => Vec::new(),
         }
     }

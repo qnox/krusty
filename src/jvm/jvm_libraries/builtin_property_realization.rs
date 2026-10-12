@@ -82,6 +82,7 @@ impl JvmLibraries {
             compile_time_constant: None,
             metadata_constant_read: false,
             deprecated_hidden: false,
+            accessor_availability: Default::default(),
             is_final: false,
             visibility: function.visibility,
             owner,

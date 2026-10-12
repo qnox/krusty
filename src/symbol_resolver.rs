@@ -789,6 +789,14 @@ pub struct SymbolResolver<'a> {
     type_variables: &'a [String],
 }
 
+/// Which accessor a property selection will execute. Provider-normalized candidate availability
+/// is operation-specific because a HIDDEN getter and setter remove different source forms.
+#[derive(Clone, Copy)]
+pub(crate) enum PropertyAccess {
+    Read,
+    Write,
+}
+
 /// The emit-independent facts about a selected extension call. One computation feeds both the
 /// callable the backend emits and the type the front end reports, so the two cannot disagree.
 struct ExtensionCallShape {
@@ -1573,10 +1581,28 @@ impl<'a> SymbolResolver<'a> {
         receiver: Ty,
         name: &str,
     ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
+        self.select_extension_property_for_access(receiver, name, PropertyAccess::Read)
+    }
+
+    pub(crate) fn select_extension_property_for_write(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
+        self.select_extension_property_for_access(receiver, name, PropertyAccess::Write)
+    }
+
+    fn select_extension_property_for_access(
+        &self,
+        receiver: Ty,
+        name: &str,
+        access: PropertyAccess,
+    ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
         for symbols in self.symbol_levels_in_scope(name) {
             match self.select_extension_property_from_callables(
                 receiver,
                 name,
+                access,
                 level_properties(&symbols),
             )? {
                 Some(property) => return Ok(Some(property)),
@@ -1590,6 +1616,7 @@ impl<'a> SymbolResolver<'a> {
         &self,
         receiver: Ty,
         name: &str,
+        access: PropertyAccess,
         properties: impl IntoIterator<Item = &'p PropertyInfo>,
     ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
         let mut properties = properties.into_iter().peekable();
@@ -1599,6 +1626,10 @@ impl<'a> SymbolResolver<'a> {
         let receiver_mro = self.receiver_mro(receiver);
         let mut candidates = properties
             .filter(|property| property.kind == PropKind::Extension)
+            .filter(|property| match access {
+                PropertyAccess::Read => property.readable(),
+                PropertyAccess::Write => property.write_selectable(),
+            })
             .filter(|property| self.property_visible(property))
             .filter(|property| {
                 generic_bounds_admit(
@@ -2062,13 +2093,16 @@ impl<'a> SymbolResolver<'a> {
                 let member_property = member_dispatch
                     .then(|| self.declared_member_property(ty, name, &callables))
                     .flatten();
+                let writable_member_property = member_dispatch
+                    .then(|| self.declared_member_property_for_write(ty, name, &callables))
+                    .flatten();
                 let read = member_property
                     .as_ref()
                     .and_then(|property| member_property_read_from_declaration(ty, property));
-                // The canonical property selector already accounts for an intersection's `var`
-                // overriding a `val`. Derive both accessors from that one semantic declaration so
-                // a direct write and a mutable reference cannot disagree about their owner.
-                let write = member_property
+                // Reads and writes consume the same provider-normalized family but select against
+                // their accessor independently: a HIDDEN getter does not remove a setter, nor a
+                // HIDDEN setter the getter.
+                let write = writable_member_property
                     .as_ref()
                     .and_then(member_property_write_from_declaration);
                 let method_ref = member_dispatch
@@ -2124,7 +2158,12 @@ impl<'a> SymbolResolver<'a> {
                     extension_call.is_some(),
                 );
                 let extension_property = self
-                    .select_extension_property_from_callables(ty, name, callables.properties())
+                    .select_extension_property_from_callables(
+                        ty,
+                        name,
+                        PropertyAccess::Read,
+                        callables.properties(),
+                    )
                     .ok()
                     .flatten();
                 // EVERY overload named `name` applicable to the receiver: instance members and operators
@@ -3790,11 +3829,18 @@ fn resolved_member_from_info_tracking(
     )
 }
 
-fn member_property_from_callables(callables: &Callables) -> Option<PropertyInfo> {
+fn member_property_from_callables(
+    callables: &Callables,
+    access: PropertyAccess,
+) -> Option<PropertyInfo> {
     callables
         .properties()
         .iter()
         .filter(|property| property.kind == PropKind::Member && property.context_count == 0)
+        .filter(|property| match access {
+            PropertyAccess::Read => property.readable(),
+            PropertyAccess::Write => property.write_selectable(),
+        })
         .min_by_key(|property| property.receiver_rank)
         .cloned()
 }

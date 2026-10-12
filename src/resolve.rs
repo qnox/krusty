@@ -60,6 +60,7 @@ pub(crate) use checked_annotation_publication::publish_checked_declaration_annot
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
 pub(crate) use lexical_policies::publish_file_lexical_policies;
 pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
+mod body_local_property_selection;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -10706,6 +10707,8 @@ struct CheckedLocalProperty {
     interface: bool,
     source_member: crate::libraries::SourceMember,
     stable_declaration: Option<crate::fir::DeclarationId>,
+    deprecated_hidden: bool,
+    accessor_availability: crate::libraries::PropertyAccessorAvailability,
 }
 
 struct DispatchPropertyBinding {
@@ -12040,6 +12043,26 @@ impl<'a> Checker<'a> {
         if property.receiver.is_some() || ty.mentions_error() || ty.mentions_pending() {
             return;
         }
+        let hidden = |declaration| {
+            self.resolved_index.is_some_and(|index| {
+                index
+                    .declaration_applied_annotations(declaration)
+                    .iter()
+                    .any(crate::types::ResolvedAnnotation::is_deprecated_hidden)
+            })
+        };
+        let deprecated_hidden = stable_declaration.is_some_and(|declaration| hidden(declaration));
+        let accessor_available = |sibling| {
+            stable_declaration
+                .and_then(|declaration| {
+                    self.resolved_index?.owned_declaration(
+                        declaration,
+                        crate::fir::DeclarationKind::Accessor,
+                        sibling,
+                    )
+                })
+                .is_none_or(|accessor| !hidden(accessor))
+        };
         self.checked_local_properties.insert(
             (owner, property.name.clone()),
             CheckedLocalProperty {
@@ -12050,33 +12073,13 @@ impl<'a> Checker<'a> {
                 interface,
                 source_member,
                 stable_declaration,
+                deprecated_hidden,
+                accessor_availability: crate::libraries::PropertyAccessorAvailability {
+                    getter: accessor_available(0),
+                    setter: accessor_available(1),
+                },
             },
         );
-    }
-
-    /// The first property declaration published by a classifier in the active bounded body.
-    /// Reads, writes, and update expressions share this exact overlay lookup; none may fall back to
-    /// the immutable provider merely because the local declaration has an explicit type.
-    fn checked_body_local_property(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<&CheckedLocalProperty> {
-        std::iter::once((receiver.non_null(), false))
-            .chain(
-                self.body_local_supertypes(receiver)
-                    .into_iter()
-                    .map(|supertype| (supertype, true)),
-            )
-            .filter_map(|(candidate, inherited)| {
-                let owner = candidate.kotlin_class_internal()?;
-                let property = self
-                    .checked_local_properties
-                    .get(&(owner, name.to_string()))?;
-                (!inherited || crate::symbol_resolver::member_is_inheritable(property.visibility))
-                    .then_some(property)
-            })
-            .next()
     }
 
     fn remove_checked_source_member_result(
@@ -13461,6 +13464,7 @@ impl<'a> Checker<'a> {
             .filter(|property| {
                 property.kind == crate::libraries::PropKind::TopLevel && property.context_count == 0
             })
+            .filter(|property| property.readable())
             .cloned()
             .collect::<Vec<_>>();
         if properties
@@ -22990,7 +22994,8 @@ impl<'a> Checker<'a> {
         let receiver_qualifier = self.qualifier(scope, QualifierInput::Expression(receiver));
         if let Ok(ResolvedQualifier::Classifier(owner)) = receiver_qualifier {
             // Associated properties precede the members of the companion-object value.
-            let associated = self.select_qualified_associated_property(scope, owner, &name);
+            let associated =
+                self.select_qualified_associated_property_for_write(scope, owner, &name);
             if !matches!(associated, TopLevelPropertySelection::None) {
                 if self.reject_inaccessible_classifier_expression(receiver, owner) {
                     return;
@@ -22998,7 +23003,7 @@ impl<'a> Checker<'a> {
                 self.write_receiverless_property(scope, s, value, &name, associated);
                 return;
             }
-            if let Some(property) = self.resolver().associated_property(owner, &name) {
+            if let Some(property) = self.resolver().associated_property_for_write(owner, &name) {
                 let member_span = self.assignment_member_name_span(s, &name);
                 let access_owner = property.associated_access_owner.unwrap_or(property.owner);
                 if !self.callable_accessible(
@@ -23041,27 +23046,16 @@ impl<'a> Checker<'a> {
             }
         }
         if let Ok(ResolvedQualifier::Package(package)) = receiver_qualifier {
-            if let Some(property) = self
+            let properties = self
                 .resolver_in_scope(std::slice::from_ref(&package))
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, &name, &[], &[])
-                .and_then(crate::symbol_resolver::Symbol::value)
-            {
-                if property.setter.is_none() {
-                    self.report_val_reassignment(
-                        self.file.stmt_spans[s.0 as usize],
-                        format!("val cannot be reassigned: '{name}'"),
-                    );
-                    return;
-                };
-                let value_ty = self.expr(scope, value);
-                self.expect_assignable(property.ty, value_ty, self.span(value), "assignment");
-                self.stmt_lowers.insert(
-                    s,
-                    StmtLowering::TopLevelPropertySet(Box::new(ResolvedPropertyAccess {
-                        property,
-                        context_args: Vec::new(),
-                    })),
-                );
+                .top_level_properties_for_write(&name);
+            let selection = self.select_top_level_property_candidates_for_access(
+                scope,
+                properties,
+                crate::symbol_resolver::PropertyAccess::Write,
+            );
+            if !matches!(selection, TopLevelPropertySelection::None) {
+                self.write_receiverless_property(scope, s, value, &name, selection);
                 return;
             }
         }
@@ -23093,12 +23087,14 @@ impl<'a> Checker<'a> {
         // Its checked overlay must shadow the immutable provider's deliberately unresolved local
         // placeholder for explicit writes just as it already does for reads and implicit writes.
         // Falling through below preserves the overlay's exact mutability and stable declaration.
-        let checked_local_member =
-            !rt.is_nullable() && self.checked_body_local_property(rt, &name).is_some();
+        let checked_local_member = !rt.is_nullable()
+            && self
+                .checked_body_local_property_for_write(rt, &name)
+                .is_some();
         let selected_member_property = (!rt.is_nullable() && !checked_local_member)
             .then(|| {
                 self.resolver()
-                    .select_member_property_applicable_where(rt, &name, |property| {
+                    .select_member_property_write_applicable_where(rt, &name, |property| {
                         let context_types = property.getter.params.get(..property.context_count)?;
                         self.select_context_arguments_with_types(scope, context_types)
                             .ok()
@@ -27291,6 +27287,7 @@ fun box(): String {
                             compile_time_constant: None,
                             metadata_constant_read: false,
                             deprecated_hidden: false,
+                            accessor_availability: Default::default(),
                             is_final: false,
                             visibility: Visibility::Public,
                             owner: foo,
@@ -37053,6 +37050,35 @@ impl<'a> Checker<'a> {
         extension_receiver: Ty,
         name: &str,
     ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Read,
+        )
+    }
+
+    fn member_extension_property_for_write(
+        &self,
+        scope: &CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
+        self.member_extension_property_for_access(
+            scope,
+            extension_receiver,
+            name,
+            crate::symbol_resolver::PropertyAccess::Write,
+        )
+    }
+
+    fn member_extension_property_for_access(
+        &self,
+        scope: &CheckerScope<'_>,
+        extension_receiver: Ty,
+        name: &str,
+        access: crate::symbol_resolver::PropertyAccess,
+    ) -> Result<Option<MemberExtensionProperty>, ()> {
         member_extension_property(
             &self.fed_source(),
             self,
@@ -37066,6 +37092,7 @@ impl<'a> Checker<'a> {
             },
             extension_receiver,
             name,
+            access,
         )
     }
 
@@ -41365,6 +41392,19 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         properties: Vec<crate::libraries::PropertyInfo>,
     ) -> TopLevelPropertySelection {
+        self.select_top_level_property_candidates_for_access(
+            scope,
+            properties,
+            crate::symbol_resolver::PropertyAccess::Read,
+        )
+    }
+
+    fn select_top_level_property_candidates_for_access(
+        &self,
+        scope: &CheckerScope<'_>,
+        properties: Vec<crate::libraries::PropertyInfo>,
+        access: crate::symbol_resolver::PropertyAccess,
+    ) -> TopLevelPropertySelection {
         let mut missing_context = None;
         let mut applicable = Vec::new();
         for mut property in properties {
@@ -41374,6 +41414,10 @@ impl<'a> Checker<'a> {
             // still reserves the declared name while its declaration diagnostic is reported.
             if property.kind != crate::libraries::PropKind::TopLevel
                 || property.context_count > property.getter.params.len()
+                || match access {
+                    crate::symbol_resolver::PropertyAccess::Read => !property.readable(),
+                    crate::symbol_resolver::PropertyAccess::Write => !property.write_selectable(),
+                }
             {
                 continue;
             }
