@@ -654,6 +654,9 @@ struct Parser<'a> {
     /// Span of a `value` modifier consumed by the most recent declaration prefix. Class registration
     /// takes it before the class body is parsed, so a nested `value class` cannot overwrite it.
     value_modifier_span: Option<Span>,
+    /// Spans of the `external` modifiers consumed by the current declaration prefix, in source
+    /// order.
+    external_modifier_spans: Vec<Span>,
     /// Type parameters visible to hoisted anonymous classifiers in the current parser context.
     lexical_type_parameters: LexicalTypeParameters,
     /// Simple names of annotations consumed by the most recent `skip_decl_prefix`, awaiting attachment
@@ -799,6 +802,7 @@ impl<'a> Parser<'a> {
             no_trailing_lambda: false,
             block_trailing_is_value: false,
             value_modifier_span: None,
+            external_modifier_spans: Vec::new(),
             lexical_type_parameters: LexicalTypeParameters::default(),
             pending_annotations: Vec::new(),
             pending_annotation_args: Vec::new(),
@@ -2156,6 +2160,7 @@ impl<'a> Parser<'a> {
                 let is_property = self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar);
                 let is_var = self.at(TokenKind::KwVar);
                 if is_property {
+                    self.record_external_property_parameter(&epmods);
                     self.bump();
                 }
                 let pspan = self.tok().span;
@@ -2231,19 +2236,7 @@ impl<'a> Parser<'a> {
             }
             if !members_only {
                 loop {
-                    // Enum constants may carry annotations (`@SerialName("system") SYSTEM(...)` — common
-                    // in kotlinx.serialization enums). Capture them so they can be emitted onto the enum's
-                    // static field (per JVM retention), matching kotlinc.
-                    let mut entry_ann_names: Vec<AnnotationRef> = Vec::new();
-                    let mut entry_ann_args: Vec<Vec<ExprId>> = Vec::new();
-                    while self.at(TokenKind::At) {
-                        let (name, args) = self.parse_annotation();
-                        if let Some(n) = name {
-                            entry_ann_names.push(n);
-                            entry_ann_args.push(args);
-                        }
-                        self.skip_newlines();
-                    }
+                    let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
                     if !self.at(TokenKind::Ident) {
                         break;
                     }
@@ -3039,6 +3032,9 @@ impl<'a> Parser<'a> {
                     }
                     _ => (false, false), // a plain constructor parameter (not a property)
                 };
+                if is_property {
+                    self.record_external_property_parameter(&cpmods);
+                }
                 let pspan = self.tok().span;
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");

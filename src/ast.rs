@@ -19,6 +19,7 @@ mod constructors;
 mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
+mod external_modifier_targets;
 mod operators;
 mod type_refs;
 pub use type_refs::TrFlags;
@@ -29,6 +30,7 @@ pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
+pub use external_modifier_targets::{ExternalModifierTarget, ExternalModifierUse};
 pub use operators::{BinOp, UnOp};
 pub use use_site_annotations::UseSiteAnnotation;
 
@@ -1589,6 +1591,9 @@ pub struct File {
     /// included, since the two are legal only in a multiplatform project and the diagnostic points
     /// at the keyword rather than at the declaration it precedes.
     pub multiplatform_modifiers: Vec<(String, crate::diag::Span)>,
+    /// Each `external` keyword written on an enum entry or a primary-constructor property, in
+    /// source order.
+    pub external_modifier_uses: Vec<ExternalModifierUse>,
     /// Each top-level or member declaration's modifier list, as written.
     pub declaration_prefixes: DeclarationPrefixes,
     pub decl_arena: Vec<Decl>,
