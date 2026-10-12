@@ -750,6 +750,32 @@ pub fn front_end_diagnostics_inputs(
         .collect()
 }
 
+/// Run one source-kind-aware input through the production frontend and render its complete located
+/// diagnostics without asking a backend to emit a source kind (such as a script) it does not own.
+pub fn front_end_named_input_result(
+    filename: &str,
+    input: krusty::frontend::SourceInput<'_>,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> (i32, String) {
+    let cp = common::cached_classpath(cp_jars, jdk_modules);
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
+    let source = input.text;
+    let mut diagnostics = krusty::diag::DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &[input],
+        common::with_native_plugins(CompilationTarget::Jvm, platform),
+        &krusty::features::LangFeatures::new(),
+        |_, _| {},
+        &mut diagnostics,
+    );
+    let _ = krusty::compiler::check_frontend_only(analysis, &mut diagnostics);
+    let code = if diagnostics.has_errors() { 1 } else { 0 };
+    (code, diagnostics.render_all(&[(filename, source)]))
+}
+
 /// Assert one Kotlin language feature's gate against the reference compiler.
 pub fn assert_language_feature_gate(source: &str, feature: &str) {
     let stdlib = common::stdlib_jar();
@@ -1120,9 +1146,18 @@ pub fn kotlinc_box_files_result_with_classpath(
 /// Compile one named source with kotlinc. Unlike [`kotlinc_source_result`], this preserves a caller
 /// supplied extension so frontend-only Kotlin script diagnostics can be compared directly.
 pub fn kotlinc_named_source_result(filename: &str, source: &str) -> (i32, String) {
+    kotlinc_named_source_result_with_args(filename, source, &[])
+}
+
+/// [`kotlinc_named_source_result`] with caller-supplied reference-compiler arguments.
+pub fn kotlinc_named_source_result_with_args(
+    filename: &str,
+    source: &str,
+    extra_args: &[String],
+) -> (i32, String) {
     let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
     let source_paths = write_fixture_sources(&work, &[(filename, source)]);
-    let result = kotlinc_paths_result(&source_paths, &work.join("out"), &[]);
+    let result = kotlinc_paths_result(&source_paths, &work.join("out"), extra_args);
     let _ = std::fs::remove_dir_all(work);
     result
 }

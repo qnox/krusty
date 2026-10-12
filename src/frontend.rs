@@ -12,6 +12,7 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 use crate::plugins::registry::NativePlugins;
 
 mod explicit_api;
+mod external_modifier_targets;
 mod header_validation;
 mod inline_preparation;
 mod local_class_names;
@@ -704,15 +705,17 @@ pub fn analyze_source_set_with_features(
 ) -> SourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        AnalysisScope {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        false,
-        true,
     )
 }
 
@@ -804,15 +807,17 @@ pub fn analyze_source_set_prefix_with_features(
 ) -> SourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        checked_count,
-        inferred_count,
+        AnalysisScope {
+            checked_count,
+            inferred_count,
+            trim_support_bodies: false,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        false,
-        true,
     )
 }
 
@@ -827,15 +832,17 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
 ) -> SourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        checked_count,
-        inferred_count,
+        AnalysisScope {
+            checked_count,
+            inferred_count,
+            trim_support_bodies: true,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        true,
-        true,
     )
 }
 
@@ -878,15 +885,17 @@ where
 {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        AnalysisScope {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: true,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         prepare_symbols,
         diags,
-        false,
-        true,
     )
 }
 
@@ -909,15 +918,17 @@ pub fn analyze_source_set_streaming_with_module(
 ) -> StreamingSourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        AnalysisScope {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: false,
+        },
         platform.into(),
         project_features,
         module_name,
         |_, _| {},
         diags,
-        false,
-        false,
     )
     .into()
 }
@@ -930,15 +941,17 @@ pub fn analyze_source_set_streaming_with_features(
 ) -> StreamingSourceSetAnalysis {
     analyze_source_set_impl(
         sources,
-        sources.len(),
-        sources.len(),
+        AnalysisScope {
+            checked_count: sources.len(),
+            inferred_count: sources.len(),
+            trim_support_bodies: false,
+            retain_inspection_analysis: false,
+        },
         platform.into(),
         project_features,
         DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
-        false,
-        false,
     )
     .into()
 }
@@ -957,34 +970,51 @@ where
 {
     analyze_source_set_impl(
         sources,
-        checked_count,
-        inferred_count,
+        AnalysisScope {
+            checked_count,
+            inferred_count,
+            trim_support_bodies: false,
+            retain_inspection_analysis: false,
+        },
         platform,
         project_features,
         DEFAULT_MODULE_NAME,
         prepare_symbols,
         diags,
-        false,
-        false,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Which sources of a set one analysis checks, and what it keeps of them.
+#[derive(Clone, Copy)]
+struct AnalysisScope {
+    /// Sources before this index have their bodies checked.
+    checked_count: usize,
+    /// Sources before this index are analyzed; the rest are dependency support.
+    inferred_count: usize,
+    /// Drop the bodies of inferred sources that are not checked.
+    trim_support_bodies: bool,
+    /// Keep the analysis an inspection reads (types, retained files).
+    retain_inspection_analysis: bool,
+}
+
 fn analyze_source_set_impl<F>(
     sources: &[SourceInput<'_>],
-    checked_count: usize,
-    inferred_count: usize,
+    scope: AnalysisScope,
     platform: PlatformProvider,
     project_features: &LangFeatures,
     module_name: &str,
     prepare_symbols: F,
     diags: &mut DiagSink,
-    trim_support_bodies: bool,
-    retain_inspection_analysis: bool,
 ) -> SourceSetAnalysis
 where
     F: FnOnce(&[File], &mut FrontendSymbols),
 {
+    let AnalysisScope {
+        checked_count,
+        inferred_count,
+        trim_support_bodies,
+        retain_inspection_analysis,
+    } = scope;
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
@@ -1025,6 +1055,9 @@ where
         file.is_common = source.is_common;
         if source.kind != SourceKind::Java {
             record_local_class_name_provenance(&mut file);
+        }
+        if matches!(source.kind, SourceKind::Kotlin | SourceKind::KotlinScript) {
+            external_modifier_targets::check(&file, &features, diags);
         }
         if source.kind == SourceKind::Kotlin {
             header_validation::validate(&file, diags);

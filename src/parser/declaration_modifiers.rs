@@ -2,7 +2,9 @@
 //! modality a modifier list selects.
 
 use super::{Parser, TokenKind};
-use crate::ast::{AnnotationRef, DeclarationPrefix, ExprId};
+use crate::ast::{
+    AnnotationRef, DeclarationPrefix, ExprId, ExternalModifierTarget, ExternalModifierUse,
+};
 use crate::diag::Span;
 use crate::types::Visibility;
 
@@ -185,6 +187,9 @@ impl Parser<'_> {
                 if text == "value" {
                     self.value_modifier_span = Some(self.tok().span);
                 }
+                if text == "external" {
+                    self.external_modifier_spans.push(self.tok().span);
+                }
                 mods.push(text);
                 self.bump();
             } else {
@@ -221,9 +226,100 @@ impl Parser<'_> {
             .flatten()
     }
 
+    /// Record the `external` keywords of a primary-constructor property whose prefix wrote
+    /// `modifiers`; kotlinc deprecates the first and rejects every repetition.
+    pub(super) fn record_external_property_parameter(&mut self, modifiers: &[String]) {
+        let spans = std::mem::take(&mut self.external_modifier_spans);
+        if modifiers.iter().any(|modifier| modifier == "external") {
+            self.file
+                .external_modifier_uses
+                .extend(
+                    spans
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, span)| ExternalModifierUse {
+                            target: ExternalModifierTarget::PropertyParameter,
+                            span,
+                            repeated: index > 0,
+                        }),
+                );
+        }
+    }
+
+    /// An enum entry's annotations and modifiers, before its name. Annotations are kept so they
+    /// reach the enum's static field (`@SerialName("system") SYSTEM(...)`, common in
+    /// kotlinx.serialization enums). `external` is the one modifier an entry may still write, and
+    /// kotlinc deprecates it (`ForbidExternalEnumEntriesAndPrimaryConstructorProperties`).
+    pub(super) fn parse_enum_entry_prefix(&mut self) -> (Vec<AnnotationRef>, Vec<Vec<ExprId>>) {
+        let mut annotations = Vec::new();
+        let mut annotation_args = Vec::new();
+        let mut external = Vec::new();
+        loop {
+            if self.at(TokenKind::At) {
+                let (name, args) = self.parse_annotation();
+                if let Some(name) = name {
+                    annotations.push(name);
+                    annotation_args.push(args);
+                }
+            } else if self.at_external_entry_modifier() {
+                external.push(self.tok().span);
+                self.bump();
+            } else {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.file
+            .external_modifier_uses
+            .extend(
+                external
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, span)| ExternalModifierUse {
+                        target: ExternalModifierTarget::EnumEntry,
+                        span,
+                        repeated: index > 0,
+                    }),
+            );
+        (annotations, annotation_args)
+    }
+
+    /// Whether an enum entry's prefix continues with an `external` modifier: the keyword followed,
+    /// past any line break, by an annotation or by the entry's name and what may follow an entry
+    /// name. An entry named `external`, and a member such as `external interface I` after the entry
+    /// list, are not entry modifiers.
+    pub(super) fn at_external_entry_modifier(&self) -> bool {
+        if !(self.at(TokenKind::Ident) && self.keyword_text("external")) {
+            return false;
+        }
+        let next = self.after_plain_newlines(self.i + 1);
+        let Some(next_token) = self.t.get(next).copied() else {
+            return false;
+        };
+        if next_token.kind == TokenKind::Ident && self.token_keyword_text(next_token, "external") {
+            return true;
+        }
+        match next_token.kind {
+            TokenKind::At => true,
+            TokenKind::Ident => matches!(
+                self.t.get(next + 1).map(|token| token.kind),
+                None | Some(
+                    TokenKind::LParen
+                        | TokenKind::LBrace
+                        | TokenKind::Comma
+                        | TokenKind::Newline
+                        | TokenKind::RBrace
+                        | TokenKind::Eof
+                )
+            ),
+            _ => false,
+        }
+    }
+
     /// Start a declaration whose modifier list [`Parser::record_declaration_prefix`] will keep.
     pub(super) fn begin_declaration_prefix(&mut self) {
         self.declaration_prefix = PrefixInProgress::default();
+        self.external_modifier_spans.clear();
     }
 
     /// Note a token of the modifier list being consumed; the first one starts the list as kotlinc
