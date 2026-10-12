@@ -16991,6 +16991,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same uses its emitter routes through them. Test: `tests/companion_field_bridge_use_e2e.rs`.
   Corpus: `classes/kt1018.kt`, `objects/kt1047.kt`, `objects/kt1047a.kt`,
   `properties/kt4252.kt`.
+- **Synthetic accessors are created in pre-order.** kotlinc's `SyntheticAccessorLowering` creates
+  an accessor when it meets the access and only then transforms the access's operands, and the
+  owner appends its accessors in creation order. A store's setter therefore precedes the getter its
+  value reads: `counter = counter + 1` in another class declares `access$setCounter$p` before
+  `access$getCounter$p`, and the same holds for `$p` member and `$cp` companion bridges. The JVM
+  plan walks each body in pre-order and keeps the stable line sort across bodies. A `$cp` setter
+  interns its `<set-?>` parameter name after its body, as every other setter bridge does. Test:
+  `tests/synthetic_accessor_order_e2e.rs`. Corpus: `enum/companionAccessingEnumValue.kt`.
 - **A backing field's descriptor interns before its nullability annotation.** kotlinc's class
   writer visits the fields after the methods, each as its name, its descriptor and then its
   `@NotNull`/`@Nullable` annotation. A private field no method reads or writes therefore adds its

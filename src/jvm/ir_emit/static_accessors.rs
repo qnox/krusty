@@ -710,11 +710,12 @@ impl Walk<'_> {
 }
 
 impl Walk<'_> {
-    /// Record, in evaluation order, each use under `root` that code of `context` makes of another
-    /// class's private static declaration. A use without a source line takes its parent's; the
-    /// construction of a carrier in `carriers` stands for that carrier's own uses. `export_private`
-    /// is set when `root` is a non-private `inline` function: that body is copied into other
-    /// classes, so its private calls need accessors even when `context` is their owner.
+    /// Record, in pre-order (an access before its operands), each use under `root` that code of
+    /// `context` makes of another class's private static declaration. A use without a source line
+    /// takes its parent's; the construction of a carrier in `carriers` stands for that carrier's
+    /// own uses. `export_private` is set when `root` is a non-private `inline` function: that body
+    /// is copied into other classes, so its private calls need accessors even when `context` is
+    /// their owner.
     fn collect(
         &self,
         context: StaticOwner,
@@ -725,21 +726,19 @@ impl Walk<'_> {
         uses: &mut Vec<Use>,
     ) {
         let ir = self.ir;
-        // Post-order: an operand's use precedes the use of the call or store consuming it.
-        let mut stack = vec![(root, line, false)];
-        while let Some((expression, inherited, expanded)) = stack.pop() {
+        // Pre-order, as kotlinc's `SyntheticAccessorLowering` creates an accessor when it meets
+        // the access and only then transforms its operands: a store's setter precedes the getter
+        // its value reads.
+        let mut stack = vec![(root, line)];
+        while let Some((expression, inherited)) = stack.pop() {
             let line = ir
                 .expr_source_lines
                 .get(&expression)
                 .copied()
                 .unwrap_or(inherited);
-            if !expanded {
-                stack.push((expression, inherited, true));
-                let mut children = Vec::new();
-                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-                stack.extend(children.into_iter().rev().map(|child| (child, line, false)));
-                continue;
-            }
+            let mut children = Vec::new();
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+            stack.extend(children.into_iter().rev().map(|child| (child, line)));
             let carrier = match ir.expr(expression) {
                 IrExpr::StaticInstance { owner, .. } => Some(ir.classes[*owner as usize].fq_name),
                 IrExpr::New { internal, .. } => Some(*internal),
@@ -1549,8 +1548,6 @@ impl Accessor<'_> {
             super::declared_property_access::hoisted_bridge_shape(self.ir, index, true);
         cw.reserve_method_name(&name);
         cw.seed_utf8(&descriptor);
-        cw.seed_utf8("<set-?>");
-        cw.seed_utf8(&type_descriptor(ty));
         let words = slot_words(ty);
         let mut code = CodeBuilder::new(words);
         code.mark_line(self.declaration_line);
@@ -1558,6 +1555,7 @@ impl Accessor<'_> {
         let field = self.field(index, ty, cw);
         code.putstatic(field, words as i32);
         code.ret_void();
+        cw.seed_utf8("<set-?>");
         code.ensure_locals(words);
         code.link();
         cw.add_method(self.flags, &name, &descriptor, &code);

@@ -1646,6 +1646,8 @@ mod suspend_under_try_e2e;
 mod suspend_value_class_delegation_e2e;
 #[path = "suspend_value_class_results_e2e.rs"]
 mod suspend_value_class_results_e2e;
+#[path = "synthetic_accessor_order_e2e.rs"]
+mod synthetic_accessor_order_e2e;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]
