@@ -1508,16 +1508,14 @@ impl Accessor<'_> {
         cw.add_method(self.flags, &name, &descriptor, &code);
     }
 
-    /// `access$set<X>$cp`: the outer class's write of a hoisted companion field. Its
-    /// `<set-?>` LocalVariableTable strings intern at the method visit, before the body.
+    /// `access$set<X>$cp`: the outer class's write of a hoisted companion field. The body interns
+    /// the field reference before the `<set-?>` LocalVariableTable name, matching kotlinc's visit.
     fn hoisted_setter(&self, index: u32, cw: &mut ClassWriter) {
         let ty = jvm_declared_ty(&self.ir.statics[index as usize].ty);
         let (name, descriptor) =
             super::declared_property_access::hoisted_bridge_shape(self.ir, index, true);
         cw.reserve_method_name(&name);
         cw.seed_utf8(&descriptor);
-        cw.seed_utf8("<set-?>");
-        cw.seed_utf8(&type_descriptor(ty));
         let words = slot_words(ty);
         let mut code = CodeBuilder::new(words);
         code.mark_line(self.declaration_line);

@@ -870,8 +870,17 @@ fn attach_synth_nullability(
         };
         let (getter, setter) = accessor_jvm_names(c, &property.name);
         let pd = desc(hoisted.ty);
-        cw.set_method_nullability(&getter, &format!("(){pd}"), Some(a), &[]);
-        if hoisted.is_var {
+        if property
+            .getter
+            .is_some_and(|getter| !ir.method_visibility(getter).is_private())
+        {
+            cw.set_method_nullability(&getter, &format!("(){pd}"), Some(a), &[]);
+        }
+        if hoisted.is_var
+            && property
+                .setter
+                .is_some_and(|setter| !ir.method_visibility(setter).is_private())
+        {
             cw.set_method_nullability(&setter, &format!("({pd})V"), None, &[Some(a)]);
         }
     }
@@ -3078,21 +3087,6 @@ fn emit_class(
             }
         }
     }
-    // A companion's synthetic `(…, DefaultConstructorMarker)` ctor goes AFTER the accessors —
-    // kotlinc's companion member order (private <init>, accessors, marker <init>). A class hiding a
-    // value-class-parameter primary puts its accessor after `equals` the same way.
-    if c.has_primary_ctor && marker_accessor_emitted_last(ir, c) && has_ctor_marker_accessor(ir, c)
-    {
-        let physical_parameters = class_ctor_jvm_tys(c);
-        let parameter_identities =
-            super::method_parameters::primary_constructor_identities(ir, c, &physical_parameters);
-        constructor_defaults::emit_ctor_marker_accessor(
-            &fq_name,
-            &physical_parameters,
-            &parameter_identities,
-            &mut cw,
-        );
-    }
     // `-jvm-default=disable`: an inherited body gets an explicit override forwarding to the holder,
     // or every inherited call is an `AbstractMethodError`. kotlinc adds them before the bridges, and
     // `<clinit>` follows both.
@@ -3109,6 +3103,21 @@ fn emit_class(
         c.decl_start_line.max(c.decl_line),
         &mut cw,
     );
+    // A companion's synthetic `(…, DefaultConstructorMarker)` ctor goes AFTER the accessors —
+    // kotlinc's companion member order (private <init>, accessors, marker <init>). A class hiding a
+    // value-class-parameter primary puts its accessor after `equals` the same way.
+    if c.has_primary_ctor && marker_accessor_emitted_last(ir, c) && has_ctor_marker_accessor(ir, c)
+    {
+        let physical_parameters = class_ctor_jvm_tys(c);
+        let parameter_identities =
+            super::method_parameters::primary_constructor_identities(ir, c, &physical_parameters);
+        constructor_defaults::emit_ctor_marker_accessor(
+            &fq_name,
+            &physical_parameters,
+            &parameter_identities,
+            &mut cw,
+        );
+    }
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,

@@ -116,13 +116,26 @@ pub fn elide_default_property_stores(ir: &mut IrFile) {
 /// from its shape. The field's type is read after value-class carrier realization, so it is the
 /// physical slot the JVM zero-fills.
 fn is_elided_initializer_store(ir: &IrFile, expression: ExprId) -> bool {
-    ir.property_initializer_stores.contains(&expression)
-        && matches!(ir.expr(expression), IrExpr::SetField { class, index, value, .. }
-        if crate::jvm::fresh_storage::holds_fresh_value(
-            ir,
+    if !ir.property_initializer_stores.contains(&expression) {
+        return false;
+    }
+    let (ty, value) = match ir.expr(expression) {
+        IrExpr::SetField {
+            class,
+            index,
+            value,
+            ..
+        } => (
             ir.classes[*class as usize].fields[*index as usize].ty,
             *value,
-        ))
+        ),
+        // Companion storage realization preserves the declaration store's exact identity while
+        // replacing its physical field with an outer static. It is still the same declaration
+        // initializer, and the JVM supplies the same fresh zero for that static slot.
+        IrExpr::SetStatic { index, value } => (ir.statics[*index as usize].ty, *value),
+        _ => return false,
+    };
+    crate::jvm::fresh_storage::holds_fresh_value(ir, ty, value)
 }
 
 #[cfg(test)]
@@ -208,5 +221,43 @@ mod tests {
             panic!("body must remain a block");
         };
         assert_eq!(stmts, &[boxed]);
+    }
+
+    #[test]
+    fn removes_a_recorded_default_store_after_companion_storage_becomes_static() {
+        let mut ir = IrFile::default();
+        let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        ir.statics.push(crate::ir::IrStatic {
+            name: "count".to_string(),
+            ty: Ty::Int,
+            init: None,
+            is_var: true,
+            is_const: false,
+            is_lateinit: false,
+            owner: None,
+            visibility: crate::types::Visibility::Private,
+            setter_jvm_name: None,
+            erased_declared_ty: None,
+            accessors: crate::ir::IrStaticAccessors::ABSENT,
+            line: 0,
+            source_order: 0,
+            property_delegate: false,
+        });
+        let declaration = ir.add_expr(IrExpr::SetStatic {
+            index: 0,
+            value: zero,
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration],
+            value: None,
+        });
+        ir.property_initializer_stores.insert(declaration);
+
+        elide_default_property_stores(&mut ir);
+
+        let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+            panic!("body must remain a block");
+        };
+        assert!(stmts.is_empty());
     }
 }
