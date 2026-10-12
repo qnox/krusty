@@ -4,6 +4,8 @@
 
 #[path = "bridge_result_cast_e2e.rs"]
 mod bridge_result_cast_e2e;
+#[path = "bridged_static_write_receiver_e2e.rs"]
+mod bridged_static_write_receiver_e2e;
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
 #[path = "captured_field_storage_e2e.rs"]

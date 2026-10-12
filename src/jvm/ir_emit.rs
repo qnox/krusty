@@ -133,7 +133,7 @@ mod override_result_emission;
 use override_result_emission::{declared_method_desc, declared_method_signature};
 mod primary_constructor_parameters;
 mod property_access;
-use property_access::{accessor_receiver_ty, accessor_takes_receiver};
+use property_access::{accessor_receiver_ty, accessor_takes_receiver, ReceiverUse};
 mod property_reference_class;
 mod property_reference_values;
 mod return_emission;
@@ -6215,8 +6215,7 @@ impl<'a> Emitter<'a> {
                 code,
             );
         } else if let Some(receiver) = operation.receiver {
-            let receiver_ty = accessor_receiver_ty(&access, access_owner);
-            self.emit_property_receiver(receiver, access_owner, takes_receiver, &receiver_ty, code);
+            self.emit_property_receiver(receiver, &access, ReceiverUse::Write, code);
         } else if takes_receiver {
             self.run.set_emit_error(format!(
                 "receiver-less property realization requires an instance receiver: {}",
@@ -6327,47 +6326,6 @@ impl<'a> Emitter<'a> {
                 self.mark_dispatch_line(operation.expression, code);
                 code.invokestatic(m, words, 0);
             }
-        }
-    }
-
-    /// Emit the source receiver according to an already-selected property realization. Instance
-    /// accessors/fields consume it; a static realization still evaluates and drops an effectful receiver.
-    /// Reads and writes share this exact rule so `side().p` and `side().p = v` cannot diverge.
-    fn emit_property_receiver(
-        &mut self,
-        receiver: crate::ir::ExprId,
-        access_owner: TypeName,
-        takes_receiver: bool,
-        expected: &Ty,
-        code: &mut CodeBuilder,
-    ) {
-        if takes_receiver {
-            self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), *expected, code);
-            return;
-        }
-        // A receiverless realization does not make the receiver expression disappear. Elide only an
-        // expression that runs no code, or a singleton/static read of the very owner whose static access
-        // initializes it anyway; every other receiver is evaluated and popped.
-        let initializes_owner = match self.ir.expr(receiver) {
-            IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
-                self.ir,
-                *classifier,
-                crate::jvm::singleton_storage::of(self.classifiers, *classifier),
-            )
-            .is_some_and(|published| published.owner == access_owner),
-            IrExpr::ExternalStaticField { owner, .. }
-            | IrExpr::ExternalStaticInstance { owner, .. } => *owner == access_owner,
-            IrExpr::StaticInstance { owner, .. } => self
-                .ir
-                .classes
-                .get(*owner as usize)
-                .is_some_and(|class| class.fq_name == access_owner),
-            _ => false,
-        };
-        if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
-            self.emit_value(receiver, code);
-            code.pop();
         }
     }
 

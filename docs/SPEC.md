@@ -16999,6 +16999,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   plan walks each body in pre-order and keeps the stable line sort across bodies. A `$cp` setter
   interns its `<set-?>` parameter name after its body, as every other setter bridge does. Test:
   `tests/synthetic_accessor_order_e2e.rs`. Corpus: `enum/companionAccessingEnumValue.kt`.
+- **A write through a static setter bridge evaluates its singleton receiver.** kotlinc's
+  `JvmPropertiesLowering.patchReceiver` turns a store to a static field into a block that first
+  evaluates the receiver as a statement, and the store that `SyntheticAccessorLowering` replaces
+  with `access$set…$cp` / `access$set…$p` keeps it: a nested class writing a private companion
+  property is `getstatic Outer.Companion; pop; <value>; invokestatic Outer.access$setX$cp`, and a
+  nested class of a named object writes `getstatic Obj.INSTANCE; pop` first. A read through the
+  getter bridge, a store the owner writes with its own `putstatic`, and a `this` receiver drop the
+  receiver. Test: `tests/bridged_static_write_receiver_e2e.rs`.
 - **A backing field's descriptor interns before its nullability annotation.** kotlinc's class
   writer visits the fields after the methods, each as its name, its descriptor and then its
   `@NotNull`/`@Nullable` annotation. A private field no method reads or writes therefore adds its

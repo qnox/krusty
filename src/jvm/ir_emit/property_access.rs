@@ -111,9 +111,8 @@ impl Emitter<'_> {
             | PropertyAccess::AccessBridge { owner, .. } => *owner,
         };
         let takes_receiver = accessor_takes_receiver(&access);
-        let receiver_ty = accessor_receiver_ty(&access, access_owner);
         if let Some(receiver) = receiver.filter(|_| !receiver_is_static_field_qualifier) {
-            self.emit_property_receiver(receiver, access_owner, takes_receiver, &receiver_ty, code);
+            self.emit_property_receiver(receiver, &access, ReceiverUse::Read, code);
         } else if takes_receiver {
             self.run.set_emit_error(format!(
                 "receiver-less property realization requires an instance receiver: {}",
@@ -448,6 +447,70 @@ impl Emitter<'_> {
             } else {
                 code.putfield(fref, words);
             }
+        }
+    }
+}
+
+/// Whether a property operation reads or writes, for its receiver's emission.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReceiverUse {
+    Read,
+    Write,
+}
+
+impl Emitter<'_> {
+    /// Emit the source receiver according to an already-selected property realization. Instance
+    /// accessors/fields consume it; a static realization still evaluates and drops an effectful
+    /// receiver. Reads and writes share this rule so `side().p` and `side().p = v` cannot diverge.
+    ///
+    /// A singleton receiver of the realization's own owner is elided, since the static access
+    /// initializes that class anyway, except on a write through a synthetic `access$set…$p` /
+    /// `access$set…$cp` bridge. kotlinc's `JvmPropertiesLowering.patchReceiver` keeps a static
+    /// field store's receiver as a statement of its own, and the store `SyntheticAccessorLowering`
+    /// turns into the bridge call keeps it: `getstatic Companion; pop` precedes the value.
+    pub(super) fn emit_property_receiver(
+        &mut self,
+        receiver: crate::ir::ExprId,
+        access: &crate::jvm::inline::PropertyAccess,
+        operation: ReceiverUse,
+        code: &mut CodeBuilder,
+    ) {
+        use crate::jvm::inline::PropertyAccess;
+        let access_owner = match access {
+            PropertyAccess::Field { owner, .. }
+            | PropertyAccess::Accessor { owner, .. }
+            | PropertyAccess::AccessBridge { owner, .. } => *owner,
+        };
+        if accessor_takes_receiver(access) {
+            self.emit_value(receiver, code);
+            let expected = accessor_receiver_ty(access, access_owner);
+            self.narrow_on_stack(self.value_ty(receiver), expected, code);
+            return;
+        }
+        let bridged_write = operation == ReceiverUse::Write
+            && matches!(access, PropertyAccess::AccessBridge { .. });
+        let initializes_owner = !bridged_write
+            && match self.ir.expr(receiver) {
+                IrExpr::SingletonValue { classifier } => {
+                    singleton_instance_load::published_singleton(
+                        self.ir,
+                        *classifier,
+                        crate::jvm::singleton_storage::of(self.classifiers, *classifier),
+                    )
+                    .is_some_and(|published| published.owner == access_owner)
+                }
+                IrExpr::ExternalStaticField { owner, .. }
+                | IrExpr::ExternalStaticInstance { owner, .. } => *owner == access_owner,
+                IrExpr::StaticInstance { owner, .. } => self
+                    .ir
+                    .classes
+                    .get(*owner as usize)
+                    .is_some_and(|class| class.fq_name == access_owner),
+                _ => false,
+            };
+        if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
+            self.emit_value(receiver, code);
+            code.pop();
         }
     }
 }
