@@ -111,6 +111,7 @@ mod intrinsic_probes;
 mod lambda_class;
 pub(super) mod lambda_class_names;
 mod lambda_implementation_placement;
+mod lateinit_guard;
 pub(crate) use lambda_implementation_placement::reparent_lambda_impls;
 mod local_updates;
 mod local_variable_representation;
@@ -6504,8 +6505,8 @@ impl<'a> Emitter<'a> {
                 self.nullable_sam_wrapper_emits_control_flow(e)
                     || args.iter().any(|&a| self.emits_control_flow(a))
             }
-            // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
-            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join requires the
+            // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; pop; ldc
+            // name; invokestatic throw…; aconst_null; L:`), whose join requires the
             // surrounding operand baseline to agree — so an earlier operand is spilled first.
             IrExpr::EnclosingInstance { receiver, .. } => self.emits_control_flow(*receiver),
             IrExpr::GetField {

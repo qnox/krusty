@@ -3920,9 +3920,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compiles to `dup; ifnull L; areturn; L: pop; ldc name; invokestatic …; aconst_null; areturn`. Member,
   object and enum getters take that shape as facade getters already did; an inline read keeps the
   `ifnonnull` guard below (test `lateinit_getter_shape_e2e`).
+- **Every `lateinit` use-site guard has kotlinc's shape.** `LateinitLowering` reads the value into a
+  temporary and throws when it is null; its codegen writes `dup; ifnonnull L; pop; ldc name;
+  invokestatic throwUninitializedPropertyAccessException; aconst_null; L:` at a member field read, a
+  read through `access$get<X>$p`, a named object's static field, a private top-level static, and a
+  local `lateinit var`. The `throw` intrinsic returns `void` to the verifier, so the null path drops
+  the duplicate and pushes the `null` its branch yields. Member, bridge and local reads omitted the
+  `pop` and `aconst_null`. Where the redundant-null-check pass proves a local still null, both
+  compilers reduce the read to `ldc name; invokestatic …; aconst_null`. Test:
+  `tests/lateinit_use_guard_e2e.rs`. Corpus: `properties/lateinit/exceptionField.kt`,
+  `properties/lateinit/nameClash.kt`, `properties/lateinit/local/uninitializedRead.kt`.
 - **A `lateinit` FIELD read is itself branchy.** The uninitialized guard kotlinc inserts at every
-  such read (`dup; ifnonnull L; ldc name; invokestatic throwUninitializedPropertyAccessException; L:`)
-  branches and rejoins. So a `lateinit` read is a
+  such read (`dup; ifnonnull L; pop; ldc name; invokestatic throwUninitializedPropertyAccessException;
+  aconst_null; L:`) branches and rejoins. So a `lateinit` read is a
   branchy sub-expression exactly like a comparison or a `when`, and every position that holds operands
   across one — `emit_operands`, `New`, `SetField`, `StringConcat`, and the `emit_value_over` fill/subscript
   positions above — must spill or retain the held entries. `emits_control_flow` answers this for `GetField` by
@@ -5082,8 +5092,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `UninitializedPropertyAccessException`. Parsed as `Stmt::LocalLateinit` (distinct from `Stmt::Local`,
   whose initializer is mandatory) and only for a non-null reference annotation (a primitive/nullable/
   unresolved type bails). Each read is wrapped in an `IrExpr::LateinitCheck` — the same guard the
-  member-field lateinit read uses (`dup; ifnonnull L; ldc name;
-  invokestatic Intrinsics.throwUninitializedPropertyAccessException; L:`). This is behaviorally exact
+  member-field lateinit read uses (`dup; ifnonnull L; pop; ldc name;
+  invokestatic Intrinsics.throwUninitializedPropertyAccessException; aconst_null; L:`). This is behaviorally exact
   for every access; kotlinc additionally omits the guard where definite-assignment analysis proves the
   slot is initialized (a plain read) or unset (an unconditional throw), so krusty's always-guarded read
   is byte-identical only for a maybe-initialized read (byte-parity for the DA-optimized cases is future

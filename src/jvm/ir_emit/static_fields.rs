@@ -800,23 +800,6 @@ impl Emitter<'_> {
     }
 }
 
-/// The guard on a private top-level `lateinit` read. The field value is already on the stack.
-fn emit_lateinit_use_guard(name: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
-    code.dup();
-    let initialized = code.new_label();
-    code.ifnonnull(initialized);
-    code.pop();
-    code.push_string(name, cw);
-    let throw = cw.methodref(
-        "kotlin/jvm/internal/Intrinsics",
-        "throwUninitializedPropertyAccessException",
-        "(Ljava/lang/String;)V",
-    );
-    code.invokestatic(throw, 1, 0);
-    code.aconst_null();
-    code.bind(initialized);
-}
-
 impl Emitter<'_> {
     /// Straight-line expressions, except a private top-level `lateinit` read that inlines its guard.
     pub(super) fn static_expr_branches(&self, expr: u32, node: &crate::ir::IrExpr) -> bool {
@@ -865,7 +848,7 @@ impl Emitter<'_> {
             code.invokestatic(m, 0, slot_words(jt) as i32);
             // `access$get<X>$p` is a raw `getstatic`. The use site throws; `isInitialized` does not.
             if is_lateinit && !probe {
-                emit_lateinit_use_guard(&name, code, self.cw);
+                self.emit_lateinit_use_guard(&name, code);
             }
             return;
         }
@@ -922,7 +905,7 @@ impl Emitter<'_> {
             );
             code.getstatic(fref, slot_words(jt) as i32);
             if is_lateinit && !probe {
-                emit_lateinit_use_guard(&name, code, self.cw);
+                self.emit_lateinit_use_guard(&name, code);
             }
         } else {
             let m = self.cw.methodref(

@@ -59,17 +59,7 @@ impl Emitter<'_> {
         // A `lateinit var` read throws while the field is still null. The bridge above performs a
         // raw field read, so the use site keeps the same guard as a direct read.
         if is_lateinit {
-            code.dup();
-            let initialized = code.new_label();
-            code.ifnonnull(initialized);
-            code.push_string(&source_name, self.cw);
-            let throw = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "throwUninitializedPropertyAccessException",
-                "(Ljava/lang/String;)V",
-            );
-            code.invokestatic(throw, 1, 0);
-            self.bind(initialized, code);
+            self.emit_lateinit_use_guard(&source_name, code);
         }
     }
 }

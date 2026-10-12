@@ -1853,22 +1853,9 @@ impl super::Emitter<'_> {
             }
             IrExpr::LateinitCheck { operand, name } => {
                 // A `lateinit var` local read: throw `UninitializedPropertyAccessException` while the slot
-                // is still null. Same guard as the member-field lateinit read (`dup; ifnonnull L; ldc
-                // name; invokestatic throwUninitializedPropertyAccessException; L:`).
+                // is still null, with the member-field guard's shape.
                 self.emit_value(*operand, code);
-                code.dup();
-                let lbl = code.new_label();
-                code.ifnonnull(lbl);
-                code.push_string(name, self.cw);
-                let m = self.cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "throwUninitializedPropertyAccessException",
-                    "(Ljava/lang/String;)V",
-                );
-                code.invokestatic(m, 1, 0);
-                // `value_ty` already yields the JVM type of the operand (a reference here); the surviving
-                // (non-null) value is on the stack at the branch target.
-                self.bind(lbl, code);
+                self.emit_lateinit_use_guard(name, code);
             }
             IrExpr::Throw { operand } => {
                 self.emit_value(*operand, code);
