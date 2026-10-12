@@ -20,6 +20,8 @@ mod cast_operand_reread_e2e;
 mod common_core;
 #[path = "default_impls_inherited_signature_e2e.rs"]
 mod default_impls_inherited_signature_e2e;
+#[path = "lateinit_companion_hoist_e2e.rs"]
+mod lateinit_companion_hoist_e2e;
 #[path = "lateinit_use_guard_e2e.rs"]
 mod lateinit_use_guard_e2e;
 #[cfg(test)]

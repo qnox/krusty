@@ -31,6 +31,9 @@ struct Candidate {
     setter_visibility: Visibility,
     source_order: u32,
     decl_line: u32,
+    /// A private `lateinit` property: every read of the hoisted static carries the uninitialized
+    /// guard, and `isInitialized` probes the raw field.
+    is_lateinit: bool,
     /// `@JvmField`: the hoisted static IS the property's public surface — a PUBLIC field with no
     /// companion accessors and no `access$…$cp` bridges (kotlinc's realization).
     is_jvm_field: bool,
@@ -267,7 +270,14 @@ pub(crate) fn lower_companion_properties(
             // when it cannot (`I?` over `Int`). The value-class pass records which of the two
             // this static is; leaving the field on the companion made a property reference call
             // an instance accessor the class does not have.
-            if declaration.is_open || backing.is_lateinit() || (!is_jvm_field && !inert_receiver) {
+            // A private `lateinit` property moves too: it has no accessor, so the outer class reads
+            // the static with the guard inline and every other class through `access$get…$cp`.
+            // A non-private one keeps its companion field and its throwing getter.
+            let is_lateinit = backing.is_lateinit();
+            if declaration.is_open
+                || (is_lateinit && !declaration.is_private)
+                || (!is_jvm_field && !inert_receiver)
+            {
                 continue;
             }
             candidates.push(Candidate {
@@ -284,6 +294,7 @@ pub(crate) fn lower_companion_properties(
                 setter_visibility: declaration.setter_visibility,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
+                is_lateinit,
                 is_jvm_field,
                 declared_getter: declaration.getter,
                 declared_setter: declaration.setter,
@@ -327,6 +338,7 @@ pub(crate) fn lower_companion_properties(
                 setter_visibility: Visibility::Private,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
+                is_lateinit: false,
                 is_jvm_field: false,
                 declared_getter: declaration.getter,
                 declared_setter: declaration.setter,
@@ -348,7 +360,7 @@ pub(crate) fn lower_companion_properties(
             init: candidate.initializer.map(|(initializer, _)| initializer),
             is_var: candidate.is_var,
             is_const: false,
-            is_lateinit: false,
+            is_lateinit: candidate.is_lateinit,
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
             visibility: candidate.visibility,
             setter_jvm_name: None,
@@ -472,6 +484,14 @@ pub(crate) fn lower_companion_properties(
             IrExpr::GetField { class, index, .. }
                 if static_for_field.contains_key(&(class, index)) =>
             {
+                Some(IrExpr::GetStatic(static_for_field[&(class, index)]))
+            }
+            // `isInitialized` loads the moved field with no guard.
+            IrExpr::LateinitInitialized { class, index, .. }
+                if static_for_field.contains_key(&(class, index)) =>
+            {
+                ir.lateinit_initialization_probes
+                    .insert(expression as ExprId);
                 Some(IrExpr::GetStatic(static_for_field[&(class, index)]))
             }
             IrExpr::SetField {

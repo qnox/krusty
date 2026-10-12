@@ -49,12 +49,21 @@ impl Emitter<'_> {
     /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
     /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
     fn is_lateinit_field(&self, owner: TypeName, name: &str) -> bool {
-        self.ir
+        let instance = self
+            .ir
             .classes
             .iter()
             .find(|class| class.fq_name == owner)
             .and_then(|class| class.fields.iter().find(|field| field.name == name))
-            .is_some_and(|field| field.is_lateinit())
+            .is_some_and(|field| field.is_lateinit());
+        // A private `lateinit` companion field moved to its outer class is a static there.
+        instance
+            || self.ir.statics.iter().enumerate().any(|(index, storage)| {
+                storage.is_lateinit
+                    && storage.owner == Some(owner)
+                    && self.ir.is_jvm_companion_hoisted_static(index as u32)
+                    && self.ir.static_field_jvm_name(index as u32) == name
+            })
     }
 
     /// Whether this property read emits the uninitialized guard inline. A direct field load does.

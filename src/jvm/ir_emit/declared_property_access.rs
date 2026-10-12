@@ -262,12 +262,16 @@ impl Emitter<'_> {
             return None;
         }
         let (name, descriptor) = storage.bridge_shape(self.ir, writable);
+        // `access$get…$cp` is a raw field load, so a `lateinit` read guards at the use site.
+        let lateinit = &self.ir.statics[storage.index as usize];
+        let inline_uninitialized_guard =
+            (!writable && lateinit.is_lateinit).then(|| lateinit.name.clone());
         Some(PropertyAccess::AccessBridge {
             owner: storage.owner,
             name,
             descriptor,
             takes_receiver: false,
-            inline_uninitialized_guard: None,
+            inline_uninitialized_guard,
         })
     }
 }

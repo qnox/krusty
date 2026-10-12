@@ -3930,6 +3930,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compilers reduce the read to `ldc name; invokestatic …; aconst_null`. Test:
   `tests/lateinit_use_guard_e2e.rs`. Corpus: `properties/lateinit/exceptionField.kt`,
   `properties/lateinit/nameClash.kt`, `properties/lateinit/local/uninitializedRead.kt`.
+- **A private `lateinit` companion property is stored on the outer class.** kotlinc moves it like
+  every other private companion property: a `private static` field of the outer class, with no
+  accessor. The outer class reads the static with the use-site guard inline, the companion and
+  every other class read it through `access$get…$cp` followed by the same guard, and
+  `::x.isInitialized` loads the raw field. A non-private `lateinit` companion property keeps its
+  companion field and throwing getter in krusty; kotlinc publishes it as a public static of the
+  outer class (`properties/lateinit/accessorExceptionPublic.kt`, not yet matched). Test:
+  `tests/lateinit_companion_hoist_e2e.rs`. Corpus: `properties/lateinit/kt30548.kt`,
+  `properties/lateinit/privateVarInCompanion.kt`, `properties/lateinit/accessorException.kt`.
 - **A `lateinit` FIELD read is itself branchy.** The uninitialized guard kotlinc inserts at every
   such read (`dup; ifnonnull L; pop; ldc name; invokestatic throwUninitializedPropertyAccessException;
   aconst_null; L:`) branches and rejoins. So a `lateinit` read is a

@@ -887,6 +887,10 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, 0, slot_words(jt) as i32);
             }
+            // A hoisted private `lateinit` companion field has no getter: each read guards.
+            if is_lateinit && !probe {
+                self.emit_lateinit_use_guard(&name, code);
+            }
         }
         // Within the facade (or a `const val`, which is public) read the field directly; from
         // another class a plain top-level property is private, so go through `getX()` — kotlinc's
