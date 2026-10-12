@@ -22,9 +22,9 @@ use crate::fx_hash::HashMap;
 use std::hash::Hash;
 
 use crate::fir::{
-    DeclarationFlags, DeclarationId, InheritedCallableStatus, ResolvedFunctionOverride,
-    ResolvedFunctionOverrideTarget, ResolvedModuleIndex, ResolvedPropertyOverride,
-    ResolvedPropertyOverrideTarget,
+    DeclarationFlags, DeclarationId, DeclarationKind, InheritedCallableStatus,
+    ResolvedFunctionOverride, ResolvedFunctionOverrideTarget, ResolvedModuleIndex,
+    ResolvedPropertyOverride, ResolvedPropertyOverrideTarget,
 };
 use crate::types::{ReturnValueStatus, Visibility};
 
@@ -357,6 +357,28 @@ fn publish_inherited_visibilities(
             continue;
         };
         apply(index, declaration, status, &mut inherited);
+        // An accessor written without a visibility modifier has its property's visibility, the
+        // inherited one included (`override var v: Int; set(value) { … }` over an `internal var`).
+        let unmodified_accessors = index
+            .owned_declarations(declaration)
+            .iter()
+            .copied()
+            .filter(|&accessor| {
+                index
+                    .declaration_anchor(accessor)
+                    .is_some_and(|anchor| anchor.kind == DeclarationKind::Accessor)
+                    && index.declaration_header(accessor).is_some_and(|header| {
+                        !header.flags.has(DeclarationFlags::HAS_VISIBILITY_MODIFIER)
+                    })
+            })
+            .collect::<Vec<_>>();
+        for accessor in unmodified_accessors {
+            let accessor_status = VisibilityStatus {
+                explicit: None,
+                effective: status.effective,
+            };
+            apply(index, accessor, accessor_status, &mut inherited);
+        }
     }
     inherited
 }
