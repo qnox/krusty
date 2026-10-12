@@ -14,8 +14,8 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
-    ClassId, ExprId, FnParamInfo, IrConst, IrExpr, IrFile, IrFunction, IrGeneratedParameterRole,
-    IrLocalPropertyLayout, IrParameterIdentity, IrTypeOp,
+    ClassId, ExprId, FnParamInfo, FunId, IrConst, IrExpr, IrFile, IrFunction,
+    IrGeneratedParameterRole, IrLocalPropertyLayout, IrParameterIdentity, IrTypeOp,
 };
 use crate::types::{Ty, Visibility};
 
@@ -48,6 +48,32 @@ fn in_place_delegate(ir: &IrFile, delegate: ExprId) -> Option<InPlaceDelegate> {
 pub fn realize(ir: &mut IrFile) {
     realize_package_delegates(ir);
     realize_member_delegates(ir);
+}
+
+/// Extend each generated delegate method from its getter's final internal JVM name.
+///
+/// Value-class lowering may already have added both the getter's signature hash and the delegate
+/// method's own hash. Internal naming runs later and records the getter's exact old identity here;
+/// replacing only that prefix preserves the delegate suffix without deriving a property name.
+pub(crate) fn follow_internal_getter_names(ir: &mut IrFile, old_names: &HashMap<FunId, String>) {
+    let renames = ir
+        .jvm_delegate_methods_with_getters()
+        .filter_map(|(method, getter)| {
+            let old_getter = old_names.get(&getter)?;
+            let method_name = &ir.functions[method as usize].name;
+            let suffix = method_name
+                .strip_prefix(old_getter)
+                .filter(|suffix| suffix.starts_with("$delegate"))
+                .expect("an in-place delegate method extends its recorded getter's JVM name");
+            Some((
+                method,
+                format!("{}{suffix}", ir.functions[getter as usize].name),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for (method, name) in renames {
+        ir.functions[method as usize].name = name;
+    }
 }
 
 fn realize_package_delegates(ir: &mut IrFile) {

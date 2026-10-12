@@ -145,6 +145,7 @@ const VALUE_CLASS_DELEGATES: &str = "package store\n\
     \n\
     class Board {\n\
     \x20   val result: Score by Unit\n\
+    \x20   internal val hidden: Score by Unit\n\
     }\n\
     \n\
     val Score.doubled: Int by Unit\n";
@@ -155,6 +156,10 @@ fn value_class_delegate_methods_follow_their_mangled_getters() {
         (
             "store/Board",
             "method 0x000a getResult-0DMqHrU$delegate(Lstore/Board;)Ljava/lang/Object; None",
+        ),
+        (
+            "store/Board",
+            "method 0x000a getHidden-0DMqHrU$main$delegate(Lstore/Board;)Ljava/lang/Object; None",
         ),
         (
             "store/ValueClassDelegatesKt",

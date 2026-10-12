@@ -46,6 +46,7 @@ pub(crate) fn mangle_internal_members(ir: &mut IrFile, module_name: &str, facade
         function.name = format!("{old}{suffix}");
         old_names.insert(fid, old);
     }
+    crate::jvm::in_place_delegates::follow_internal_getter_names(ir, &old_names);
     let new_name = |fid: FunId| ir.functions[fid as usize].name.clone();
     for class in &mut ir.classes {
         for property in &mut class.properties {
