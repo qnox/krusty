@@ -1,6 +1,6 @@
 use super::*;
 
-fn expression_subtree_contains(
+pub(super) fn expression_subtree_contains(
     ir: &IrFile,
     root: crate::ir::ExprId,
     predicate: &impl Fn(crate::ir::ExprId, &IrExpr) -> bool,

@@ -2991,6 +2991,7 @@ mod reified_object_type_of_e2e;
 
 #[path = "discarded_inline_result_temporary_e2e.rs"]
 mod discarded_inline_result_temporary_e2e;
+#[path = "e2e/jvm_storage_realization.rs"]
 mod jvm_storage_realization;
 #[path = "primitive_to_object_equality_e2e.rs"]
 mod primitive_to_object_equality_e2e;

@@ -26,6 +26,8 @@ mod local_classifier_provenance;
 mod lowering_temporaries;
 mod ranges;
 
+use lambda_return_flow::expression_subtree_contains;
+
 use super::lower_body;
 
 #[path = "callable_references/tests.rs"]
