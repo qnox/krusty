@@ -260,7 +260,7 @@ enum class Collision(val value: String) {
     A("instance");
 
     companion object {
-        val value = "companion"
+        val value = "companion"; const val marker = 2
     }
 }
 

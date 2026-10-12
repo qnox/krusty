@@ -552,7 +552,7 @@ pub(super) fn emit_enum_static_fields(
         .filter(|(_, s)| s.owner_matches(fq))
         .map(|(index, s)| (index as u32, s))
         .collect();
-    owner_statics.sort_by_key(|(_, s)| s.line);
+    owner_statics.sort_by_key(|(index, declaration)| (declaration.source_order, *index));
     for (index, s) in owner_statics {
         // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path). A hoisted
         // companion property's field is private unless `@JvmField` makes it the property's surface.
