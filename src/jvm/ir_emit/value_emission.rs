@@ -1815,7 +1815,20 @@ impl super::Emitter<'_> {
                 code.aload(slot);
             }
             IrExpr::NotNullAssert { operand, check } => {
-                self.emit_value(*operand, code);
+                // kotlinc checks a value in the slot that produced it and narrows the checked
+                // value afterwards: a captured `var`'s `ObjectRef.element` is checked as `Object`
+                // and only then cast to the variable's type (`getfield; dup; checkNotNull;
+                // checkcast`).
+                let shared_cell = match *self.ir.expr(*operand) {
+                    IrExpr::RefGet { holder, elem } if ir_ty_to_jvm(&elem).is_reference() => {
+                        self.emit_shared_cell_read(holder, elem, false, code);
+                        Some(elem)
+                    }
+                    _ => {
+                        self.emit_value(*operand, code);
+                        None
+                    }
+                };
                 // Flow typing can prove a stable nullable scalar non-null before a later, redundant
                 // `!!`. Its checked FIR assertion remains visible, but the selected smart-cast
                 // conversion means the operand is already a physical JVM scalar by this point. A
@@ -1850,6 +1863,9 @@ impl super::Emitter<'_> {
                     1
                 };
                 code.invokestatic(m, arguments, 0);
+                if let Some(elem) = shared_cell {
+                    self.narrow_shared_cell_element(elem, code);
+                }
             }
             IrExpr::LateinitCheck { operand, name } => {
                 // A `lateinit var` local read: throw `UninitializedPropertyAccessException` while the slot
