@@ -145,3 +145,22 @@ fn a_prefix_increment_of_a_qualified_or_indexed_access_rereads() {
         "QualifiedPrefixReread",
     );
 }
+
+/// Inline syntax is compacted between parsing and checked-FIR preparation. A postfix statement has
+/// already discarded its saved-old-value statement, but its shared receiver marker must survive so
+/// the inlined update evaluates a nontrivial receiver only once.
+#[test]
+fn an_inline_postfix_statement_keeps_its_single_receiver_evaluation() {
+    both_compilers_agree(
+        "var calls = 0\n\
+         class C(var x: Int)\n\
+         fun make(c: C): C { calls++; return c }\n\
+         inline fun bump(c: C) { make(c).x++ }\n\
+         fun box(): String {\n\
+         \x20   val c = C(4)\n\
+         \x20   bump(c)\n\
+         \x20   return if (calls == 1 && c.x == 5) \"OK\" else \"fail: $calls/${c.x}\"\n\
+         }\n",
+        "InlinePostfixReceiver",
+    );
+}

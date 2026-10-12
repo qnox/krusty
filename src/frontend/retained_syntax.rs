@@ -1036,10 +1036,12 @@ pub(super) fn compact(file: &mut File) {
                 .into_iter()
                 .filter_map(|operand| expressions.get(&operand).copied())
                 .collect();
-            let original = match access.original {
-                Some(original) => Some(statements.get(&original).copied()?),
-                None => None,
-            };
+            // A postfix update used as a statement intentionally prunes the saved-old-value
+            // statement while keeping the access block. That absence changes the compacted
+            // record to statement form; it must not discard the whole shared-operand marker.
+            let original = access
+                .original
+                .and_then(|original| statements.get(&original).copied());
             Some((
                 new,
                 crate::ast::IncDecAccess {
