@@ -343,8 +343,15 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
             *result = ty(*result, names);
             return;
         }
-        IrCheckedOperation::RangeContains { counter, .. } => {
+        IrCheckedOperation::RangeContains {
+            counter,
+            unsigned_compare,
+            ..
+        } => {
             *counter = ty(*counter, names);
+            if let Some(compare) = unsigned_compare {
+                runtime_function(compare, names);
+            }
             return;
         }
         IrCheckedOperation::RangeLoop {
@@ -399,6 +406,9 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
                 | super::IrIntrinsic::PrimitiveCompare {
                     operand: classifier,
                     ..
+                }
+                | super::IrIntrinsic::UnsignedCompare {
+                    operand: classifier,
                 }
                 | super::IrIntrinsic::UnsignedToString { source: classifier }
                 | super::IrIntrinsic::PrimitiveArrayNew {

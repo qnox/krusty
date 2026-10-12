@@ -433,8 +433,16 @@ fn emit_return(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) 
         }
         // A cast is the value itself here (see the `TypeOp` expression), so the `return` moves
         // through it like through a block's value: an elvis arm's coercion can hold the jump.
-        IrExpr::TypeOp { op, arg, .. }
-            if !matches!(op, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf) =>
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } if !matches!(op, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf)
+            && !(*op == IrTypeOp::ImplicitCoercion
+                && (js_uses_ulong_carrier(type_operand)
+                    || ir
+                        .checked_type(*arg)
+                        .is_some_and(|ty| js_uses_ulong_carrier(&ty)))) =>
         {
             emit_return(ir, *arg, depth, inst, out)
         }
@@ -529,7 +537,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             IrConst::UByte(v) => v.to_string(),
             IrConst::UShort(v) => v.to_string(),
             IrConst::UInt(v) => v.to_string(),
-            IrConst::ULong(v) => v.to_string(),
+            IrConst::ULong(v) => format!("{v}n"),
             IrConst::Float(v) => v.to_string(),
             IrConst::Double(v) => v.to_string(),
             // A `Char` is a UTF-16 code unit; `\uXXXX` reproduces it exactly (JS strings admit lone
@@ -616,6 +624,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 Some(Ty::Short) => format!("new Int16Array({size})"),
                 Some(Ty::Char) => format!("new Uint16Array({size})"),
                 Some(Ty::Boolean) => format!("new Array({size}).fill(false)"),
+                Some(Ty::ULong) => format!("new Array({size}).fill(0n)"),
                 Some(_) if array_type.is_reference_array() => {
                     format!("new Array({size}).fill(null)")
                 }
@@ -647,16 +656,40 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             )
         }
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-            format!(
-                "({} {} {})",
-                emit_expr(ir, *lhs, inst),
-                js_op(*op),
-                emit_expr(ir, *rhs, inst)
-            )
-        }
-        IrExpr::Equality { op, mode, lhs, rhs } => {
             let left = emit_expr(ir, *lhs, inst);
             let right = emit_expr(ir, *rhs, inst);
+            let left_ty = ir.checked_type(*lhs);
+            let right_ty = ir.checked_type(*rhs);
+            if matches!(
+                op,
+                IrBinOp::Eq | IrBinOp::Ne | IrBinOp::RefEq | IrBinOp::RefNe
+            ) && [left_ty, right_ty]
+                .into_iter()
+                .flatten()
+                .any(|ty| js_uses_ulong_carrier(&ty))
+            {
+                let left = js_ulong_equality_operand_if_needed(&left, left_ty);
+                let right = js_ulong_equality_operand_if_needed(&right, right_ty);
+                format!("({left} {} {right})", js_op(*op))
+            } else if [left_ty, right_ty]
+                .into_iter()
+                .flatten()
+                .any(|ty| js_uses_ulong_carrier(&ty))
+            {
+                emit_ulong_binary(*op, &left, &right)
+            } else {
+                format!("({left} {} {right})", js_op(*op))
+            }
+        }
+        IrExpr::Equality { op, mode, lhs, rhs } => {
+            let mut left = emit_expr(ir, *lhs, inst);
+            let mut right = emit_expr(ir, *rhs, inst);
+            if let Some(ty) = ir.checked_type(*lhs).filter(js_uses_ulong_carrier) {
+                left = js_ulong_equality_operand(&left, ty);
+            }
+            if let Some(ty) = ir.checked_type(*rhs).filter(js_uses_ulong_carrier) {
+                right = js_ulong_equality_operand(&right, ty);
+            }
             let equal = match mode {
                 // JavaScript `Object.is` has Kotlin's boxed floating-point behavior: NaN equals
                 // itself and negative zero differs from positive zero.
@@ -680,8 +713,13 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 .collect::<String>();
             format!("(\"\"{parts})")
         }
-        IrExpr::PrimitiveNeg { operand, .. } => {
-            format!("(-{})", emit_expr(ir, *operand, inst))
+        IrExpr::PrimitiveNeg { operand, ty } => {
+            let operand = emit_expr(ir, *operand, inst);
+            if js_uses_ulong_carrier(ty) {
+                js_ulong_value(&format!("(-{})", js_ulong_value(&operand)))
+            } else {
+                format!("(-{operand})")
+            }
         }
         IrExpr::Call {
             callee,
@@ -837,6 +875,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                         Ty::Short => format!("new Int16Array({n})"),
                         Ty::Char => format!("new Uint16Array({n})"),
                         Ty::Boolean => format!("new Array({n}).fill(false)"),
+                        Ty::ULong => format!("new Array({n}).fill(0n)"),
                         _ => format!("new Array({n}).fill(0)"),
                     }
                 }
@@ -868,6 +907,23 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                          Object.is(a,b)?0:Object.is(a,-0)?-1:Object.is(b,-0)?1:a<b?-1:1)\
                          ({left},{right})"
                     )
+                }
+                crate::ir::IrIntrinsic::UnsignedCompare { operand } => {
+                    let [left, right] = args.as_slice() else {
+                        unreachable!("checked unsigned comparison has exactly two arguments");
+                    };
+                    let left = emit_expr(ir, *left, inst);
+                    let right = emit_expr(ir, *right, inst);
+                    match *operand {
+                        Ty::UInt => format!(
+                            "((a,b)=>{{a>>>=0;b>>>=0;return a<b?-1:a>b?1:0}})({left},{right})"
+                        ),
+                        Ty::ULong => format!(
+                            "((a,b)=>{{a=BigInt.asUintN(64,BigInt(a));b=BigInt.asUintN(64,BigInt(b));\
+                             return a<b?-1:a>b?1:0}})({left},{right})"
+                        ),
+                        _ => unreachable!("checked unsigned comparison has an unsigned carrier"),
+                    }
                 }
                 // Coroutine CPS realization is target-specific and is not yet part of the JS
                 // backend. Keep the semantic operation explicit instead of invoking the stdlib's
@@ -912,9 +968,24 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             type_operand,
         } => {
             let a = emit_expr(ir, *arg, inst);
+            let source_type = ir.checked_type(*arg);
             match op {
                 IrTypeOp::InstanceOf => js_instanceof(&a, type_operand),
                 IrTypeOp::NotInstanceOf => format!("(!{})", js_instanceof(&a, type_operand)),
+                IrTypeOp::ImplicitCoercion if js_uses_ulong_carrier(type_operand) => {
+                    if type_operand.is_nullable() {
+                        format!(
+                            "((value)=>value===null?null:{})({a})",
+                            js_ulong_value("value")
+                        )
+                    } else {
+                        js_ulong_value(&a)
+                    }
+                }
+                IrTypeOp::ImplicitCoercion => source_type
+                    .filter(js_uses_ulong_carrier)
+                    .and_then(|source| js_ulong_scalar_coercion(&a, source, *type_operand))
+                    .unwrap_or(a),
                 // JS is untyped — a cast is the value itself.
                 _ => a,
             }
@@ -1121,6 +1192,82 @@ fn js_op(op: IrBinOp) -> &'static str {
     }
 }
 
+/// JavaScript's exact carrier for Kotlin `ULong`. All producers and consumers cross this one
+/// boundary so a converted value cannot become a `Number` beside a literal `BigInt`.
+fn js_uses_ulong_carrier(ty: &Ty) -> bool {
+    ty.canonical_semantic().non_null() == Ty::ULong
+}
+
+fn js_ulong_value(value: &str) -> String {
+    format!("BigInt.asUintN(64, BigInt({value}))")
+}
+
+fn js_ulong_equality_operand(value: &str, ty: Ty) -> String {
+    if ty.canonical_semantic().admits_null() {
+        format!(
+            "((value) => value === null ? null : {})({value})",
+            js_ulong_value("value")
+        )
+    } else {
+        js_ulong_value(value)
+    }
+}
+
+fn js_ulong_equality_operand_if_needed(value: &str, ty: Option<Ty>) -> String {
+    match ty.filter(js_uses_ulong_carrier) {
+        Some(ty) => js_ulong_equality_operand(value, ty),
+        None => value.to_string(),
+    }
+}
+
+fn js_ulong_scalar_coercion(value: &str, source: Ty, target: Ty) -> Option<String> {
+    let converted = js_ulong_scalar_value(value, target)?;
+    if source.canonical_semantic().admits_null() {
+        let converted = js_ulong_scalar_value("value", target)?;
+        Some(format!(
+            "((value) => value === null ? null : {converted})({value})"
+        ))
+    } else {
+        Some(converted)
+    }
+}
+
+fn js_ulong_scalar_value(value: &str, target: Ty) -> Option<String> {
+    Some(match target.canonical_semantic().non_null() {
+        Ty::Byte => format!("Number(BigInt.asIntN(8, BigInt({value})))"),
+        Ty::Short => format!("Number(BigInt.asIntN(16, BigInt({value})))"),
+        Ty::Int => format!("Number(BigInt.asIntN(32, BigInt({value})))"),
+        Ty::Long => format!("Number(BigInt.asIntN(64, BigInt({value})))"),
+        Ty::UByte => format!("Number(BigInt.asUintN(8, BigInt({value})))"),
+        Ty::UShort => format!("Number(BigInt.asUintN(16, BigInt({value})))"),
+        Ty::Char => format!("String.fromCharCode(Number(BigInt.asUintN(16, BigInt({value}))))"),
+        Ty::UInt => format!("Number(BigInt.asUintN(32, BigInt({value})))"),
+        Ty::Float => format!("Math.fround(Number({}))", js_ulong_value(value)),
+        Ty::Double => format!("Number({})", js_ulong_value(value)),
+        _ => return None,
+    })
+}
+
+fn emit_ulong_binary(op: IrBinOp, left: &str, right: &str) -> String {
+    let left = js_ulong_value(left);
+    let right = if matches!(op, IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr) {
+        // Kotlin masks a 64-bit shift count to its low six bits, including negative counts.
+        // BigInt shifts do not mask their count, so preserve the language operation explicitly.
+        format!("(BigInt({right}) & 63n)")
+    } else {
+        js_ulong_value(right)
+    };
+    // A normalized `ULong` is non-negative, so BigInt's signed shift is the unsigned shift Kotlin
+    // selected. JavaScript deliberately has no BigInt `>>>` operator.
+    let operator = if op == IrBinOp::Ushr { ">>" } else { js_op(op) };
+    let value = format!("({left} {operator} {right})");
+    if op.yields_boolean() {
+        value
+    } else {
+        js_ulong_value(&value)
+    }
+}
+
 /// A JS string literal for a Kotlin string value. A JS string is also a UTF-16 code-unit sequence,
 /// so an unpaired surrogate is written as `\uXXXX` and survives verbatim.
 fn js_string(s: &KtString) -> String {
@@ -1141,7 +1288,7 @@ fn js_string(s: &KtString) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrClass, IrFunction};
+    use crate::ir::{IrClass, IrFunction, IrIntrinsic};
 
     fn blank_class(name: &str) -> IrClass {
         IrClass {
@@ -1340,5 +1487,35 @@ mod tests {
         let mut out = String::new();
         emit_stmt(&ir, marker, 0, false, &mut out);
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn unsigned_comparison_uses_value_order_for_both_carriers() {
+        let mut ir = IrFile::default();
+        let uint_left = ir.add_expr(IrExpr::Const(IrConst::UInt(0x8000_0000)));
+        let uint_right = ir.add_expr(IrExpr::Const(IrConst::UInt(0x7fff_ffff)));
+        let uint = ir.add_expr(IrExpr::Call {
+            callee: Callee::Intrinsic {
+                operation: IrIntrinsic::UnsignedCompare { operand: Ty::UInt },
+                ret: Ty::Int,
+            },
+            dispatch_receiver: None,
+            args: vec![uint_left, uint_right],
+        });
+        let ulong_left = ir.add_expr(IrExpr::Const(IrConst::ULong(0x8000_0000_0000_0000)));
+        let ulong_right = ir.add_expr(IrExpr::Const(IrConst::ULong(0x7fff_ffff_ffff_ffff)));
+        let ulong = ir.add_expr(IrExpr::Call {
+            callee: Callee::Intrinsic {
+                operation: IrIntrinsic::UnsignedCompare { operand: Ty::ULong },
+                ret: Ty::Int,
+            },
+            dispatch_receiver: None,
+            args: vec![ulong_left, ulong_right],
+        });
+        let uint = emit_expr(&ir, uint, false);
+        let ulong = emit_expr(&ir, ulong, false);
+
+        assert!(uint.contains("a>>>=0;b>>>=0"), "{uint}");
+        assert!(ulong.contains("BigInt.asUintN(64"), "{ulong}");
     }
 }

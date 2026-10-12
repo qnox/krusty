@@ -1327,6 +1327,9 @@ pub enum FirExprKind {
         /// Exact primitive comparison representation selected by the frontend. This is independent
         /// of counted-loop support: `Double`/`Float` ranges are valid membership comparisons.
         comparison: ResolvedTy,
+        /// Provider-selected unsigned ordering consumed by common range lowering. `None` for a
+        /// signed, character or floating-point comparison.
+        unsigned_compare: Option<FirRuntimeFunction>,
         value: FirExprId,
         start: FirExprId,
         end: FirExprId,

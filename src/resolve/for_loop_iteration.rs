@@ -631,7 +631,7 @@ impl Checker<'_> {
     /// that role (`CompilerIntrinsic::UnsignedCompare`) after checking its full signature. Exactly
     /// one declaration may carry it: a second one on the classpath leaves the plan unselected
     /// rather than letting candidate order decide which one a compiler-generated loop calls.
-    fn unsigned_loop_compare(&self, element: Ty) -> Option<RuntimeFunction> {
+    pub(super) fn unsigned_loop_compare(&self, element: Ty) -> Option<RuntimeFunction> {
         let carrier = self
             .fed_source()
             .classifier(element.kotlin_class_internal()?)?

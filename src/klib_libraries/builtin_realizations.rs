@@ -56,9 +56,18 @@ pub(super) fn realize_member_property(owner: TypeName, property: &mut PropertyIn
 }
 
 /// Attach the operation the package function `function` denotes, if it is a builtin one.
-pub(super) fn realize_package_function(package: TypeName, function: &mut FunctionInfo) {
+pub(super) fn realize_package_function(
+    package: TypeName,
+    compiler_builtin_owner: bool,
+    function: &mut FunctionInfo,
+) {
     let name = function.callable.name.clone();
-    package_rules::attach_function_realization(package, &name, function);
+    package_rules::attach_dependency_function_realization(
+        package,
+        &name,
+        compiler_builtin_owner,
+        function,
+    );
 }
 
 /// Attach the operation the package property `property` reads, if it is a builtin one.

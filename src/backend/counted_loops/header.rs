@@ -198,6 +198,17 @@ fn step_type(ty: Ty) -> Ty {
 }
 
 fn exclusive_bound(ir: &mut IrFile, last: ExprId, direction: Direction, ty: Ty) -> Option<ExprId> {
+    let moved = moved_bound(ir, last, direction)?;
+    Some(ir.add_expr(IrExpr::TypeOp {
+        op: crate::ir::IrTypeOp::ImplicitCoercion,
+        arg: moved,
+        type_operand: ty,
+    }))
+}
+
+/// `convertToExclusiveUpperBound`/`convertToExclusiveLowerBound` of a constant bound: the constant
+/// one step further in `direction`, of the bound's own kind, unless that step overflows it.
+pub(super) fn moved_bound(ir: &mut IrFile, last: ExprId, direction: Direction) -> Option<ExprId> {
     let delta: i64 = match direction {
         Direction::Increasing => 1,
         Direction::Decreasing => -1,
@@ -211,12 +222,7 @@ fn exclusive_bound(ir: &mut IrFile, last: ExprId, direction: Direction, ty: Ty) 
         IrConst::Char(value) => IrConst::Char(u16::try_from(i64::from(value) + delta).ok()?),
         _ => return None,
     };
-    let moved = ir.add_expr(IrExpr::Const(moved));
-    Some(ir.add_expr(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::ImplicitCoercion,
-        arg: moved,
-        type_operand: ty,
-    }))
+    Some(ir.add_expr(IrExpr::Const(moved)))
 }
 
 impl Realizer<'_> {

@@ -221,22 +221,11 @@ impl CommonExpectationIndex {
         let SymbolNamespace::Package(package) = namespace else {
             return;
         };
-        candidate.callable.compiler_intrinsic =
-            self.package_function_role(common_metadata_source, package, name, candidate);
-    }
-
-    /// Attach the common role to the provider record that was just normalized and appended.
-    pub(super) fn attach_tail(
-        &self,
-        common_metadata_source: bool,
-        namespace: SymbolNamespace,
-        name: &str,
-        candidates: &mut [FunctionInfo],
-    ) {
-        let Some(candidate) = candidates.last_mut() else {
-            return;
-        };
-        self.attach(common_metadata_source, namespace, name, candidate);
+        if let Some(role) =
+            self.package_function_role(common_metadata_source, package, name, candidate)
+        {
+            candidate.callable.compiler_intrinsic = Some(role);
+        }
     }
 
     fn read(path: &Path) -> Result<Self, CommonExpectationError> {

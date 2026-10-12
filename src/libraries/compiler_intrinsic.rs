@@ -91,6 +91,10 @@ pub enum CompilerIntrinsic {
     /// this role from the exact common declaration onto its physical realization; a nearer
     /// operator and an otherwise identical declaration from another dependency do not carry it.
     FloatingRangeMembership,
+    /// A `kotlin.ranges` `contains` extension of a closed range (`ClosedRange<Int>.contains(Long)`).
+    /// kotlinc's `RangeContainsLowering` compares against the bounds of a range literal it is
+    /// called on instead of calling it; a user extension of the same shape is called.
+    ClosedRangeContains,
     /// `kotlin.ranges` progression builders a counted `for` loop reads through instead of calling
     /// (kotlinc's `ForLoopsLowering` handlers). Outside a loop header they are ordinary calls.
     RangeDownTo,

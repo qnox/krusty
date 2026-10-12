@@ -326,6 +326,9 @@ pub enum IrCheckedOperation {
         end: ExprId,
         negated: bool,
         counter: Ty,
+        /// Exact selected unsigned comparison consumed by common realization. `None` for every
+        /// signed, character or floating-point counter.
+        unsigned_compare: Option<IrRuntimeFunction>,
     },
     /// `step`'s failure on a step that is not positive: an `IllegalArgumentException` whose
     /// message is `Step must be positive, was: $step.`.

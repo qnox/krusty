@@ -1893,14 +1893,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 end_type,
                 result,
             }) => self.range_construction(operation, start, start_type, end, end_type, result),
-            IrExpr::Checked(IrCheckedOperation::RangeContains {
-                operation,
-                value,
-                start,
-                end,
-                negated,
-                counter,
-            }) => self.range_contains(operation, value, start, end, negated, counter),
             IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
                 self.illegal_progression_step(step)
             }

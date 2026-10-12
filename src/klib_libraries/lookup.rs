@@ -170,7 +170,11 @@ pub(super) fn published_function(
     // A KLIB declaration's implementation is its serialized IR body, unless it is one of the
     // language's builtins, whose compiler operation the shared rules name by exact declaration.
     if let CallablePlacement::Package(package) = placement {
-        builtin_realizations::realize_package_function(package, &mut function);
+        builtin_realizations::realize_package_function(
+            package,
+            signed.compiler_builtin_owner,
+            &mut function,
+        );
     }
     let kind = realization_kind(placement, function.kind == FnKind::Extension);
     identities.assign_function(signed, kind, &mut function);

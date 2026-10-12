@@ -393,6 +393,21 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_carriers_require_an_explicit_unsigned_operation() {
+        assert!(super::lower::carrier(crate::types::Ty::UInt)
+            .expect("UInt has a physical carrier")
+            .is_some());
+        assert_eq!(
+            super::lower::ordinary_numeric_carrier(crate::types::Ty::UInt).unwrap_err(),
+            "an ordinary operator on `kotlin.UInt`"
+        );
+        assert_eq!(
+            super::lower::ordinary_numeric_carrier(crate::types::Ty::ULong).unwrap_err(),
+            "an ordinary operator on `kotlin.ULong`"
+        );
+    }
+
+    #[test]
     fn a_main_program_starts_in_main() {
         let (outputs, diagnostics) =
             compile_program(WasmTarget::Wasi, Entry::Main, &["fun main() {}"]);

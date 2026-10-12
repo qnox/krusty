@@ -48,19 +48,33 @@ fn generated_data_class_equality_records_declared_field_types() {
     );
 }
 
+/// Membership is realized after FIR lowering, as kotlinc's `RangeContainsLowering` runs after
+/// checking: `1 <= value && value < 4` on the JVM, whose constant inclusive bound becomes exclusive.
 #[test]
-fn generated_range_membership_records_the_comparison_type() {
-    let ir = lower_single_source_with_jvm_stdlib(
+fn realized_range_membership_records_the_comparison_type() {
+    let mut ir = lower_single_source_with_jvm_stdlib(
         "fun contains(value: Int): Boolean = value in 1..3\n",
         "CheckedRangeMembershipOperands",
+    );
+    use crate::backend::counted_loops::{
+        realize, CountedLoopPolicy, CounterLoopStyle, HeaderInlining, UntilSteps,
+    };
+    realize(
+        &mut ir,
+        CountedLoopPolicy {
+            style: CounterLoopStyle::JavaLike,
+            inlining: HeaderInlining::Kotlinc,
+            until_steps: UntilSteps::Built,
+        },
     );
 
     assert_eq!(
         primitive_operands(&ir, IrBinOp::Le),
-        [
-            (Some(Ty::Int), Some(Ty::Int)),
-            (Some(Ty::Int), Some(Ty::Int)),
-        ]
+        [(Some(Ty::Int), Some(Ty::Int))]
+    );
+    assert_eq!(
+        primitive_operands(&ir, IrBinOp::Lt),
+        [(Some(Ty::Int), Some(Ty::Int))]
     );
 }
 

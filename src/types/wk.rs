@@ -52,6 +52,8 @@ names! {
     uint => "kotlin/UInt",
     ulong => "kotlin/ULong",
     kotlin_jvm_intrinsics => "kotlin/jvm/internal/Intrinsics",
+    closed_range => "kotlin/ranges/ClosedRange",
+    closed_floating_point_range => "kotlin/ranges/ClosedFloatingPointRange",
     int_range => "kotlin/ranges/IntRange",
     long_range => "kotlin/ranges/LongRange",
     char_range => "kotlin/ranges/CharRange",

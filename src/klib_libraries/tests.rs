@@ -446,6 +446,150 @@ fn a_builtin_klib_function_carries_its_shared_compiler_operation() {
 }
 
 #[test]
+fn a_dependency_closed_range_lookalike_keeps_its_serialized_body() {
+    let mut contains = function(
+        "contains",
+        Some(class("kotlin/ranges/IntRange", false)),
+        vec![class("kotlin/Char", false)],
+    );
+    contains.ret = class("kotlin/Boolean", false);
+    contains.is_operator = true;
+    let libraries = KlibLibraries::from_packages(vec![(
+        segments(&["kotlin", "ranges"]),
+        package_of(vec![contains]),
+    )])
+    .expect("the same-package dependency is signable");
+
+    let contains = single_function(&libraries, "kotlin/ranges", "contains");
+    assert_eq!(contains.callable.compiler_intrinsic, None);
+    let realization = libraries
+        .external_callable(contains.callable.external_identity.expect("identity"))
+        .expect("the dependency body remains its realization");
+    assert_eq!(realization.callable.compiler_intrinsic, None);
+}
+
+fn write_closed_range_contains_klib(
+    label: &str,
+    unique_name: &str,
+    operator: bool,
+    ret: Ty,
+) -> std::path::PathBuf {
+    let mut declaration = crate::metadata::builder::FnMeta::plain(
+        "contains",
+        vec![("value".to_string(), Ty::Char)],
+        ret,
+    );
+    declaration.receiver = Some(Ty::obj("kotlin/ranges/IntRange"));
+    declaration.operator = operator;
+    let fragment = crate::metadata::klib_fragment::package_fragment(
+        &["kotlin", "ranges"],
+        &crate::metadata::klib_fragment::KlibFileMembers {
+            file_name: "dependency.kt".to_string(),
+            functions: vec![declaration],
+            properties: Vec::new(),
+            constants: Vec::new(),
+            aliases: Vec::new(),
+        },
+        &[],
+        true,
+    );
+    let mut writer = crate::klib::write::KlibWriter::native_test_fixture(unique_name);
+    writer.add_fragment("kotlin.ranges", fragment);
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    writer
+        .write_directory(&directory)
+        .expect("write range-contains KLIB");
+    let ir = directory.join("default/ir");
+    std::fs::create_dir_all(&ir).expect("create spoofed dependency IR directory");
+    for table in [
+        "files.knf",
+        "strings.knt",
+        "signatures.knt",
+        "irDeclarations.knd",
+        "bodies.knb",
+        "types.knt",
+    ] {
+        std::fs::write(ir.join(table), [0u8; 4]).expect("write empty spoofed dependency IR table");
+    }
+    directory
+}
+
+#[test]
+fn a_dependency_cannot_claim_stdlib_authority_from_its_manifest() {
+    let directory = write_closed_range_contains_klib("spoofed-stdlib", "stdlib", true, Ty::Boolean);
+
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::dependency(directory.clone())])
+        .expect("the dependency archive opens");
+    let contains = single_function(&libraries, "kotlin/ranges", "contains");
+    assert_eq!(contains.callable.compiler_intrinsic, None);
+    assert_eq!(
+        libraries
+            .external_callable(contains.callable.external_identity.expect("identity"))
+            .expect("dependency realization")
+            .callable
+            .compiler_intrinsic,
+        None
+    );
+
+    drop(libraries);
+    std::fs::remove_dir_all(directory).expect("remove spoofed stdlib dependency");
+}
+
+#[test]
+fn a_dependency_first_duplicate_cannot_hide_the_designated_stdlib_role() {
+    // Public KLIB signatures intentionally omit result type and source modifiers. Give the
+    // dependency the same serialized identity but incompatible metadata so this proves the full
+    // authoritative declaration replaces it rather than merely receiving the stdlib authority bit.
+    let dependency =
+        write_closed_range_contains_klib("duplicate-dependency", "dependency", false, Ty::String);
+    let stdlib = write_closed_range_contains_klib("designated-stdlib", "stdlib", true, Ty::Boolean);
+    let libraries = KlibLibraries::open(&[
+        KlibLibraryInput::dependency(dependency.clone()),
+        KlibLibraryInput::platform_stdlib(stdlib.clone()),
+    ])
+    .expect("the duplicate dependency and designated stdlib open");
+
+    let contains = single_function(&libraries, "kotlin/ranges", "contains");
+    let expected = Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains);
+    assert!(contains.flags.operator);
+    assert_eq!(contains.callable.ret, Ty::Boolean);
+    assert_eq!(contains.callable.compiler_intrinsic, expected);
+    assert_eq!(
+        libraries
+            .external_callable(contains.callable.external_identity.expect("identity"))
+            .expect("selected realization")
+            .callable
+            .compiler_intrinsic,
+        expected
+    );
+
+    drop(libraries);
+    std::fs::remove_dir_all(dependency).expect("remove duplicate dependency");
+    std::fs::remove_dir_all(stdlib).expect("remove designated stdlib");
+}
+
+#[test]
+fn multiple_typed_platform_stdlibs_are_rejected_before_archive_decoding() {
+    let error = KlibLibraries::open(&[
+        KlibLibraryInput::platform_stdlib("first-stdlib.klib".into()),
+        KlibLibraryInput::platform_stdlib("second-stdlib.klib".into()),
+    ])
+    .err()
+    .expect("multiple selected platform stdlibs are invalid");
+    assert_eq!(
+        error.to_string(),
+        "multiple platform stdlib KLIB inputs: first-stdlib.klib and second-stdlib.klib"
+    );
+}
+
+#[test]
 fn a_klib_delegate_function_keeps_its_serialized_body_authoritative() {
     let libraries = KlibLibraries::from_packages(vec![(
         segments(&["kotlin"]),

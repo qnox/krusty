@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use super::super::classifier_records::classifier_record;
 use super::super::lookup::published_function;
-use super::super::KlibLibraries;
+use super::super::{KlibLibraries, KlibLibraryInput};
 use crate::compilation_target::CompilationTarget;
 use crate::libraries::{CallablePlacement, FunctionInfo, MemberRealization};
 use crate::metadata::semantic::{KotlinFunction, KotlinType};
@@ -166,7 +166,8 @@ fn check_target(target: CompilationTarget, list: &str) {
         );
         return;
     };
-    let libraries = KlibLibraries::open(&[stdlib]).unwrap_or_else(|error| panic!("{error}"));
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib)])
+        .unwrap_or_else(|error| panic!("{error}"));
     let uncovered = uncovered_externals(&libraries);
     let path = list_path(list);
     let shrink = std::env::var_os("KRUSTY_SHRINK_UNCOVERED_EXTERNALS").is_some();

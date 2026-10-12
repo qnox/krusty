@@ -48,6 +48,15 @@ impl BodyLowering<'_, '_, '_> {
                     &[left, right],
                 )
             }
+            IrIntrinsic::UnsignedCompare { operand } => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Err("a malformed unsigned comparison".into());
+                };
+                let carrier = operand
+                    .scalar_value_repr()
+                    .ok_or_else(|| declined!("an unsigned comparison of `{operand:?}`"))?;
+                self.unsigned_compare_intrinsic(carrier, *left, *right, ret)
+            }
             // `s[i]`, and the read a `for (c in s)` loop is lowered into: common lowering turns
             // that loop into a counted one over `StringLength` and this, so the two arrive
             // together and only one of them was answered.

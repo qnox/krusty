@@ -94,6 +94,34 @@ impl<'a> Checker<'a> {
         span: Span,
         expected_result: Option<Ty>,
     ) -> Option<(Ty, ResolvedCall)> {
+        self.operator_call_ret_with_argument_kinds(
+            scope,
+            site,
+            receiver,
+            name,
+            arg_tys,
+            arg_exprs,
+            span,
+            expected_result,
+            None,
+        )
+    }
+
+    /// Shared operator selection with an optional checked semantic view of the arguments. Range
+    /// membership uses this only to authorize a direct comparison through a type parameter's
+    /// declared primitive bound; the ordinary call path always derives kinds from source values.
+    fn operator_call_ret_with_argument_kinds(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        site: ExprId,
+        receiver: Ty,
+        name: &str,
+        arg_tys: &[Ty],
+        arg_exprs: &[ExprId],
+        span: Span,
+        expected_result: Option<Ty>,
+        checked_argument_kinds: Option<Vec<crate::symbol_resolver::CallArgKind>>,
+    ) -> Option<(Ty, ResolvedCall)> {
         // `downTo` and the legacy `until` range spellings are represented by RangeKind in the AST,
         // but their Kotlin declarations are `infix`, not `operator`. They still go through the same
         // semantic callable selection and checked-FIR handoff as the operator range conventions.
@@ -102,7 +130,9 @@ impl<'a> Checker<'a> {
             |operator: bool, infix: bool| operator || (accepts_range_infix && infix);
         if name == "set" {
             self.indexed_operator_ambiguous = false;
-            let arg_kinds = self.call_arg_kinds(scope, arg_exprs);
+            let arg_kinds = checked_argument_kinds
+                .clone()
+                .unwrap_or_else(|| self.call_arg_kinds(scope, arg_exprs));
             let (mut functions, properties) =
                 self.stable_receiver_callables(receiver, name).into_parts();
             let resolver = self.resolver();
@@ -226,7 +256,8 @@ impl<'a> Checker<'a> {
             };
             return Some((ret, target));
         }
-        let arg_kinds = self.call_arg_kinds(scope, arg_exprs);
+        let arg_kinds =
+            checked_argument_kinds.unwrap_or_else(|| self.call_arg_kinds(scope, arg_exprs));
         crate::trace_compiler!(
             "resolve",
             "operator extension inventory name={name} receiver={receiver:?} candidates={:?}",
@@ -495,7 +526,6 @@ impl<'a> Checker<'a> {
             let et = self.expr(scope, end);
             let operands = InRangeOperands {
                 expression: e,
-                value,
                 kind,
                 value_ty: vt,
             };
@@ -553,11 +583,56 @@ impl<'a> Checker<'a> {
             let range_st = range_operand(st);
             let range_et = range_operand(et);
             let comparison_provenance = selected_range_comparison_provenance(kind, &range_call);
-            // Require uniform operand types — the lowering emits direct same-type comparisons, so a
-            // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
+            let operands_are_numeric = [range_vt, range_st, range_et].iter().all(prim);
+            let uniform = range_vt == range_st && range_st == range_et;
+            let mut ordinary_contains = None;
+            // kotlinc's `RangeContainsLowering` compares in the widest numeric type of the bounds
+            // and the value (`computeComparisonClass`) when the call is the range's own `contains`
+            // or a stdlib closed-range extension. Every primitive range declares the member
+            // `contains` of its own element type, and a member wins over any extension, so operands
+            // of one type always select it; mixed operands select through ordinary resolution.
+            // Unsigned membership is compared only between operands of one type. A range kotlinc
+            // does not compare (`downTo`, a floating `..<`) calls its `contains`.
+            let mut unsigned_compare = None;
             let comparison =
-                if prim(&range_vt) && range_vt == range_st && range_st == range_et {
-                    Some(range_st.range_counter_type().unwrap_or(range_st))
+                if operands_are_numeric {
+                    // Resolve `contains` before bypassing it even when the source operand types are
+                    // uniform. `Byte..Byte` and `Short..Short` build an `IntRange`, whose applicable
+                    // narrow overload is an extension and may be shadowed by a local declaration.
+                    // A type parameter participates through its declared primitive bound here,
+                    // just as it does in `rangeTo` selection above. Keep the source type for the
+                    // ordinary-call fallback below: only the selected builtin role authorizes
+                    // bypassing that call.
+                    let selected = if range_vt == vt {
+                        self.range_contains_call(scope, e, range_ty, vt, value)
+                    } else {
+                        self.range_contains_call_for_bound(scope, e, range_ty, range_vt, value)
+                    };
+                    let selects_range_contains = match &selected {
+                        Some((Ty::Boolean, ResolvedCall::Member(_))) => true,
+                        Some((Ty::Boolean, ResolvedCall::Extension(extension))) => {
+                            extension.callable.compiler_intrinsic
+                                == Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
+                        }
+                        _ => false,
+                    };
+                    if range_vt == vt {
+                        ordinary_contains = Some(selected);
+                    }
+                    let unsigned = [range_vt, range_st, range_et]
+                        .iter()
+                        .any(|ty| ty.is_unsigned());
+                    let comparison = (selects_range_contains
+                        && comparison_provenance.is_some()
+                        && (uniform || !unsigned))
+                        .then(|| range_comparison_type(range_st, range_et, range_vt))
+                        .flatten();
+                    if let Some(counter @ (Ty::UInt | Ty::ULong)) = comparison {
+                        unsigned_compare = self.unsigned_loop_compare(counter);
+                        unsigned_compare.as_ref().map(|_| counter)
+                    } else {
+                        comparison
+                    }
                 } else if prim(&range_st)
                     && range_st == range_et
                     && self.in_range_widened_value(vt, range_st)
@@ -577,11 +652,25 @@ impl<'a> Checker<'a> {
                     self.resolved_builtin_operator_accesses
                         .insert((e, convention.key), access);
                 }
+                // Direct comparison bypasses the selected range call, so publish the non-null
+                // boundaries it would impose on both bounds. Use the already selected comparison
+                // type: for a mixed floating range this preserves the platform check before the
+                // same Float-to-Double widening the comparison requires.
+                for operand in [start, end] {
+                    self.narrow_platform_value(comparison, operand, PlatformNarrowing::Argument);
+                }
+                // Numeric membership similarly bypasses the selected contains call. The alternate
+                // direct arm is a widened reference (`Any! in 1..2`): it must stay boxed for the
+                // checked `instanceof Int` path and therefore has no scalar value boundary.
+                if operands_are_numeric {
+                    self.narrow_platform_value(comparison, value, PlatformNarrowing::Argument);
+                }
                 self.resolved_in_range_comparisons.insert(
                     e,
                     ResolvedInRangeComparison {
                         comparison,
                         provenance,
+                        unsigned_compare,
                     },
                 );
                 Ty::Boolean
@@ -590,29 +679,68 @@ impl<'a> Checker<'a> {
                 // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
                 // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
-                self.finish_range_contains(scope, &operands, range_ty, range_call)
+                let contains = ordinary_contains
+                    .unwrap_or_else(|| self.range_contains_call(scope, e, range_ty, vt, value));
+                self.finish_range_contains(&operands, range_ty, range_call, contains)
             }
         };
         self.set(e, t)
     }
 
-    fn finish_range_contains(
+    /// The `contains` operator call testing membership of `value` in a range of `range_ty`.
+    fn range_contains_call(
         &mut self,
         scope: &CheckerScope<'_>,
+        expression: ExprId,
+        range_ty: Ty,
+        value_ty: Ty,
+        value: ExprId,
+    ) -> Option<(Ty, ResolvedCall)> {
+        self.operator_call_ret(
+            scope,
+            expression,
+            range_ty,
+            "contains",
+            &[value_ty],
+            &[value],
+            self.span(expression),
+            None,
+        )
+    }
+
+    /// Select `contains` through a type parameter's checked primitive bound solely to authorize
+    /// direct comparison. This still runs the ordinary shared operator selector; it changes only
+    /// the semantic argument view. A non-direct fallback calls [`Self::range_contains_call`] with
+    /// the original symbolic source type instead.
+    fn range_contains_call_for_bound(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        range_ty: Ty,
+        bound: Ty,
+        value: ExprId,
+    ) -> Option<(Ty, ResolvedCall)> {
+        self.operator_call_ret_with_argument_kinds(
+            scope,
+            expression,
+            range_ty,
+            "contains",
+            &[bound],
+            &[value],
+            self.span(expression),
+            None,
+            Some(vec![crate::symbol_resolver::CallArgKind::Typed(bound)]),
+        )
+    }
+
+    fn finish_range_contains(
+        &mut self,
         operands: &InRangeOperands,
         range_ty: Ty,
         range_call: ResolvedCall,
+        contains: Option<(Ty, ResolvedCall)>,
     ) -> Ty {
-        let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
-            scope,
-            operands.expression,
-            range_ty,
-            "contains",
-            &[operands.value_ty],
-            &[operands.value],
-            self.span(operands.expression),
-            None,
-        ) else {
+        let Some((Ty::Boolean, contains_call)) = contains else {
             self.diags.error(
                 self.span(operands.expression),
                 format!(
@@ -635,6 +763,38 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// `computeComparisonClass`: the widest numeric type of a range literal's bounds and the value.
+fn range_comparison_type(start: Ty, end: Ty, value: Ty) -> Option<Ty> {
+    widest_numeric_type(widest_numeric_type(start, end)?, value)
+}
+
+/// `leastCommonPrimitiveNumericType`.
+fn widest_numeric_type(left: Ty, right: Ty) -> Option<Ty> {
+    let either = |types: &[Ty]| types.contains(&left) || types.contains(&right);
+    Some(if either(&[Ty::Double]) {
+        Ty::Double
+    } else if either(&[Ty::Float]) {
+        Ty::Float
+    } else if either(&[Ty::ULong]) {
+        Ty::ULong
+    } else if either(&[Ty::UInt, Ty::UShort, Ty::UByte]) {
+        Ty::UInt
+    } else if either(&[Ty::Long]) {
+        Ty::Long
+    } else if either(&[Ty::Int, Ty::Short, Ty::Byte]) {
+        Ty::Int
+    } else if either(&[Ty::Char]) {
+        Ty::Char
+    } else {
+        return None;
+    })
+}
+
+/// Whether the selected range declaration is one kotlinc's `RangeContainsLowering` turns into
+/// comparisons: a closed range built by `rangeTo`, `rangeUntil` or `until` over progression
+/// elements, or a floating-point `rangeTo`. `downTo` builds a progression, which is not a
+/// `ClosedRange`, and a floating-point `rangeUntil` an `OpenEndRange`: membership in either calls
+/// its `contains`.
 fn selected_range_comparison_provenance(
     kind: crate::ast::RangeKind,
     range_call: &ResolvedCall,
@@ -653,11 +813,8 @@ fn selected_range_comparison_provenance(
         (RangeKind::Until, MemberRealization::Intrinsic(CompilerIntrinsic::RangeUntil)) => {
             Some(Provenance::RangeUntil)
         }
-        (RangeKind::DownTo, MemberRealization::Intrinsic(CompilerIntrinsic::RangeDownTo)) => {
-            Some(Provenance::RangeDownTo)
-        }
         (
-            RangeKind::Through | RangeKind::OpenEnd,
+            RangeKind::Through,
             MemberRealization::Intrinsic(CompilerIntrinsic::FloatingRangeMembership),
         ) => Some(Provenance::FloatingRangeMembership),
         _ => None,
@@ -692,11 +849,13 @@ impl ResolvedCall {
 pub(crate) struct ResolvedInRangeComparison {
     pub(crate) comparison: Ty,
     pub(crate) provenance: crate::fir::FirRangeComparisonProvenance,
+    /// Exact provider-selected comparison for an unsigned counter. Common lowering consumes this
+    /// identity before publishing the normalized unsigned-ordering operation to backends.
+    pub(crate) unsigned_compare: Option<super::for_loop_iteration::RuntimeFunction>,
 }
 
 struct InRangeOperands {
     expression: ExprId,
-    value: ExprId,
     kind: crate::ast::RangeKind,
     value_ty: Ty,
 }

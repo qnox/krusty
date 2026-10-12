@@ -82,6 +82,17 @@ pub struct KlibWriter {
 }
 
 impl KlibWriter {
+    /// A current Native metadata-library container for cross-module tests that only care about
+    /// archive structure or manifest authority, not version stamping itself.
+    #[cfg(test)]
+    pub(crate) fn native_test_fixture(unique_name: &str) -> Self {
+        Self::new(
+            unique_name,
+            KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
+            KlibPlatform::Native,
+        )
+    }
+
     /// A library named `unique_name`, stamped with `stamp`, for `platform`.
     ///
     /// The manifest is the reference compiler's for a metadata library: no dependencies, no Konan

@@ -7,6 +7,9 @@ use super::{builtin_declared_return, builtin_descriptor, builtin_erased};
 /// Provider-normalized projection of one package callable decoded from a builtins resource.
 #[derive(Clone)]
 pub(in crate::jvm) struct BuiltinPackageFunction {
+    /// The selected builtins fragment came from the JVM stdlib paired with the selected common
+    /// KLIB. This is input provenance, never a package/name/manifest inference.
+    pub(in crate::jvm) compiler_builtin_owner: bool,
     pub(in crate::jvm) generic_sig: GenericSig,
     pub(in crate::jvm) only_input_type_formals: Vec<String>,
     pub(in crate::jvm) params: Vec<Ty>,

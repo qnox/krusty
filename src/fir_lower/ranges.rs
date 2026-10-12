@@ -7,6 +7,7 @@ use super::{BodyLowering, FirLoweringFailure};
 pub(super) struct InRangeLowering {
     operation: FirRangeOperation,
     comparison_ty: Ty,
+    unsigned_compare: Option<crate::fir::FirRuntimeFunction>,
     operands: [FirExprId; 3],
     negated: bool,
     origin: OriginId,
@@ -16,6 +17,7 @@ impl InRangeLowering {
     pub(super) fn new(
         operation: FirRangeOperation,
         comparison_ty: Ty,
+        unsigned_compare: Option<crate::fir::FirRuntimeFunction>,
         operands: [FirExprId; 3],
         negated: bool,
         origin: OriginId,
@@ -23,6 +25,7 @@ impl InRangeLowering {
         Self {
             operation,
             comparison_ty,
+            unsigned_compare,
             operands,
             negated,
             origin,
@@ -61,6 +64,7 @@ impl BodyLowering<'_> {
         let InRangeLowering {
             operation,
             comparison_ty,
+            unsigned_compare,
             operands: [value, start, end],
             negated,
             origin,
@@ -74,10 +78,15 @@ impl BodyLowering<'_> {
                 ty: comparison_ty,
             });
         }
-        if matches!(comparison_ty, Ty::UInt | Ty::ULong) {
-            let value = self.expression(value)?;
+        let value_ty = self.expression_ty(value)?;
+        if matches!(comparison_ty, Ty::UInt | Ty::ULong)
+            || !(value_ty.is_reference() && comparison_ty.is_jvm_scalar())
+        {
+            // The backend realizes membership in a range literal as kotlinc's
+            // `RangeContainsLowering` does, from the operands as written.
             let start = self.expression(start)?;
             let end = self.expression(end)?;
+            let value = self.expression(value)?;
             return Ok(self
                 .ir
                 .add_expr(IrExpr::Checked(IrCheckedOperation::RangeContains {
@@ -87,6 +96,13 @@ impl BodyLowering<'_> {
                     end,
                     negated,
                     counter: comparison_ty,
+                    unsigned_compare: unsigned_compare.map(|function| {
+                        crate::ir::IrRuntimeFunction {
+                            function: function.function,
+                            parameters: function.parameters.to_vec(),
+                            result: function.result,
+                        }
+                    }),
                 })));
         }
         let mut declarations = Vec::with_capacity(3);
@@ -108,70 +124,48 @@ impl BodyLowering<'_> {
             init: Some(end),
             named: false,
         }));
-        let value_ty = self.expression_ty(value)?;
+        // A reference value over a primitive range is an element only when it is a boxed one.
         let value = self.expression(value)?;
-        if value_ty.is_reference() && comparison_ty.is_jvm_scalar() {
-            let value_slot = self.allocate_temporary();
-            declarations.push(self.ir.add_expr(IrExpr::Variable {
-                index: value_slot,
-                ty: stored_value_ty(value_ty),
-                init: Some(value),
-                named: false,
-            }));
-            let value_read = self.ir.add_expr(IrExpr::GetValue(value_slot));
-            let matches = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::InstanceOf,
-                arg: value_read,
-                type_operand: comparison_ty,
-            });
-            let value_read = self.ir.add_expr(IrExpr::GetValue(value_slot));
-            let value = self.coerce_range_operand(value_read, comparison_ty);
-            let scalar_slot = self.allocate_temporary();
-            let scalar = self.ir.add_expr(IrExpr::Variable {
-                index: scalar_slot,
-                ty: comparison_ty,
-                init: Some(value),
-                named: false,
-            });
-            let contained = self.range_membership(
-                operation,
-                comparison_ty,
-                negated,
-                start_slot,
-                end_slot,
-                scalar_slot,
-            );
-            let matched = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![scalar],
-                value: Some(contained),
-            });
-            let mismatch = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(negated)));
-            let result = self.ir.add_expr(IrExpr::When {
-                branches: vec![(Some(matches), matched), (None, mismatch)],
-            });
-            self.ir.logical_types.insert(matched, Ty::Boolean);
-            self.ir.logical_types.insert(result, Ty::Boolean);
-            return Ok(self.ir.add_expr(IrExpr::Block {
-                stmts: declarations,
-                value: Some(result),
-            }));
-        }
-        let value = self.coerce_range_operand(value, comparison_ty);
         let value_slot = self.allocate_temporary();
         declarations.push(self.ir.add_expr(IrExpr::Variable {
             index: value_slot,
-            ty: comparison_ty,
+            ty: stored_value_ty(value_ty),
             init: Some(value),
             named: false,
         }));
-        let result = self.range_membership(
+        let value_read = self.ir.add_expr(IrExpr::GetValue(value_slot));
+        let matches = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: value_read,
+            type_operand: comparison_ty,
+        });
+        let value_read = self.ir.add_expr(IrExpr::GetValue(value_slot));
+        let value = self.coerce_range_operand(value_read, comparison_ty);
+        let scalar_slot = self.allocate_temporary();
+        let scalar = self.ir.add_expr(IrExpr::Variable {
+            index: scalar_slot,
+            ty: comparison_ty,
+            init: Some(value),
+            named: false,
+        });
+        let contained = self.range_membership(
             operation,
             comparison_ty,
             negated,
             start_slot,
             end_slot,
-            value_slot,
+            scalar_slot,
         );
+        let matched = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![scalar],
+            value: Some(contained),
+        });
+        let mismatch = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(negated)));
+        let result = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(matches), matched), (None, mismatch)],
+        });
+        self.ir.logical_types.insert(matched, Ty::Boolean);
+        self.ir.logical_types.insert(result, Ty::Boolean);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: declarations,
             value: Some(result),
@@ -188,9 +182,8 @@ impl BodyLowering<'_> {
         value_slot: u32,
     ) -> ExprId {
         if negated && matches!(comparison_ty, Ty::Float | Ty::Double) {
-            // IEEE floating-point order is partial: `!(x <= NaN)` is true while `x > NaN` is
-            // false, so the integer De Morgan form is not equivalent. Build the checked positive
-            // membership predicate and negate that boolean result exactly.
+            // IEEE floating order is partial: neither `<` nor `>` holds for NaN. Negate the
+            // positive conjunction instead of applying the integral De Morgan rewrite.
             let contained = self.range_membership(
                 operation,
                 comparison_ty,

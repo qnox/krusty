@@ -1,6 +1,6 @@
 //! Whole source sets analyzed against the Kotlin/Native stdlib KLIB as their platform.
 
-use super::super::KlibLibraries;
+use super::super::{KlibLibraries, KlibLibraryInput};
 use crate::diag::DiagSink;
 
 pub(super) fn native_stdlib() -> Option<KlibLibraries> {
@@ -13,7 +13,10 @@ pub(super) fn native_stdlib() -> Option<KlibLibraries> {
         );
         return None;
     };
-    Some(KlibLibraries::open(&[stdlib]).unwrap_or_else(|error| panic!("{error}")))
+    Some(
+        KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib)])
+            .unwrap_or_else(|error| panic!("{error}")),
+    )
 }
 
 fn diagnostics(libraries: &KlibLibraries, source: &str) -> Vec<String> {
