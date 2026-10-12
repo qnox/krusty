@@ -109,20 +109,63 @@ const GENERIC_EXTENSION_DELEGATES: &str = "package store\n\
     \n\
     @JvmInline value class Value(val raw: Int)\n\
     \n\
+    interface ProjectedBound<T>\n\
+    interface NullableBound<T>\n\
+    \n\
     val <T> T.packageValue: Int by Unit\n\
+    val <T : Int?> T.nullablePrimitiveBound: Int by Unit\n\
+    val <T : Value?> T.nullableValueBound: Int by Unit\n\
+    val <T : Comparable<T>> T.recursiveBound: Int by Unit\n\
+    val <T : ProjectedBound<out T>> T.projectedRecursiveBound: Int by Unit\n\
+    val <T : NullableBound<T?>> T.nullableRecursiveBound: Int by Unit\n\
     val <T> List<T>.nestedValue: Int by Unit\n\
     val List<String>.concreteValue: Int by Unit\n\
     val Value?.nullableValue: Int by Unit\n\
     \n\
     class GenericHost<A> {\n\
     \x20   val <T> T.memberValue: Int by Unit\n\
+    \x20   val <T : Int?> T.nullablePrimitiveBound: Int by Unit\n\
+    \x20   val <T : Value?> T.nullableValueBound: Int by Unit\n\
     \x20   val <T> List<T>.nestedMemberValue: Int by Unit\n\
     \x20   val A.enclosingValue: Int by Unit\n\
+    }\n\
+    \n\
+    class Outer<A> {\n\
+    \x20   inner class Inner<B : A> {\n\
+    \x20       val nestedOwner: Int by Unit\n\
+    \x20   }\n\
+    }\n\
+    \n\
+    fun <T> localOwner(value: T): Int {\n\
+    \x20   class Local<A : T> {\n\
+    \x20       val localOwner: Int by Unit\n\
+    \x20   }\n\
+    \x20   return Local<T>().localOwner\n\
+    }\n\
+    \n\
+    class RecursiveHost<T : Comparable<T>> {\n\
+    \x20   val recursiveOwner: Int by Unit\n\
+    }\n\
+    \n\
+    class ProjectedRecursiveHost<T : ProjectedBound<out T>> {\n\
+    \x20   val projectedRecursiveOwner: Int by Unit\n\
+    }\n\
+    \n\
+    class NullableRecursiveHost<T : NullableBound<T?>> {\n\
+    \x20   val nullableRecursiveOwner: Int by Unit\n\
     }\n";
 
 #[test]
 fn generic_extension_delegate_methods_use_erased_receivers() {
-    for class in ["store/GenericExtensionDelegatesKt", "store/GenericHost"] {
+    for class in [
+        "store/GenericExtensionDelegatesKt",
+        "store/GenericHost",
+        "store/Outer$Inner",
+        "store/GenericExtensionDelegatesKt$localOwner$Local",
+        "store/RecursiveHost",
+        "store/ProjectedRecursiveHost",
+        "store/NullableRecursiveHost",
+    ] {
         common::byte_diff_against_kotlinc_cp(
             "GenericExtensionDelegates",
             GENERIC_EXTENSION_DELEGATES,
@@ -134,10 +177,11 @@ fn generic_extension_delegate_methods_use_erased_receivers() {
     }
 }
 
-/// A retained property annotation's synthetic marker follows the getter and precedes the delegate
-/// method, matching kotlinc's declaration order.
+/// A retained property annotation's synthetic marker precedes the delegate method even when
+/// accessor renaming left the marker nonadjacent to its getter.
 const ANNOTATED_MEMBER_DELEGATE: &str = "package store\n\
     \n\
+    import kotlin.jvm.JvmName\n\
     import kotlin.reflect.KProperty\n\
     \n\
     @Target(AnnotationTarget.PROPERTY)\n\
@@ -146,7 +190,9 @@ const ANNOTATED_MEMBER_DELEGATE: &str = "package store\n\
     operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
     \n\
     class AnnotatedHost {\n\
-    \x20   @Marker val value: Int by Unit\n\
+    \x20   @Marker\n\
+    \x20   @get:JvmName(\"readValue\")\n\
+    \x20   val value: Int by Unit\n\
     }\n";
 
 #[test]
@@ -159,6 +205,36 @@ fn annotated_member_marker_precedes_its_delegate_method() {
     )
     .expect("reference kotlinc is provisioned")
     .unwrap_or_else(|diff| panic!("annotated member delegate differs from kotlinc: {diff}"));
+}
+
+/// A member extension's marker is a standalone method in the class schedule. It keeps the
+/// property's source position so the generated in-place delegate method cannot overtake it.
+const ANNOTATED_MEMBER_EXTENSION_DELEGATE: &str = "package store\n\
+    \n\
+    import kotlin.reflect.KProperty\n\
+    \n\
+    @Target(AnnotationTarget.PROPERTY)\n\
+    annotation class Marker\n\
+    \n\
+    operator fun Unit.getValue(thisRef: String, property: KProperty<*>): Int = 1\n\
+    \n\
+    class AnnotatedExtensionHost {\n\
+    \x20   @Marker\n\
+    \x20   val String.extension: Int by Unit\n\
+    }\n";
+
+#[test]
+fn annotated_member_extension_marker_precedes_its_delegate_method() {
+    common::byte_diff_against_kotlinc_cp(
+        "AnnotatedMemberExtensionDelegate",
+        ANNOTATED_MEMBER_EXTENSION_DELEGATE,
+        "store/AnnotatedExtensionHost",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| {
+        panic!("annotated member extension delegate differs from kotlinc: {diff}")
+    });
 }
 
 /// The reported shape runs, and the JVM declares the `get<X>$delegate` methods in place of the

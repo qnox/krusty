@@ -147,19 +147,12 @@ fn realize_package_delegates(ir: &mut IrFile) {
 
 fn realize_member_delegates(ir: &mut IrFile) {
     let mut removed = HashMap::<ClassId, HashSet<u32>>::default();
-    let annotation_markers = ir
-        .property_annotation_markers
-        .values()
-        .copied()
-        .collect::<HashSet<_>>();
     for class in 0..ir.classes.len() {
         let class = class as ClassId;
         let owner = ir.classes[class as usize].fq_name;
         let owner_receiver = approximate_owner_receiver(ir, owner);
-        let owner_type_parameters = ir
-            .class_signature_name(owner)
+        let owner_type_parameters = owner_type_parameter_chain(ir, owner)
             .into_iter()
-            .flat_map(|signature| &signature.type_params)
             .map(|parameter| parameter.semantic_name.clone())
             .chain(
                 ir.classes[class as usize]
@@ -179,6 +172,10 @@ fn realize_member_delegates(ir: &mut IrFile) {
                     field: declaration.delegate_field?,
                     getter: declaration.getter?,
                     last_accessor: declaration.setter.unwrap_or(declaration.getter?),
+                    annotation_marker: ir
+                        .property_annotation_markers
+                        .get(&(owner, declaration.name.clone()))
+                        .copied(),
                     receivers: vec![owner_receiver],
                 })
             })
@@ -195,6 +192,10 @@ fn realize_member_delegates(ir: &mut IrFile) {
                         field: declaration.delegate_field?,
                         getter: declaration.getter,
                         last_accessor: declaration.setter.unwrap_or(declaration.getter),
+                        annotation_marker: ir
+                            .property_annotation_markers
+                            .get(&(owner, declaration.name.clone()))
+                            .copied(),
                         receivers: vec![
                             owner_receiver,
                             approximate_delegate_receiver(
@@ -215,6 +216,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 field,
                 getter,
                 last_accessor,
+                annotation_marker,
                 receivers,
             } = candidate;
             let Some((store, delegate)) = delegate_store(ir, class, field) else {
@@ -263,15 +265,12 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 .iter()
                 .position(|&function| function == last_accessor)
                 .map_or(methods.len(), |index| index + 1);
-            let position = if last_accessor == getter
-                && methods
-                    .get(position)
-                    .is_some_and(|method| annotation_markers.contains(method))
-            {
-                position + 1
-            } else {
-                position
-            };
+            // Accessor renaming can leave the already-recorded property marker away from its
+            // getter. The delegate method follows both the property's accessors and that exact
+            // marker, irrespective of their current adjacency.
+            let position = annotation_marker
+                .and_then(|marker| methods.iter().position(|&method| method == marker))
+                .map_or(position, |marker| position.max(marker + 1));
             methods.insert(position, method);
             match declaration {
                 MemberDelegateDeclaration::Property(property) => {
@@ -302,23 +301,55 @@ fn approximate_delegate_receiver<'a>(
     approximate_type_parameters(receiver, &parameters, &mut HashSet::default())
 }
 
-/// The dispatch receiver of a static delegate method cannot refer to its owner's class type
-/// parameters. Keep the applied owner shape, substituting each argument with its declared primary
-/// bound, so `Host<A>` becomes `Host<Any>` rather than raw `Host` in the method Signature.
+/// Type parameters declared across the JVM owner application, outermost first. A non-static inner
+/// classifier's application includes each enclosing inner-chain declaration; a static nested class
+/// ends that chain.
+fn owner_type_parameter_chain(
+    ir: &IrFile,
+    owner: crate::types::TypeName,
+) -> Vec<&crate::ir::IrTypeParameter> {
+    let mut current = owner;
+    let mut chain = Vec::new();
+    loop {
+        let Some(class) = ir
+            .classes
+            .iter()
+            .find(|candidate| candidate.fq_name == current)
+        else {
+            break;
+        };
+        if let Some(signature) = ir.class_signature_name(current) {
+            chain.push(signature.type_params.as_slice());
+        }
+        if !class.is_inner_class {
+            break;
+        }
+        let Some(outer) = current.nested_owner() else {
+            break;
+        };
+        current = outer;
+    }
+    chain.into_iter().rev().flatten().collect::<Vec<_>>()
+}
+
+/// The dispatch receiver of a static delegate method cannot refer to its owner chain's class type
+/// parameters. Keep the applied owner shape, substituting every argument with its declared primary
+/// bound, so `Outer<A>.Inner<B : A>` becomes `Outer<Any>.Inner<Any>` rather than a partial or raw
+/// application in the method Signature. A local owner's captured parameters are not arguments of
+/// that application, but its declared bounds may refer to them; approximate those references too.
 fn approximate_owner_receiver(ir: &IrFile, owner: crate::types::TypeName) -> Ty {
-    let Some(signature) = ir.class_signature_name(owner) else {
-        return Ty::Obj(owner, &[]);
-    };
-    if signature.type_params.is_empty() {
+    let declarations = owner_type_parameter_chain(ir, owner);
+    if declarations.is_empty() {
         return Ty::Obj(owner, &[]);
     }
-    let parameters = signature
-        .type_params
+    let mut parameters = declarations
         .iter()
         .map(|parameter| parameter.semantic_name.clone())
         .collect::<HashSet<_>>();
-    let arguments = signature
-        .type_params
+    if let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) {
+        parameters.extend(class.captured_type_params.iter().cloned());
+    }
+    let arguments = declarations
         .iter()
         .map(|parameter| {
             let bound = crate::jvm::generic_erasure::declared_primary_bound(parameter)
@@ -337,9 +368,13 @@ fn approximate_type_parameters(
     match ty {
         Ty::TyParam(name, bound) if parameters.contains(name) => {
             if !visiting.insert(name.to_owned()) {
-                return Ty::obj_name(crate::types::wk::any());
+                // A repeated parameter is the recursive position of an F-bound. The generated
+                // method does not declare that parameter, so kotlinc exposes the position as `*`.
+                return Ty::star_projection(Ty::nullable(Ty::obj_name(crate::types::wk::any())));
             }
-            let approximated = approximate_type_parameters(*bound, parameters, visiting).non_null();
+            // A bare type parameter carries nullability in its bound. Keep that wrapper so
+            // `T : Int?` and `T : Value?` remain boxed delegate-method receivers.
+            let approximated = approximate_type_parameters(*bound, parameters, visiting);
             visiting.remove(name);
             approximated
         }
@@ -355,22 +390,22 @@ fn approximate_type_parameters(
             signature.suspend,
         ),
         Ty::Nullable(inner) => {
-            Ty::nullable(approximate_type_parameters(*inner, parameters, visiting))
+            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::nullable)
         }
         Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(approximate_type_parameters(*inner, parameters, visiting))
+            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::platform_nullable)
         }
         Ty::InProjection(inner) => {
-            Ty::in_projection(approximate_type_parameters(*inner, parameters, visiting))
+            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::in_projection)
         }
         Ty::OutProjection(inner) => {
-            Ty::out_projection(approximate_type_parameters(*inner, parameters, visiting))
+            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::out_projection)
         }
         Ty::StarProjection(inner) => {
-            Ty::star_projection(approximate_type_parameters(*inner, parameters, visiting))
+            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::star_projection)
         }
         Ty::DefinitelyNotNull(inner) => {
-            approximate_type_parameters(*inner, parameters, visiting).non_null()
+            approximate_type_parameter_wrapper(*inner, parameters, visiting, Ty::non_null)
         }
         Ty::Obj(classifier, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             classifier,
@@ -389,6 +424,23 @@ fn approximate_type_parameters(
     }
 }
 
+fn approximate_type_parameter_wrapper(
+    inner: Ty,
+    parameters: &HashSet<String>,
+    visiting: &mut HashSet<String>,
+    wrap: fn(Ty) -> Ty,
+) -> Ty {
+    let approximated = approximate_type_parameters(inner, parameters, visiting);
+    if matches!(approximated, Ty::StarProjection(_)) {
+        // A star is already the complete replacement for this recursive type argument. Retaining
+        // a nullable, projection, or definitely-not-null wrapper would produce an invalid `*?`,
+        // `out *`, or `* & Any` signature instead of kotlinc's `*`.
+        approximated
+    } else {
+        wrap(approximated)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum MemberDelegateDeclaration {
     Property(u32),
@@ -400,6 +452,7 @@ struct MemberDelegateCandidate {
     field: u32,
     getter: FunId,
     last_accessor: FunId,
+    annotation_marker: Option<FunId>,
     /// Dispatch receiver followed by the extension receiver, when present.
     receivers: Vec<Ty>,
 }

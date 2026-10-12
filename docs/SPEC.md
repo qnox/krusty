@@ -10712,9 +10712,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is ABSTRACT, an interface member with a getter is OPEN. A getter written in source, a setter
   body, a `private set` and a delegated property's accessors are not the default accessor, which
   the accessor flag word records; a bodiless `set` is. A non-default setter records its value
-  parameter (the written name, else `value`, or `<set-?>` when delegated), and a delegated property
-  records its `x$delegate` field; `lateinit` and delegation are property flags. Measured against kotlinc
-  2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_property_flags_e2e.rs`.
+  parameter (the written name, else `value`, or `<set-?>` when delegated), and an ordinary
+  delegated property records its `x$delegate` field; a singleton or constant delegate instead
+  records the in-place delegate method described below. `lateinit` and delegation are property
+  flags. Measured against kotlinc 2.4.20; see `docs/METADATA_NOTES.md`. Test:
+  `tests/metadata_property_flags_e2e.rs`.
 - **Status an override inherits.** An override records the return-value status of the first
   declaration it overrides that has one (Java declarations have none and are skipped) and is
   `operator`/`infix` when any declaration it overrides is. Kotlin's `Any` is the implicit supertype
@@ -12424,10 +12426,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operands a same-module expansion never reads; the JVM realization elides them, and for a
   dependency's operator reads its bytecode. A dependency operator that is not `@InlineOnly` or
   reified must then be spliced: falling back to a real call is refused, since the call would check
-  the `null`. A top-level delegated property's metadata sets `IS_DELEGATED`, marks both accessors
-  not default (`<set-?>` for the setter's value) and names its `x$delegate` field explicitly. A
-  delegated getter states its operator call at the property's line, which an inlined operator's
-  lines map against. (`tests/delegated_properties_array_e2e.rs`.)
+  the `null`. An ordinary top-level delegated property's metadata sets `IS_DELEGATED`, marks both
+  accessors not default (`<set-?>` for the setter's value) and names its `x$delegate` field
+  explicitly. A singleton or constant delegate instead names its in-place delegate method and has
+  no storage field, as described below. A delegated getter states its operator call at the
+  property's line, which an inlined operator's lines map against.
+  (`tests/delegated_properties_array_e2e.rs`.)
   Delegated properties that share a name on one owner — extension properties for different
   receivers — cannot share that field. The first keeps `name$delegate` and each later one takes
   the next suffix, `name$delegate$1`, `name$delegate$2`, in declaration order, including when the
