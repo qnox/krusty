@@ -707,6 +707,7 @@ fn property_bridges(
                 setter_target,
                 internal_getter: internal_getter_bridge,
                 internal_setter: internal_setter_bridge,
+                overridden_internal: overridden_getter_internal,
             },
         );
         order.resize(
@@ -800,6 +801,8 @@ struct PropertyBridgeNames {
     setter_target: String,
     internal_getter: bool,
     internal_setter: bool,
+    /// The overridden getter is `internal`: its JVM name is the module slot, not a mapped builtin.
+    overridden_internal: bool,
 }
 
 fn push_property_bridge(
@@ -815,6 +818,7 @@ fn push_property_bridge(
         setter_target,
         internal_getter: internal_getter_bridge,
         internal_setter: internal_setter_bridge,
+        overridden_internal,
     } = names;
     let own = |accessor: Option<u32>| accessor.filter(|f| ir.classes[cid].methods.contains(f));
     let (getter, setter) = (
@@ -835,7 +839,11 @@ fn push_property_bridge(
     if !has_getter {
         let target_name =
             (internal_getter_bridge || getter_name != getter_target).then_some(getter_target);
-        let special = !internal_getter_bridge && getter_name != property_getter_name(&edge.name);
+        // As for a function, the name an internal slot publishes (`getV$lib`) is not a builtin's
+        // mapped JVM name, so its bridge is an ordinary overridable one, not a final special bridge.
+        let special = !internal_getter_bridge
+            && !overridden_internal
+            && getter_name != property_getter_name(&edge.name);
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
             target_function: getter,
@@ -868,6 +876,7 @@ fn push_property_bridge(
     // or the value-class retain drops it as a duplicate of the public setter.
     let sname = setter_name_with_getter_suffix(&edge.name, &getter_name);
     let has_setter = (!internal_setter_bridge
+        && sname == setter_target
         && crate::jvm::names::same_type_descriptor(setter_param, edge.implementation_type))
         || ir.classes[cid].bridges.iter().any(|b| {
             b.name == sname
