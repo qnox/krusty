@@ -44,6 +44,21 @@ fun sizeIs(text: String?): Boolean = text?.length == 3\n\
 fun countedIs(text: String?): String = if (counted() != text?.length) \"other\" else \"same\"\n\
 ";
 
+const SAFE_CALL_ORDER_SOURCE: &str = "\
+var effects = 0\n\
+\n\
+fun counted(): Int {\n\
+    effects++\n\
+    return 3\n\
+}\n\
+\n\
+fun box(): String {\n\
+    val text: String? = null\n\
+    if (text?.length == counted()) return \"comparison was true\"\n\
+    return if (effects == 0) \"OK\" else \"evaluated other operand: $effects\"\n\
+}\n\
+";
+
 #[test]
 fn primitive_to_object_equality_is_byte_identical_to_kotlinc() {
     common::byte_diff_against_kotlinc_cp(
@@ -56,4 +71,13 @@ fn primitive_to_object_equality_is_byte_identical_to_kotlinc() {
     .unwrap_or_else(|diff| {
         panic!("store/PrimitiveToObjectEqualityKt differs from kotlinc: {diff}")
     });
+}
+
+#[test]
+fn safe_call_equality_does_not_evaluate_the_other_operand_for_a_null_receiver() {
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SAFE_CALL_ORDER_SOURCE, "SafeCallEqualityOrder")
+            .as_deref(),
+        Some("OK")
+    );
 }

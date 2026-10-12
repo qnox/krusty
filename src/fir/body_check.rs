@@ -522,7 +522,7 @@ struct BodyFirChecker<'a> {
     /// Callables whose declaration lives in an enclosing independently streamed body. Nested
     /// lambdas/local functions retain this set so their references publish explicit closure
     /// operands instead of mistaking a streaming boundary for an ordinary nested-body scope.
-    streamed_outer_callables: std::collections::HashSet<BodyLocalCallableDeclarationId>,
+    streamed_outer_callables: HashSet<BodyLocalCallableDeclarationId>,
     nested_body_depth: u32,
     expression_depth: u32,
     owned_receiver_count: u32,
@@ -933,24 +933,24 @@ impl BodyFirChecker<'_> {
             index,
             origins,
             body,
-            scopes: vec![HashMap::new()],
-            delegate_scopes: vec![HashMap::new()],
-            outer_values: HashMap::new(),
-            outer_delegates: HashMap::new(),
+            scopes: vec![HashMap::default()],
+            delegate_scopes: vec![HashMap::default()],
+            outer_values: HashMap::default(),
+            outer_delegates: HashMap::default(),
             class_values: class_context.values,
             class_capture_values: class_context.capture_values,
             class_delegates: class_context.delegates,
             class_receivers: class_context.receivers,
-            counted_loop_variables: HashSet::new(),
+            counted_loop_variables: HashSet::default(),
             enclosing_property,
             session,
             return_target,
             lambda_return_source: None,
-            outer_lambda_return_depths: HashMap::new(),
+            outer_lambda_return_depths: HashMap::default(),
             function_return_depth: 0,
             loops: Vec::new(),
-            local_callable_scopes: vec![HashMap::new()],
-            expression_substitutions: HashMap::new(),
+            local_callable_scopes: vec![HashMap::default()],
+            expression_substitutions: HashMap::default(),
             lambda_binding_name: None,
             outer_callables: class_context.callables,
             streamed_outer_callables,
@@ -1105,8 +1105,8 @@ impl BodyFirChecker<'_> {
         body: ExprId,
     ) -> Result<FirExprId, BodyCheckFailure> {
         self.loops.push((label.clone(), 0, target));
-        self.scopes.push(HashMap::new());
-        self.delegate_scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
+        self.delegate_scopes.push(HashMap::default());
         if let Some((name, value)) = binding {
             self.scopes
                 .last_mut()
@@ -1128,9 +1128,9 @@ impl BodyFirChecker<'_> {
         condition: ExprId,
     ) -> Result<(FirExprId, FirExprId), BodyCheckFailure> {
         self.loops.push((label.clone(), 0, target));
-        self.scopes.push(HashMap::new());
-        self.delegate_scopes.push(HashMap::new());
-        self.local_callable_scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
+        self.delegate_scopes.push(HashMap::default());
+        self.local_callable_scopes.push(HashMap::default());
         let result = (|| {
             let checked_body = match self.file.expr(body).clone() {
                 Expr::Block { stmts, trailing } => {
@@ -1913,30 +1913,16 @@ impl BodyFirChecker<'_> {
                             BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::InRange),
                         ));
                     } else {
-                        let comparison = self
-                            .info
-                            .resolved_in_range_comparisons
-                            .get(&expression)
-                            .ok_or_else(|| {
-                            self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::UnsupportedExpression(
-                                    ExpressionForm::InRange,
-                                ),
-                            )
-                        })?;
+                        let (provenance, comparison, unsigned_compare) =
+                            self.in_range_comparison(expression)?;
                         FirExprKind::InRange {
                             operation: Self::range_operation(*kind),
-                            provenance: comparison.provenance,
-                            comparison: self.resolved_type(
-                                self.file.expr_span(expression).ok_or_else(|| {
-                                    self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                                })?,
-                                comparison.comparison,
-                            )?,
-                            value: self.expression(*value)?,
-                            start: self.expression(*start)?,
-                            end: self.expression(*end)?,
+                            provenance,
+                            comparison,
+                            unsigned_compare,
+                            value: self.direct_range_operand(*value, comparison)?,
+                            start: self.direct_range_operand(*start, comparison)?,
+                            end: self.direct_range_operand(*end, comparison)?,
                             negated: *negated,
                         }
                     }

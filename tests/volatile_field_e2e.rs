@@ -10,25 +10,44 @@ package store\n\
 \n\
 import kotlin.concurrent.Volatile as SharedVolatile\n\
 \n\
-class Flags(@Volatile var a: Int, @SharedVolatile var b: Long) {\n\
-    @Transient\n\
+annotation class Volatile\n\
+annotation class Transient\n\
+\n\
+class Flags(@kotlin.jvm.Volatile var a: Int, @SharedVolatile var b: Long) {\n\
+    @kotlin.jvm.Transient\n\
     var c: String = \"\"\n\
 \n\
     @kotlin.jvm.Volatile\n\
     var d: Any? = null\n\
 \n\
+    @Volatile\n\
+    var decoyVolatile: Int = 0\n\
+\n\
+    @Transient\n\
+    var decoyTransient: Int = 0\n\
+\n\
     companion object {\n\
-        @Volatile\n\
+        @kotlin.jvm.Volatile\n\
         var shared: Int = 1\n\
     }\n\
 }\n\
 \n\
 object Single {\n\
-    @Volatile\n\
+    @kotlin.jvm.Volatile\n\
     var counter = 0\n\
 }\n\
 \n\
-@Volatile\n\
+enum class EnumFlags {\n\
+    A;\n\
+\n\
+    @kotlin.jvm.Volatile\n\
+    var state = 0\n\
+\n\
+    @kotlin.jvm.Transient\n\
+    var cache = \"\"\n\
+}\n\
+\n\
+@kotlin.jvm.Volatile\n\
 var topLevel: String = \"t\"\n\
 ";
 
@@ -38,6 +57,7 @@ fn a_volatile_or_transient_property_marks_its_field() {
         "store/Flags",
         "store/Flags$Companion",
         "store/Single",
+        "store/EnumFlags",
         "store/VolatileFieldKt",
     ] {
         common::byte_diff_against_kotlinc_cp(

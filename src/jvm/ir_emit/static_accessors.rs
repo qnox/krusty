@@ -455,7 +455,7 @@ pub(super) fn plan(
 /// accessor has no source line of its own; it stands at its property, after the accessor the
 /// source declared, whose uses kotlinc meets first.
 fn synthesized_companion_accessor_lines(ir: &IrFile) -> HashMap<crate::ir::ExprId, u32> {
-    let mut lines = HashMap::new();
+    let mut lines = HashMap::default();
     for class in ir.classes.iter().filter(|class| class.is_companion) {
         for (index, property) in class.properties.iter().enumerate() {
             let Some(storage) = ir.jvm_companion_property_static(class.fq_name, index as u32)
@@ -586,9 +586,10 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
         {
             uses.push(walk.protected_use(0, ProtectedMemberAccessBridge::of_reference(bridge)));
         }
-        // A private companion property whose field moved to the outer class is read, and by a
-        // mutable carrier written, through that class's `$cp` accessors.
-        if let Some(index) = realization.hoisted_companion_static {
+        // A private companion property's compiler-supplied accessor reaches its hoisted field
+        // through the outer class's `$cp` accessor. A source-declared accessor remains a call to
+        // that accessor and is planned independently below.
+        if let Some(index) = realization.hoisted_companion_getter {
             let owner = ir.statics[index as usize]
                 .owner
                 .map(StaticOwner::Class)
@@ -598,75 +599,73 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
                 owner,
                 accessor: StaticAccessor::HoistedGetter(index),
             });
-            if class
-                .prop_ref
-                .as_ref()
-                .is_some_and(|reference| reference.mutable)
-            {
-                uses.push(Use {
-                    line: 0,
-                    owner,
-                    accessor: StaticAccessor::HoistedSetter(index),
-                });
-            }
+        }
+        if let Some(index) = realization.hoisted_companion_setter {
+            let owner = ir.statics[index as usize]
+                .owner
+                .map(StaticOwner::Class)
+                .expect("a hoisted companion field has an outer class");
+            uses.push(Use {
+                line: 0,
+                owner,
+                accessor: StaticAccessor::HoistedSetter(index),
+            });
         }
         // A private member property's carrier reads, and a mutable one writes, through the
         // owner's field accessors; a property without a field has no such accessor.
         if let Some(crate::ir::IrLocalPropertyLayout::Member {
             class: declaring,
             property,
+            backing_field,
             ..
         }) = realization
             .member_access_bridge
             .and_then(|target| ir.local_property_layouts.get(&target))
-            .filter(|layout| {
-                matches!(
-                    layout,
-                    crate::ir::IrLocalPropertyLayout::Member {
-                        backing_field: Some(_),
-                        ..
-                    }
-                )
-            })
         {
             let owner = StaticOwner::Class(ir.classes[*declaring as usize].fq_name);
             let (declaring, property) = (*declaring, *property);
             let declared = &ir.classes[declaring as usize].properties[property as usize];
-            uses.push(Use {
-                line: 0,
-                owner,
-                accessor: if declared.getter.is_some() {
-                    StaticAccessor::MemberGetter {
-                        class: declaring,
-                        property,
-                    }
-                } else {
-                    StaticAccessor::FieldGetter {
-                        class: declaring,
-                        property,
-                    }
-                },
-            });
+            let getter = if declared.modifiers.declared_getter {
+                Some(StaticAccessor::MemberGetter {
+                    class: declaring,
+                    property,
+                })
+            } else {
+                backing_field.map(|_| StaticAccessor::FieldGetter {
+                    class: declaring,
+                    property,
+                })
+            };
+            if let Some(accessor) = getter {
+                uses.push(Use {
+                    line: 0,
+                    owner,
+                    accessor,
+                });
+            }
             if class
                 .prop_ref
                 .as_ref()
                 .is_some_and(|reference| reference.mutable)
             {
-                uses.push(Use {
-                    line: 0,
-                    owner,
-                    accessor: if declared.setter.is_some() {
-                        StaticAccessor::MemberSetter {
-                            class: declaring,
-                            property,
-                        }
-                    } else {
-                        StaticAccessor::FieldSetter {
-                            class: declaring,
-                            property,
-                        }
-                    },
-                });
+                let setter = if declared.modifiers.declared_setter {
+                    Some(StaticAccessor::MemberSetter {
+                        class: declaring,
+                        property,
+                    })
+                } else {
+                    backing_field.map(|_| StaticAccessor::FieldSetter {
+                        class: declaring,
+                        property,
+                    })
+                };
+                if let Some(accessor) = setter {
+                    uses.push(Use {
+                        line: 0,
+                        owner,
+                        accessor,
+                    });
+                }
             }
         }
     }
@@ -1246,21 +1245,17 @@ impl Accessor<'_> {
         let ir = self.ir;
         let owner = &ir.classes[class as usize];
         let property = &owner.properties[property as usize];
-        let field = &owner.fields[property
-            .backing_field
-            .expect("a bridged member property has a backing field")
-            as usize];
         let internal = owner.fq_name.render();
-        let ty = declared_property_accessor_jvm(ir, property, field);
         let name = member_property_accessor_name(&property_getter_name(&property.name), true);
-        let descriptor = format!("(L{internal};){}", type_descriptor(ty));
-        let mut code = CodeBuilder::new(1);
-        code.mark_line(self.declaration_line);
-        code.aload(0);
         let getter = &ir.functions[property
             .getter
             .expect("a member getter bridge calls a declared getter")
             as usize];
+        let ty = jvm_declared_ty(&getter.ret);
+        let descriptor = format!("(L{internal};){}", type_descriptor(ty));
+        let mut code = CodeBuilder::new(1);
+        code.mark_line(self.declaration_line);
+        code.aload(0);
         let method = cw.methodref(&internal, &getter.name, &ir_method_desc(&[], &getter.ret));
         code.invokevirtual(method, 0, slot_words(ty) as i32);
         emit_return(ty, &mut code);
@@ -1280,23 +1275,19 @@ impl Accessor<'_> {
         let ir = self.ir;
         let owner = &ir.classes[class as usize];
         let property = &owner.properties[property as usize];
-        let field = &owner.fields[property
-            .backing_field
-            .expect("a bridged member property has a backing field")
-            as usize];
         let internal = owner.fq_name.render();
-        let ty = declared_property_accessor_jvm(ir, property, field);
         let name = member_property_accessor_name(&property_setter_name(&property.name), true);
+        let setter = &ir.functions[property
+            .setter
+            .expect("a member setter bridge calls a declared setter")
+            as usize];
+        let ty = jvm_declared_ty(&setter.params[0]);
         let descriptor = format!("(L{internal};{})V", type_descriptor(ty));
         let words = slot_words(ty);
         let mut code = CodeBuilder::new(1 + words);
         code.mark_line(self.declaration_line);
         code.aload(0);
         load(ty, 1, &mut code);
-        let setter = &ir.functions[property
-            .setter
-            .expect("a member setter bridge calls a declared setter")
-            as usize];
         let setter_descriptor = method_descriptor(&[jvm_declared_ty(&setter.params[0])], Ty::Unit);
         let method = cw.methodref(&internal, &setter.name, &setter_descriptor);
         code.invokevirtual(method, words as i32, 0);

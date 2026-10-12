@@ -3682,9 +3682,6 @@ fn emit_enum_class(
     // Property backing fields are private (kotlinc), reached through the synthesized `getX()`/`setX()`
     // accessors — for both the primary-constructor fields and body member-property fields
     // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
-    let enum_field_acc = |f: &IrField| {
-        (if f.is_private() { 0x0002 } else { 0x0001 }) | if f.is_final() { 0x0010 } else { 0 }
-    };
     // kotlinc emits an ENUM's `Companion` field FIRST — ahead of the constructor properties, the
     // entry constants and `$VALUES`/`$ENTRIES` — unlike an ordinary class, where it follows the
     // instance fields. Emitting it last also interned its name and descriptor late, so the class
@@ -3725,7 +3722,7 @@ fn emit_enum_class(
     cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
-    for (f, t) in c.fields.iter().zip(&field_tys) {
+    for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
         let nullability = (!f.is_lateinit())
             .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
             .flatten();
@@ -3734,7 +3731,7 @@ fn emit_enum_class(
                 .field
                 .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
-            enum_field_acc(f),
+            field_visibility::declared_field_access(c, field_index, false),
             &f.name,
             &type_descriptor(*t),
             signature.as_deref(),

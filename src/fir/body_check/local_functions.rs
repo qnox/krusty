@@ -195,7 +195,7 @@ impl BodyFirChecker<'_> {
             class_capture_values,
             class_delegates,
             class_receivers,
-            counted_loop_variables: HashSet::new(),
+            counted_loop_variables: HashSet::default(),
             enclosing_property: self.enclosing_property,
             session: self.session,
             return_target,

@@ -1,20 +1,19 @@
-//! kotlinc's `JvmSafeCallChainFoldingLowering` for an equality with a safe call.
+//! Common lowering for primitive equality with a safe-call operand.
 //!
-//! `a?.x == y`, where `y` is a non-null JVM primitive, folds into the safe call's guard: the
+//! `a?.x == y`, where `y` is a non-null primitive, folds into the safe call's guard: the
 //! comparison becomes the non-null branch and the null branch answers `false`. The safe call on
 //! the right folds the same way, which moves the left operand into the non-null branch: it is not
-//! evaluated when the receiver is `null`, as on kotlinc's JVM backend. `!=` is the negation of
-//! the folded equality.
+//! evaluated when the receiver is `null`. That source evaluation order is a common semantic fact,
+//! not a backend optimization. `!=` is the negation of the folded equality.
 //!
-//! kotlinc's `JvmOptimizationLowering` then inlines a temporary initialized by a read of an
-//! immutable binding. A receiver whose read follows the moved operand is not the value right after
-//! the null check, which kotlinc's bytecode safe-call patterns would keep on the stack instead, so
-//! that receiver is read from its binding in the guard and again in the selector.
+//! An immutable receiver binding may be read directly once moving the other operand into the
+//! guarded branch leaves the temporary redundant. This preserves source evaluation order while
+//! leaving the common IR in the same canonical shape for every backend.
 
 use crate::ir::{ExprId, IrBindingStability, IrConst, IrExpr, IrFile};
 use crate::types::{EqualityMode, Ty};
 
-pub(crate) fn fold_safe_call_equalities(ir: &mut IrFile) {
+pub(super) fn fold_safe_call_equalities(ir: &mut IrFile) {
     // Operands precede the expressions that use them, so a nested equality folds first.
     let equalities = (0..ir.exprs.len())
         .filter_map(|index| {
@@ -39,7 +38,7 @@ fn fold(ir: &mut IrFile, equality: ExprId) {
         return;
     };
     let folded = |safe_call: ExprId, other: ExprId| {
-        is_jvm_primitive(ir, other)
+        is_non_null_primitive(ir, other)
             .then(|| safe_call_guard(ir, safe_call))
             .flatten()
     };
@@ -98,8 +97,8 @@ fn fold(ir: &mut IrFile, equality: ExprId) {
     }
 }
 
-/// Read the binding a safe call's receiver temporary copies in place of the temporary, when that
-/// binding is immutable: kotlinc's `JvmOptimizationLowering` drops such a temporary.
+/// Read the binding a safe call's receiver temporary copies in place of the temporary when that
+/// binding is immutable.
 fn inline_stable_receiver(ir: &mut IrFile, block: ExprId, uses: &[ExprId]) {
     let IrExpr::Block { stmts, .. } = ir.expr(block) else {
         return;
@@ -193,8 +192,8 @@ fn safe_call_result(ir: &IrFile, selector: ExprId) -> ExprId {
     }
 }
 
-/// kotlinc's `isJvmPrimitive`: a non-null primitive type.
-fn is_jvm_primitive(ir: &IrFile, expression: ExprId) -> bool {
+/// Whether this expression has a non-null primitive semantic type.
+fn is_non_null_primitive(ir: &IrFile, expression: ExprId) -> bool {
     ir.checked_type(expression).is_some_and(|ty| {
         matches!(
             ty,

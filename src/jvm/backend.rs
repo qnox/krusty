@@ -242,8 +242,6 @@ fn run_backend_passes_after_plugins(
     crate::jvm::sam_projected_adapters::realize(ir);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     crate::jvm::deferred_local_storage::realize(ir);
-    // kotlinc folds an equality of a safe call with a primitive into the call's null guard.
-    crate::jvm::safe_call_equality::fold_safe_call_equalities(ir);
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and

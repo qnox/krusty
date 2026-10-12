@@ -17059,12 +17059,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the reference is unboxed and compared, with no `Boolean` materialized in a condition. A boxed
   left operand keeps the right primitive in a temporary. `Boolean`, `Float` and `Double` keep
   their own forms. A `Byte`/`Short` pair compares at `Int` as kotlinc's FIR2IR builds it: the
-  nullable side becomes the safe conversion `e?.toInt()`. kotlinc's
-  `JvmSafeCallChainFoldingLowering` then folds `safe?.x == p` and `p == safe?.x` (with `p` a
-  non-null primitive) into the safe call's guard, `false` on the null path, so the other operand
-  is not evaluated for a `null` receiver — JVM semantics, so the fold is a JVM pass; `!=` negates
-  the folded equality. A right-side fold reads an immutable receiver binding directly, as
-  `JvmOptimizationLowering` drops that temporary. Test: `tests/primitive_to_object_equality_e2e.rs`.
+  nullable side becomes the safe conversion `e?.toInt()`. Both kotlinc/JVM and Kotlin/Native fold
+  `safe?.x == p` and `p == safe?.x` (with `p` a non-null primitive) into the safe call's guard,
+  `false` on the null path, so the other operand is not evaluated for a `null` receiver; `!=`
+  negates the folded equality. The Native corpus explicitly pins that behavior (while noting it
+  might be a Kotlin bug), so common lowering records the shared evaluation order before backend
+  selection. A right-side fold reads an immutable receiver binding directly. Test:
+  `tests/primitive_to_object_equality_e2e.rs`.
   Corpus: `primitiveTypes/equalityWithObject/generated/*`, `binaryOp/eqNullableShortToShort.kt`,
   `binaryOp/eqNullableToPrimitiveWithSideEffects.kt`, `safeCall/safeCallEqPrimitive.kt`,
   `safeCall/safeCallNotEqPrimitive.kt`, `casts/literalExpressionAsGenericArgument/*`.
@@ -17073,13 +17074,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   outer class, with or without an initializer. A property with no initializer gets no static
   initializer of its own; the companion's `init` blocks run in the outer `<clinit>` and write the
   static in source order, and the companion reaches it through `access$get…$cp`/`access$set…$cp`.
+  A property reference still calls a source-declared getter or setter; only a compiler-supplied
+  accessor is retargeted to the raw outer-field bridge.
   Test: `tests/companion_init_assigned_property_e2e.rs`. Corpus:
   `statics/anonymousInitializerInClassObject.kt`.
 - **A protected or internal companion property is an outer-class static too.** The move covers
   every visibility. The companion's synthesized accessors keep the property's visibility (a
   protected getter and setter; an internal pair is module-mangled, `getX$main`), and the outer
-  class's `access$get…$cp`/`access$set…$cp` bridges keep the unmangled name. A private setter is
-  still synthesized as a public method until the private-default-setter elision lands. Test:
+  class's `access$get…$cp`/`access$set…$cp` bridges keep the unmangled name. An initializer-less,
+  bodiless private setter has no method and is recorded as absent from the static realization;
+  the initializer-backed shape retains the public JVM bridge used by nested classes. Test:
   `tests/companion_property_visibility_e2e.rs`. Corpus: `regressions/kt5395.kt` (`protected val`).
 - **An enum class's companion properties are enum statics.** kotlinc moves an enum companion's
   backing fields like any class companion's, and runs the companion initializer in the enum's

@@ -12,11 +12,14 @@ class Assigned {\n\
     companion object {\n\
         val label: String\n\
         var count: Int\n\
+        var narrowed: Int\n\
+            private set\n\
         private val secret: String\n\
 \n\
         init {\n\
             label = \"a\"\n\
             count = 2\n\
+            narrowed = 3\n\
             secret = \"s\"\n\
         }\n\
 \n\
@@ -34,6 +37,39 @@ class Mixed {\n\
         }\n\
     }\n\
 }\n\
+\n\
+class Custom {\n\
+    companion object {\n\
+        private val decorated: String\n\
+            get() = field + \"!\"\n\
+\n\
+        init {\n\
+            decorated = \"OK\"\n\
+        }\n\
+\n\
+        fun shown(): String = ::decorated.get()\n\
+    }\n\
+}\n\
+\n\
+fun box(): String = Custom.shown()\n\
+";
+
+const CUSTOM_SETTER_SOURCE: &str = "\
+class CustomSetter {\n\
+    companion object {\n\
+        private var adjusted: Int\n\
+            set(value) { field = value + 1 }\n\
+\n\
+        init { adjusted = 0 }\n\
+\n\
+        fun throughReference(): Int {\n\
+            ::adjusted.set(40)\n\
+            return ::adjusted.get()\n\
+        }\n\
+    }\n\
+}\n\
+\n\
+fun box(): String = if (CustomSetter.throughReference() == 41) \"OK\" else \"FAIL\"\n\
 ";
 
 #[test]
@@ -43,6 +79,8 @@ fn an_init_assigned_companion_property_is_an_outer_static() {
         "store/Assigned$Companion",
         "store/Mixed",
         "store/Mixed$Companion",
+        "store/Custom",
+        "store/Custom$Companion",
     ] {
         common::byte_diff_against_kotlinc_cp(
             "CompanionInitAssignedProperty",
@@ -53,4 +91,21 @@ fn an_init_assigned_companion_property_is_an_outer_static() {
         .expect("reference kotlinc is provisioned")
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
+}
+
+#[test]
+fn a_reference_to_a_hoisted_property_keeps_its_declared_getter() {
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "CompanionInitAssignedProperty").as_deref(),
+        Some("OK!")
+    );
+}
+
+#[test]
+fn a_reference_to_a_hoisted_property_keeps_its_declared_setter() {
+    assert_eq!(
+        common::compile_and_run_with_stdlib(CUSTOM_SETTER_SOURCE, "CompanionCustomSetterReference")
+            .as_deref(),
+        Some("OK")
+    );
 }

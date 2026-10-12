@@ -2,7 +2,7 @@
 //! `private`, and of the default setter whose visibility a `lateinit` field shares.
 
 use crate::ir::IrClass;
-use crate::types::{TypeName, Visibility};
+use crate::types::{type_name, TypeName, Visibility};
 
 /// Is this property declared `@JvmField`? The annotation replaces the property's JVM realization
 /// wholesale: kotlinc emits NO `getX()`/`setX()` for it and gives the backing field the PROPERTY's
@@ -74,10 +74,12 @@ pub(super) fn declared_field_access(c: &IrClass, field_index: usize, is_static: 
 /// application is a resolved identity, so `kotlin.concurrent.Volatile`, an alias of
 /// `kotlin.jvm.Volatile` on the JVM, is the same annotation.
 pub(super) fn annotated_field_modifiers(annotations: &[TypeName]) -> u16 {
+    let volatile = type_name("kotlin/jvm/Volatile");
+    let transient = type_name("kotlin/jvm/Transient");
     annotations.iter().fold(0, |modifiers, annotation| {
-        if annotation.matches("kotlin/jvm/Volatile") {
+        if *annotation == volatile {
             modifiers | 0x0040
-        } else if annotation.matches("kotlin/jvm/Transient") {
+        } else if *annotation == transient {
             modifiers | 0x0080
         } else {
             modifiers

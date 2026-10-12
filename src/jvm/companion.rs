@@ -342,6 +342,23 @@ pub(crate) fn lower_companion_properties(
     let mut static_for_field = HashMap::default();
     for candidate in &candidates {
         let index = ir.statics.len() as u32;
+        let accessors = crate::ir::IrStaticAccessors {
+            getter: if candidate.declared_getter.is_some() {
+                crate::ir::IrStaticAccessor::Declared
+            } else {
+                crate::ir::IrStaticAccessor::Default
+            },
+            setter: if candidate.declared_setter.is_some() {
+                crate::ir::IrStaticAccessor::Declared
+            } else if candidate.initializer.is_none()
+                && !candidate.is_private
+                && candidate.setter_visibility.is_private()
+            {
+                crate::ir::IrStaticAccessor::Absent
+            } else {
+                crate::ir::IrStaticAccessor::Default
+            },
+        };
         ir.statics.push(IrStatic {
             name: candidate.name.clone(),
             ty: candidate.ty,
@@ -353,7 +370,7 @@ pub(crate) fn lower_companion_properties(
             visibility: candidate.visibility,
             setter_jvm_name: None,
             erased_declared_ty: None,
-            accessors: crate::ir::IrStaticAccessors::DEFAULT,
+            accessors,
             line: candidate.decl_line,
             source_order: candidate.source_order,
             // kotlinc's hoisted field is a new declaration, not the delegate storage it moved:
@@ -570,7 +587,10 @@ pub(crate) fn lower_companion_properties(
                 ir.set_method_visibility(getter, candidate.visibility);
                 getter
             });
-            let setter = (candidate.is_var && candidate.declared_setter.is_none()).then(|| {
+            let setter = (candidate.is_var
+                && candidate.declared_setter.is_none()
+                && !(candidate.initializer.is_none() && candidate.setter_visibility.is_private()))
+            .then(|| {
                 let value = ir.add_expr(IrExpr::GetValue(1));
                 let write = ir.add_expr(IrExpr::SetStatic {
                     index: static_index,
@@ -606,8 +626,8 @@ pub(crate) fn lower_companion_properties(
                     ]),
                 );
                 ir.fn_source_order.insert(setter, candidate.source_order);
-                // A private default setter is not a method kotlinc emits at all; until that
-                // elision lands, other classes still call this one, so it stays public.
+                // An initializer-backed private default setter is still the public JVM bridge
+                // used by nested classes. Only the initializer-less case above has no method.
                 if !candidate.setter_visibility.is_private() {
                     ir.set_method_visibility(setter, candidate.setter_visibility);
                 }
