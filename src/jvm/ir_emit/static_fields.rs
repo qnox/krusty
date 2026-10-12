@@ -465,7 +465,11 @@ pub(super) fn emit_class_static_fields(
         let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
         let jvm_field = ir.is_jvm_field_static(static_index);
         let block_storage = companion_blocks::storage_is_private(ir, static_index);
-        let acc = if (s.visibility.is_private() || hoisted || block_storage) && !jvm_field {
+        let public_lateinit = s.is_lateinit && !s.visibility.is_private();
+        let acc = if (s.visibility.is_private() || hoisted || block_storage)
+            && !jvm_field
+            && !public_lateinit
+        {
             0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
@@ -525,10 +529,16 @@ fn static_field_annotations<'a>(
     static_index: u32,
 ) -> Option<&'a crate::ir::FieldAnnotations> {
     if let Some((companion, property)) = ir.jvm_companion_static_declaration(static_index) {
-        return companion
+        return owner
             .field_annotations
             .iter()
-            .find(|annotations| annotations.field == property.name);
+            .find(|annotations| annotations.field == property.name)
+            .or_else(|| {
+                companion
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == property.name)
+            });
     }
     let field = &ir.statics[static_index as usize].name;
     owner
@@ -896,6 +906,7 @@ impl Emitter<'_> {
             } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(i)
                 || self.ir.is_jvm_field_static(i)
+                || (is_lateinit && !is_private)
             {
                 let fref = self.cw.fieldref(
                     &owner_name,
@@ -952,6 +963,7 @@ impl Emitter<'_> {
         let jt = jvm_declared_ty(&s.ty);
         let name = s.name.clone();
         let is_const = s.is_const;
+        let public_lateinit = s.is_lateinit && !s.visibility.is_private();
         let facade = self.facade.clone();
         self.emit_value(value, code);
         if self.diverges(value) {
@@ -996,6 +1008,7 @@ impl Emitter<'_> {
             } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(index)
                 || self.ir.is_jvm_field_static(index)
+                || public_lateinit
             {
                 let fref = self.cw.fieldref(
                     &owner_name,

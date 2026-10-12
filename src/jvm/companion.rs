@@ -41,6 +41,9 @@ struct Candidate {
     /// `x$delegate` storage. Property reads stay on the delegated accessor; the field itself is
     /// still a private static of the outer class.
     delegate_storage: bool,
+    /// A `lateinit` companion property is public static storage on the outer class. Its companion
+    /// getter retains the uninitialized guard; the field itself carries no nullability annotation.
+    is_lateinit: bool,
 }
 
 /// The init-body store of a delegated property's `$delegate` field, and the value it stores.
@@ -266,7 +269,7 @@ pub(crate) fn lower_companion_properties(
             // when it cannot (`I?` over `Int`). The value-class pass records which of the two
             // this static is; leaving the field on the companion made a property reference call
             // an instance accessor the class does not have.
-            if declaration.is_open || backing.is_lateinit() {
+            if declaration.is_open {
                 continue;
             }
             candidates.push(Candidate {
@@ -287,6 +290,7 @@ pub(crate) fn lower_companion_properties(
                 declared_getter: declaration.getter,
                 declared_setter: declaration.setter,
                 delegate_storage: false,
+                is_lateinit: backing.is_lateinit(),
             });
         }
         for property in 0..companion_class.properties.len() {
@@ -330,6 +334,7 @@ pub(crate) fn lower_companion_properties(
                 declared_getter: declaration.getter,
                 declared_setter: declaration.setter,
                 delegate_storage: true,
+                is_lateinit: false,
             });
         }
     }
@@ -361,7 +366,7 @@ pub(crate) fn lower_companion_properties(
             init: candidate.initializer.map(|(initializer, _)| initializer),
             is_var: candidate.is_var,
             is_const: false,
-            is_lateinit: false,
+            is_lateinit: candidate.is_lateinit,
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
             visibility: candidate.visibility,
             setter_jvm_name: None,
@@ -472,18 +477,19 @@ pub(crate) fn lower_companion_properties(
                 index,
             } if static_for_field.contains_key(&(class, index)) => {
                 let read = IrExpr::GetStatic(static_for_field[&(class, index)]);
-                // Hoisting changes only storage. An explicit, effectful companion receiver is
-                // still evaluated in source order before the static read, just as kotlinc does.
-                if crate::ir::expr_runs_no_code(ir, receiver)
-                    || redundant_companion_receiver(ir, class, receiver)
+                // A canonical companion singleton read still triggers its class initialization
+                // before the static access. An arbitrary expression written as the receiver is a
+                // lookup coordinate for a companion property and is not evaluated by kotlinc.
+                if redundant_companion_receiver(ir, class, receiver)
+                    && !crate::ir::expr_runs_no_code(ir, receiver)
                 {
-                    Some(read)
-                } else {
                     let read = ir.add_expr(read);
                     Some(IrExpr::Block {
                         stmts: vec![receiver],
                         value: Some(read),
                     })
+                } else {
+                    Some(read)
                 }
             }
             IrExpr::SetField {
@@ -496,18 +502,19 @@ pub(crate) fn lower_companion_properties(
                     index: static_for_field[&(class, index)],
                     value,
                 };
-                // The companion instance is already stored. Reloading it only to discard it
-                // before a static store is not part of kotlinc's `<clinit>`.
-                if crate::ir::expr_runs_no_code(ir, receiver)
-                    || redundant_companion_receiver(ir, class, receiver)
+                // Outside the companion initializer, a canonical singleton reference still runs
+                // class initialization and is then discarded. An arbitrary receiver expression
+                // is only a companion lookup coordinate and is not evaluated.
+                if redundant_companion_receiver(ir, class, receiver)
+                    && !crate::ir::expr_runs_no_code(ir, receiver)
                 {
-                    Some(write)
-                } else {
                     let write = ir.add_expr(write);
                     Some(IrExpr::Block {
                         stmts: vec![receiver, write],
                         value: None,
                     })
+                } else {
+                    Some(write)
                 }
             }
             _ => None,

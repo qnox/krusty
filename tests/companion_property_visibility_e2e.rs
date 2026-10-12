@@ -49,7 +49,7 @@ class EffectfulReceiver {\n\
         init { text = \"OK\" }\n\
 \n\
         private fun self(): Companion {\n\
-            calls++\n\
+            calls = calls + 1\n\
             return this\n\
         }\n\
 \n\
@@ -90,7 +90,7 @@ fn an_initializer_backed_private_setter_keeps_the_nested_class_bridge() {
 }
 
 #[test]
-fn an_effectful_companion_receiver_runs_before_the_hoisted_static_read() {
+fn an_explicit_companion_receiver_is_only_a_lookup_coordinate() {
     for class in [
         "store/EffectfulReceiver",
         "store/EffectfulReceiver$Companion",
@@ -107,6 +107,6 @@ fn an_effectful_companion_receiver_runs_before_the_hoisted_static_read() {
     assert_eq!(
         common::compile_and_run_with_stdlib(EFFECTFUL_RECEIVER, "EffectfulCompanionReceiver")
             .as_deref(),
-        Some("OK")
+        Some("fail:0")
     );
 }

@@ -3094,15 +3094,31 @@ fn emit_class(
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
     constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
-    static_accessors::emit(
-        ir,
-        env.run,
-        &env.run.static_accessor_plan.borrow(),
-        StaticOwner::Class(c.fq_name),
-        facade,
-        c.decl_start_line.max(c.decl_line),
-        &mut cw,
-    );
+    let companion_marker = c.is_companion
+        && c.has_primary_ctor
+        && marker_accessor_emitted_last(ir, c)
+        && has_ctor_marker_accessor(ir, c);
+    if companion_marker {
+        static_accessors::emit_before_companion_marker(
+            ir,
+            env.run,
+            &env.run.static_accessor_plan.borrow(),
+            StaticOwner::Class(c.fq_name),
+            facade,
+            c.decl_start_line.max(c.decl_line),
+            &mut cw,
+        );
+    } else {
+        static_accessors::emit(
+            ir,
+            env.run,
+            &env.run.static_accessor_plan.borrow(),
+            StaticOwner::Class(c.fq_name),
+            facade,
+            c.decl_start_line.max(c.decl_line),
+            &mut cw,
+        );
+    }
     // A companion's synthetic `(…, DefaultConstructorMarker)` ctor goes AFTER the accessors —
     // kotlinc's companion member order (private <init>, accessors, marker <init>). A class hiding a
     // value-class-parameter primary puts its accessor after `equals` the same way.
@@ -3115,6 +3131,17 @@ fn emit_class(
             &fq_name,
             &physical_parameters,
             &parameter_identities,
+            &mut cw,
+        );
+    }
+    if companion_marker {
+        static_accessors::emit_after_companion_marker(
+            ir,
+            env.run,
+            &env.run.static_accessor_plan.borrow(),
+            StaticOwner::Class(c.fq_name),
+            facade,
+            c.decl_start_line.max(c.decl_line),
             &mut cw,
         );
     }

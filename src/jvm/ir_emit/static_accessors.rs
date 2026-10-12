@@ -1007,6 +1007,64 @@ pub(super) fn emit(
     declaration_line: u32,
     cw: &mut ClassWriter,
 ) {
+    emit_selected(ir, run, plan, owner, facade, declaration_line, cw, None);
+}
+
+/// Accessors kotlinc places before a companion's synthetic marker constructor.
+pub(super) fn emit_before_companion_marker(
+    ir: &IrFile,
+    run: &EmitRun,
+    plan: &StaticAccessorPlan,
+    owner: StaticOwner,
+    facade: &str,
+    declaration_line: u32,
+    cw: &mut ClassWriter,
+) {
+    emit_selected(
+        ir,
+        run,
+        plan,
+        owner,
+        facade,
+        declaration_line,
+        cw,
+        Some(false),
+    );
+}
+
+/// Companion-instance field accessors follow the marker constructor; property/static accessors do
+/// not. Keeping the category split here prevents an emitter caller from reconstructing it by name.
+pub(super) fn emit_after_companion_marker(
+    ir: &IrFile,
+    run: &EmitRun,
+    plan: &StaticAccessorPlan,
+    owner: StaticOwner,
+    facade: &str,
+    declaration_line: u32,
+    cw: &mut ClassWriter,
+) {
+    emit_selected(
+        ir,
+        run,
+        plan,
+        owner,
+        facade,
+        declaration_line,
+        cw,
+        Some(true),
+    );
+}
+
+fn emit_selected(
+    ir: &IrFile,
+    run: &EmitRun,
+    plan: &StaticAccessorPlan,
+    owner: StaticOwner,
+    facade: &str,
+    declaration_line: u32,
+    cw: &mut ClassWriter,
+    companion_instances: Option<bool>,
+) {
     let accessor = Accessor {
         ir,
         run,
@@ -1020,6 +1078,11 @@ pub(super) fn emit(
         },
     };
     for planned in plan.accessors_of(owner) {
+        if companion_instances.is_some_and(|selected| {
+            matches!(planned, StaticAccessor::CompanionInstance { .. }) != selected
+        }) {
+            continue;
+        }
         match *planned {
             StaticAccessor::Function(function) => accessor.function(function, cw),
             StaticAccessor::Getter(index) => accessor.getter(index, cw),
