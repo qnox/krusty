@@ -1976,12 +1976,18 @@ impl BodyLowering<'_> {
             rhs: null,
         });
         let selector = self.expression(selector)?;
+        let selector_line = self.ir.expr_source_lines.get(&selector).copied();
         let selector = self.coerce_result(selector, result_type);
         let null_result = if result_type == Ty::Unit {
             self.ir.add_expr(IrExpr::UnitInstance)
         } else {
             self.ir.add_expr(IrExpr::Const(IrConst::Null))
         };
+        // fir2ir's safe-call construction gives its `null` branch the selector's offsets, so the
+        // null path is a source position of the selector's line like any other constant.
+        if let Some(line) = selector_line {
+            self.ir.expr_source_lines.insert(null_result, line);
+        }
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });

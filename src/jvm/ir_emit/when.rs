@@ -186,7 +186,9 @@ impl Emitter<'_> {
         // A guard folded to a constant `null` receiver jumps unconditionally: the selector is dead
         // and is not laid down, as `emit_when` treats a constant-false arm.
         let always_null = self.emit_cond_branch(guard, null_path, true, code);
-        let emit_arm = |emitter: &mut Self, arm: u32, code: &mut CodeBuilder| {
+        // The null path re-marks the selector's line only after a selector that completes: kotlinc
+        // marks it where the selector's code ends, which a diverging selector leaves dead.
+        let emit_arm = |emitter: &mut Self, arm: u32, marked: bool, code: &mut CodeBuilder| {
             if emission.is_stmt {
                 // A discarded value is never materialized: its implicit conversion (boxing into the
                 // safe call's nullable result) is not written, and a discarded constant is nothing
@@ -205,10 +207,22 @@ impl Emitter<'_> {
                     IrExpr::Const(_) | IrExpr::UnitInstance
                 ) {
                     emitter.emit(arm, code);
+                } else if marked && emitter.ir.expr_source_lines.contains_key(&arm) {
+                    // kotlinc still pushes the constant at its own line before the join pops it,
+                    // and that push becomes a `nop`. Like every `nop`, it survives only as the sole
+                    // instruction of its line: after an inlined selector, whose body forgot the
+                    // caller's line, the null path re-marks the line on it.
+                    emitter.mark_expression_start(arm, code);
+                    code.nop();
                 }
                 emitter.discarding_diverges(arm)
             } else {
-                emitter.emit_value(arm, code);
+                match emitter.ir.expr(arm).clone() {
+                    constant @ IrExpr::Const(_) if !marked => {
+                        emitter.emit_value_node(arm, &constant, code);
+                    }
+                    _ => emitter.emit_value(arm, code),
+                }
                 emitter.adapt_physical_operand_for(
                     arm,
                     emitter.value_ty(arm),
@@ -218,7 +232,7 @@ impl Emitter<'_> {
                 emitter.diverges(arm)
             }
         };
-        let selector_diverges = always_null || emit_arm(self, selector, code);
+        let selector_diverges = always_null || emit_arm(self, selector, true, code);
         if matches!(exit, Some((_, false))) {
             return;
         }
@@ -231,7 +245,7 @@ impl Emitter<'_> {
             self.unassigned_values.extend(temporaries);
         }
         code.set_stack(emission.entry_height);
-        let _ = emit_arm(self, null_result, code);
+        let _ = emit_arm(self, null_result, !selector_diverges, code);
         self.bind(emission.end, code);
     }
 

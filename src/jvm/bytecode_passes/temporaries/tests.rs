@@ -1183,6 +1183,52 @@ fn a_line_and_a_local_bound_at_the_null_target_move_after_its_pop() {
 }
 
 #[test]
+fn a_line_on_its_own_null_path_keeps_the_target_label_after_the_pop() {
+    // aload_0 ; astore_1 ; aload_1 ; ifnull 7 ; aload_1 ; touch ; goto 8 ; [line 8] nop ; return
+    let mut code = Code::new(&[
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 7),
+        aload(1),
+        call("touch"),
+        jump(GOTO, 8),
+        op(NOP),
+        op(RETURN),
+    ])
+    .line(7);
+    let outcome = eliminate(&mut code.method, &BTreeSet::new(), false);
+    assert_eq!(
+        outcome,
+        Some(Elimination {
+            pinned: BTreeSet::new()
+        })
+    );
+    let goto = code
+        .method
+        .nodes
+        .iter()
+        .position(|node| matches!(node, Node::Insn(Insn::Jump { op: GOTO, .. })))
+        .expect("the goto");
+    let null_target = code.labels[7];
+    assert_eq!(
+        code.method.nodes[goto + 1..],
+        [
+            Node::Label(null_target),
+            Node::Insn(Insn::Op(POP)),
+            Node::Line {
+                line: 8,
+                start: null_target
+            },
+            Node::Insn(Insn::Op(NOP)),
+            Node::Label(code.labels[8]),
+            Node::Insn(Insn::Op(RETURN)),
+            Node::Label(code.labels[9]),
+        ]
+    );
+}
+
+#[test]
 fn an_instruction_is_stepped_again_only_when_its_incoming_state_changed() {
     let analyze = |code: &Code| {
         let mut steps = 0;

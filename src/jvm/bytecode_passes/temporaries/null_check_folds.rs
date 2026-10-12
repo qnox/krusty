@@ -385,6 +385,17 @@ pub(super) fn place_after_pops(
             .iter()
             .position(|&at| *body.list.node(at) == Node::Label(target.label))
             .expect("the folded jumps' label stands in front of its pop");
+        // kotlinc's labels are normalized before its passes run, so the null target is one label
+        // with the null path's own `aconst_null` behind it, and kotlinc inserts the `pop` right
+        // after that label. A line marked on that path keeps the label, so its entry describes the
+        // `pop`, while its node now follows the `pop` and opens the debug range the path's
+        // remaining `nop` is alone in. Only when the null path is empty does the target stand at
+        // the join: the join's labels follow the folded jumps' own, and its line numbers describe
+        // what comes after the `pop`.
+        let joins = run
+            .iter()
+            .enumerate()
+            .any(|(k, &at)| k > own && matches!(body.list.node(at), Node::Label(_)));
         let mut late: Vec<Node> = Vec::new();
         let mut lines = Vec::new();
         let mut standing = Vec::new();
@@ -397,6 +408,10 @@ pub(super) fn place_after_pops(
                         late.push(Node::Label(label));
                         body.list.remove(at);
                     }
+                }
+                line @ Node::Line { .. } if !joins => {
+                    late.push(line);
+                    body.list.remove(at);
                 }
                 Node::Line { line, .. } => {
                     lines.push(line);
