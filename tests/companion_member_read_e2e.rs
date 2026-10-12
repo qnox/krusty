@@ -250,6 +250,39 @@ class Outer {
     assert_ne!(companion.access & 0x0008, 0, "companion field is static");
 }
 
+/// An enum's instance backing field follows the same physical-name plan as an ordinary class.
+/// `ACC_STATIC` is not part of a JVM field's identity, so keeping both source names would produce
+/// an unloadable class with duplicate `value: String` fields.
+#[test]
+fn enum_instance_field_is_disambiguated_from_the_companion_static() {
+    let src = r#"
+enum class Collision(val value: String) {
+    A("instance");
+
+    companion object {
+        val value = "companion"
+    }
+}
+
+fun box(): String =
+    if (Collision.A.value == "instance" && Collision.value == "companion") "OK" else "fail"
+"#;
+    for class in ["Collision", "Collision$Companion"] {
+        common::byte_diff_against_kotlinc_cp(
+            "EnumCompanionFieldCollision",
+            src,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+    assert_eq!(
+        common::compile_and_run_with_stdlib(src, "EnumCompanionFieldCollision").as_deref(),
+        Some("OK")
+    );
+}
+
 #[test]
 fn instance_function_wins_over_companion_function() {
     let src = r#"

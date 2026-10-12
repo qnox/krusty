@@ -3732,6 +3732,7 @@ fn emit_enum_class(
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
     for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
+        let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let nullability = (!f.is_lateinit())
             .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
             .flatten();
@@ -3741,7 +3742,7 @@ fn emit_enum_class(
                 .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
             field_visibility::declared_field_access(c, field_index, false),
-            &f.name,
+            &physical_name,
             &type_descriptor(*t),
             signature.as_deref(),
             None,
@@ -3805,13 +3806,13 @@ fn emit_enum_class(
         let mut field_i = 0usize;
         for (argument, ty) in c.ctor_args.iter().zip(&all_param_tys) {
             if argument.is_field {
-                let name = &c.fields[field_i].name;
+                let name = instance_field_jvm_name(ir, env.run, c, field_i);
                 if let Some(line) = property_line(ir, c, field_i as u32) {
                     store_lines.push((ctor.bytes.len() as u16, line));
                 }
                 ctor.aload(0);
                 load(*ty, slot, &mut ctor);
-                let field = cw.fieldref(&fq, name, &type_descriptor(*ty));
+                let field = cw.fieldref(&fq, &name, &type_descriptor(*ty));
                 ctor.putfield(field, slot_words(*ty) as i32);
                 field_i += 1;
             }
