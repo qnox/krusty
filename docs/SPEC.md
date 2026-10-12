@@ -16974,7 +16974,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-null primitive) into the safe call's guard, `false` on the null path, so the other operand
   is not evaluated for a `null` receiver — JVM semantics, so the fold is a JVM pass; `!=` negates
   the folded equality. A right-side fold reads an immutable receiver binding directly, as
-  `JvmOptimizationLowering` drops that temporary. Test: `tests/primitive_to_object_equality_e2e.rs`.
+  `JvmOptimizationLowering` drops that temporary. Native realizes structural `a == b` with a
+  nullable left and a non-null right operand as Kotlin/Native's `BuiltinOperatorLowering` does,
+  `a != null && a.equals(b)`: the right operand is skipped for a `null` left one whatever its form,
+  and a non-null left operand evaluates both (so `f() == s?.x` runs `f()` on Native and not on the
+  JVM). Tests: `tests/primitive_to_object_equality_e2e.rs`,
+  `tests/nullable_equality_evaluation_order_e2e.rs`.
   Corpus: `primitiveTypes/equalityWithObject/generated/*`, `binaryOp/eqNullableShortToShort.kt`,
   `binaryOp/eqNullableToPrimitiveWithSideEffects.kt`, `safeCall/safeCallEqPrimitive.kt`,
   `safeCall/safeCallNotEqPrimitive.kt`, `casts/literalExpressionAsGenericArgument/*`.
