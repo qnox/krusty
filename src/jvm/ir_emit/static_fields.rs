@@ -90,7 +90,6 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         } else {
             0x001A // PRIVATE | STATIC | FINAL
         };
-        let acc = acc | volatile_static_access(ir, static_index);
         let desc = ir_type_desc(&s.ty);
         // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
         // as the same property declared inside a class does — the facade's field table is a different
@@ -192,18 +191,6 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
-    }
-}
-
-/// `ACC_VOLATILE` when static `index` stores a `@Volatile` property, else nothing.
-fn volatile_static_access(ir: &IrFile, index: u32) -> u16 {
-    if ir
-        .static_declaration_annotations(index)
-        .is_some_and(crate::jvm::property_realizations::has_volatile_storage)
-    {
-        0x0040
-    } else {
-        0
     }
 }
 
@@ -502,7 +489,6 @@ pub(super) fn emit_class_static_fields(
         // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
         let synthetic = ir.is_compiler_generated_static(static_index);
         let acc = if synthetic { acc | 0x1000 } else { acc };
-        let acc = acc | volatile_static_access(ir, static_index);
         // Reference-typed statics, including private hoisted fields, carry nullability annotations,
         // except a `lateinit` one, which holds null until assigned.
         let ann =

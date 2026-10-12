@@ -40,17 +40,6 @@ pub(crate) fn jvm_field_eligible(
         && !has_context_parameters
 }
 
-/// Whether a property's resolved annotations ask for a JVM `volatile` backing field.
-///
-/// `kotlin.concurrent.Volatile` is the JVM's typealias of `kotlin.jvm.Volatile`, so both spellings
-/// resolve to this one identity. The flag belongs to the storage, so every realization of the
-/// property's field (instance, object or facade static, hoisted companion static) consults it.
-pub(crate) fn has_volatile_storage(annotations: &[TypeName]) -> bool {
-    annotations
-        .iter()
-        .any(|annotation| annotation.matches("kotlin/jvm/Volatile"))
-}
-
 #[derive(Clone, Debug)]
 pub(crate) enum PropertyRealization {
     Local(PropertyId),

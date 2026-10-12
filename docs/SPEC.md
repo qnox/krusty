@@ -12958,17 +12958,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The accessors follow the enum's members and bridges in the order the constants first select them;
    every `$default` constructor overload interns its descriptor before its body's constants.
    Tests: `tests/enum_entry_constructor_e2e.rs`.
-- **A `@Volatile` property's backing field is `ACC_VOLATILE`.** `kotlin.concurrent.Volatile` is the
-  JVM's typealias of `kotlin.jvm.Volatile`, so both spellings resolve to the one `kotlin/jvm/Volatile`
-  identity, and the JVM backend reads that identity off the property declaration, never its
-  spelling. The flag follows the storage wherever the JVM realizes it: a class instance field of
-  any visibility (a primary-constructor property included), a `lateinit` field, an object's static,
-  a companion property hoisted onto its outer class (joined through the exact companion
-  property → static edge), and a file facade's static (joined through the package property's
-  storage layout). Visibility, finality and annotations are unchanged. Without the flag
-  `AtomicReferenceFieldUpdater.newUpdater` throws "Must be volatile type". Byte-identical to
-  kotlinc 2.4.20 for every shape; the updater and a reflective `Modifier.isVolatile` probe run.
-  Tests: `tests/volatile_field_e2e.rs`.
 - **A singleton or constant delegate is evaluated in place, without a `$delegate` field.**
   kotlinc's `SingletonOrConstantDelegationLowering` applies when a delegated property's delegate is
   `Unit`, an object, an enum entry or a (signed) literal, and the property has no type or context

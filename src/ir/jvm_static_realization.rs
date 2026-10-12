@@ -92,37 +92,6 @@ impl IrFile {
             })
     }
 
-    /// The resolved annotations of the source property that static `index` stores: a package
-    /// property kept on its facade, or a companion property hoisted onto its outer class. `None`
-    /// for storage no single property declares (a delegate, generated support storage).
-    pub(crate) fn static_declaration_annotations(&self, index: u32) -> Option<&[TypeName]> {
-        let package =
-            self.local_property_layouts
-                .iter()
-                .find_map(|(property, layout)| match layout {
-                    crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. }
-                        if *storage == index =>
-                    {
-                        self.package_properties
-                            .iter()
-                            .find(|declaration| declaration.property == *property)
-                    }
-                    _ => None,
-                });
-        if let Some(declaration) = package {
-            return Some(&declaration.annotations);
-        }
-        let (companion, property) = self
-            .jvm_companion_property_statics
-            .iter()
-            .find_map(|(&declaration, &storage)| (storage == index).then_some(declaration))?;
-        let class = self.class_id_by_name(companion)?;
-        self.classes[class as usize]
-            .properties
-            .get(property as usize)
-            .map(|declaration| &*declaration.annotations)
-    }
-
     pub(crate) fn has_jvm_default_static_getter(&self, index: u32) -> bool {
         self.publishes_jvm_default_static_accessors(index)
             && self.statics[index as usize].accessors.getter == IrStaticAccessor::Default
