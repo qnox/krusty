@@ -13227,9 +13227,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     types`.
 
   Both now select the one candidate at the nearest scope rank whose parameters the arguments map
-  onto. Signature evaluation takes its result when that result names no type parameter, and
-  leaves the mismatch to the body check. The candidate list stays for a call whose arguments no
-  candidate's shape accepts. Test: `tests/java_not_null_null_argument_e2e.rs`.
+  onto. Within one rejected member-family rung, written type-argument arity filters overloads before
+  diagnostic ownership is chosen. A wrong-arity lexical extension still leaves the normal scope
+  tower free to reach an applicable extension on a farther rung. Signature evaluation takes the
+  selected result when no type parameter remains after the receiver, explicit type arguments, and
+  mapped arguments contribute their ordinary generic constraints; argument and generic-bound
+  mismatches stay with the body check. An
+  unavailable context parameter is retained as an applicability outcome too: a unique contextual
+  declaration with a fixed result still types the inferred signature, while an unfixed result
+  or an argument-mapping failure retains the missing-context failure instead of becoming an
+  unresolved member. The candidate list stays for a call whose arguments no available candidate's
+  shape accepts. Tests:
+  `tests/java_not_null_null_argument_e2e.rs`, `tests/context_parameters_e2e.rs`.
 - **A `vararg` parameter is always omittable in default-argument resolution.** A `vararg` with no
   declared default leaves `declares_default_value` unset — it is implicitly omittable — so
   `CallSig::has_known_required_param` skips the vararg slot (mirroring the call-arg slot mapper).

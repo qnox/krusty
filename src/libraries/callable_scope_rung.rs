@@ -16,6 +16,18 @@ pub enum CallableScopeRung {
 }
 
 impl CallableScopeRung {
+    /// Stable nearest-first ordering for overload selection. `scope_rank` distinguishes levels
+    /// within one semantic rung; it is not comparable across these families (a local and a
+    /// current-package declaration can both carry numeric rank zero).
+    pub(crate) fn selection_rank(self) -> u8 {
+        match self {
+            Self::Unscoped => 0,
+            Self::ExplicitImport => 1,
+            Self::CurrentPackage => 2,
+            Self::Import => 3,
+        }
+    }
+
     pub fn is_import(self) -> bool {
         matches!(self, Self::ExplicitImport | Self::Import)
     }

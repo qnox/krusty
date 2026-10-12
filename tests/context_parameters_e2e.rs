@@ -756,6 +756,739 @@ fn functional_interface_member_context_is_implicit() {
 }
 
 #[test]
+fn contextual_member_failures_keep_their_inferred_result() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(c: C)
+    fun accept(value: String): String = value
+}
+fun inferred(api: Api) = with(C()) { api.accept(null).length }
+fun missing(api: Api) = api.accept("x").length
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "ContextRejected.kt".to_string(),
+            line: 7,
+            column: 49,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        },
+        common::CompilerError {
+            file: "ContextRejected.kt".to_string(),
+            line: 8,
+            column: 29,
+            message: "no context argument for 'c: C' found.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the contextual failure fixtures"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the contextual failure fixtures"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn a_rejected_contextual_member_reapplies_its_demanded_return_binding() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class Api {
+    context(c: T)
+    fun <T> String.accept(value: String) = c
+}
+fun use(api: Api) = with(api) { with(1) { "".accept(null).inc() } }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextPending.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ContextPending.kt".to_string(),
+        line: 6,
+        column: 53,
+        message: "null cannot be a value of a non-null type 'String'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the rejected contextual call"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the rejected contextual call"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn a_rejected_contextual_generic_member_uses_its_context_binding() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class Api {
+    context(x: T)
+    fun <T : Any> accept(value: T): T = value
+}
+fun use(api: Api) = with(1) { api.accept(null).inc() }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextBoundRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ContextBoundRejected.kt".to_string(),
+        line: 6,
+        column: 42,
+        message: "null cannot be a value of a non-null type 'Int'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the null argument"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the null argument");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn a_rejected_contextual_generic_member_keeps_bindings_before_a_missing_context() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(x: T, missing: C)
+    fun <T : Any> accept(value: T): T = value
+}
+fun use(api: Api) = with(1) { api.accept(null).inc() }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("PartialContextBoundRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "PartialContextBoundRejected.kt".to_string(),
+            line: 7,
+            column: 35,
+            message: "no context argument for 'missing: C' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "PartialContextBoundRejected.kt".to_string(),
+            line: 7,
+            column: 42,
+            message: "null cannot be a value of a non-null type 'Int'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the missing context and null argument"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the missing context and null argument"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn a_rejected_contextual_generic_member_keeps_bindings_after_a_missing_context() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(missing: C, x: T)
+    fun <T : Any> accept(value: T): T = value
+}
+fun use(api: Api) = with(1) { api.accept(null).inc() }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("LaterContextBoundRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "LaterContextBoundRejected.kt".to_string(),
+            line: 7,
+            column: 35,
+            message: "no context argument for 'missing: C' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "LaterContextBoundRejected.kt".to_string(),
+            line: 7,
+            column: 42,
+            message: "null cannot be a value of a non-null type 'Int'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the missing context and null argument"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the missing context and null argument"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn rejected_signature_recovery_seeds_explicit_type_arguments_before_context_lookup() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class Api {
+    context(x: T)
+    fun <T> accept(value: String): T = x
+}
+fun use(api: Api) = with(1) { api.accept<String>(null).length }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ExplicitContextBoundRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "ExplicitContextBoundRejected.kt".to_string(),
+            line: 6,
+            column: 35,
+            message: "no context argument for 'x: T' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "ExplicitContextBoundRejected.kt".to_string(),
+            line: 6,
+            column: 50,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the explicit context mismatch"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the explicit context mismatch"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn rejected_signature_recovery_preserves_explicit_binding_during_context_match() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class Api {
+    context(x: T)
+    fun <T> accept(value: String): T = x
+}
+fun use(api: Api) = with("") { api.accept<CharSequence>(null).length }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ExplicitContextSubtypeRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ExplicitContextSubtypeRejected.kt".to_string(),
+        line: 6,
+        column: 57,
+        message: "null cannot be a value of a non-null type 'String'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the null argument"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the null argument");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn rejected_argument_diagnostic_preserves_explicit_binding_during_context_match() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class Api {
+    context(x: T)
+    fun <T> accept(value: T): T = value
+}
+fun use(api: Api) = with("") { api.accept<CharSequence>(null) }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ExplicitContextValueRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ExplicitContextValueRejected.kt".to_string(),
+        line: 6,
+        column: 57,
+        message: "null cannot be a value of a non-null type 'CharSequence'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the null argument"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the null argument");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn rejected_signature_recovery_preserves_expected_binding_during_context_match() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class Api {
+    context(x: T)
+    fun <T> accept(value: String): T = x
+}
+fun use(api: Api): CharSequence = with("") { api.accept(null) }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ExpectedContextSubtypeRejected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ExpectedContextSubtypeRejected.kt".to_string(),
+        line: 6,
+        column: 57,
+        message: "null cannot be a value of a non-null type 'String'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the null argument"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the null argument");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn a_rejected_member_extension_uses_its_generic_dispatch_receiver() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api<T>(val x: T) {
+    context(c: C)
+    fun String.accept(value: String) = x
+}
+fun use(api: Api<Int>) = with(api) { with(C()) { "".accept(null).inc() } }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextDispatchPending.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ContextDispatchPending.kt".to_string(),
+        line: 7,
+        column: 60,
+        message: "null cannot be a value of a non-null type 'String'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the generic dispatch failure"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the generic dispatch failure"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn an_unavailable_context_retains_its_generic_dispatch_result() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api<T>(val x: T) {
+    context(c: C)
+    fun String.accept(value: String) = x
+}
+fun use(api: Api<Int>) = with(api) { "".accept(null).inc() }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextUnavailableDispatchPending.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "ContextUnavailableDispatchPending.kt".to_string(),
+            line: 7,
+            column: 41,
+            message: "no context argument for 'c: C' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "ContextUnavailableDispatchPending.kt".to_string(),
+            line: 7,
+            column: 48,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the unavailable context failure"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the unavailable context failure"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn an_unavailable_context_retains_bindings_from_available_context_parameters() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(x: T, missing: C)
+    fun <T> String.accept(value: String) = x
+}
+fun use(api: Api) = with(api) { with(1) { "".accept(null).inc() } }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("PartialContextPending.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "PartialContextPending.kt".to_string(),
+            line: 7,
+            column: 46,
+            message: "no context argument for 'missing: C' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "PartialContextPending.kt".to_string(),
+            line: 7,
+            column: 53,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the partially available context call"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the partially available context call"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn a_dependency_member_retains_bindings_from_available_context_parameters() {
+    const LIBRARY: &str = r#"// LANGUAGE: +ContextParameters
+package dependency
+class C
+class Api {
+    context(x: T, missing: C)
+    fun <T> accept(value: String): T = x
+}
+"#;
+    const USE: &str = r#"// LANGUAGE: +ContextParameters
+import dependency.Api
+fun use(api: Api) = with(1) { api.accept(null).inc() }
+"#;
+    let Some(library) = common::kotlinc_lib_out(&[("Dependency.kt", LIBRARY)]) else {
+        return;
+    };
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("DependencyUse.kt", USE)],
+        &[library, common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(USE),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "DependencyUse.kt".to_string(),
+            line: 3,
+            column: 35,
+            message: "no context argument for 'missing: C' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "DependencyUse.kt".to_string(),
+            line: 3,
+            column: 42,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the dependency context failure"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the dependency context failure"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn an_explicit_result_retains_bindings_from_available_context_parameters() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(x: T, missing: C)
+    fun <T> String.accept(value: String): T = x
+}
+fun use(api: Api) = with(api) { with(1) { "".accept(null).inc() } }
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ExplicitPartialContextPending.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "ExplicitPartialContextPending.kt".to_string(),
+            line: 7,
+            column: 46,
+            message: "no context argument for 'missing: C' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "ExplicitPartialContextPending.kt".to_string(),
+            line: 7,
+            column: 53,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the explicit-result partial context call"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the explicit-result partial context call"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn a_rejected_direct_member_uses_its_explicit_receiver() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api<T>(val x: T) {
+    context(c: C)
+    fun accept(value: String) = x
+    fun use(other: Api<String>) = with(C()) { other.accept(null).length }
+}
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextExplicitReceiverPending.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ContextExplicitReceiverPending.kt".to_string(),
+        line: 6,
+        column: 60,
+        message: "null cannot be a value of a non-null type 'String'.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the explicit receiver failure"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(
+        result.krusty_code, 0,
+        "krusty accepted the explicit receiver failure"
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn an_unavailable_context_is_not_an_unresolved_generic_member() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(c: C)
+    fun <T> create(): T = TODO()
+}
+fun unfixed(api: Api) = api.create()
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextUnfixed.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "ContextUnfixed.kt".to_string(),
+            line: 7,
+            column: 29,
+            message: "cannot infer type for type parameter 'T'. Specify it explicitly.".to_string(),
+        },
+        common::CompilerError {
+            file: "ContextUnfixed.kt".to_string(),
+            line: 7,
+            column: 29,
+            message: "no context argument for 'c: C' found.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the unfixed call"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the unfixed call");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn an_expected_result_fixes_an_unavailable_contextual_generic_member() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(c: C)
+    fun <T> create(): T = TODO()
+}
+fun expected(api: Api): String = api.create()
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextExpected.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [common::CompilerError {
+        file: "ContextExpected.kt".to_string(),
+        line: 7,
+        column: 38,
+        message: "no context argument for 'c: C' found.".to_string(),
+    }];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the missing context"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the missing context");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn an_unmapped_contextual_member_is_not_unresolved() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    context(c: C)
+    fun accept(value: String): String = value
+}
+fun missing(api: Api) = api.accept()
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextUnmapped.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "ContextUnmapped.kt".to_string(),
+            line: 7,
+            column: 29,
+            message: "no context argument for 'c: C' found.".to_string(),
+        },
+        common::CompilerError {
+            file: "ContextUnmapped.kt".to_string(),
+            line: 7,
+            column: 29,
+            message: "no value passed for parameter 'value'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the unmapped call"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the unmapped call");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn context_availability_does_not_split_a_rejected_overload_family() {
+    const SRC: &str = r#"// LANGUAGE: +ContextParameters
+class C
+class Api {
+    fun pick(value: String): Int = 0
+    fun pick(value: CharSequence): Int = 0
+    context(c: C)
+    fun pick(value: Any): String = ""
+}
+fun mixed(api: Api) = api.pick(null).length
+"#;
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("ContextMixedFamily.kt", SRC)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(SRC),
+    );
+    let expected = [
+        common::CompilerError {
+            file: "ContextMixedFamily.kt".to_string(),
+            line: 9,
+            column: 32,
+            message: "null cannot be a value of a non-null type 'String'.".to_string(),
+        },
+        common::CompilerError {
+            file: "ContextMixedFamily.kt".to_string(),
+            line: 9,
+            column: 38,
+            message: "unresolved reference 'length' on receiver of type 'Int'.".to_string(),
+        },
+    ];
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc accepted the rejected call"
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
+    assert_ne!(result.krusty_code, 0, "krusty accepted the rejected call");
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
 fn implicit_receiver_member_shadows_top_level() {
     // Inside `with(Scope)`, an unqualified call to a name that is BOTH a member of the receiver and a
     // top-level function binds the MEMBER (kotlinc scoping: the receiver is the nearer scope). Outside

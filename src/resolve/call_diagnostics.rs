@@ -81,6 +81,578 @@ fn rejected_candidate_argument_shape(
 }
 
 impl Checker<'_> {
+    /// Exact declaration family used when member-extension selection rejects every candidate by
+    /// argument type or unavailable context. Recovery keeps the provider declaration carried by
+    /// the selection shape and applies the same dispatch receiver/class bindings; it never searches
+    /// the classifier again or reconstructs a declaration from its spelling.
+    pub(super) fn rejected_member_extension_candidates(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        argument_count: usize,
+        extension_receiver: Ty,
+        name: &str,
+        selection: MemberExtensionSelection,
+        receivers: Option<&[ImplicitReceiver]>,
+    ) -> Vec<crate::libraries::FunctionInfo> {
+        let source = self.fed_source();
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let type_argument_count = self.file.call_type_args.get(&call.0).map_or(0, Vec::len);
+        let receivers = member_extension_selection::ordinary_dispatch_first(
+            scope,
+            receivers
+                .map(<[ImplicitReceiver]>::to_vec)
+                .unwrap_or_else(|| self.implicit_receivers(scope)),
+        );
+        let mut mapped =
+            member_extension_function_shapes_in(&source, &receivers, extension_receiver, name)
+                .into_iter()
+                .filter_map(|shape| {
+                    if selection == MemberExtensionSelection::Operators && !shape.is_operator {
+                        return None;
+                    }
+                    let mut candidate = crate::libraries::FunctionInfo::classifier_member(
+                        crate::libraries::FnKind::Extension,
+                        shape.owner,
+                        shape.member,
+                    );
+                    crate::symbol_resolver::specialize_member_function(
+                        &source,
+                        shape.dispatch_receiver.ty,
+                        &mut candidate,
+                        &shape.class_bindings,
+                    );
+                    candidate.scope_rank =
+                        u32::try_from(shape.priority.dispatch_rank).unwrap_or(u32::MAX);
+                    candidate.receiver_rank =
+                        u32::try_from(shape.priority.dispatch_depth).unwrap_or(u32::MAX);
+                    let signature = candidate.semantic_signature();
+                    let type_arity_matches =
+                        type_argument_count == 0 || signature.formals.len() == type_argument_count;
+                    let visible = match self.contextual_call_shape_result(
+                        scope,
+                        &signature.params,
+                        &candidate.call_sig,
+                        candidate.context_count,
+                        argument_names,
+                    ) {
+                        Ok(shape) => (shape.params.len(), shape.call_sig),
+                        Err(_) => {
+                            let context_count = candidate.context_count.min(signature.params.len());
+                            let explicitly_named = |parameter: usize| {
+                                self.file.explicit_context_arguments
+                                    && candidate.call_sig.param_names.get(parameter).is_some_and(
+                                        |parameter| {
+                                            argument_names.is_some_and(|names| {
+                                                names
+                                                    .iter()
+                                                    .flatten()
+                                                    .any(|argument| argument == parameter)
+                                            })
+                                        },
+                                    )
+                            };
+                            let indices = (context_count..signature.params.len())
+                                .chain(
+                                    (0..context_count)
+                                        .filter(|&parameter| explicitly_named(parameter)),
+                                )
+                                .collect::<Vec<_>>();
+                            (
+                                indices.len(),
+                                candidate.call_sig.select_parameters(&indices),
+                            )
+                        }
+                    };
+                    call_argument_parameter_indices(
+                        argument_count,
+                        visible.0,
+                        argument_names,
+                        trailing_lambda,
+                        &visible.1,
+                    )?;
+                    Some((shape.priority, candidate, type_arity_matches))
+                })
+                .collect::<Vec<_>>();
+        // A value-argument-mapped declaration fixes the dispatch rung even when its explicit
+        // type-argument arity is wrong. Only after that tower choice can arity remove declarations;
+        // it must not expose a farther receiver.
+        if let Some(nearest_dispatch) = mapped
+            .iter()
+            .map(|(priority, ..)| priority.dispatch_rank)
+            .min()
+        {
+            mapped.retain(|(priority, ..)| priority.dispatch_rank == nearest_dispatch);
+        }
+        // Type arity selects within the chosen dispatch rung, but a rung with no matching arity
+        // remains the diagnostic owner. Preserve that family for the shared reporter instead of
+        // turning it into `None` and continuing to a farther top-level extension.
+        if mapped
+            .iter()
+            .any(|(_, _, type_arity_matches)| *type_arity_matches)
+        {
+            mapped.retain(|(_, _, type_arity_matches)| *type_arity_matches);
+        }
+        let maximal =
+            member_extension_selection::maximal_member_extensions(self, &mapped, |candidate| {
+                candidate.0
+            });
+        maximal
+            .into_iter()
+            .map(|index| mapped[index].1.clone())
+            .collect()
+    }
+
+    /// When overload selection rejects a family by type but exactly one declaration has a valid
+    /// source-argument mapping, report that declaration's mapped argument errors. This diagnostic
+    /// step is origin-neutral: top-level and extension candidates carry the same semantic shape and
+    /// must not fall back to a generic inapplicable message merely because one came from a package
+    /// receiver.
+    pub(super) fn report_single_mapped_candidate_type_errors(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        constraints: CallConstraints<'_>,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> Option<Ty> {
+        let type_args = constraints.type_args;
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let checkpoint = self.diags.diags.len();
+        let mut mapped = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let signature = candidate.semantic_signature();
+                let type_arity_matches =
+                    type_args.is_empty() || signature.formals.len() == type_args.len();
+                let mut bindings = constraints.bindings(&self.fed_source(), &signature);
+                let initial_params =
+                    crate::symbol_resolver::ty_subst_all(&signature.params, &bindings);
+                let (mut shape, missing_context) = match self.contextual_call_shape_result(
+                    scope,
+                    &initial_params,
+                    &candidate.call_sig,
+                    candidate.context_count,
+                    argument_names,
+                ) {
+                    Ok(shape) => (shape, None),
+                    Err(missing) => {
+                        let context_count = candidate.context_count.min(initial_params.len());
+                        let explicitly_named = |parameter: usize| {
+                            self.file.explicit_context_arguments
+                                && candidate.call_sig.param_names.get(parameter).is_some_and(
+                                    |parameter| {
+                                        argument_names.is_some_and(|names| {
+                                            names
+                                                .iter()
+                                                .flatten()
+                                                .any(|argument| argument == parameter)
+                                        })
+                                    },
+                                )
+                        };
+                        let parameter_indices = (context_count..initial_params.len())
+                            .chain(
+                                (0..context_count).filter(|&parameter| explicitly_named(parameter)),
+                            )
+                            .collect::<Vec<_>>();
+                        let selected_context_indices = (0..context_count)
+                            .filter(|&parameter| !explicitly_named(parameter))
+                            .collect::<Vec<_>>();
+                        let mut context_sources = vec![None; context_count];
+                        let mut context_actual_types = vec![None; context_count];
+                        for parameter in selected_context_indices {
+                            let Ok(selected) = self.select_context_arguments_with_types(
+                                scope,
+                                std::slice::from_ref(&initial_params[parameter]),
+                            ) else {
+                                continue;
+                            };
+                            let Some((source, actual)) = selected.into_iter().next() else {
+                                continue;
+                            };
+                            context_sources[parameter] = Some(source);
+                            context_actual_types[parameter] = Some(actual);
+                        }
+                        let shape = ContextualCallShape {
+                            params: parameter_indices
+                                .iter()
+                                .map(|&parameter| initial_params[parameter])
+                                .collect(),
+                            call_sig: candidate.call_sig.select_parameters(&parameter_indices),
+                            parameter_indices,
+                            context_sources,
+                            context_actual_types,
+                        };
+                        // Context lookup consumes the applied shape, but kotlinc names an
+                        // unavailable parameter with its declaration type (`x: T`, not `x: String`).
+                        let diagnostic_missing = MissingContextParameter {
+                            index: missing.index,
+                            ty: signature.params[missing.index],
+                        };
+                        (shape, Some(diagnostic_missing))
+                    }
+                };
+                for (parameter, actual) in shape.context_actual_types.iter().enumerate() {
+                    let Some(actual) = actual else { continue };
+                    let declared = *signature.params.get(parameter)?;
+                    unify_member_extension_slot(declared, *actual, &[], &mut bindings);
+                }
+                let params = crate::symbol_resolver::ty_subst_all(&signature.params, &bindings);
+                shape.params = shape
+                    .parameter_indices
+                    .iter()
+                    .map(|&parameter| params[parameter])
+                    .collect();
+                let parameters = call_argument_parameter_indices(
+                    args.len(),
+                    shape.params.len(),
+                    argument_names,
+                    trailing_lambda,
+                    &shape.call_sig,
+                )?;
+                let omitted_defaults = map_call_sig_args_with_trailing(
+                    args,
+                    argument_names,
+                    shape.params.len(),
+                    &shape.call_sig,
+                    trailing_lambda,
+                )
+                .ok()?
+                .iter()
+                .filter(|argument| argument.is_none())
+                .count();
+                let specificity = parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(source, &parameter)| {
+                        let declared = shape.params[parameter];
+                        if shape.call_sig.vararg_index == Some(parameter)
+                            && !self.file.is_spread_arg(args[source])
+                        {
+                            declared.array_read_elem().unwrap_or(declared)
+                        } else {
+                            declared
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let generic = candidate
+                    .generic_sig
+                    .as_ref()
+                    .is_some_and(|signature| !signature.formals.is_empty());
+                Some((
+                    candidate,
+                    shape,
+                    parameters,
+                    specificity,
+                    omitted_defaults,
+                    generic,
+                    missing_context,
+                    type_arity_matches,
+                ))
+            })
+            .collect::<Vec<_>>();
+        // Scope-tower priority chooses the nearest APPLICABLE level. A nearer declaration whose
+        // source arguments do not even map does not hide a mapped declaration on an outer level
+        // (`with(outer) { with(inner) { receiver.extension(null) } }`). Selection already follows
+        // that rule; rejected-call recovery must project the same tower before deciding which one
+        // candidate owns the argument-type diagnostic.
+        if let Some(nearest_scope_rank) = mapped
+            .iter()
+            .map(|(candidate, ..)| (candidate.scope_rung.selection_rank(), candidate.scope_rank))
+            .min()
+        {
+            mapped.retain(|(candidate, ..)| {
+                (candidate.scope_rung.selection_rank(), candidate.scope_rank) == nearest_scope_rank
+            });
+        }
+        let any_type_arity_matches = mapped
+            .iter()
+            .any(|(_, _, _, _, _, _, _, type_arity_matches)| *type_arity_matches);
+        if any_type_arity_matches {
+            mapped.retain(|(_, _, _, _, _, _, _, type_arity_matches)| *type_arity_matches);
+        }
+        if mapped.len() > 1 {
+            let dominated = mapped
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (_, _, _, specificity, omitted, ..))| {
+                    mapped
+                        .iter()
+                        .any(|(_, _, _, other_specificity, other_omitted, ..)| {
+                            other_specificity == specificity && other_omitted < omitted
+                        })
+                        .then_some(index)
+                })
+                .collect::<crate::fx_hash::HashSet<_>>();
+            mapped = mapped
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
+                .collect();
+        }
+        crate::symbol_resolver::retain_most_specific_declarations(
+            &self.fed_source(),
+            Some(constraints.receiver),
+            &mut mapped,
+            |(candidate, _, _, specificity, _, generic, _, _)| {
+                (
+                    candidate
+                        .is_extension()
+                        .then(|| candidate.semantic_receiver())
+                        .flatten(),
+                    specificity.as_slice(),
+                    *generic,
+                    Some(candidate.callable.owner),
+                )
+            },
+        );
+        if !any_type_arity_matches {
+            if let [(candidate, ..)] = mapped.as_slice() {
+                if let Some(formal) = candidate
+                    .generic_sig
+                    .as_ref()
+                    .and_then(|signature| signature.formals.get(type_args.len()))
+                {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        format!(
+                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                            crate::types::type_parameter_source_name(formal)
+                        ),
+                    );
+                }
+            }
+        }
+        let reported_type_arity = if any_type_arity_matches {
+            false
+        } else {
+            let candidates = mapped
+                .iter()
+                .map(|(candidate, ..)| (*candidate).clone())
+                .collect::<Vec<_>>();
+            self.report_callable_type_argument_arity(call, name, type_args.len(), &candidates)
+        };
+        let [(candidate, shape, parameters, _, _, _, missing_context, _)] = mapped.as_slice()
+        else {
+            return reported_type_arity.then_some(Ty::Error);
+        };
+        if let Some(missing) = missing_context {
+            self.report_missing_context_parameter(call, *missing, &candidate.call_sig.param_names);
+        }
+        if self.report_dnn_null_inference(
+            call,
+            candidate,
+            args,
+            argument_names,
+            trailing_lambda,
+            type_args.len(),
+        ) {
+            self.diags.sort_source_order_from(checkpoint);
+            return Some(Ty::Error);
+        }
+        if let Some(signature) = candidate.generic_sig.as_ref() {
+            let bindings = crate::symbol_resolver::infer_generic_call_bindings(
+                signature,
+                parameters.iter().enumerate().map(|(source, &parameter)| {
+                    let argument = args[source];
+                    let declaration_parameter = shape.parameter_indices[parameter];
+                    let actual = self
+                        .callable_reference_types
+                        .get(&argument)
+                        .copied()
+                        .unwrap_or(arg_tys[source]);
+                    (declaration_parameter, actual, false)
+                }),
+                candidate.call_sig.vararg_index,
+            );
+            for (formal_index, formal) in signature.formals.iter().enumerate() {
+                let inferred_from_callable_reference =
+                    parameters.iter().enumerate().any(|(source, &parameter)| {
+                        let declaration_parameter = shape.parameter_indices[parameter];
+                        matches!(self.file.expr(args[source]), Expr::CallableRef { .. })
+                            && signature.params.get(declaration_parameter).is_some_and(
+                                |parameter| {
+                                    ty_mentions_param(*parameter, std::slice::from_ref(formal))
+                                },
+                            )
+                    });
+                if !inferred_from_callable_reference {
+                    continue;
+                }
+                let satisfies_bounds = bindings.get(formal).is_some_and(|&actual| {
+                    signature
+                        .formal_bounds
+                        .get(formal_index)
+                        .into_iter()
+                        .flatten()
+                        .all(|&bound| self.receiver_is_assignable(actual, bound))
+                });
+                if !satisfies_bounds {
+                    self.diags.error(
+                        self.span(call),
+                        format!(
+                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                            crate::types::type_parameter_source_name(formal)
+                        ),
+                    );
+                    return Some(Ty::Error);
+                }
+            }
+        }
+        for (source, &parameter) in parameters.iter().enumerate() {
+            let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
+            else {
+                continue;
+            };
+            let expected = if shape.call_sig.vararg_index == Some(parameter)
+                && !self.file.is_spread_arg(args[source])
+            {
+                declared.array_read_elem().unwrap_or(declared)
+            } else {
+                declared
+            };
+            if !shape.call_sig.parameter_admits(parameter, expected, actual) {
+                self.report_assignability_error(
+                    expected,
+                    actual,
+                    self.span(args[source]),
+                    "argument",
+                );
+            } else {
+                self.expect_call_arg(scope, expected, args[source], actual);
+            }
+        }
+        if self.diags.diags.len() > checkpoint {
+            let signature = candidate.semantic_signature();
+            let bindings = constraints.bindings(&self.fed_source(), &signature);
+            self.report_explicit_type_argument_bound_errors(
+                call, name, candidate, &signature, &bindings,
+            );
+            self.diags.sort_source_order_from(checkpoint);
+            return Some(Ty::Error);
+        }
+
+        if let Some(result) =
+            self.report_extension_receiver_type_mismatch(call, name, candidate, constraints)
+        {
+            return Some(result);
+        }
+
+        let signature = candidate.semantic_signature();
+        let bindings = constraints.bindings(&self.fed_source(), &signature);
+        let bound_checkpoint = self.diags.diags.len();
+        self.report_explicit_type_argument_bound_errors(
+            call, name, candidate, &signature, &bindings,
+        );
+        if self.diags.diags.len() > bound_checkpoint {
+            let mut display = self
+                .source_callable_display(candidate)
+                .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+            if candidate.classifier_static {
+                display.insert_str(0, "static ");
+            }
+            self.diags.error(
+                self.call_callee_name_span(call),
+                format!("inapplicable candidate(s): {display}"),
+            );
+            self.diags.sort_source_order_from(checkpoint);
+            return Some(Ty::Error);
+        }
+        None
+    }
+
+    /// Report the exact unavailable context parameter retained on a selected callable. Candidate
+    /// selection already chose the declaration; diagnostics consume that identity and its applied
+    /// semantic signature instead of falling back to a family-level context message.
+    pub(super) fn report_selected_callable_missing_context(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        selected: &SelectedCallable,
+    ) {
+        let parameters = selected.applied_params();
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let missing = self
+            .contextual_call_shape_result(
+                scope,
+                &parameters,
+                &selected.call_sig,
+                selected.context_count,
+                argument_names,
+            )
+            .err();
+        if let Some(missing) = missing {
+            self.report_missing_context_parameter(call, missing, &selected.call_sig.param_names);
+        } else {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                "no implicit value is available for the context parameters".to_string(),
+            );
+        }
+    }
+
+    /// Retain upper-bound diagnostics when a rejected call still has one shape-matching candidate.
+    /// Recovery uses the declaration's result so enclosing expressions remain typed, but an
+    /// explicitly written invalid type argument remains an error owned by its source occurrence.
+    pub(super) fn report_explicit_type_argument_bound_errors(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        candidate: &crate::libraries::FunctionInfo,
+        signature: &crate::libraries::GenericSig,
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) {
+        let Some(type_arguments) = self.file.call_type_args.get(&call.0).cloned() else {
+            return;
+        };
+        let declaration = Self::generic_callable_header(name, candidate);
+        for (formal_index, type_argument) in type_arguments.iter().enumerate() {
+            if type_argument.is_inference_placeholder() {
+                continue;
+            }
+            let Some(formal) = signature.formals.get(formal_index) else {
+                continue;
+            };
+            let Some(&actual) = bindings.get(formal) else {
+                continue;
+            };
+            for &bound in signature
+                .formal_bounds
+                .get(formal_index)
+                .into_iter()
+                .flatten()
+            {
+                let expected = crate::symbol_resolver::ty_subst_keep_unbound(bound, bindings);
+                if self.generic_bound_admits(actual, expected) {
+                    continue;
+                }
+                // A flexible Java bound exposes the written argument through that same platform
+                // view in diagnostics (`T : Number!`, `String!`). This is declaration metadata,
+                // not an origin branch: a non-flexible Kotlin bound keeps the written type exact.
+                let diagnostic_actual = if matches!(expected, Ty::PlatformNullable(_)) {
+                    expected.rewrap_nullability(actual.non_null())
+                } else {
+                    actual
+                };
+                let context = [expected, diagnostic_actual];
+                let expected = self.diagnostic_type_name(expected, &context);
+                let actual = self.diagnostic_type_name(diagnostic_actual, &context);
+                let formal = crate::types::type_parameter_source_name(formal);
+                self.diags.error(
+                    type_argument.span,
+                    format!(
+                        "type argument is not within its bounds: type parameter '{formal} (of {declaration})' must be subtype of '{expected}', but actual: '{actual}'."
+                    ),
+                );
+            }
+        }
+    }
+
     /// Report a generic call whose contextual result constraints disagree on a formal that also
     /// shapes a lambda argument. The call itself owns the inference failure, but each affected
     /// lambda remains a separately diagnosed source expression and its body must still be checked
