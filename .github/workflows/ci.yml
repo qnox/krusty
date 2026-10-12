@@ -23,7 +23,8 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  # Lint + coverage (`just ci`). Conformance and Gradle both run binaries from `build-shared-bins`.
+  # Lint + coverage (`just ci`). Conformance and Gradle run prebuilt artifact families from their
+  # independent producer jobs below.
   # Neither matrix compiles krusty again.
   ci:
     runs-on: ubuntu-latest
@@ -165,10 +166,10 @@ jobs:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
 
-  # One gate build of the binaries the matrices run. Conformance uses the test binary and the
-  # focused KLIB tests. Gradle uses the same CLI and the krusty-build test binary; consumers do not
-  # compile krusty again.
-  build-shared-bins:
+  # Each artifact family has one producer. They run on separate hosted runners so the conformance
+  # matrix waits for the slowest required build instead of serializing every unrelated target graph
+  # on one runner. Consumers never compile krusty again.
+  build-conformance-bin:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -177,18 +178,63 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - name: build shared test binaries
+      - name: build conformance binary
         run: |
           set -euo pipefail
           source scripts/phase-timing.sh
-          phase_log_prefix=shared-bins
+          phase_log_prefix=conformance-bin
           PHASE_TIMING_LOG="$(mktemp)"
           trap 'phase_report || true' EXIT
           phase_begin conformance-test-binary
           bin=$(just conformance-bin)
           phase_end conformance-test-binary
           cp "$bin" conformance-bin
-          # The non-box tests and every Gradle lane launch this CLI. The library is already built.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: conformance-bin
+          path: conformance-bin
+          if-no-files-found: error
+
+  build-klib-test-bins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build focused KLIB test binaries
+        run: |
+          set -euo pipefail
+          source scripts/phase-timing.sh
+          phase_log_prefix=klib-test-bins
+          PHASE_TIMING_LOG="$(mktemp)"
+          trap 'phase_report || true' EXIT
+          phase_begin focused-klib-test-binaries
+          scripts/build-klib-test-binaries.sh "$PWD"
+          phase_end focused-klib-test-binaries
+      - uses: actions/upload-artifact@v7
+        with:
+          name: klib-test-bins
+          path: |
+            klib-e2e-tests
+            klib-unit-tests
+          if-no-files-found: error
+
+  build-tool-bins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: build compiler and Gradle test binaries
+        run: |
+          set -euo pipefail
+          source scripts/phase-timing.sh
+          phase_log_prefix=tool-bins
+          PHASE_TIMING_LOG="$(mktemp)"
+          trap 'phase_report || true' EXIT
           phase_begin krusty-cli
           cargo build --profile gate -p krusty-cli
           phase_end krusty-cli
@@ -197,23 +243,12 @@ jobs:
           bin=$(just krusty-build-tests)
           phase_end krusty-build-tests
           cp "$bin" krusty-build-tests
-          phase_begin klib-e2e-tests
-          bin=$(scripts/cargo-test-binary.sh e2e --test e2e)
-          phase_end klib-e2e-tests
-          cp "$bin" klib-e2e-tests
-          phase_begin klib-unit-tests
-          bin=$(scripts/cargo-test-binary.sh krusty --lib)
-          phase_end klib-unit-tests
-          cp "$bin" klib-unit-tests
       - uses: actions/upload-artifact@v7
         with:
-          name: shared-bins
+          name: tool-bins
           path: |
-            conformance-bin
             krusty
             krusty-build-tests
-            klib-e2e-tests
-            klib-unit-tests
           if-no-files-found: error
 
   # Supported-version matrix + the max version (for the badge later), from the kotlin-versions manifest.
@@ -234,7 +269,7 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-shared-bins, versions]
+    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]
     strategy:
       fail-fast: false
       matrix:
@@ -378,10 +413,19 @@ jobs:
           key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
             box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-
-      - name: download shared test binaries
+      - name: download conformance binary
         uses: actions/download-artifact@v8
         with:
-          name: shared-bins
+          name: conformance-bin
+      - name: download compiler binary
+        uses: actions/download-artifact@v8
+        with:
+          name: tool-bins
+      - name: download focused KLIB test binaries
+        if: matrix.target == 'native' && matrix.version == needs.versions.outputs.max
+        uses: actions/download-artifact@v8
+        with:
+          name: klib-test-bins
       # One box run writes both reports over the same applicable cases: pct.txt is the case report
       # "<pct> <passed> <applicable>" and jvm-byte-equality.txt the JVM byte report
       # "<pct> <matched> <total>" (.class bytes). Printing their badge fields validates each and
@@ -591,7 +635,7 @@ jobs:
   # Kotlin version, driving the shared krusty binary. Release publishes these bytes unchanged.
   build-tools:
     name: build-tools (${{ matrix.kotlin }})
-    needs: [build-shared-bins, versions]
+    needs: [build-tool-bins, versions]
     strategy:
       fail-fast: false
       matrix:
@@ -613,7 +657,7 @@ jobs:
           cache-provider: basic
       - uses: actions/download-artifact@v8
         with:
-          name: shared-bins
+          name: tool-bins
       - name: build, test and package for Kotlin ${{ matrix.kotlin }}
         run: |
           set -euo pipefail
@@ -627,7 +671,7 @@ jobs:
 
   # Execute the exact release bytes against every supported Kotlin Gradle plugin.
   gradle:
-    needs: [build-shared-bins, build-gradle-plugin]
+    needs: [build-tool-bins, build-gradle-plugin]
     strategy:
       fail-fast: false
       matrix:
@@ -666,7 +710,7 @@ jobs:
           key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
       - uses: actions/download-artifact@v8
         with:
-          name: shared-bins
+          name: tool-bins
       - uses: actions/download-artifact@v8
         with:
           name: krusty-gradle-plugin
