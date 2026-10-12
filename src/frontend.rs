@@ -1056,10 +1056,12 @@ where
         if source.kind != SourceKind::Java {
             record_local_class_name_provenance(&mut file);
         }
+        if matches!(source.kind, SourceKind::Kotlin | SourceKind::KotlinScript) {
+            external_modifier_targets::check(&file, &features, diags);
+        }
         if source.kind == SourceKind::Kotlin {
             header_validation::validate(&file, diags);
             explicit_api::check(&file, &features, diags);
-            external_modifier_targets::check(&file, &features, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
             // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
             // written as an `invokestatic` of a method the facade does not declare, so the program

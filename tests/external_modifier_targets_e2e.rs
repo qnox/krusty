@@ -45,6 +45,31 @@ fn assert_reported_like_kotlinc(source: &str, reference_args: &[String]) {
     );
 }
 
+fn assert_script_reported_like_kotlinc(source: &str, reference_args: &[String]) {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let (krusty_code, krusty_stderr) = common::front_end_named_input_result(
+        "Use.kts",
+        krusty::frontend::SourceInput::kotlin_script(source),
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    );
+    let (reference_code, reference_stderr) =
+        common::kotlinc_named_source_result_with_args("Use.kts", source, reference_args);
+    let reported = |code: i32, stderr: &str| {
+        (
+            code,
+            common::compiler_errors(stderr),
+            common::compiler_warnings(stderr),
+        )
+    };
+    assert_eq!(
+        reported(krusty_code, &krusty_stderr),
+        reported(reference_code, &reference_stderr),
+        "\nkrusty: {krusty_stderr}\nkotlinc: {reference_stderr}"
+    );
+}
+
 /// Without the feature, each `external` is deprecated for its target and the code compiles.
 #[test]
 fn external_on_an_enum_entry_or_a_constructor_property_is_deprecated() {
@@ -69,6 +94,28 @@ fn an_entry_named_external_is_not_a_modifier() {
          enum class H { A,\n    ;\n    class external\n}\n\
          fun g() = G.external.ordinal + H.A.ordinal\n",
         &[],
+    );
+}
+
+/// The explicit semicolon ends the entry list. Although the lexer represents it as a newline token,
+/// lookahead must not cross it and reinterpret the entry named `external` as a modifier on `init`.
+#[test]
+fn an_entry_named_external_before_a_semicolon_is_not_a_modifier() {
+    assert_reported_like_kotlinc(
+        "enum class E { external; init {} }\nfun ordinal() = E.external.ordinal\n",
+        &[],
+    );
+}
+
+/// Scripts use the same modifier-target rule as ordinary Kotlin files, with the same warning/error
+/// transition and exact locations.
+#[test]
+fn external_targets_in_a_script_are_checked() {
+    let source = "enum class E { external A }\nclass K(external val x: Int)\n";
+    assert_script_reported_like_kotlinc(source, &[]);
+    assert_script_reported_like_kotlinc(
+        &format!("// LANGUAGE: +{FEATURE}\n{source}"),
+        &[format!("-XXLanguage:+{FEATURE}")],
     );
 }
 

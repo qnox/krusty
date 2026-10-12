@@ -292,17 +292,14 @@ impl Parser<'_> {
         if !(self.at(TokenKind::Ident) && self.keyword_text("external")) {
             return false;
         }
-        let Some(next) =
-            (self.i + 1..self.t.len()).find(|&index| self.t[index].kind != TokenKind::Newline)
-        else {
+        let next = self.after_plain_newlines(self.i + 1);
+        let Some(next_token) = self.t.get(next).copied() else {
             return false;
         };
-        if self.t[next].kind == TokenKind::Ident
-            && self.token_keyword_text(self.t[next], "external")
-        {
+        if next_token.kind == TokenKind::Ident && self.token_keyword_text(next_token, "external") {
             return true;
         }
-        match self.t[next].kind {
+        match next_token.kind {
             TokenKind::At => true,
             TokenKind::Ident => matches!(
                 self.t.get(next + 1).map(|token| token.kind),
