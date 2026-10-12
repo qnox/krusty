@@ -42,11 +42,13 @@ fn property_initializers_and_accessors_stream_as_distinct_body_units() {
     for work in ordinary {
         kinds.push(work.kind);
         check_and_dispatch_body(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -103,11 +105,13 @@ fn anonymous_property_initializer_reads_same_named_lexical_capture() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -164,11 +168,13 @@ fn enum_entry_property_accessor_streams_as_checked_fir() {
     for work in ordinary {
         let getter = work.kind == BodyKind::Getter;
         check_and_dispatch_body(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -255,11 +261,13 @@ fn local_classifier_property_reference_streams_with_captured_type_arguments() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_body(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -291,11 +299,13 @@ fn script_body_streams_as_one_checked_body_unit() {
     assert_eq!(work.kind, BodyKind::Script);
 
     check_and_dispatch_body(
-        &analysis.files[0],
-        info,
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info,
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -334,11 +344,13 @@ fn class_init_block_uses_its_stable_body_unit_anchor() {
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -386,11 +398,13 @@ fn enum_init_block_uses_the_current_dispatch_receiver() {
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -448,11 +462,13 @@ fn enum_property_initializer_reads_a_prior_property_on_current_dispatch() {
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -524,11 +540,13 @@ fn class_initializer_keeps_property_parameter_slots_without_rebinding_their_name
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         direct,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -656,11 +674,13 @@ fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instan
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -745,11 +765,13 @@ fn sibling_local_function_supplies_the_local_class_shared_capture_operand() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -843,11 +865,13 @@ fn local_class_recaptures_the_selected_local_constructor_closure() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -976,12 +1000,14 @@ fn local_class_member_keeps_the_enclosing_body_local_callable_identity() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_active_body_in_session(
-            &analysis.files[0],
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             &active,
-            info,
-            SourceFileId::from_raw(0),
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1073,11 +1099,13 @@ fn anonymous_class_mutable_capture_is_a_shared_cell_in_checked_fir() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1143,11 +1171,13 @@ fn anonymous_class_inferred_property_increment_keeps_outer_capture_mutable() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1243,11 +1273,13 @@ fn nested_anonymous_class_forwards_a_mutable_destructure_capture() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1328,11 +1360,13 @@ fn inner_local_class_super_lambda_reads_the_enclosing_class_capture() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1398,11 +1432,13 @@ fn local_class_inside_setter_keeps_enclosing_backing_field_identity() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1464,11 +1500,13 @@ fn nested_anonymous_super_argument_reads_its_enclosing_instance_from_the_prefix(
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1666,11 +1704,13 @@ fn enum_entry_constructor_mapping_is_final_in_checked_fir() {
     let mut sink = RecordingSink::default();
     for work in entries {
         check_and_dispatch_body(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked source"),
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked source"),
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1752,11 +1792,13 @@ fn enum_entry_property_initializers_stream_with_the_entry_receiver() {
     let mut sink = RecordingSink::default();
     for work in property_initializers {
         check_and_dispatch_body(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1880,11 +1922,13 @@ fn enum_entry_inner_class_reads_entry_property_through_outer_enum_receiver() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_body(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -1995,11 +2039,13 @@ fn enum_entry_property_anonymous_object_captures_prior_entry_storage() {
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_body(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -2055,11 +2101,13 @@ fn anonymous_object_nested_inner_class_publishes_outer_capture_dependent_signatu
     let mut sink = RecordingSink::default();
     for work in ordinary {
         check_and_dispatch_body(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -2562,11 +2610,13 @@ fn enum_entry_without_primary_constructor_targets_selected_secondary_callable() 
     let mut sink = RecordingSink::default();
     for work in entries {
         check_and_dispatch_body(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked source"),
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked source"),
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -2619,11 +2669,13 @@ fn parameter_default_is_owned_by_fir_even_without_an_ordinary_body() {
         streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -2711,11 +2763,13 @@ fn overloaded_functions_keep_parameter_referencing_defaults_in_their_own_signatu
     let mut sink = RecordingSink::default();
     for body in work {
         check_and_dispatch_body(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked source"),
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked source"),
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             body,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
@@ -2815,11 +2869,13 @@ fn imported_nested_typealiases_publish_bound_constructions_and_unbound_construct
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[1],
-        analysis.types[1].as_ref().expect("checked use site"),
-        SourceFileId::from_raw(1),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[1],
+            info: analysis.types[1].as_ref().expect("checked use site"),
+            source: SourceFileId::from_raw(1),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -2909,11 +2965,13 @@ fn secondary_constructor_delegation_is_final_in_checked_fir() {
         streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -2981,11 +3039,13 @@ fn secondary_constructor_val_initialization_is_a_checked_backing_field_write() {
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         work,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -3046,11 +3106,13 @@ fn primary_super_delegation_uses_the_selected_module_constructor() {
         streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         child,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -3129,11 +3191,13 @@ fn nested_class_super_argument_selects_its_enclosing_object_receiver() {
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         derived,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -3210,11 +3274,13 @@ fn primary_super_callable_reference_captures_the_available_enclosing_receiver() 
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         inner,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -3294,11 +3360,13 @@ fn inner_super_constructor_delegation_keeps_the_checked_enclosing_receiver() {
     let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
     let mut sink = RecordingSink::default();
     check_and_dispatch_body(
-        &analysis.files[0],
-        analysis.types[0].as_ref().expect("checked source"),
-        SourceFileId::from_raw(0),
+        crate::fir::BodyCheckUnit {
+            file: &analysis.files[0],
+            info: analysis.types[0].as_ref().expect("checked source"),
+            source: SourceFileId::from_raw(0),
+            index: &index,
+        },
         derived,
-        &index,
         sources.origins_mut(),
         &mut inline_bodies,
         &mut sink,
@@ -3357,11 +3425,13 @@ fn anonymous_inner_super_delegation_reads_checked_constructor_capture_parameters
     let mut session = BodyCheckSession::default();
     for work in ordinary {
         check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked source"),
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked source"),
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,

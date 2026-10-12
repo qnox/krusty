@@ -332,11 +332,13 @@ fn check_default_source(
             missing_owner: false,
         };
         if let Err(error) = crate::fir::check_and_dispatch_signature_defaults_in_session(
-            file,
-            &info,
-            source,
+            crate::fir::BodyCheckUnit {
+                file,
+                info: &info,
+                source,
+                index: &*index,
+            },
             item.clone(),
-            &*index,
             &active,
             sources.origins_mut(),
             &mut sink,
@@ -434,11 +436,13 @@ pub(super) fn from_checked_analysis(
         let file = files.get(source.raw() as usize)?;
         let info = types.get(source.raw() as usize).and_then(Option::as_ref)?;
         if let Err(error) = crate::fir::check_and_dispatch_body_in_session(
-            file,
-            info,
-            source,
+            crate::fir::BodyCheckUnit {
+                file,
+                info,
+                source,
+                index: &mut index,
+            },
             work,
-            &mut index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut unexpected,
@@ -469,11 +473,13 @@ pub(super) fn from_checked_analysis(
         let file = files.get(source.raw() as usize)?;
         let info = types.get(source.raw() as usize).and_then(Option::as_ref)?;
         if let Err(error) = crate::fir::check_and_dispatch_body_in_session(
-            file,
-            info,
-            source,
+            crate::fir::BodyCheckUnit {
+                file,
+                info,
+                source,
+                index: &mut index,
+            },
             work,
-            &mut index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut nested,
@@ -604,12 +610,14 @@ pub(super) fn streaming(
             }
             for work in inline_work.take_for_source(&index, source) {
                 if let Err(error) = crate::fir::check_and_dispatch_active_body_in_session(
-                    file,
+                    crate::fir::BodyCheckUnit {
+                        file,
+                        info: &info,
+                        source,
+                        index: &index,
+                    },
                     &active,
-                    &info,
-                    source,
                     work,
-                    &index,
                     sources.origins_mut(),
                     &mut inline_bodies,
                     &mut unexpected,
@@ -641,12 +649,14 @@ pub(super) fn streaming(
             };
             for work in nested_work {
                 if let Err(error) = crate::fir::check_and_dispatch_active_body_in_session(
-                    file,
+                    crate::fir::BodyCheckUnit {
+                        file,
+                        info: &info,
+                        source,
+                        index: &index,
+                    },
                     &active,
-                    &info,
-                    source,
                     work,
-                    &index,
                     sources.origins_mut(),
                     &mut inline_bodies,
                     &mut nested,

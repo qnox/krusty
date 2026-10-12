@@ -762,12 +762,14 @@ fn consume_body_group(
     for body in group.work.iter().copied() {
         let mut checked = DeferredCheckedBodies::default();
         let result = crate::fir::check_and_dispatch_active_body_in_session(
-            active_file,
+            crate::fir::BodyCheckUnit {
+                file: active_file,
+                info: &info,
+                source: source_id,
+                index,
+            },
             active,
-            &info,
-            source_id,
             body,
-            index,
             source_map.origins_mut(),
             inline_bodies,
             &mut checked,
@@ -1152,12 +1154,14 @@ pub fn check_frontend_only(
                 };
                 for body in group.work {
                     if let Err(error) = crate::fir::check_and_dispatch_active_body_in_session(
-                        &active_file,
+                        crate::fir::BodyCheckUnit {
+                            file: &active_file,
+                            info: &info,
+                            source: source_id,
+                            index: &index,
+                        },
                         &active,
-                        &info,
-                        source_id,
                         body,
-                        &index,
                         source_map.origins_mut(),
                         &mut inline_bodies,
                         &mut sink,

@@ -1204,18 +1204,20 @@ fn checked_constructor_parameters<'a>(
     Ok((parameters, defaults))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn check_and_dispatch_signature_constructor_defaults(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: DefaultArgumentProvider,
-    index: &ResolvedModuleIndex,
     active: &ActiveSourceDeclarations,
     origins: &mut OriginStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let BodyCheckUnit {
+        file,
+        source,
+        index,
+        ..
+    } = unit;
     let provider = index
         .declaration_anchor(work.provider)
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
@@ -1295,18 +1297,7 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
         return Err(CheckedBodyDriverFailure::MissingBody);
     }
     let owner = BodyOwnerId::from_raw(work.target.raw());
-    let mut checker = BodyFirChecker::new(
-        BodyCheckUnit {
-            file,
-            info,
-            source,
-            index,
-        },
-        owner,
-        span,
-        origins,
-        session,
-    );
+    let mut checker = BodyFirChecker::new(unit, owner, span, origins, session);
     checker.constructor_prefix_capture_access = true;
     bind_parameters_and_check_defaults(
         &mut checker,

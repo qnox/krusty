@@ -260,11 +260,13 @@ fn pass_one_retains_inline_fir_before_ordinary_body_streaming() {
             .expect("scheduled declaration")
             .source;
         check_and_dispatch_body(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked file"),
-            source,
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked file"),
+                source,
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,

@@ -2938,11 +2938,13 @@ fn common_ir_sink_consumes_scheduled_function_body_and_defaults() {
     for work in ordinary {
         let mut indexed_sink = sink.indexed(&index);
         crate::fir::check_and_dispatch_body(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked type info"),
-            crate::fir::SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked type info"),
+                source: crate::fir::SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut indexed_sink,
@@ -2993,11 +2995,13 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
     for work in ordinary {
         let mut indexed_sink = sink.indexed(&index);
         crate::fir::check_and_dispatch_body(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked type info"),
-            crate::fir::SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked type info"),
+                source: crate::fir::SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut no_inline_insertions,
             &mut indexed_sink,
@@ -3057,11 +3061,13 @@ pub(crate) fn lower_single_source_with_platform(
     for work in ordinary {
         let mut indexed_sink = sink.indexed(&index);
         crate::fir::check_and_dispatch_body(
-            &analysis.files[0],
-            analysis.types[0].as_ref().expect("checked type info"),
-            crate::fir::SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info: analysis.types[0].as_ref().expect("checked type info"),
+                source: crate::fir::SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut indexed_sink,
@@ -3126,13 +3132,15 @@ pub(crate) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usi
     for work in ordinary {
         let mut deferred = DeferredBodies::default();
         crate::fir::check_and_dispatch_body(
-            &analysis.files[active_source],
-            analysis.types[active_source]
-                .as_ref()
-                .expect("checked type info"),
-            source_id,
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[active_source],
+                info: analysis.types[active_source]
+                    .as_ref()
+                    .expect("checked type info"),
+                source: source_id,
+                index: &index,
+            },
             work,
-            &index,
             source_map.origins_mut(),
             &mut crate::fir::InlineBodyStore::default(),
             &mut deferred,

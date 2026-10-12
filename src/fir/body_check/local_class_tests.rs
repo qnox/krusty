@@ -43,11 +43,13 @@ fn checked_streamed_owned_bodies(
     let mut sink = StreamedBodySink::default();
     for work in ordinary {
         super::driver::check_and_dispatch_bound_body_in_session(
-            &analysis.files[0],
-            info,
-            SourceFileId::from_raw(0),
+            crate::fir::BodyCheckUnit {
+                file: &analysis.files[0],
+                info,
+                source: SourceFileId::from_raw(0),
+                index: &index,
+            },
             work,
-            &index,
             sources.origins_mut(),
             &mut inline_bodies,
             &mut sink,
