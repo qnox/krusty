@@ -935,20 +935,26 @@ fn ci_splits_every_version_into_independent_target_rows() {
         "a Gradle lane runs the prebuilt krusty-build tests"
     );
     assert!(
-        workflow.contains("needs: [build-shared-bins, versions]")
-            && workflow.contains("needs: [build-shared-bins, build-gradle-plugin]"),
-        "conformance and Gradle both wait on the shared binaries"
+        workflow.contains(
+            "needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]"
+        ) && workflow.contains("needs: [build-tool-bins, build-gradle-plugin]")
+            && workflow.contains("needs: [build-tool-bins, versions]"),
+        "each consumer waits only on its independently built artifact families"
     );
     assert!(
-        !workflow.contains("build-conformance-bin"),
-        "the shared binary job is not named for conformance alone"
+        !workflow.contains("build-shared-bins"),
+        "unrelated artifact families must not be serialized on one runner"
     );
     assert!(
-        workflow.contains("phase_log_prefix=shared-bins")
+        workflow.contains("phase_log_prefix=conformance-bin")
             && workflow.contains("phase_begin conformance-test-binary")
+            && workflow.contains("phase_log_prefix=klib-test-bins")
+            && workflow.contains("phase_begin focused-klib-test-binaries")
+            && workflow.contains("scripts/build-klib-test-binaries.sh \"$PWD\"")
+            && workflow.contains("phase_log_prefix=tool-bins")
             && workflow.contains("phase_begin krusty-cli")
             && workflow.contains("phase_begin krusty-build-tests"),
-        "the shared binary job must time each compile"
+        "each independently scheduled build retains measurable phase ownership"
     );
     assert!(
         workflow.contains(
