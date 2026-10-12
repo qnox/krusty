@@ -81,12 +81,18 @@ impl PropertyAbi {
         parameters
     }
 
-    fn getter_symbol(&self) -> String {
-        super::super::super::super::symbols::module_property_getter_symbol(self.property)
+    fn getter_symbol(&self, module_name: &str) -> String {
+        super::super::super::super::symbols::module_property_getter_symbol(
+            module_name,
+            self.property,
+        )
     }
 
-    fn setter_symbol(&self) -> String {
-        super::super::super::super::symbols::module_property_setter_symbol(self.property)
+    fn setter_symbol(&self, module_name: &str) -> String {
+        super::super::super::super::symbols::module_property_setter_symbol(
+            module_name,
+            self.property,
+        )
     }
 }
 
@@ -313,7 +319,7 @@ impl FileLowering<'_> {
         file_init: FuncId,
         name: &str,
     ) -> Result<(), Unsupported> {
-        let symbol = abi.getter_symbol();
+        let symbol = abi.getter_symbol(self.module_name);
         let signature = self.signature_of(&abi.getter_parameters(), abi.ty)?;
         let id = self
             .module
@@ -362,7 +368,7 @@ impl FileLowering<'_> {
         file_init: FuncId,
         name: &str,
     ) -> Result<(), Unsupported> {
-        let symbol = abi.setter_symbol();
+        let symbol = abi.setter_symbol(self.module_name);
         let signature = self.signature_of(&abi.setter_parameters(), Ty::Unit)?;
         let id = self
             .module
@@ -432,9 +438,11 @@ impl BodyLowering<'_, '_, '_> {
         let Some(arguments) = self.module_property_receiver(&abi, receiver)? else {
             return Ok(None);
         };
-        let id = self
-            .file
-            .import(&abi.getter_symbol(), &abi.getter_parameters(), abi.ty)?;
+        let id = self.file.import(
+            &abi.getter_symbol(self.file.module_name),
+            &abi.getter_parameters(),
+            abi.ty,
+        )?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
@@ -470,9 +478,11 @@ impl BodyLowering<'_, '_, '_> {
                 .into());
         };
         arguments.push(value);
-        let id = self
-            .file
-            .import(&abi.setter_symbol(), &abi.setter_parameters(), Ty::Unit)?;
+        let id = self.file.import(
+            &abi.setter_symbol(self.file.module_name),
+            &abi.setter_parameters(),
+            Ty::Unit,
+        )?;
         let func_ref = self.func_ref(id);
         self.emit_call(func_ref, &arguments)?;
         Ok(())

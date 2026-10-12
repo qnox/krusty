@@ -32,7 +32,7 @@ impl ConstructorAbi {
 }
 
 /// The plan for one constructor, or why another file cannot construct through it.
-fn plan(record: &IrModuleConstructor) -> Result<ConstructorAbi, Unsupported> {
+fn plan(module_name: &str, record: &IrModuleConstructor) -> Result<ConstructorAbi, Unsupported> {
     let name = record.owner.render();
     let owner = record.owner_flags;
     let declined = [
@@ -58,10 +58,13 @@ fn plan(record: &IrModuleConstructor) -> Result<ConstructorAbi, Unsupported> {
     if record.context_parameter_count != 0 {
         return Err(format!("a cross-file constructor with context parameters (`{name}`)").into());
     }
-    let symbol = super::super::super::super::symbols::module_constructor_symbol(record)
-        .ok_or_else(|| {
-            format!("internal: a module constructor of `{name}` with an unchecked parameter type")
-        })?;
+    let symbol =
+        super::super::super::super::symbols::module_constructor_symbol(module_name, record)
+            .ok_or_else(|| {
+                format!(
+                    "internal: a module constructor of `{name}` with an unchecked parameter type"
+                )
+            })?;
     let mut parameters: Vec<Ty> = record.outer.map(Ty::obj_name).into_iter().collect();
     parameters.extend(record.parameters.iter().copied());
     Ok(ConstructorAbi {
@@ -94,7 +97,10 @@ impl FileLowering<'_> {
         for constructor in constructors {
             // The same decision every constructing file makes: a declined plan has no entry
             // point, and no other file calls one.
-            let Ok(abi) = plan(&self.ir.module_constructions.records[&constructor]) else {
+            let Ok(abi) = plan(
+                self.module_name,
+                &self.ir.module_constructions.records[&constructor],
+            ) else {
                 continue;
             };
             let checked = &self.ir.checked_constructor_bodies[&constructor];
@@ -220,7 +226,7 @@ impl BodyLowering<'_, '_, '_> {
             )
             .into());
         }
-        let abi = plan(record)?;
+        let abi = plan(self.file.module_name, record)?;
         if defaulted {
             return Err(
                 format!("a cross-file constructor with a default argument (`{name}`)").into(),

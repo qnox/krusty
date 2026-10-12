@@ -81,8 +81,8 @@ fn assert_matches_reference(target: CompilationTarget, form: &str) {
         } else {
             (form.to_string(), Vec::new())
         };
-        // kotlinc-native alone may be unprovisioned and unrecorded; the `klib-semantics` lane
-        // requires it.
+        // kotlinc-native alone may be unprovisioned and unrecorded; the maximum-version Native CI
+        // row and focused local `just klib-semantics` recipe require it.
         let Some(expected) = reference_outcome(target, &[("V.kt", &source)], &args) else {
             continue;
         };

@@ -51,7 +51,10 @@ impl SymbolResolver<'_> {
                 && (self
                     .module
                     .is_some_and(|module| module.classifier(internal).is_some())
-                    || self.lib.internal_accessible(internal)))
+                    || self
+                        .lib
+                        .dependency_access_policy()
+                        .internal_classifier_accessible(internal)))
         {
             return true;
         }

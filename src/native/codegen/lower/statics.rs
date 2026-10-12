@@ -155,7 +155,7 @@ impl<'a> FileLowering<'a> {
         statics: Option<FuncId>,
     ) -> Result<FuncId, Unsupported> {
         let void = Signature::new(CallConv::SystemV);
-        let symbol = super::super::super::symbols::file_init_symbol(source);
+        let symbol = super::super::super::symbols::file_init_symbol(self.module_name, source);
         let id = self
             .module
             .declare_function(&symbol, Linkage::Hidden, &void)

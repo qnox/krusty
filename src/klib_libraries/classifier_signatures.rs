@@ -8,7 +8,7 @@ use super::declaration_signatures::{
 };
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::{
-    classifier_shape, constructor_parameter_identities, declared_type_alias, AliasExpansion,
+    classifier_shape, constructor_parameter_identities, declared_nested_type_alias, AliasExpansion,
     ClassTypeParameters, LibraryType, TypeKind,
 };
 use crate::metadata::id_signature::{
@@ -32,8 +32,12 @@ pub(super) struct SignedConstructor {
 pub(super) struct SignedClassifier {
     /// The class's shape without its callables.
     pub(super) shape: LibraryType,
+    /// Exact declaring KLIB module identity, when this classifier came from an archive.
+    pub(super) module: Option<String>,
     pub(super) modality: KotlinModality,
     pub(super) type_parameters: ClassTypeParameters,
+    /// Whether this classifier's KLIB is a friend of the current compilation.
+    pub(super) internal_friend: bool,
     pub(super) constructors: Vec<SignedConstructor>,
     /// Instance members and member extensions.
     pub(super) functions: Vec<SignedFunction>,
@@ -57,7 +61,9 @@ pub(super) struct SignedClassifier {
 pub(super) fn sign_package_classes(
     package: &[String],
     mut classes: HashMap<String, KotlinClass>,
-    declared: &mut HashSet<KlibPublicIdSignature>,
+    declared: &mut HashSet<(Option<String>, KlibPublicIdSignature)>,
+    internal_friend: bool,
+    module: Option<&str>,
 ) -> Result<Vec<(TypeName, SignedClassifier)>, KlibLibraryError> {
     let prefix = if package.is_empty() {
         String::new()
@@ -132,7 +138,7 @@ pub(super) fn sign_package_classes(
         );
         let type_parameters = ClassTypeParameters::of(class, identities, captured);
         scopes.insert(name.clone(), type_parameters.clone());
-        if !declared.insert(signature) {
+        if !declared.insert((module.map(str::to_owned), signature)) {
             continue;
         }
         let inside = MetadataContainer {
@@ -166,7 +172,8 @@ pub(super) fn sign_package_classes(
             .into_iter()
             .zip(constructor_signatures)
         {
-            if declaration.visibility == Visibility::Private || !declared.insert(signature.clone())
+            if declaration.visibility == Visibility::Private
+                || !declared.insert((module.map(str::to_owned), signature.clone()))
             {
                 continue;
             }
@@ -186,13 +193,15 @@ pub(super) fn sign_package_classes(
                 continue;
             }
             let path = format!("{local}.{}", declaration.name);
-            let signed = sign_function(
+            let mut signed = sign_function(
                 inside,
                 &path,
                 declaration,
                 Some(type_parameters.identities()),
+                internal_friend,
             )?;
-            if !declared.insert(signed.signature.clone()) {
+            signed.module = module.map(str::to_owned);
+            if !declared.insert((module.map(str::to_owned), signed.signature.clone())) {
                 continue;
             }
             if signed.declaration.is_static {
@@ -208,13 +217,15 @@ pub(super) fn sign_package_classes(
                 continue;
             }
             let path = format!("{local}.{}", declaration.name);
-            let signed = sign_property(
+            let mut signed = sign_property(
                 inside,
                 &path,
                 declaration,
                 Some(type_parameters.identities()),
+                internal_friend,
             )?;
-            if !declared.insert(signed.signature.clone()) {
+            signed.module = module.map(str::to_owned);
+            if !declared.insert((module.map(str::to_owned), signed.signature.clone())) {
                 continue;
             }
             if signed.declaration.is_static {
@@ -227,7 +238,7 @@ pub(super) fn sign_package_classes(
             .into_iter()
             .filter(|alias| alias.visibility != Visibility::Private)
             .map(|alias| {
-                declared_type_alias(identity, &alias, type_parameters.enclosing())
+                declared_nested_type_alias(identity, &alias, type_parameters.enclosing())
                     .map_err(|error| unsignable(package, &format!("{local}.{}", alias.name), error))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -235,8 +246,10 @@ pub(super) fn sign_package_classes(
             identity,
             SignedClassifier {
                 shape,
+                module: module.map(str::to_owned),
                 modality: class.modality,
                 type_parameters,
+                internal_friend,
                 constructors,
                 functions,
                 properties,

@@ -6,13 +6,20 @@
 //! ([`super::write`]). It runs before any target lowering: a library records Kotlin declarations,
 //! not a target's realization of them.
 
-use crate::backend::{Artifact, Backend, CheckedIrFile};
+use crate::backend::{
+    Artifact, Backend, CheckedIrFile, DependencyExportSignatures, DependencyMetadata,
+};
 use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::ir::{IrClass, IrFile};
 use crate::metadata::class_declarations::{ClassTailOptions, PropertyOrigin};
 use crate::metadata::declaration_records;
+use crate::metadata::id_signature::{
+    package_function_signature, package_property_accessor_signature, MetadataAccessor,
+    MetadataContainer,
+};
 use crate::metadata::klib_fragment::{package_fragment, KlibClass, KlibFileMembers};
+use crate::metadata::semantic::parse_package_fragment_checked;
 
 use super::write::{KlibPlatform, KlibStamp, KlibWriter};
 
@@ -41,30 +48,21 @@ impl KlibBackend {
         self.annotations_in_metadata = enabled;
         self
     }
-}
 
-/// What the backend accumulates across the files of one module: each file's fragment and the
-/// package it declares into, in compilation order.
-#[derive(Default)]
-pub struct KlibModule {
-    fragments: Vec<(String, Vec<u8>)>,
-}
-
-impl Backend for KlibBackend {
-    type State = KlibModule;
-
-    fn compilation_target(&self) -> CompilationTarget {
+    fn target(&self) -> CompilationTarget {
         match self.platform {
             KlibPlatform::Native => CompilationTarget::Native,
+            KlibPlatform::WasmJs => CompilationTarget::WasmJs,
+            KlibPlatform::WasmWasi => CompilationTarget::WasmWasi,
         }
     }
 
-    fn lower_ir_file(
+    fn record_file(
         &self,
-        file: CheckedIrFile<'_>,
-        state: &mut Self::State,
+        file: &CheckedIrFile<'_>,
+        state: &mut KlibModule,
         diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
+    ) -> DependencyExportSignatures {
         let ir = &file.ir;
         let classes = library_classes(ir);
         if let Some(construct) = classes
@@ -75,7 +73,7 @@ impl Backend for KlibBackend {
                 crate::diag::Span::new(0, 0),
                 format!("{DECLINE_PREFIX}{construct} yet"),
             );
-            return Vec::new();
+            return DependencyExportSignatures::default();
         }
         let stem = &file.stems[file.source.raw() as usize];
         // Fragments record the file's simple name; a logical source path keeps only its last part.
@@ -128,7 +126,7 @@ impl Backend for KlibBackend {
                 crate::diag::Span::new(0, 0),
                 format!("{DECLINE_PREFIX}this class shape yet"),
             );
-            return Vec::new();
+            return DependencyExportSignatures::default();
         };
         let constants = records
             .iter()
@@ -190,17 +188,183 @@ impl Backend for KlibBackend {
             &declarations,
             self.annotations_in_metadata,
         );
+        let Some(exports) = package_exports(ir, file.module_name, &segments, &fragment, diags)
+        else {
+            return DependencyExportSignatures::default();
+        };
         state.fragments.push((package, fragment));
-        Vec::new()
+        exports
     }
 
-    fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact> {
+    fn finish(&self, state: KlibModule, module_name: &str) -> Vec<Artifact> {
         let mut writer = KlibWriter::new(module_name, self.stamp, self.platform);
         for (package, fragment) in state.fragments {
             writer.add_fragment(&package, fragment);
         }
         writer.entries()
     }
+}
+
+/// What the backend accumulates across the files of one module: each file's fragment and the
+/// package it declares into, in compilation order.
+#[derive(Default)]
+pub struct KlibModule {
+    fragments: Vec<(String, Vec<u8>)>,
+}
+
+impl Backend for KlibBackend {
+    type State = KlibModule;
+
+    fn compilation_target(&self) -> CompilationTarget {
+        self.target()
+    }
+
+    fn lower_ir_file(
+        &self,
+        file: CheckedIrFile<'_>,
+        state: &mut Self::State,
+        diags: &mut DiagSink,
+    ) -> Vec<Artifact> {
+        let _ = self.record_file(&file, state, diags);
+        Vec::new()
+    }
+
+    fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact> {
+        self.finish(state, module_name)
+    }
+}
+
+impl DependencyMetadata for KlibBackend {
+    type State = KlibModule;
+
+    fn compilation_target(&self) -> CompilationTarget {
+        self.target()
+    }
+
+    fn record_ir_file(
+        &self,
+        file: &CheckedIrFile<'_>,
+        state: &mut Self::State,
+        diags: &mut DiagSink,
+    ) -> DependencyExportSignatures {
+        self.record_file(file, state, diags)
+    }
+
+    fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact> {
+        self.finish(state, module_name)
+    }
+}
+
+/// Exact callable identities published by this file's generated fragment.
+///
+/// Decode the bytes the dependency will actually read, then sign those declarations through the
+/// same identity algorithm as `KlibLibraries`. Declaration order joins the decoded metadata back
+/// to the stable common-IR callable ids that produced it; no spelling participates in the join.
+fn package_exports(
+    ir: &IrFile,
+    module_name: &str,
+    package: &[&str],
+    fragment: &[u8],
+    diags: &mut DiagSink,
+) -> Option<DependencyExportSignatures> {
+    let decoded = match parse_package_fragment_checked(fragment) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: cannot decode generated KLIB metadata: {error}"),
+            );
+            return None;
+        }
+    };
+    if decoded.functions.len() != ir.package_functions.len()
+        || decoded.properties.len() != ir.package_properties.len()
+    {
+        diags.error(
+            crate::diag::Span::new(0, 0),
+            "internal error: generated KLIB metadata changed package declaration order",
+        );
+        return None;
+    }
+    let package = package
+        .iter()
+        .map(|segment| (*segment).to_string())
+        .collect::<Vec<_>>();
+    let container = MetadataContainer {
+        package: &package,
+        classes: &[],
+        native_interop_library: false,
+    };
+    let mut exports = DependencyExportSignatures::default();
+    for (source, declaration) in ir.package_functions.iter().zip(&decoded.functions) {
+        if source.visibility == crate::types::Visibility::Private {
+            continue;
+        }
+        let signature = match package_function_signature(container, declaration) {
+            Ok(signature) => signature,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("internal error: cannot sign generated KLIB function: {error}"),
+                );
+                return None;
+            }
+        };
+        exports.record_callable(
+            source.function,
+            crate::libraries::KlibDependencyCallable {
+                module: module_name.to_owned(),
+                declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+            },
+        );
+    }
+    for (source, declaration) in ir.package_properties.iter().zip(&decoded.properties) {
+        if source.visibility == crate::types::Visibility::Private {
+            continue;
+        }
+        let Some(layout) = ir.local_property_layouts.get(&source.property) else {
+            continue;
+        };
+        let (getter, setter) = match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. } => {
+                (*getter, *setter)
+            }
+            crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
+                (Some(*getter), *setter)
+            }
+            crate::ir::IrLocalPropertyLayout::Member { .. }
+            | crate::ir::IrLocalPropertyLayout::MemberExtension { .. } => continue,
+        };
+        for (callable, accessor) in [
+            getter.map(|getter| (getter, MetadataAccessor::Getter)),
+            setter.map(|setter| (setter, MetadataAccessor::Setter)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let signature =
+                match package_property_accessor_signature(container, declaration, accessor) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        diags.error(
+                            crate::diag::Span::new(0, 0),
+                            format!(
+                            "internal error: cannot sign generated KLIB property accessor: {error}"
+                        ),
+                        );
+                        return None;
+                    }
+                };
+            exports.record_callable(
+                callable,
+                crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Accessor(signature),
+                },
+            );
+        }
+    }
+    Some(exports)
 }
 
 /// The common-IR function of a property's source-declared setter, whose parameter name the
@@ -273,9 +437,6 @@ fn unsupported_class_construct(ir: &IrFile, class: &IrClass) -> Option<&'static 
         .is_some()
     {
         return Some("companion blocks");
-    }
-    if class.is_value {
-        return Some("value classes");
     }
     None
 }

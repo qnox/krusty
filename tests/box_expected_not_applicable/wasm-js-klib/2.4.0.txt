@@ -1,6 +1,6 @@
-# Kotlin 2.4.20 codegen/box files expected to be not-applicable on wasm-js, relative to
+# Kotlin 2.4.0 codegen/box files expected to be not-applicable on wasm-js-klib, relative to
 # compiler/testData/codegen/box. Regenerate both exact inventories with
-# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local wasm-js run. The lists only shrink.
+# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local wasm-js-klib run. The lists only shrink.
 annotations/instances/multiplatformInstantiation.kt
 annotations/intrinsicConstEvaluationInSources.kt
 annotations/nativeThrows.kt
@@ -18,6 +18,7 @@ assert/assertEnabledInlinedCrossModule.kt
 assert/assertEnabledWithFunctionReference.kt
 associatedObjects/findAssociatedObjectInSeparatedFile.kt
 basics/kt75483.kt
+basics/unchecked_cast10.kt
 basics/unchecked_cast6.kt
 basics/unchecked_cast8.kt
 binaryOp/call.kt
@@ -81,40 +82,37 @@ classes/inheritSetAndHashSet.kt
 classes/kt1120.kt
 closures/closureThisByUsingMethodFromParentClass.kt
 collections/kt41123.kt
+companionBlocksAndExtensions/callableReferences.kt
+companionBlocksAndExtensions/companionBlock.kt
 compileKotlinAgainstKotlin/jvm8/defaults/interop/likeMemberClash.kt
 constants/comparisonTrue.kt
 constants/numberLiteralCoercionToInferredType.kt
-contextParameters/contextualCallableReferenceEquality.kt
-contextParameters/contextualCallableReferenceReturnType.kt
 contextParameters/withExtensionReceiverInType.kt
 coroutines/capturedOuterThis.kt
 coroutines/createCoroutinesOnManualInstances.kt
 coroutines/dispatchResume.kt
 coroutines/epam.kt
 coroutines/featureIntersection/defaultExpect.kt
+coroutines/featureIntersection/suspendFunctionIsAs.kt
+coroutines/functionReference_invokeAsFunction.kt
 coroutines/functionReference_lambdaAsSuspendLambda.kt
 coroutines/generate.kt
 coroutines/implicitUnitReturn.kt
 coroutines/kt35967.kt
 coroutines/suspendFunctionAsCoroutine/dispatchResume.kt
 coroutines/suspendFunctionalInterface.kt
-coroutines/tailCallOptimizations/unit/kt72710.kt
-coroutines/tailCallOptimizations/unit/override.kt
-coroutines/tailCallOptimizations/unit/override2.kt
-coroutines/tailCallOptimizations/unit/override3.kt
-coroutines/tailCallOptimizations/unit/overrideCrossinline.kt
-coroutines/tailCallOptimizations/unit/overrideOverriden.kt
-coroutines/tailCallOptimizations/unit/simple.kt
 coroutines/varSpilling/lvtWithInlineOnly.kt
+dataClasses/copy/kt12708.kt
+defaultArguments/useNextParamInLambda.kt
+defaultArguments/useNextParamInLambdaTailrec.kt
 delegatedProperty/delegateToFinalProperty/initializeContainerOfTopLevelProperties.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/useReflectionOnKProperty.kt
-diagnostics/functions/tailRecursion/checkStackDepth.kt
-enum/enumCompanionInitJs.kt
+enum/enumCompanionInit.kt
 enum/enumEntries.kt
 enum/enumEntriesCompatibilityCheck.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
-enum/initEnumAfterObjectAccessJs.kt
+enum/initEnumAfterObjectAccess.kt
 evaluate/cornerCaseInFloat.kt
 evaluate/enumWithDifferentFileOrder.kt
 evaluate/intrinsicConst/kt53272.kt
@@ -128,7 +126,6 @@ fakeOverride/kt40180.kt
 fakeOverride/kt40180_2.kt
 fakeOverride/kt40180_3.kt
 fir/sourceBinarySource.kt
-fullValueClasses/defaultConstructor.kt
 funInterface/equality/functionReferencesBound.kt
 funInterface/equality/functionReferencesUnbound.kt
 funInterface/equality/lambdaRuntimeConversion.kt
@@ -138,7 +135,6 @@ functions/kt1739.kt
 functions/localFunctions/kt4777.kt
 functions/mutualInline.kt
 inference/eagerLambdaAnalysisWithNoExpectedType.kt
-inference/earlierReifiedFixFlexible.kt
 inference/kt65882.kt
 inference/kt67609.kt
 inference/overrideDefaultMethod.kt
@@ -185,6 +181,10 @@ inlineArgsInPlace/mutableCollectionPlusAssign.kt
 inlineClasses/callableReferences/withInlineFunctionWithMultipleConstraints.kt
 inlineClasses/propertyLoweringOrder.kt
 inlineClasses/propertyLoweringOrderGeneric.kt
+inlineClasses/resultGeneric.kt
+inlineClasses/resultGeneric2.kt
+inlineClasses/unboxParameterOfSuspendLambdaBeforeInvoke.kt
+inlineClasses/unboxParameterOfSuspendLambdaBeforeInvokeGeneric.kt
 inlineEvaluationOrder/propertyAccessExternalWithSideEffect.kt
 intrinsics/throwable.kt
 intrinsics/throwableCallableReference.kt
@@ -196,6 +196,7 @@ ir/privateSignatures/localFakeOverride.kt
 ir/privateSignatures/topLevelPrivateDelegate.kt
 ir/serializationRegressions/dispatchReceiverValue.kt
 ir/serializationRegressions/signatureClash.kt
+ir/serializationRegressions/transitiveClash.kt
 javaInterop/objectMethods/cloneCallsConstructor.kt
 javaInterop/objectMethods/cloneCallsSuper.kt
 javaInterop/objectMethods/cloneCallsSuperAndModifies.kt
@@ -218,6 +219,8 @@ jsAstOptimizations/tempVarDeclOnAssignment.kt
 jsCode/lambdaNoInline.kt
 jsCode/regex.kt
 jsName/peculiarIdentifiers.kt
+localClass/innerWithCapture.kt
+localClass/noPrimaryConstructor.kt
 multiplatform/k2/assertDisabledAsActualFunction.kt
 multiplatform/k2/assertDisabledAsActualFunctionHmpp.kt
 multiplatform/k2/assertEnabledAsActualFunction.kt
@@ -239,6 +242,7 @@ primitiveTypes/kt935.kt
 properties/eagerInitializationWithSimpleObject.kt
 properties/kt1159.kt
 properties/kt1714.kt
+properties/lateinit/isInitializedAndDeinitialize/isInitializedMultiFile.kt
 properties/lazyInitializationThroughTopFun.kt
 properties/noInitializationLazilyOnNonPropertiesCall.kt
 reflection/classLiterals/nativeWithoutPackagePatching.kt
@@ -304,6 +308,7 @@ traits/noPrivateDelegation.kt
 unaryOp/call.kt
 unaryOp/callNullable.kt
 volatile/atomicArrayIntrinsics.kt
+volatile/crossModuleIntrinsic.kt
 volatile/intrinsicWithInlineFunction.kt
 volatile/intrinsics.kt
 volatile/intrinsicsOnGlobal.kt

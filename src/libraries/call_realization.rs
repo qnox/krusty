@@ -10,6 +10,17 @@ use crate::types::{SemanticCallableOwner, Ty, TypeName};
 /// provider-to-backend contract, so backends name it here rather than reaching into metadata.
 pub use crate::metadata::id_signature::KlibDeclarationSignature;
 
+/// One callable exported by one exact KLIB module.
+///
+/// A public IdSignature is unique inside a KLIB, not across an arbitrary dependency graph:
+/// unrelated modules may legally declare identical internal signatures. Target linkage therefore
+/// joins both the provider-owned module identity and the serialized declaration identity.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct KlibDependencyCallable {
+    pub module: String,
+    pub declaration: KlibDeclarationSignature,
+}
+
 /// How a provider realizes one already-selected dependency callable.
 ///
 /// The identity a consumer holds is opaque and provider-assigned; this is what the provider hands
@@ -37,7 +48,7 @@ pub enum ExternalCallableKind {
 /// This deliberately excludes every target-realization field carried by
 /// [`ExternalCallableRealization`] and the backend handoff: physical owners, descriptors, ABI
 /// parameter types and physical names do not participate in common-IR lowering. The exact KLIB
-/// signature remains the only join key.
+/// module-qualified signature remains the only join key.
 #[derive(Clone, Copy)]
 pub struct KlibBodyCallable<'a> {
     name: &'a str,
@@ -46,7 +57,7 @@ pub struct KlibBodyCallable<'a> {
     ret: Ty,
     parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     context_count: usize,
-    signature: &'a KlibDeclarationSignature,
+    identity: &'a KlibDependencyCallable,
 }
 
 impl<'a> KlibBodyCallable<'a> {
@@ -57,7 +68,7 @@ impl<'a> KlibBodyCallable<'a> {
         ret: Ty,
         parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
         context_count: usize,
-        signature: Option<&'a KlibDeclarationSignature>,
+        identity: Option<&'a KlibDependencyCallable>,
     ) -> Option<Self> {
         Some(Self {
             name,
@@ -66,7 +77,7 @@ impl<'a> KlibBodyCallable<'a> {
             ret,
             parameter_identities,
             context_count,
-            signature: signature?,
+            identity: identity?,
         })
     }
 
@@ -98,7 +109,11 @@ impl<'a> KlibBodyCallable<'a> {
     }
 
     pub(crate) fn signature(self) -> &'a KlibDeclarationSignature {
-        self.signature
+        &self.identity.declaration
+    }
+
+    pub(crate) fn identity(self) -> &'a KlibDependencyCallable {
+        self.identity
     }
 }
 
@@ -118,6 +133,9 @@ pub struct ExternalCallableRealization {
     /// can join this selection to its decoded IR body. Providers without serialized IR publish
     /// `None`; a consumer never reconstructs it from the callable's spelling or shape.
     pub declaration_signature: Option<KlibDeclarationSignature>,
+    /// Exact KLIB module plus declaration identity used to join a selected dependency call to
+    /// target code emitted earlier in the same program. This is absent for non-KLIB providers.
+    pub dependency_callable: Option<KlibDependencyCallable>,
 }
 
 impl ExternalCallableRealization {
@@ -132,7 +150,7 @@ impl ExternalCallableRealization {
             self.callable.ret,
             &self.parameter_identities,
             self.callable.context_count,
-            self.declaration_signature.as_ref(),
+            self.dependency_callable.as_ref(),
         )
     }
 }

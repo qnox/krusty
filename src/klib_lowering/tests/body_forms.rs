@@ -8,10 +8,13 @@ use crate::fx_hash::HashMap;
 use super::super::*;
 use super::demo_package::*;
 use super::{distribution_root, frozen_function, kotlin_class, lowered_body, stdlib, validated};
+use crate::klib_libraries::{KlibBodyLibrary, KlibDeclarationBodies};
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
 };
-use crate::metadata::klib_ir::{read_declaration_trees, KlibIrConstant, KlibIrSignature};
+use crate::metadata::klib_ir::{
+    read_declaration_trees, KlibIrConstant, KlibIrModuleTrees, KlibIrSignature,
+};
 use crate::metadata::semantic::semantic_ty;
 use crate::types::Ty;
 
@@ -197,6 +200,230 @@ fn a_call_of_an_already_lowered_function_follows_the_active_selection() {
         "scope {scope {return@Some(0) call b(v0!: Int): Int: Nothing}: Nothing}"
     );
     validated(unit.ir());
+}
+
+#[test]
+fn a_friend_body_local_call_never_uses_an_equal_signature_fact_from_another_module() {
+    let demo = demo_in_module("friend", &IDENTITY_AND_CALLER, identity_and_caller);
+    let mut ordinary = demo.facts["b"].clone();
+    ordinary
+        .dependency_callable
+        .as_mut()
+        .expect("a named KLIB callable")
+        .module = "ordinary".to_owned();
+    // Kotlin signatures do not include the return type. An unrelated module may therefore carry
+    // this equal serialized signature with a different declaration header.
+    ordinary.ret = Ty::String;
+    let facts = KlibCalleeFacts::new([ordinary.klib_body_callable().expect("signed")]);
+    let mut unit = DependencyBodyUnit::default();
+    let root = unit
+        .lower_function(demo.callable("a"), &demo.bodies, &facts)
+        .expect("the friend-local serialized header, not the ordinary fact, describes the call");
+
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, root),
+        "scope {scope {return@Some(0) call b(v0!: Int): Int: Nothing}: Nothing}"
+    );
+}
+
+#[test]
+fn a_body_call_uses_its_producer_dependency_in_both_input_orders() {
+    fn lower(unrelated_first: bool) {
+        let (caller, caller_trees) =
+            selected_demo_module("caller", &IDENTITY_AND_CALLER, &["a"], identity_and_caller);
+        let (_, friend_trees) =
+            selected_demo_module("friend", &IDENTITY_AND_CALLER, &["b"], identity_and_caller);
+        let (mut unrelated, unrelated_trees) = selected_demo_module(
+            "unrelated",
+            &IDENTITY_AND_CALLER,
+            &["b"],
+            identity_and_caller,
+        );
+        // Public signatures do not include the return type. This deliberately makes selecting
+        // the unrelated module observably incompatible with the body it serialized.
+        unrelated.get_mut("b").expect("unrelated b").ret = Ty::String;
+        let caller_library =
+            KlibBodyLibrary::new("caller".to_owned(), ["friend".to_owned()], caller_trees);
+        let friend_library = KlibBodyLibrary::new("friend".to_owned(), Vec::new(), friend_trees);
+        let unrelated_library =
+            KlibBodyLibrary::new("unrelated".to_owned(), Vec::new(), unrelated_trees);
+        let libraries = if unrelated_first {
+            vec![caller_library, unrelated_library, friend_library]
+        } else {
+            vec![caller_library, friend_library, unrelated_library]
+        };
+        let bodies = KlibDeclarationBodies::from_body_libraries(libraries)
+            .expect("equal signatures in three distinct modules are legal");
+        let root = caller["a"]
+            .klib_body_callable()
+            .expect("the caller is signed");
+        let selected = unrelated["b"]
+            .klib_body_callable()
+            .expect("the unrelated source selection is signed");
+
+        let mut unit = DependencyBodyUnit::default();
+        let root = unit
+            .lower_function(root, &bodies, &KlibCalleeFacts::new([selected]))
+            .expect("the producer edge authenticates the friend, not the source selection");
+        validated(unit.ir());
+        assert_eq!(unit.ir().functions.len(), 2);
+        assert_eq!(
+            lowered_body(&unit, root),
+            "scope {scope {return@Some(0) call b(v0!: Int): Int: Nothing}: Nothing}"
+        );
+    }
+
+    lower(false);
+    lower(true);
+}
+
+#[test]
+fn a_body_call_without_a_producer_edge_never_uses_an_unrelated_source_selection() {
+    let (caller, caller_trees) =
+        selected_demo_module("caller", &IDENTITY_AND_CALLER, &["a"], identity_and_caller);
+    let (unrelated, unrelated_trees) = selected_demo_module(
+        "unrelated",
+        &IDENTITY_AND_CALLER,
+        &["b"],
+        identity_and_caller,
+    );
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+        KlibBodyLibrary::new("caller".to_owned(), Vec::new(), caller_trees),
+        KlibBodyLibrary::new("unrelated".to_owned(), Vec::new(), unrelated_trees),
+    ])
+    .expect("two modules");
+    let root = caller["a"].klib_body_callable().expect("signed caller");
+    let selected = unrelated["b"]
+        .klib_body_callable()
+        .expect("signed unrelated selection");
+
+    let mut unit = DependencyBodyUnit::default();
+    let decline = unit
+        .lower_function(root, &bodies, &KlibCalleeFacts::new([selected]))
+        .expect_err("an absent producer edge cannot be reconstructed from a source selection");
+    assert_unit_is_empty(&unit);
+    assert_eq!(
+        decline.to_string(),
+        "the KLIB body of `demo.a` (it calls `demo.b`, which no reachable library serializes its declaration)"
+    );
+}
+
+#[test]
+fn two_reachable_modules_with_the_same_call_signature_are_ambiguous() {
+    let (caller, caller_trees) =
+        selected_demo_module("caller", &IDENTITY_AND_CALLER, &["a"], identity_and_caller);
+    let (_, first_trees) =
+        selected_demo_module("first", &IDENTITY_AND_CALLER, &["b"], identity_and_caller);
+    let (_, second_trees) =
+        selected_demo_module("second", &IDENTITY_AND_CALLER, &["b"], identity_and_caller);
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+        KlibBodyLibrary::new(
+            "caller".to_owned(),
+            ["first".to_owned(), "second".to_owned()],
+            caller_trees,
+        ),
+        KlibBodyLibrary::new("first".to_owned(), Vec::new(), first_trees),
+        KlibBodyLibrary::new("second".to_owned(), Vec::new(), second_trees),
+    ])
+    .expect("three modules");
+    let root = caller["a"].klib_body_callable().expect("signed caller");
+
+    let mut unit = DependencyBodyUnit::default();
+    let decline = unit
+        .lower_function(root, &bodies, &KlibCalleeFacts::default())
+        .expect_err("the producer graph has two declaring modules");
+    assert_unit_is_empty(&unit);
+    assert_eq!(
+        decline.to_string(),
+        "the KLIB body of `demo.a` (it calls `demo.b`, whose declaration multiple producer dependencies serialize)"
+    );
+}
+
+#[test]
+fn a_local_body_declaration_wins_over_an_incompatible_dependency_duplicate() {
+    let (caller, caller_trees) = selected_demo_module(
+        "caller",
+        &IDENTITY_AND_CALLER,
+        &["a", "b"],
+        identity_and_caller,
+    );
+    let dependency_shape: [Shape; 1] = [("b", &[T::Int], T::String)];
+    let (dependency, dependency_trees) =
+        selected_demo_module("dependency", &dependency_shape, &["b"], identity_and_caller);
+    assert_eq!(
+        caller["b"].declaration_signature, dependency["b"].declaration_signature,
+        "return types do not distinguish public call signatures"
+    );
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+        KlibBodyLibrary::new("caller".to_owned(), ["dependency".to_owned()], caller_trees),
+        KlibBodyLibrary::new("dependency".to_owned(), Vec::new(), dependency_trees),
+    ])
+    .expect("two modules");
+    let root = caller["a"].klib_body_callable().expect("signed caller");
+
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function(root, &bodies, &KlibCalleeFacts::default())
+        .expect("the caller-local declaration wins");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 2);
+}
+
+#[test]
+fn duplicate_producer_edges_still_select_one_dependency_origin() {
+    let (caller, caller_trees) =
+        selected_demo_module("caller", &IDENTITY_AND_CALLER, &["a"], identity_and_caller);
+    let (_, dependency_trees) = selected_demo_module(
+        "dependency",
+        &IDENTITY_AND_CALLER,
+        &["b"],
+        identity_and_caller,
+    );
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+        KlibBodyLibrary::new(
+            "caller".to_owned(),
+            ["dependency".to_owned(), "dependency".to_owned()],
+            caller_trees,
+        ),
+        KlibBodyLibrary::new("dependency".to_owned(), Vec::new(), dependency_trees),
+    ])
+    .expect("two modules");
+    let root = caller["a"].klib_body_callable().expect("signed caller");
+
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function(root, &bodies, &KlibCalleeFacts::default())
+        .expect("duplicate edges name one exact dependency");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 2);
+}
+
+#[test]
+fn a_body_call_reaches_a_transitive_producer_dependency() {
+    let (caller, caller_trees) =
+        selected_demo_module("caller", &IDENTITY_AND_CALLER, &["a"], identity_and_caller);
+    let (_, dependency_trees) = selected_demo_module(
+        "dependency",
+        &IDENTITY_AND_CALLER,
+        &["b"],
+        identity_and_caller,
+    );
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+        KlibBodyLibrary::new("caller".to_owned(), ["bridge".to_owned()], caller_trees),
+        KlibBodyLibrary::new(
+            "bridge".to_owned(),
+            ["dependency".to_owned()],
+            KlibIrModuleTrees::default(),
+        ),
+        KlibBodyLibrary::new("dependency".to_owned(), Vec::new(), dependency_trees),
+    ])
+    .expect("three modules");
+    let root = caller["a"].klib_body_callable().expect("signed caller");
+
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function(root, &bodies, &KlibCalleeFacts::default())
+        .expect("the producer graph is transitive");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 2);
 }
 
 // --- Equality and negation ----------------------------------------------------------------------

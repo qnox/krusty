@@ -18,23 +18,31 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+mod default_arguments;
 mod intrinsic_operations;
 mod objects;
 
-use crate::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
+use crate::ir::{
+    module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
+    IrTypeOp,
+};
 use crate::types::{EqualityMode, Ty};
 
 use super::super::encode::{BlockType, Code, Function, Module, ValType};
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
+use super::callable_registry::{CallableRegistry, FileCallTargets};
 use super::classes::{FileClasses, RealizedProperties};
+use super::property_registry::PropertyRegistry;
 
 pub(super) type Unsupported = String;
 
 /// The wasm functions one file defines, by the file's own function ids.
 pub(super) struct LoweredFile {
-    /// The wasm function index of each of the file's functions, by its `FunId`.
-    pub(super) functions: Vec<u32>,
+    /// The Wasm function index of each emitted function, by its `FunId`; an inline-only template
+    /// has no physical function.
+    pub(super) functions: Vec<Option<u32>>,
     /// The function running this file's top-level property initializers in declaration order,
     /// when it has any.
     pub(super) initializer: Option<u32>,
@@ -44,10 +52,13 @@ pub(super) struct LoweredFile {
 pub(super) fn lower_file(
     ir: &IrFile,
     properties: &RealizedProperties,
+    callables: &CheckedBackendCallables,
+    dependency_exports: &DependencyExportSignatures,
     module: &mut Module,
     runtime: &mut Runtime,
+    callable_registry: &mut CallableRegistry,
+    property_registry: &mut PropertyRegistry,
 ) -> Result<LoweredFile, Unsupported> {
-    let mut globals = Vec::with_capacity(ir.statics.len());
     for property in &ir.statics {
         if property.owner.is_some() {
             return Err("a static property of a class".to_string());
@@ -55,18 +66,24 @@ pub(super) fn lower_file(
         if property.is_lateinit {
             return Err("a `lateinit` top-level property".to_string());
         }
-        let Some(value) = carrier(property.ty)? else {
+    }
+    let globals = property_registry.prepare_file(ir, |ty| {
+        let Some(value) = carrier(ty)? else {
             return Err("a `Unit` top-level property".to_string());
         };
-        globals.push(module.global(value));
-    }
+        Ok(module.global(value))
+    })?;
     let mut signatures = Vec::with_capacity(ir.functions.len());
     for (id, function) in ir.functions.iter().enumerate() {
+        if ir.inline_only_fns.contains(&(id as FunId)) {
+            signatures.push(None);
+            continue;
+        }
         if function.is_static && function.dispatch_receiver.is_some() {
             return Err(format!("the static member function `{}`", function.name));
         }
         if function.dispatch_receiver.is_some() {
-            signatures.push(super::classes::method_type(module, ir, id as FunId)?);
+            signatures.push(Some(super::classes::method_type(module, ir, id as FunId)?));
             continue;
         }
         if function.body.is_none() {
@@ -78,12 +95,11 @@ pub(super) fn lower_file(
             .map(|param| carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
-        signatures.push(module.func_type(params, results));
+        signatures.push(Some(module.func_type(params, results)));
     }
-    let indices = signatures
-        .iter()
-        .map(|_| module.declare())
-        .collect::<Vec<_>>();
+    let indices = callable_registry.declare_file(ir, module)?;
+    let default_indices = callable_registry.declare_file_defaults(ir, module)?;
+    let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let classes = if ir.classes.is_empty() {
         None
     } else {
@@ -98,16 +114,25 @@ pub(super) fn lower_file(
     let context = FileContext {
         ir,
         functions: &indices,
+        default_functions: &default_indices,
         globals: &globals,
         classes: classes.as_ref(),
+        calls: &call_targets,
+        properties: property_registry,
     };
     for (id, function) in ir.functions.iter().enumerate() {
+        let (Some(index), Some(signature)) = (indices[id], signatures[id]) else {
+            if !ir.inline_only_fns.contains(&(id as FunId)) {
+                return Err("an emitted function without a Wasm declaration".to_string());
+            }
+            continue;
+        };
         let Some(root) = function.body else {
             // An abstract member: its slot holds the trap, and nothing calls it directly.
             module.define(
-                indices[id],
+                index,
                 Function {
-                    ty: signatures[id],
+                    ty: signature,
                     locals: Vec::new(),
                     code: {
                         let mut code = Code::default();
@@ -134,14 +159,15 @@ pub(super) fn lower_file(
         body.function_body(root, function.ret)?;
         let Body { code, locals, .. } = body;
         module.define(
-            indices[id],
+            index,
             Function {
-                ty: signatures[id],
+                ty: signature,
                 locals,
                 code,
             },
         );
     }
+    default_arguments::define(&context, module, runtime)?;
     if let Some(classes) = &classes {
         objects::define_class_functions(&context, classes, module, runtime)?;
     }
@@ -172,6 +198,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
+    callable_registry.publish(dependency_exports, &indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -182,11 +209,16 @@ pub(super) fn lower_file(
 /// went in the module.
 struct FileContext<'a> {
     ir: &'a IrFile,
-    /// The wasm function of each of the file's functions, by `FunId`.
-    functions: &'a [u32],
+    /// The Wasm function of each emitted function, by `FunId`.
+    functions: &'a [Option<u32>],
+    /// Default-argument mask entry for each emitted source function that declares defaults.
+    default_functions: &'a [Option<u32>],
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    calls: &'a FileCallTargets,
+    /// Top-level property storage reserved or published by files of this source module.
+    properties: &'a PropertyRegistry,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -287,10 +319,13 @@ struct Body<'a> {
     ir: &'a IrFile,
     module: &'a mut Module,
     runtime: &'a mut Runtime,
-    functions: &'a [u32],
+    functions: &'a [Option<u32>],
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    /// Exact source/dependency call targets registered before this body is emitted.
+    calls: &'a FileCallTargets,
+    properties: &'a PropertyRegistry,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -316,6 +351,28 @@ impl<'a> Body<'a> {
         module: &'a mut Module,
         runtime: &'a mut Runtime,
         parameters: &[Ty],
+        declared: HashMap<u32, Ty>,
+        result: Ty,
+    ) -> Self {
+        Self::with_physical_parameters(
+            context,
+            module,
+            runtime,
+            parameters,
+            parameters.len(),
+            declared,
+            result,
+        )
+    }
+
+    /// Build a body whose physical Wasm signature has trailing backend parameters that are not
+    /// semantic value slots (the default-argument entry's mask words).
+    fn with_physical_parameters(
+        context: &FileContext<'a>,
+        module: &'a mut Module,
+        runtime: &'a mut Runtime,
+        parameters: &[Ty],
+        physical_parameter_count: usize,
         mut declared: HashMap<u32, Ty>,
         result: Ty,
     ) -> Self {
@@ -335,9 +392,11 @@ impl<'a> Body<'a> {
             functions: context.functions,
             globals: context.globals,
             classes: context.classes,
+            calls: context.calls,
+            properties: context.properties,
             code: Code::default(),
             locals: Vec::new(),
-            next_local: parameters.len() as u32,
+            next_local: physical_parameter_count as u32,
             values: parameters
                 .iter()
                 .enumerate()
@@ -645,7 +704,68 @@ impl<'a> Body<'a> {
                 for (arg, param) in args.iter().zip(params) {
                     self.value(*arg, param)?;
                 }
-                self.code.call(self.functions[function as usize]);
+                let function = self.emitted_function(function)?;
+                self.code.call(function);
+            }
+            IrExpr::Call {
+                callee: Callee::Module { target, params, .. },
+                dispatch_receiver: None,
+                args,
+            }
+            | IrExpr::Call {
+                callee:
+                    Callee::CrossFile {
+                        module_target: Some(target),
+                        params,
+                        ..
+                    },
+                dispatch_receiver: None,
+                args,
+            } => {
+                let function = self
+                    .calls
+                    .module(target)
+                    .ok_or_else(|| "an unregistered source callable identity".to_string())?;
+                self.direct_call(function, &params, &args)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::ModuleWithDefaults {
+                        default_provider,
+                        params,
+                        defaults,
+                        dispatch_receiver_ty: None,
+                        extension_receiver_parameter: None,
+                        ..
+                    },
+                dispatch_receiver: None,
+                args,
+            } => {
+                let provider = module_override_callable(default_provider).ok_or_else(|| {
+                    "a source default entry whose provider is not in the current module".to_string()
+                })?;
+                let function = self
+                    .calls
+                    .module_default(provider)
+                    .ok_or_else(|| "an unregistered source default entry".to_string())?;
+                self.defaulted_call(function, &params, &defaults, &args)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        defaults,
+                        ..
+                    },
+                dispatch_receiver: None,
+                args,
+            } if defaults.is_empty() => {
+                let function = self
+                    .calls
+                    .external(target)
+                    .ok_or_else(|| "an unregistered dependency callable identity".to_string())?;
+                self.direct_call(function, &params, &args)?;
             }
             IrExpr::Call {
                 callee: Callee::Intrinsic { operation, .. },
@@ -786,6 +906,31 @@ impl<'a> Body<'a> {
             other => return Err(describe_node(&other)),
         }
         Ok(())
+    }
+
+    fn direct_call(
+        &mut self,
+        function: u32,
+        params: &[Ty],
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        if params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        for (&arg, &param) in args.iter().zip(params) {
+            self.value(arg, param)?;
+        }
+        self.code.call(function);
+        Ok(())
+    }
+
+    fn emitted_function(&self, function: FunId) -> Result<u32, Unsupported> {
+        let emitted = self
+            .functions
+            .get(function as usize)
+            .copied()
+            .ok_or_else(|| "a call with an invalid local function identity".to_string())?;
+        emitted.ok_or_else(|| "a call to an inline-only function that was not spliced".to_string())
     }
 
     fn constant(&mut self, constant: &IrConst) -> Result<(), Unsupported> {

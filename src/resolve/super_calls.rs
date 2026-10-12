@@ -281,6 +281,14 @@ impl Checker<'_> {
                             visibility,
                             property.owner,
                             access_receiver,
+                            if setter {
+                                property
+                                    .setter
+                                    .as_ref()
+                                    .and_then(|setter| setter.external_identity)
+                            } else {
+                                property.getter.external_identity
+                            },
                         ),
                         0,
                     ))
@@ -299,6 +307,16 @@ impl Checker<'_> {
                 access_visibility,
                 selected.owner,
                 access_receiver,
+                selected.property.as_ref().and_then(|property| {
+                    if setter {
+                        property
+                            .setter
+                            .as_ref()
+                            .and_then(|setter| setter.external_identity)
+                    } else {
+                        property.getter.external_identity
+                    }
+                }),
             ) {
                 return None;
             }

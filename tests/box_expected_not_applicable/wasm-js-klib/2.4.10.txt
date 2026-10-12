@@ -1,6 +1,6 @@
-# Kotlin 2.4.10 codegen/box files expected to be not-applicable on wasm-wasi, relative to
+# Kotlin 2.4.10 codegen/box files expected to be not-applicable on wasm-js-klib, relative to
 # compiler/testData/codegen/box. Regenerate both exact inventories with
-# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local wasm-wasi run. The lists only shrink.
+# KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local wasm-js-klib run. The lists only shrink.
 annotations/instances/multiplatformInstantiation.kt
 annotations/intrinsicConstEvaluationInSources.kt
 annotations/nativeThrows.kt
@@ -74,7 +74,6 @@ casts/nativeCCEMessage/castToLocalClass.kt
 casts/notIs.kt
 casts/objectToPrimitiveWithAssertion.kt
 casts/toNativePointers.kt
-casts/wasmCastMessagesWasmJs.kt
 char/unboxedCharSpecials.kt
 checkcastOptimization/kt47851.kt
 classLiteral/java/kt11943.kt
@@ -106,7 +105,6 @@ coroutines/varSpilling/lvtWithInlineOnly.kt
 dataClasses/copy/kt12708.kt
 defaultArguments/useNextParamInLambda.kt
 defaultArguments/useNextParamInLambdaTailrec.kt
-delegatedProperty/beforeDeclarationContainerOptimization.kt
 delegatedProperty/delegateToFinalProperty/initializeContainerOfTopLevelProperties.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 delegatedProperty/useReflectionOnKProperty.kt
@@ -116,6 +114,14 @@ enum/enumEntriesCompatibilityCheck.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
 enum/initEnumAfterObjectAccess.kt
 evaluate/cornerCaseInFloat.kt
+evaluate/enumWithDifferentFileOrder.kt
+evaluate/intrinsicConst/kt53272.kt
+evaluate/serialization/annotationOnFakeOverride.kt
+evaluate/serialization/annotationOnFakeOverrideProperty.kt
+evaluate/serialization/annotationOnParameterOnFakeOverride.kt
+evaluate/serialization/annotationOnSecondParameterOnFakeOverride.kt
+evaluate/serialization/annotationOnTypeOnFakeOverride.kt
+evaluate/serialization/annotationWithDefaultValueOnFakeOverride.kt
 fakeOverride/kt40180.kt
 fakeOverride/kt40180_2.kt
 fakeOverride/kt40180_3.kt
@@ -164,6 +170,7 @@ inline/inlinedObjectLiteralIsCheck.kt
 inline/jsCode.kt
 inline/jsCodeInLambda.kt
 inline/jsCodeVarDeclared.kt
+inline/localDeclarationsClash.kt
 inline/multipleInheritanceClash.kt
 inlineArgsInPlace/breakInArgumentExpression.kt
 inlineArgsInPlace/continueInArgumentExpression.kt
@@ -220,7 +227,6 @@ multiplatform/k2/assertEnabledAsActualFunction.kt
 multiplatform/k2/assertEnabledAsActualFunctionHmpp.kt
 multiplatform/k2/complexMatchings/expectCtorlessFinalToActualPromiseOfUnit.kt
 multiplatform/k2/defaultArguments/superCall.kt
-multiplatform/k2/hmpp/kt83572.kt
 multiplatform/k2/kt57391.kt
 multiplatform/k2/kt61166.kt
 objects/kt1047.kt
@@ -279,8 +285,6 @@ sameFileInSourceAndDependencies/memberFunctionWithDefaultArgumentsDeclaration.kt
 sameFileInSourceAndDependencies/memberPropertyDeclaration.kt
 sameFileInSourceAndDependencies/nestedClassDeclaration.kt
 secondaryConstructors/fieldInitializerOptimization.kt
-size/add.kt
-size/helloWorldPromise.kt
 smartCasts/invokeRecieverSmartcastK1.kt
 smartCasts/smartcastOnDynamic.kt
 specialBuiltins/bridgesJVM.kt

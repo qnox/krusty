@@ -322,16 +322,24 @@ impl<'a> FileLowering<'a> {
                         .and_then(|info| info.defaults.as_ref())
                         .is_some_and(|defaults| defaults.iter().any(Option::is_some))
             })
-            .map(|(callable, &function)| (*callable, function))
+            .filter_map(|(callable, &function)| {
+                let identity = match self.ir.inherited_param_default_provider(function) {
+                    Some(provider) => crate::ir::module_override_callable(provider)?,
+                    None => *callable,
+                };
+                Some((identity, function))
+            })
             .collect();
         // The map's order is not the object's: emit in function order so builds are reproducible.
-        functions.sort_unstable_by_key(|(_, function)| *function);
+        functions.sort_unstable_by_key(|(callable, function)| (*function, callable.raw()));
+        functions.dedup();
         for (callable, function) in functions {
             let declaration = &self.ir.functions[function as usize];
             let mut parameters = declaration.params.clone();
             parameters.extend(module_default_masks(declaration.params.len()));
             let signature = self.signature_of(&parameters, declaration.ret)?;
-            let symbol = super::super::super::symbols::module_default_symbol(callable);
+            let symbol =
+                super::super::super::symbols::module_default_symbol(self.module_name, callable);
             let id = self
                 .module
                 .declare_function(&symbol, Linkage::Hidden, &signature)
@@ -429,13 +437,15 @@ impl BodyLowering<'_, '_, '_> {
     /// entry that file exports for it: zeros in the omitted slots, and their bits in the mask.
     pub(super) fn module_defaulted_call(
         &mut self,
+        provider: crate::fir::CallableId,
         target: crate::fir::CallableId,
         params: &[Ty],
         ret: Ty,
         omitted: &[u32],
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
-        let symbol = super::super::super::symbols::module_default_symbol(target);
+        let symbol =
+            super::super::super::symbols::module_default_symbol(self.file.module_name, provider);
         let mut signature = params.to_vec();
         signature.extend(module_default_masks(params.len()));
         let id = self.file.import(&symbol, &signature, ret)?;

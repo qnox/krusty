@@ -19,6 +19,7 @@ use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, V
 use super::super::super::objects::REFERENCE;
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
+use super::super::property_registry::TopLevelProperty;
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
@@ -294,7 +295,8 @@ impl Body<'_> {
         for (arg, param) in args.iter().zip(params) {
             self.value(*arg, param)?;
         }
-        self.code.call(self.functions[function as usize]);
+        let function = self.emitted_function(function)?;
+        self.code.call(function);
         Ok(())
     }
 
@@ -395,6 +397,15 @@ impl Body<'_> {
         target: PropertyId,
         receiver: Option<u32>,
     ) -> Result<(), Unsupported> {
+        if receiver.is_none() {
+            if let Some(storage) = self.top_level_property(target)? {
+                if !storage.direct_read {
+                    return Err("a top-level property read that requires an accessor".to_string());
+                }
+                self.code.global_get(storage.global);
+                return Ok(());
+            }
+        }
         let (class, index) = self.member_property(target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
@@ -435,6 +446,19 @@ impl Body<'_> {
         receiver: Option<u32>,
         value: u32,
     ) -> Result<(), Unsupported> {
+        if receiver.is_none() {
+            if let Some(storage) = self.top_level_property(target)? {
+                if !storage.mutable {
+                    return Err("an assignment to an immutable top-level property".to_string());
+                }
+                if !storage.direct_write {
+                    return Err("a top-level property write that requires an accessor".to_string());
+                }
+                self.value(value, storage.ty)?;
+                self.code.global_set(storage.global);
+                return Ok(());
+            }
+        }
         let (class, index) = self.member_property(target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
@@ -467,6 +491,65 @@ impl Body<'_> {
                 property.name
             )),
         }
+    }
+
+    /// The storage selected for a receiver-less property in this or an earlier source file.
+    /// Property identity, never spelling, is the cross-file key.
+    fn top_level_property(
+        &self,
+        target: PropertyId,
+    ) -> Result<Option<TopLevelProperty>, Unsupported> {
+        if let Some(layout) = self.ir.local_property_layouts.get(&target) {
+            return match layout {
+                IrLocalPropertyLayout::TopLevelStorage {
+                    storage,
+                    qualifier: None,
+                    ..
+                } => {
+                    let declaration = self
+                        .ir
+                        .statics
+                        .get(*storage as usize)
+                        .ok_or_else(|| "an invalid top-level property storage".to_string())?;
+                    let global = self
+                        .globals
+                        .get(*storage as usize)
+                        .copied()
+                        .ok_or_else(|| "an invalid top-level property global".to_string())?;
+                    Ok(Some(TopLevelProperty {
+                        global,
+                        ty: declaration.ty,
+                        mutable: declaration.is_var,
+                        direct_read: declaration.accessors.getter
+                            != crate::ir::IrStaticAccessor::Declared,
+                        direct_write: declaration.is_var
+                            && declaration.accessors.setter
+                                != crate::ir::IrStaticAccessor::Declared,
+                    }))
+                }
+                _ => Ok(None),
+            };
+        }
+        let Some(storage) = self.properties.get(target) else {
+            return Ok(None);
+        };
+        let reference = self
+            .ir
+            .referenced_module_properties
+            .get(&target)
+            .ok_or_else(|| "a cross-file property with no module record".to_string())?;
+        if reference.owner.is_some()
+            || reference.extension_receiver.is_some()
+            || !reference.context_parameters.is_empty()
+        {
+            return Err("a cross-file property storage with a receiver".to_string());
+        }
+        if reference.ty != storage.ty || reference.mutable != storage.mutable {
+            return Err(
+                "a cross-file property storage disagrees with its module record".to_string(),
+            );
+        }
+        Ok(Some(storage))
     }
 
     /// `x as C`: the value, cast to class `C` of this file.

@@ -25,6 +25,7 @@ pub struct KlibLibraryInput {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum KlibLibraryRole {
     Dependency,
+    Friend,
     PlatformStdlib,
 }
 
@@ -34,6 +35,14 @@ impl KlibLibraryInput {
         Self {
             path,
             role: KlibLibraryRole::Dependency,
+        }
+    }
+
+    /// A dependency whose internal declarations are visible to this compilation.
+    pub fn friend(path: PathBuf) -> Self {
+        Self {
+            path,
+            role: KlibLibraryRole::Friend,
         }
     }
 
@@ -66,6 +75,8 @@ pub enum KlibLibrariesOpenError {
     },
     /// A decoded declaration cannot be signed.
     Declaration(KlibLibraryError),
+    /// A selected KLIB has no stable module identity for cross-archive joins.
+    MissingUniqueName { library: PathBuf },
 }
 
 impl std::fmt::Display for KlibLibrariesOpenError {
@@ -93,6 +104,11 @@ impl std::fmt::Display for KlibLibrariesOpenError {
                 library.display()
             ),
             Self::Declaration(error) => error.fmt(formatter),
+            Self::MissingUniqueName { library } => write!(
+                formatter,
+                "KLIB {} has no manifest unique_name",
+                library.display()
+            ),
         }
     }
 }
@@ -120,39 +136,51 @@ impl KlibLibraries {
         for input in libraries {
             let library = &input.path;
             let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
-            let _manifest = archive
+            let module = archive
                 .manifest()
-                .map_err(KlibLibrariesOpenError::Archive)?;
+                .map_err(KlibLibrariesOpenError::Archive)?
+                .unique_name()
+                .map(str::to_owned)
+                .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
+                    library: library.to_path_buf(),
+                })?;
             // Authority comes from compilation input assembly, which selected this exact archive
             // as the platform stdlib. Manifests are self-authored dependency data: Native, JS and
             // Wasm also stamp different values, so neither `unique_name` nor `builtins_platform`
             // can grant or revoke the compiler-owned role.
             let compiler_builtin_owner = matches!(input.role, KlibLibraryRole::PlatformStdlib);
+            let internal_friend = matches!(input.role, KlibLibraryRole::Friend);
             packages.extend(package_fragments(
                 library,
                 &archive,
                 compiler_builtin_owner,
+                internal_friend,
+                &module,
             )?);
-            archives.push(archive);
+            archives.push((module, archive, compiler_builtin_owner));
         }
-        let mut inventory = PackageInventory::from_packages(packages)
+        let mut inventory = PackageInventory::from_package_inputs(packages)
             .map_err(KlibLibrariesOpenError::Declaration)?;
         // Only a declaration metadata marks as defaulted has a default to read from the IR.
         let wanted = inventory.default_selection();
         let mut defaults = ParameterDefaults::default();
-        for (input, archive) in libraries.iter().zip(&archives) {
+        for (input, (module, archive, compiler_builtin_owner)) in libraries.iter().zip(&archives) {
             let library = &input.path;
-            let trees =
-                read_declaration_trees_where(archive, |signature| wanted.contains(signature))
-                    .map_err(|error| KlibLibrariesOpenError::Declarations {
-                        library: library.to_path_buf(),
-                        error,
-                    })?;
-            defaults.add_library(
-                &trees,
-                &wanted,
-                input.role == KlibLibraryRole::PlatformStdlib,
-            );
+            // A metadata KLIB (`-Xmetadata-klib`) deliberately carries linkdata without an IR
+            // channel. Its declaration-level default flags remain useful, but it publishes no
+            // constant realization to attach. Once any IR entry exists, keep treating the channel
+            // as an all-or-nothing serialized format so a partial/corrupt library is rejected.
+            if archive.ir_entries().is_empty() {
+                continue;
+            }
+            let trees = read_declaration_trees_where(archive, |signature| {
+                wanted.contains(module, signature)
+            })
+            .map_err(|error| KlibLibrariesOpenError::Declarations {
+                library: library.to_path_buf(),
+                error,
+            })?;
+            defaults.add_library(module, &trees, &wanted, *compiler_builtin_owner);
         }
         inventory.attach_defaults(&defaults);
         Ok(Self::over(std::rc::Rc::new(inventory)))
@@ -163,7 +191,9 @@ fn package_fragments(
     library: &Path,
     archive: &KlibArchive,
     compiler_builtin_owner: bool,
-) -> Result<Vec<(Vec<String>, KotlinPackage, bool)>, KlibLibrariesOpenError> {
+    internal_friend: bool,
+    module: &str,
+) -> Result<Vec<(Vec<String>, KotlinPackage, bool, bool, Option<String>)>, KlibLibrariesOpenError> {
     archive
         .package_fragments()
         .into_iter()
@@ -187,7 +217,13 @@ fn package_fragments(
                     .map(str::to_owned)
                     .collect()
             };
-            Ok((segments, package, compiler_builtin_owner))
+            Ok((
+                segments,
+                package,
+                compiler_builtin_owner,
+                internal_friend,
+                Some(module.to_owned()),
+            ))
         })
         .collect()
 }

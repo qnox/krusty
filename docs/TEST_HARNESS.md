@@ -84,31 +84,46 @@ argument, member, initializer, or assignment location is a test failure.
 
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
-binaries once with Cargo's `gate` profile, runs the conformance binary alone in five passes (JVM
-box corpus, Native box corpus, the `wasm-js` and `wasm-wasi` box corpora, then everything else), then runs the internally parallel e2e binary
-once, then runs the remaining small test binaries in parallel. The e2e suite is one process under
+binaries once with Cargo's `gate` profile, runs the conformance binary alone in nine passes (JVM
+box corpus, Native box corpus, Native-focused regressions, the shared multimodule set on Native,
+the `wasm-js` and `wasm-wasi` box corpora, Wasm-focused regressions, the same multimodule set on
+Wasm, then JVM-owned regressions including that set on JVM), then runs the internally parallel e2e
+binary once, then runs the remaining small test binaries in parallel. The e2e suite is one process under
 `KRUSTY_E2E_TIMEOUT_SECONDS`. The native codegen/box lane also runs once, excluded from the
-"everything else" pass, under its dedicated `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS` suite
-deadline. `scripts/box-lane-run.sh <native|wasm-js|wasm-wasi>` owns that same invocation for the
-`just` recipes and CI (`scripts/native-conformance-run.sh` is its Native shorthand).
+JVM-owned pass, under its dedicated `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS` suite deadline.
+`scripts/target-conformance-regressions.sh <native|wasm>` owns the focused target pass, selects that
+target's runner for the shared multimodule set, and applies its
+`KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS` deadline; it requires the Native distribution or Wasm
+compiler distribution/dependency cache that owns the target KLIBs instead of silently accepting a
+skip. It does not run a JVM oracle or read a JVM stdlib. `scripts/box-lane-run.sh
+<native|wasm-js|wasm-wasi>`
+owns each corpus invocation for the `just` recipes and CI (`scripts/native-conformance-run.sh` is
+its Native shorthand).
 
 The two Wasm lanes compile each case to one WasmGC module plus its `.mjs` loader and run it under
 Node.js 22 or newer: `wasm-js` through JavaScript imports, `wasm-wasi` through Node's WASI preview-1
-host. They still analyze each case against the JVM library surface (`kotlin-stdlib.jar` and the JDK),
-because no Wasm klib platform exists yet, so they gate the Wasm emitter, not wasm-js/wasm-wasi source
-semantics, and publish no badge. Without a Node.js 22+ the local run skips them with a notice; CI
-requires them (`KRUSTY_REQUIRE_WASM_JS_CONFORMANCE`, `KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE`). Their
+host. Each lane analyzes against that Kotlin version's exact target stdlib KLIB
+(`kotlin-stdlib-wasm-js.klib` or `kotlin-stdlib-wasm-wasi.klib`), including separately emitted
+dependency modules and exact friend archives, before lowering the complete program to Wasm. Without
+a Node.js 22+ a directly invoked corpus lane may skip with a notice; the canonical local and CI
+target passes require it (`KRUSTY_REQUIRE_WASM_JS_CONFORMANCE`,
+`KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE`). Their
 knobs mirror Native's with the `WASM_JS`/`WASM_WASI` infix (`KRUSTY_WASM_JS_BOX_ONLY`,
-`…_BOX_LIMIT`, `…_BOX_TRACE`). Each lane has its own ratchet, keyed by `wasm-js` or `wasm-wasi`,
-because the corpus mutes the two targets separately.
+`…_BOX_LIMIT`, `…_BOX_TRACE`). Each lane has its own target-KLIB ratchet, keyed by `wasm-js-klib`
+or `wasm-wasi-klib`, because Kotlin publishes different platform surfaces for the two targets.
 
-The Native lane uses the same committed text ratchet as JVM, keyed by `native` and the exact Kotlin
-release. Backend declines, frontend rejections, and accepted-but-wrong executions are expected
-failures. A missing harness capability, including an unwired multi-module topology, is also an
-expected failure and remains in the denominator. Only target/source-universe exclusions are
-not-applicable. Pass is implicit. Any new non-pass or
-transition between pass/fail/not-applicable fails, and compiler panics always fail. No version range,
-GHA cache, or bootstrap exists: a local checkout and CI read the same reviewable baseline.
+The Native lane uses the same committed text ratchet as JVM, keyed by `native-klib` and the exact
+Kotlin release. Its cases are analyzed against that release's Kotlin/Native stdlib KLIB
+(`KRUSTY_KOTLIN_NATIVE`, provisioned by `just kotlin-native <v>`), as kotlinc-native compiles them; the
+library surface is each lane's `Libraries` setting in `tests/box_lane.rs`; Native and Wasm all use
+their own target stdlib KLIB. Backend declines, frontend rejections, and accepted-but-wrong
+executions are expected failures. A missing target implementation is also an expected failure and
+remains in the denominator. Only target/source-universe exclusions are not-applicable. Pass is
+implicit. Any new non-pass or
+transition between pass/fail/not-applicable fails, and compiler panics always fail. No version range
+or GHA cache exists: ordinary local and CI runs read the same reviewable baseline. A missing new
+target-KLIB baseline must be added and populated by a deliberate full local run, reviewed, and
+committed before ordinary CI can pass.
 A `box()` answer is read from behind the entry's `BOX_RESULT_FRAME` marker, whole, and never from the
 last line of output. A scheduled invocation requires the prebuilt runtime and the provisioned corpus;
 only a plain local run may skip or fall back to the vendored cases.
@@ -124,9 +139,11 @@ invocation separately because each is a separate process with its own wall time.
 unfiltered binary name.
 
 CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm` and `native` matrix rows from those artifacts. The JVM row runs its box corpus and
-every active non-box conformance test; the Native row runs its box corpus independently, so neither
-target waits for the other's corpus result. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and
+independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. The JVM row runs its box
+corpus and JVM-owned regressions. The Native and Wasm rows run their own box corpora followed by
+their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
+target test consumes JVM artifacts and no target waits for another target's corpus result.
+`KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and
 `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix does not rebuild Rust
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
 JVM rows opt into KSP and require both KSP and pinned serialization-runtime
@@ -153,7 +170,8 @@ The generic ratchet is keyed by platform and exact Kotlin version:
 `tests/box_expected_failures/<platform>/<version>.txt` and
 `tests/box_expected_not_applicable/<platform>/<version>.txt`. Each entry is a corpus-relative path;
 pass is implicit. JVM has no expected failures, so every applicable JVM case must pass. Native's
-known non-passing backlog is explicit. Every pass/fail/not-applicable transition, duplicate, and
+and both Wasm target-KLIB lanes' known non-passing backlogs are explicit under `native-klib`,
+`wasm-js-klib`, and `wasm-wasi-klib`. Every pass/fail/not-applicable transition, duplicate, and
 corpus-absent entry fails. Sharded and filtered runs judge only their scheduled files while still
 validating committed paths against the complete corpus.
 
@@ -165,8 +183,9 @@ with the change, so review sees exactly which files moved:
 KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
   ./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --nocapture
 
-# Native failures and applicability (requires the provisioned Native runtime/corpus)
-KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+# Native failures and applicability (requires the provisioned Native runtime/corpus and
+# Kotlin/Native distribution)
+KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> KRUSTY_KOTLIN_NATIVE="$(just kotlin-native <v>)" \
   ./run-tests.sh --test conformance kotlin_codegen_box_native_conformance -- --nocapture
 
 # Wasm failures and applicability, one lane per target (requires Node.js 22+)
@@ -185,14 +204,15 @@ with them once both land: one fixes a file the other's list still names, or thei
 The `ci` workflow also runs on `merge_group`, so with master's merge queue (or "require branches to
 be up to date") on and the `ci-and-conformance` check required (see "Required Check"), every merge
 is checked on the combined commit before master moves. A branch that falls behind merges master in
-and re-blesses.
+and updates any changed manifests from a deliberate full local run.
 
 All existing platform/version manifests only shrink. The required `ci` job runs
 `scripts/check-outcome-lists.sh` before building and fails a pull request that adds an entry to any
 existing outcome manifest compared with its merge base, including one entry swapped for another:
 a regression is fixed, not recorded, and a fix does not pay for one. A manifest for a newly
-supported Kotlin version is exempt. Native and JVM inventories use the same script and repository
-layout, and it covers the CLI corpus's expected failures (`tests/cli_expected_failures`) too. The CLI
+supported Kotlin version is exempt. JVM and all target-KLIB inventories use the same script and
+repository layout, and it covers the CLI corpus's expected failures (`tests/cli_expected_failures`)
+too. The CLI
 not-applicable lists are not under this gate: they record what the reference kotlinc cannot run in
 this environment, and the required reference run proves every entry against that compiler.
 
@@ -341,7 +361,9 @@ part of `just ci`.
 The general test-binary deadline defaults to 120 seconds. Each conformance pass defaults to 120
 seconds, including each shard of the scored byte-equality run, and can be adjusted with
 `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`. The product e2e suite is one process and defaults to 1800
-seconds (`KRUSTY_E2E_TIMEOUT_SECONDS`).
+seconds (`KRUSTY_E2E_TIMEOUT_SECONDS`). Native's corpus pass defaults to 600 seconds
+(`KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS`), and each focused Native or Wasm target pass defaults
+to 600 seconds (`KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS`).
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.
@@ -349,9 +371,14 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs core `ci`, `klib-semantics`, the whole `conformance` matrix, `build-gradle-plugin`, and the
-whole `gradle` compatibility matrix. Every supported Kotlin version has distinct JVM and Native
-conformance rows; the JVM row also owns the non-box suite. The job is scheduled with `if: always()`,
+It needs core `ci`, the whole `conformance` matrix, `build-gradle-plugin`, and the whole `gradle`
+compatibility matrix. Every supported Kotlin version has distinct JVM, Native and Wasm conformance
+rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
+kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
+remains the focused local recipe. One backend-neutral multimodule case table runs through the
+runner provisioned by every JVM, Native and Wasm row; a genuinely platform-specific source stays
+there only behind its explicit `TARGET_BACKEND` directive. The JVM row owns JVM regressions; Native
+and Wasm own their focused non-corpus regressions. The job is scheduled with `if: always()`,
 because a required check that is skipped counts as passing, and it fails unless every dependency
 result is `success`. A failed, skipped, cancelled, or absent dependency therefore fails it,
 including a failed shared build or version inventory that skips a downstream matrix. Its name stays
@@ -571,8 +598,8 @@ current is worse than no number. The live measures are three badges in `README.m
   shown as
   `<pct>% (<matched>/<total> bytes)`.
 - The **Native conformance badge** (`krusty-native-conformance.json`) is the pass rate of the
-  independent Native lane: cases that compile, link, run, and return `OK` over cases applicable to
-  Native, shown as `<pct>% (<passed>/<applicable>)`.
+  independent Native lane: cases that compile against the Kotlin/Native stdlib KLIB, link, run, and
+  return `OK` over cases applicable to Native, shown as `<pct>% (<passed>/<applicable>)`.
 
 A case is applicable when kotlinc's own JVM box runner expects it to pass (`src/conformance.rs`
 `backend_applicable`, mirroring `InTextDirectivesUtils.isPassingTarget`): cases restricted to other
@@ -598,10 +625,12 @@ differential harness can install that typed configuration on both compilers.
 Both lanes scan the same version-pinned corpus directory. The Native lane never inherits a JVM
 mute: it excludes a case only for a Native/ANY target directive or a true target-runtime/source
 requirement such as JVM classes. A missing harness capability is an expected failure and remains in
-the denominator: this currently includes `// MODULE:` dependency construction, while Kotlin-only
-`// FILE:` source sets and generated coroutine helpers run normally. The committed inventories keep
-the Native denominator target-correct rather than hand-picked. These outcomes use the same generic
-platform/version ratchet as JVM, so local and CI runs enforce identical state without a GHA cache.
+the denominator. Kotlin-only `// FILE:` source sets, generated coroutine helpers, and `// MODULE:`
+graphs all use their production topology: every source module is analyzed separately against its
+declared dependency/friend KLIB archives, while target emission finalizes once. The committed
+inventories keep the Native denominator target-correct rather than hand-picked. These outcomes use
+the same generic platform/version ratchet as JVM, so local and CI runs enforce identical state
+without a GHA cache.
 
 For the byte score, each applicable case is compiled with krusty and also reference-compiled in the
 same topology (Kotlin and Java sources, `// MODULE:` dependencies, directives, classpath, and JDK)
@@ -623,9 +652,10 @@ All reports keep integer counts: `passed` and `applicable` cases for each target
 `100 * count / of` rounded down to one decimal (`0.0` when the denominator is 0), is derived only
 from its own sums. Thus only an exact count can display `100.0%`; `3145/3146` displays `99.9%`.
 The score is never an average of per-case or per-shard percentages, and neither report's counts
-stand in for another's. Only the box corpus feeds these badges. The non-box conformance tests
-(serialization, KSP, and the rest of `just conformance-regressions`) are correctness gates in every
-version lane and contribute neither cases nor bytes.
+stand in for another's. Only the box corpus feeds these badges. The JVM-owned regressions
+(serialization, KSP, and the rest of `just conformance-regressions`) and target-owned focused
+Native/Wasm regressions are correctness gates in their respective version rows and contribute
+neither cases nor bytes.
 
 The scores and runtime correctness are separate gates. A case whose classes differ from kotlinc's but
 whose `box()` returns `OK` still passes, and the exact outcome manifests (see "Box Outcome
@@ -640,6 +670,8 @@ just conformance [VERSION] [BYTES]      # stdout: "<pct> <passed> <applicable>";
 just conformance-run "$(just conformance-bin)" <version> [BYTES]   # the same, for a prebuilt binary
 just native-conformance-run "$(just conformance-bin)" <version> [NATIVE]
 just wasm-conformance-run <wasm-js|wasm-wasi> "$(just conformance-bin)" <version> [REPORT]
+just native-conformance-regressions "$(just conformance-bin)" <version>
+just wasm-conformance-regressions "$(just conformance-bin)" <version>
 just conformance-badge [CASES BYTES NATIVE]   # writes docs/badges/*.json previews
 ```
 

@@ -720,10 +720,11 @@ impl Checker<'_> {
                 .owner
                 .expect("a planned member invoke has a declaring classifier");
             if !self.selected_member_accessible(&access_probe, owner) {
-                self.reject_if_inaccessible(
+                self.reject_callable_if_inaccessible(
                     member.visibility,
                     &member.name,
                     owner,
+                    member.external_identity,
                     self.call_callee_name_span(call),
                 );
                 return InvokeResolution::Selected(Ty::Error);
@@ -824,10 +825,11 @@ impl Checker<'_> {
             }
         }
         if candidate.visibility != Visibility::Public
-            && self.reject_if_inaccessible(
+            && self.reject_callable_if_inaccessible(
                 candidate.visibility,
                 CALLABLE_INVOKE_OPERATOR,
                 candidate.owner,
+                candidate.external_identity,
                 self.call_callee_name_span(call),
             )
         {
@@ -1176,10 +1178,11 @@ impl Checker<'_> {
                         .owner
                         .expect("a selected member invoke has a declaring classifier");
                     if !self.selected_member_accessible(&access_probe, owner) {
-                        self.reject_if_inaccessible(
+                        self.reject_callable_if_inaccessible(
                             member.visibility,
                             &member.name,
                             owner,
+                            member.external_identity,
                             self.call_callee_name_span(call),
                         );
                         return InvokeResolution::Selected(Ty::Error);

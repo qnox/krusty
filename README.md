@@ -22,10 +22,11 @@
      0 out of its full length. This exposes small forward progress while 100% still requires every
      byte of every paired class to match. A case whose box() does not return "OK" counts 0 out of
      kotlinc's class bytes. The Native badge is a separate run: passed Native cases over cases
-     applicable to Native. Other test suites (serialization, KSP, and the rest of the conformance
+     applicable to Native, each analyzed against the Kotlin/Native stdlib KLIB. Other test suites (serialization, KSP, and the rest of the conformance
      tests) are correctness gates only and count toward none of the badges.
-     Every applicable JVM case must pass; its exact not-applicable inventory and Native's
-     fail/not-applicable inventories are committed under tests/box_expected_*/<platform>/<version>.txt.
+     Every applicable JVM case must pass; its exact not-applicable inventory and the `native-klib`,
+     `wasm-js-klib`, and `wasm-wasi-klib` fail/not-applicable inventories are committed under
+     tests/box_expected_*/<platform>/<version>.txt.
      See docs/TEST_HARNESS.md "Current Conformance".
      The master build recomputes all three and writes the badge JSON to a Gist
      (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
@@ -38,7 +39,8 @@ cases of Kotlin's own `codegen/box` test suite. The conformance badge shows how 
 it passes today: the share of cases whose `box()` test returns `OK`. The JVM byte-equality badge
 shows how close its output is to `kotlinc`'s on the same cases: the matching leading bytes of each
 paired `.class` file over the longer file length. The Native conformance badge independently shows
-the share of Native-applicable cases that compile, link, run, and return `OK`.
+the share of Native-applicable cases that compile against the Kotlin/Native stdlib KLIB, link, run,
+and return `OK`.
 
 [Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [Sponsor](https://github.com/sponsors/qnox)
 

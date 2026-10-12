@@ -18,7 +18,10 @@ static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
     Jvm,
+    /// Native analyzed against the Kotlin/Native stdlib KLIB; its inventories are keyed
+    /// `native-klib`.
     Native,
+    /// Wasm targets analyzed against their exact platform stdlib KLIBs.
     WasmJs,
     WasmWasi,
 }
@@ -27,9 +30,9 @@ impl Platform {
     pub fn name(self) -> &'static str {
         match self {
             Self::Jvm => "jvm",
-            Self::Native => "native",
-            Self::WasmJs => "wasm-js",
-            Self::WasmWasi => "wasm-wasi",
+            Self::Native => "native-klib",
+            Self::WasmJs => "wasm-js-klib",
+            Self::WasmWasi => "wasm-wasi-klib",
         }
     }
 }
@@ -342,7 +345,13 @@ mod tests {
             .ends_with("tests/box_expected_failures/jvm/2.4.20.txt"));
         assert!(
             not_applicable_path(Platform::Native, KotlinVersion::V2_4_10)
-                .ends_with("tests/box_expected_not_applicable/native/2.4.10.txt")
+                .ends_with("tests/box_expected_not_applicable/native-klib/2.4.10.txt")
+        );
+        assert!(failure_path(Platform::WasmJs, KotlinVersion::V2_4_20)
+            .ends_with("tests/box_expected_failures/wasm-js-klib/2.4.20.txt"));
+        assert!(
+            not_applicable_path(Platform::WasmWasi, KotlinVersion::V2_4_0)
+                .ends_with("tests/box_expected_not_applicable/wasm-wasi-klib/2.4.0.txt")
         );
     }
 
@@ -409,7 +418,7 @@ mod tests {
             format!(
                 "1 file(s) is listed as both failure and not-applicable:\n  both.kt\n\
                  1 file(s) is listed but absent from the corpus:\n  deleted.kt\n\
-                 native box conformance disagrees with {} and {}; update them from one full local run with \
+                 native-klib box conformance disagrees with {} and {}; update them from one full local run with \
                  KRUSTY_BLESS_BOX_EXPECTATIONS=1",
                 failure_path(Platform::Native, version).display(),
                 not_applicable_path(Platform::Native, version).display(),
@@ -433,5 +442,20 @@ mod tests {
             bless_requested(Some("false")),
             Err("KRUSTY_BLESS_BOX_EXPECTATIONS must be exactly 1 when set, got \"false\"".into())
         );
+    }
+
+    #[test]
+    fn a_required_inventory_fails_when_missing_but_an_optional_one_is_empty() {
+        let missing = std::env::temp_dir().join(format!(
+            "krusty-missing-box-ratchet-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let failure = std::panic::catch_unwind(|| load_path(&missing, true));
+        assert!(
+            failure.is_err(),
+            "an ordinary lane requires its committed inventory"
+        );
+        assert_eq!(load_path(&missing, false), BTreeSet::new());
     }
 }

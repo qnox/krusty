@@ -323,7 +323,13 @@ impl Checker<'_> {
             }
         };
         if candidate.visibility != Visibility::Public {
-            self.reject_if_inaccessible(candidate.visibility, name, candidate.owner, span);
+            self.reject_callable_if_inaccessible(
+                candidate.visibility,
+                name,
+                candidate.owner,
+                candidate.external_identity,
+                span,
+            );
         }
         let interface = self
             .resolver()

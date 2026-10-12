@@ -14,7 +14,7 @@ use crate::fir::SourceFileId;
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::klib::KlibArchive;
 use crate::klib_libraries::{KlibDeclarationBodies, KlibLibraries};
-use crate::libraries::KlibDeclarationSignature;
+use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{
     callable_signature, metadata_class_signature, CallableShape, DeclarationContainer,
     KlibPublicIdSignature, MetadataClass, MetadataContainer, Placement,
@@ -528,13 +528,16 @@ impl Parts {
 fn coerce_fixture(
     body: impl FnOnce(&Parts, &mut KlibIrArena) -> Option<KlibIrBody>,
 ) -> (BackendCallableFact, KlibDeclarationBodies) {
-    let libraries = KlibLibraries::from_packages(vec![(
-        vec!["kotlin".to_owned(), "ranges".to_owned()],
-        KotlinPackage {
-            functions: vec![coerce_declaration()],
-            ..KotlinPackage::default()
-        },
-    )])
+    let libraries = KlibLibraries::from_named_packages(
+        "fixture",
+        vec![(
+            vec!["kotlin".to_owned(), "ranges".to_owned()],
+            KotlinPackage {
+                functions: vec![coerce_declaration()],
+                ..KotlinPackage::default()
+            },
+        )],
+    )
     .expect("the declaration is signable");
     let fact = frozen(
         &libraries,
@@ -606,7 +609,8 @@ fn coerce_fixture(
         declaration: KlibIrMember::Function(function),
     }])
     .expect("one tree defines each identity once");
-    let bodies = KlibDeclarationBodies::from_libraries(vec![trees]).expect("one library");
+    let bodies = KlibDeclarationBodies::from_libraries(vec![("fixture".to_owned(), trees)])
+        .expect("one library");
     (fact, bodies)
 }
 
@@ -761,7 +765,7 @@ fn a_call_of_a_library_declaration_declines_by_its_callee() {
     assert_eq!(
         message,
         "the KLIB body of `kotlin.ranges.coerceAtLeast` \
-         (it calls `kotlin.ranges.coerceAtMost`, which no loaded library declares)"
+         (it calls `kotlin.ranges.coerceAtMost`, which no reachable library serializes its declaration)"
     );
 }
 
@@ -972,7 +976,7 @@ fn a_signature_no_library_serializes_declines() {
 }
 
 #[test]
-fn a_signature_two_libraries_define_rejects_the_set() {
+fn a_signature_twice_in_one_module_rejects_the_set() {
     let (fact, _) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
     let tree = || {
         let mut arena = KlibIrArena::default();
@@ -1004,14 +1008,121 @@ fn a_signature_two_libraries_define_rejects_the_set() {
         }])
         .expect("one tree")
     };
-    let error = KlibDeclarationBodies::from_libraries(vec![tree(), tree()])
-        .err()
-        .expect("one identity, two bodies");
+    let error = KlibDeclarationBodies::from_libraries(vec![
+        ("fixture".to_owned(), tree()),
+        ("fixture".to_owned(), tree()),
+    ])
+    .err()
+    .expect("one identity, two bodies");
     let Some(KlibDeclarationSignature::Public(signature)) = fact.declaration_signature else {
         unreachable!("the fixture function is public");
     };
-    assert_eq!(error.signature(), &KlibIrSignature::Public(signature));
+    assert_eq!(error.signature(), Some(&KlibIrSignature::Public(signature)));
+    assert_eq!(error.module(), "fixture");
     assert_eq!(error.libraries(), [0, 1]);
+}
+
+#[test]
+fn two_archives_claiming_one_module_are_rejected_even_when_their_signatures_are_disjoint() {
+    let (fact, _) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
+    let Some(KlibDeclarationSignature::Public(signature)) = fact.declaration_signature else {
+        unreachable!("the fixture function is public");
+    };
+    let mut arena = KlibIrArena::default();
+    let result = arena.push_type(KlibIrType::Dynamic {
+        annotations: Vec::new(),
+    });
+    let function = arena.push_function(KlibIrFunction {
+        base: base(public_symbol(KlibIrSymbolKind::Function, signature)),
+        name: "coerceAtLeast".to_owned(),
+        constructor: false,
+        type_parameters: Vec::new(),
+        dispatch_receiver: None,
+        context_parameters: Vec::new(),
+        extension_receiver: None,
+        regular_parameters: Vec::new(),
+        return_type: result,
+        overridden: Vec::new(),
+        companion_extension_class: None,
+        prepared_inline_file: None,
+        body: None,
+    });
+    let trees = KlibIrModuleTrees::from_trees(vec![KlibIrDeclarationTree {
+        arena,
+        declaration: KlibIrMember::Function(function),
+    }])
+    .expect("one tree");
+    let error = KlibDeclarationBodies::from_body_libraries(vec![
+        crate::klib_libraries::KlibBodyLibrary::new(
+            "fixture".to_owned(),
+            ["first".to_owned()],
+            KlibIrModuleTrees::default(),
+        ),
+        crate::klib_libraries::KlibBodyLibrary::new(
+            "fixture".to_owned(),
+            ["second".to_owned()],
+            trees,
+        ),
+    ])
+    .err()
+    .expect("one module identity cannot carry two producer graphs");
+    assert_eq!(error.module(), "fixture");
+    assert_eq!(error.signature(), None);
+    assert_eq!(error.libraries(), [0, 1]);
+}
+
+#[test]
+fn equal_internal_body_signatures_from_distinct_modules_remain_distinct() {
+    let (fact, _) = coerce_fixture(|parts, arena| parts.stdlib_body(arena));
+    let identity = fact
+        .dependency_callable
+        .clone()
+        .expect("the named fixture has a module-qualified identity");
+    let tree = |name: &str| {
+        let mut arena = KlibIrArena::default();
+        let result = arena.push_type(KlibIrType::Dynamic {
+            annotations: Vec::new(),
+        });
+        let KlibDeclarationSignature::Public(signature) = &identity.declaration else {
+            unreachable!("the fixture function is public");
+        };
+        let function = arena.push_function(KlibIrFunction {
+            base: base(public_symbol(KlibIrSymbolKind::Function, signature.clone())),
+            name: name.to_owned(),
+            constructor: false,
+            type_parameters: Vec::new(),
+            dispatch_receiver: None,
+            context_parameters: Vec::new(),
+            extension_receiver: None,
+            regular_parameters: Vec::new(),
+            return_type: result,
+            overridden: Vec::new(),
+            companion_extension_class: None,
+            prepared_inline_file: None,
+            body: None,
+        });
+        KlibIrModuleTrees::from_trees(vec![KlibIrDeclarationTree {
+            arena,
+            declaration: KlibIrMember::Function(function),
+        }])
+        .expect("one tree")
+    };
+    let bodies = KlibDeclarationBodies::from_libraries(vec![
+        ("ordinary".to_owned(), tree("ordinaryBody")),
+        ("friend".to_owned(), tree("friendBody")),
+    ])
+    .expect("equal signatures in distinct modules are legal");
+    for (module, expected_name) in [("ordinary", "ordinaryBody"), ("friend", "friendBody")] {
+        assert_eq!(
+            bodies
+                .function(&KlibDependencyCallable {
+                    module: module.to_owned(),
+                    declaration: identity.declaration.clone(),
+                })
+                .map(|(_, function)| function.name.as_str()),
+            Some(expected_name)
+        );
+    }
 }
 
 // --- The Kotlin/Native stdlib -----------------------------------------------------------------
@@ -1037,7 +1148,10 @@ pub(super) fn stdlib(root: &std::path::Path) -> (KlibLibraries, KlibDeclarationB
     let archive =
         KlibArchive::open(&path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
     let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");
-    let bodies = KlibDeclarationBodies::from_libraries(vec![trees]).expect("one library");
+    let manifest = archive.manifest().expect("stdlib manifest reads");
+    let library = crate::klib_libraries::KlibBodyLibrary::from_manifest(&manifest, trees)
+        .expect("stdlib has a unique_name");
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![library]).expect("one library");
     (libraries, bodies)
 }
 

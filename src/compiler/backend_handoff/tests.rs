@@ -849,6 +849,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         declaration_owner: None,
         parameter_identities: Box::new([]),
         declaration_signature: None,
+        dependency_callable: None,
     };
     let queries = std::cell::Cell::new(0);
     facts

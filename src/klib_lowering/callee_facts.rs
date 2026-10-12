@@ -1,22 +1,20 @@
 //! The provider records of the dependency declarations a checked call selected, by exact KLIB
 //! identity.
 //!
-//! A KLIB body names a callee only by the public signature it was serialized with, and lowering
-//! declares the callee from that signature's serialized header. When a checked call of the module
-//! also selected the callee, its provider record (normalized parameters, result and parameter
-//! identities, exactly as the backend handoff froze them) describes the same identity, and the
-//! two views must agree. This table is those records, joined to a call by signature alone; a
-//! signature it does not hold is a callee only its header describes. Nothing is reconstructed from
-//! the callee's name or shape.
+//! The body library's producer graph resolves a serialized call to an exact module-qualified
+//! identity before this table is consulted. When a checked source call also selected that identity,
+//! its provider record (normalized parameters, result and parameter identities, exactly as the
+//! backend handoff froze them) must agree with the serialized header. A bare signature is never a
+//! key and an unrelated source selection is never an origin fallback.
 
 use crate::fx_hash::HashMap;
 
-use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature};
+use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 
-/// Frozen dependency declarations by their exact KLIB signature.
+/// Frozen dependency declarations by their exact module-qualified KLIB identity.
 #[derive(Default)]
 pub struct KlibCalleeFacts<'a> {
-    callables: HashMap<&'a KlibDeclarationSignature, KlibCalleeFact<'a>>,
+    callables: HashMap<&'a KlibDependencyCallable, KlibCalleeFact<'a>>,
 }
 
 /// What the table holds for one signature.
@@ -35,14 +33,14 @@ impl<'a> KlibCalleeFacts<'a> {
         for callable in callables {
             facts
                 .callables
-                .entry(callable.signature())
+                .entry(callable.identity())
                 .and_modify(|fact| *fact = KlibCalleeFact::Ambiguous)
                 .or_insert(KlibCalleeFact::Selected(callable));
         }
         facts
     }
 
-    pub(super) fn get(&self, signature: &KlibDeclarationSignature) -> Option<KlibCalleeFact<'a>> {
-        self.callables.get(signature).copied()
+    pub(super) fn get(&self, identity: &KlibDependencyCallable) -> Option<KlibCalleeFact<'a>> {
+        self.callables.get(identity).copied()
     }
 }

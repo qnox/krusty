@@ -3,20 +3,23 @@
 use super::super::{KlibLibraries, KlibLibraryInput};
 use crate::diag::DiagSink;
 
-pub(super) fn native_stdlib() -> Option<KlibLibraries> {
-    let Some(stdlib) =
-        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::Native)
-    else {
-        assert!(
-            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
-            "KRUSTY_REQUIRE_KLIB is set but no Kotlin/Native stdlib KLIB is provisioned"
-        );
-        return None;
-    };
+pub(super) fn target_stdlib(
+    target: crate::compilation_target::CompilationTarget,
+) -> Option<KlibLibraries> {
+    let stdlib = crate::toolchain::kotlin_stdlib_klib(target)?;
     Some(
         KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib)])
             .unwrap_or_else(|error| panic!("{error}")),
     )
+}
+
+pub(super) fn native_stdlib() -> Option<KlibLibraries> {
+    let libraries = target_stdlib(crate::compilation_target::CompilationTarget::Native);
+    assert!(
+        libraries.is_some() || std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+        "KRUSTY_REQUIRE_KLIB is set but no Kotlin/Native stdlib KLIB is provisioned"
+    );
+    libraries
 }
 
 fn diagnostics(libraries: &KlibLibraries, source: &str) -> Vec<String> {

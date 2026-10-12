@@ -1607,7 +1607,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   On a non-JVM target `@JvmInline` is an optional expectation that kotlinc resolves from a KLIB
   library (and rejects outside common sources); an annotated declaration there arrives with the
   KLIB library provider. `tests/value_class_declaration_e2e.rs` compares every form on every target
-  with its reference compiler (recorded; kotlinc-native required in the `klib-semantics` lane);
+  with its reference compiler (recorded; kotlinc-native required by the maximum-version Native
+  conformance row and by the focused local `just klib-semantics` recipe);
   `a_value_class_needs_no_jvm_inline_on_native` in `tests/native_value_classes_e2e.rs` checks the
   runtime answer against kotlinc-native's; `a_backend_refuses_a_source_set_analyzed_for_another_target`
   in `src/compiler.rs`.
@@ -15120,9 +15121,45 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   override`). Tests: `klib_lowering::tests::callee_headers::a_member_call_declines_by_its_form`,
   `klib_lowering::tests::a_call_typed_apart_from_its_callee_declines`.
 
+- **Target linkage qualifies a KLIB declaration by its exact module.** A serialized public
+  `IdSignature` is unique inside one KLIB, but unrelated source modules may legally publish equal
+  internal signatures. Dependency metadata therefore exports `(module, IdSignature)` and the KLIB
+  provider freezes that same pair on a selected external callable. Native and Wasm join target code
+  only through the pair; KLIB parameter defaults and serialized declaration bodies use the same
+  module-qualified key, so an ordinary dependency cannot supply the default or body selected from
+  an equal-signature friend declaration. Neither path treats the signature alone, package spelling,
+  dependency order, or friend package as an origin. Tests:
+  `multimodule_conformance_cases::EQUAL_INTERNAL_SIGNATURES` through
+  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`,
+  `klib_libraries::tests::classes::a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature`,
+  `klib_libraries::parameter_defaults::tests::equal_signatures_keep_each_modules_own_default`,
+  `klib_lowering::tests::equal_internal_body_signatures_from_distinct_modules_remain_distinct`.
+
+- **Dependency friendship is a provider-owned access policy.** Resolver consumers ask the narrow
+  `DependencyAccessPolicy` boundary for classifier and callable access; they do not infer a module
+  from a package or classifier spelling. KLIB signature deduplication includes the declaring
+  module, and when equal internal classifier FQNs occur only the exact friend declaration is
+  accessible. Its owned nested type aliases are selected atomically with it; an alias from the
+  replaced ordinary classifier cannot survive beside the friend classifier. Test:
+  `klib_libraries::tests::classes::a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature`.
+
+- **A target-KLIB ratchet is changed only by a deliberate full local run.** Ordinary conformance
+  always requires both committed manifests, and CI cannot bless them. A missing manifest is an
+  error; adding or refreshing one is a one-off local maintenance operation whose complete diff is
+  reviewed and committed. Tests: `box_lane::blessing_is_a_deliberate_local_full_corpus_operation`,
+  `box_ratchet::tests::a_required_inventory_fails_when_missing_but_an_optional_one_is_empty`.
+
+- **Every Native cross-file ABI symbol includes its source-module identity.** Independently
+  analyzed modules restart callable, property and source-file ids, and may declare equal internal
+  classifier FQNs. Function/default-wrapper, property accessor, file initializer, constructor, and
+  value-class box/unbox entry points therefore include the exact source module before their stable
+  declaration component. File-local class/runtime symbols remain local linkage. Tests:
+  `multimodule_conformance_cases::{DEFAULT_CALLABLE_IDS, PROPERTY_IDS, NATIVE_ABI_SYMBOLS}` through
+  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`.
+
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
-  declaration is joined, by its exact signature, to the callee's serialized declaration in the
-  loaded trees (`KlibDeclarationBodies`, the join a body uses), and the callee is declared from
+  declaration is joined, by its exact module-qualified signature, to the callee's serialized
+  declaration in the loaded trees (`KlibDeclarationBodies`, the join a body uses), and the callee is declared from
   that declaration's header: its context parameters, extension receiver and value parameters in
   their roles, and its result, converted structurally as the body's own types are. A value
   parameter's identity is its serialized name and an extension receiver's is the receiver; a context
@@ -15133,13 +15170,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declines as an internal inconsistency; the same check runs when a function already in the unit is
   reached, or lowered as a root, under a selection. A signature two selections describe declines.
   The KLIB IR header is therefore the description of a dependency-only callee: nothing is frozen
-  for it in advance, and only reached bodies are read. The callee is declared in the same
+  for it in advance, and only reached bodies are read. A body-local declaration wins. Otherwise,
+  the exact declaring module is the sole loaded module which both serializes the signature and is
+  reachable through the producing KLIB's transitive manifest `depends` graph. The roles the current
+  compilation assigned its inputs are not producer edges; input/manifest order and an unrelated
+  source selection are not origin fallbacks. Duplicate edges are canonicalized, no reachable owner
+  declines, and multiple reachable serializing modules decline as ambiguous. A manifest with no `depends` does
+  not authorize a global scan. Two archives claiming one `unique_name` are rejected even when their
+  declarations are disjoint, because that module identity cannot authenticate two producer graphs.
+  The callee is declared in the same
   `DependencyBodyUnit` and the call lowers as a same-file call of it, with the callee's declared
-  parameter types as the expected argument types. Each signature is lowered once, a call cycle links
-  back to the function already declared, and the callee's body is lowered after its caller's. A
+  parameter types as the expected argument types. Each module-qualified identity is lowered once, a
+  call cycle links back to the function already declared, and the callee's body is lowered after its caller's. A
   call of a member function (a declaration with a dispatch receiver) declines by that form, since
-  member dispatch is not modelled; a call of a signature no loaded library declares declines by its
-  identity (`which no loaded library declares`). A callee whose own body declines makes the whole
+  member dispatch is not modelled; a call of a signature no producer-reachable library serializes
+  declines by its identity (`which no reachable library serializes its declaration`). A callee whose
+  own body declines makes the whole
   lowering decline with that reason, and every function and expression the attempt added is
   removed. Tests:
   `klib_lowering::tests::body_forms::a_call_of_a_dependency_function_lowers_its_callee_into_the_unit`,
@@ -15150,10 +15196,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_lowering::tests::callee_headers::a_callee_no_checked_call_selected_is_declared_from_its_header`,
   `a_selected_callee_that_disagrees_with_its_header_declines`,
   `a_header_declared_function_is_cross_checked_when_selected_later`,
-  `a_call_no_loaded_library_declares_declines_by_name`,
+  `a_call_no_reachable_library_serializes_declines_by_name`,
   `a_header_alone_does_not_describe_a_context_parameter`,
   `stdlib_calls_reach_header_declared_callees`,
-  `stdlib_bodies_decline_inside_header_declared_callees`.
+  `stdlib_bodies_decline_inside_header_declared_callees`,
+  `klib_lowering::tests::body_forms::a_body_call_uses_its_producer_dependency_in_both_input_orders`,
+  `a_body_call_without_a_producer_edge_never_uses_an_unrelated_source_selection`,
+  `two_reachable_modules_with_the_same_call_signature_are_ambiguous`,
+  `a_local_body_declaration_wins_over_an_incompatible_dependency_duplicate`,
+  `duplicate_producer_edges_still_select_one_dependency_origin`,
+  `a_body_call_reaches_a_transitive_producer_dependency`.
 
 - **A KLIB body's local variables are the source declarations.** A local `val`/`var` (origin
   `DEFINED`) lowers to a named variable in the next value slot after the parameters, reads of a

@@ -1557,7 +1557,7 @@ impl<'a> CommonIrBodySink<'a> {
                 function,
                 lowered.defaults.into_vec(),
                 companion_associated,
-                index.callable_default_provider(callable.id).is_some(),
+                index.callable_default_provider(callable.id),
             );
         }
         let roots = lowered.roots.into_vec();
@@ -1650,7 +1650,7 @@ impl<'a> CommonIrBodySink<'a> {
             function,
             lowered.defaults.into_vec(),
             companion_associated,
-            index.callable_default_provider(callable.id).is_some(),
+            index.callable_default_provider(callable.id),
         )?;
         Ok(())
     }
@@ -1661,7 +1661,7 @@ impl<'a> CommonIrBodySink<'a> {
         function: u32,
         lowered: Vec<(u32, crate::ir::ExprId)>,
         companion_associated: bool,
-        defaults_inherited: bool,
+        inherited_default_provider: Option<crate::fir::ResolvedFunctionOverrideTarget>,
     ) -> Result<(), FirFileLoweringFailure> {
         if lowered.is_empty() {
             return Ok(());
@@ -1688,7 +1688,15 @@ impl<'a> CommonIrBodySink<'a> {
                 return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
             }
         }
-        info.defaults_inherited |= defaults_inherited;
+        if let Some(provider) = inherited_default_provider {
+            match info.inherited_default_provider {
+                Some(existing) if existing != provider => {
+                    return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+                }
+                Some(_) => {}
+                None => info.inherited_default_provider = Some(provider),
+            }
+        }
         Ok(())
     }
 }
