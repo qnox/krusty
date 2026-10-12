@@ -18,7 +18,8 @@ pub(crate) struct JvmInPlaceDelegates {
     package_methods: std::collections::HashMap<PropertyId, FunId>,
     /// `(declaring class, index into its properties)`.
     member_methods: std::collections::HashMap<(ClassId, u32), FunId>,
-    methods: std::collections::HashSet<FunId>,
+    /// Each generated method and the getter it is named after.
+    methods: std::collections::HashMap<FunId, FunId>,
     /// Constructor statements that evaluate such a delegate where its field was initialized.
     evaluations: std::collections::HashSet<ExprId>,
 }
@@ -37,10 +38,11 @@ impl IrFile {
         &mut self,
         property: PropertyId,
         method: FunId,
+        getter: FunId,
     ) {
         let delegates = &mut self.jvm_in_place_delegates;
         delegates.package_methods.insert(property, method);
-        delegates.methods.insert(method);
+        delegates.methods.insert(method, getter);
     }
 
     pub(crate) fn record_jvm_member_delegate_method(
@@ -48,10 +50,11 @@ impl IrFile {
         class: ClassId,
         property: u32,
         method: FunId,
+        getter: FunId,
     ) {
         let delegates = &mut self.jvm_in_place_delegates;
         delegates.member_methods.insert((class, property), method);
-        delegates.methods.insert(method);
+        delegates.methods.insert(method, getter);
     }
 
     /// The `get<X>$delegate` method of package property `property`, when its delegate is
@@ -79,7 +82,17 @@ impl IrFile {
     /// Whether `function` is a generated `get<X>$delegate` method. It is named by its property's
     /// `JvmPropertySignature`, not described as a function of its own.
     pub(crate) fn is_jvm_delegate_method(&self, function: FunId) -> bool {
-        self.jvm_in_place_delegates.methods.contains(&function)
+        self.jvm_in_place_delegates.methods.contains_key(&function)
+    }
+
+    /// Every generated `get<X>$delegate` method with the getter whose JVM name it extends.
+    pub(crate) fn jvm_delegate_methods_with_getters(
+        &self,
+    ) -> impl Iterator<Item = (FunId, FunId)> + '_ {
+        self.jvm_in_place_delegates
+            .methods
+            .iter()
+            .map(|(&method, &getter)| (method, getter))
     }
 
     pub(crate) fn record_jvm_delegate_evaluation(&mut self, statement: ExprId) {

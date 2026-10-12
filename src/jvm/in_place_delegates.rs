@@ -9,7 +9,8 @@
 //!
 //! The decision reads the checked initializer's IR shape and the exact storage identity common
 //! lowering recorded for the property; it never consults a spelling. Runs before companion
-//! hoisting, which then finds no delegate field to move.
+//! hoisting, which then finds no delegate field to move. The method is recorded with its getter, so
+//! value-class lowering renames it from the getter's mangled name (`getX-<hash>$delegate`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -103,7 +104,7 @@ fn realize_package_delegates(ir: &mut IrFile) {
                 source_order_of: getter,
             },
         );
-        ir.record_jvm_package_delegate_method(property, method);
+        ir.record_jvm_package_delegate_method(property, method, getter);
     }
 }
 
@@ -158,7 +159,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 .position(|&function| function == last_accessor)
                 .map_or(methods.len(), |index| index + 1);
             methods.insert(position, method);
-            ir.record_jvm_member_delegate_method(class, property as u32, method);
+            ir.record_jvm_member_delegate_method(class, property as u32, method, getter);
         }
     }
     crate::jvm::field_compaction::remove_fields(ir, &removed);

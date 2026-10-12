@@ -127,3 +127,54 @@ fn in_place_delegates_run_and_expose_their_delegate_methods() {
         "OK"
     );
 }
+
+/// A value-class getter mangles to `get<X>-<hash>`, and its delegate method extends that JVM name:
+/// a member's is `getResult-<hash>$delegate`, while a value-class extension receiver mangles the
+/// method again with its own signature, `getDoubled-<hash>$delegate-<hash>`. The member inventory
+/// is compared whole; the classes' bytes still differ from kotlinc in the `$$delegatedProperties`
+/// reference signature of a mangled getter, which any value-class delegated property shares.
+const VALUE_CLASS_DELEGATES: &str = "package store\n\
+    \n\
+    import kotlin.reflect.KProperty\n\
+    \n\
+    @JvmInline\n\
+    value class Score(val value: Int)\n\
+    \n\
+    operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Score = Score(1)\n\
+    operator fun Unit.getValue(thisRef: Score, property: KProperty<*>): Int = thisRef.value\n\
+    \n\
+    class Board {\n\
+    \x20   val result: Score by Unit\n\
+    }\n\
+    \n\
+    val Score.doubled: Int by Unit\n";
+
+#[test]
+fn value_class_delegate_methods_follow_their_mangled_getters() {
+    for (class, method) in [
+        (
+            "store/Board",
+            "method 0x000a getResult-0DMqHrU$delegate(Lstore/Board;)Ljava/lang/Object; None",
+        ),
+        (
+            "store/ValueClassDelegatesKt",
+            "method 0x000a getDoubled-wWP1W04$delegate-wWP1W04(I)Ljava/lang/Object; None",
+        ),
+    ] {
+        let pair = common::ModuleClassPair::compile(
+            &[("ValueClassDelegates.kt", VALUE_CLASS_DELEGATES)],
+            class,
+        );
+        let kotlinc = common::member_table(&pair.kotlinc);
+        assert_eq!(
+            kotlinc.iter().filter(|row| row.as_str() == method).count(),
+            1,
+            "{class}: kotlinc declares {method}: {kotlinc:#?}"
+        );
+        assert_eq!(
+            common::member_table(&pair.krusty),
+            kotlinc,
+            "{class} members"
+        );
+    }
+}

@@ -1047,6 +1047,31 @@ pub(crate) fn lower_value_classes(
         }
     }
 
+    // 1a″. An in-place delegate's `get<X>$delegate` method extends its getter's JVM name: when the
+    //      getter mangled to `getX-<hash>`, kotlinc names the method `getX-<hash>$delegate`, and a
+    //      value-class extension receiver then mangles that name again with the method's own
+    //      signature (`getX-<hash>$delegate-<hash>`).
+    let delegate_renames = ir
+        .jvm_delegate_methods_with_getters()
+        .filter(|(_, getter)| renamed_functions.contains(getter))
+        .map(|(method, getter)| {
+            let base = format!("{}$delegate", ir.functions[getter as usize].name);
+            let fid = method as usize;
+            let name = vc_mangle(
+                &base,
+                &orig_params[fid],
+                &orig_rets[fid],
+                &callable_under,
+                ir.functions[fid].dispatch_receiver.is_none(),
+                false,
+            );
+            (method, name)
+        })
+        .collect::<Vec<_>>();
+    for (method, name) in delegate_renames {
+        ir.functions[method as usize].name = name;
+        renamed_functions.insert(method);
+    }
     // 1b. Rewrite calls carrying an exact selected source declaration to its mangled realization
     // (`super.f(vc)`, an interface method).
     if !renamed_functions.is_empty() {
