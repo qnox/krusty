@@ -1,7 +1,7 @@
 //! Fields whose constant-pool entries intern at the field-table visit, after every method, as
 //! kotlinc's writer visits them.
 
-use super::{split_declaration_annotations, ClassWriter, FieldInfo};
+use super::{annotation_values::split_declaration_annotations, ClassWriter, FieldInfo};
 
 /// A field whose constant-pool interning is DEFERRED to the field-table visit: kotlinc's writer
 /// visits methods first and fields last, so a field entry the method bodies never introduced (a
