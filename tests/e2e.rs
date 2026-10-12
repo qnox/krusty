@@ -2956,3 +2956,6 @@ mod value_class_receiver_inline_only_e2e;
 
 #[path = "field_store_lines_e2e.rs"]
 mod field_store_lines_e2e;
+
+#[path = "volatile_field_e2e.rs"]
+mod volatile_field_e2e;

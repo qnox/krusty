@@ -50,17 +50,32 @@ pub(super) fn jvm_field_visibility(c: &IrClass, field_index: usize) -> Option<u1
 /// A declared backing field's JVM access. Its visibility maps from the platform-neutral one: a
 /// `private` field is `ACC_PRIVATE` (the default: Kotlin backing fields are reached via accessors)
 /// and a non-private one `ACC_PUBLIC`, unless [`jvm_field_visibility`] publishes it otherwise.
-/// Compiler-generated storage is `ACC_SYNTHETIC`, as kotlinc marks `$$delegate_N`.
+/// Compiler-generated storage is `ACC_SYNTHETIC`, as kotlinc marks `$$delegate_N`, and the field
+/// of a `@Volatile` property is `ACC_VOLATILE`.
 pub(super) fn declared_field_access(c: &IrClass, field_index: usize, is_static: bool) -> u16 {
     let field = &c.fields[field_index];
     jvm_field_visibility(c, field_index).unwrap_or(if field.is_private() { 0x0002 } else { 0x0001 })
         | if field.is_final() { 0x0010 } else { 0 }
         | if is_static { 0x0008 } else { 0 }
+        | if backs_volatile_property(c, field_index) {
+            0x0040
+        } else {
+            0
+        }
         | if field.is_compiler_generated() {
             0x1000
         } else {
             0
         }
+}
+
+/// Whether field `field_index` is the backing field of a `@Volatile` property. The field joins its
+/// declaration through the property's exact backing-field index, never through its spelling.
+fn backs_volatile_property(c: &IrClass, field_index: usize) -> bool {
+    c.properties.iter().any(|declaration| {
+        declaration.backing_field == Some(field_index as u32)
+            && crate::jvm::property_realizations::has_volatile_storage(&declaration.annotations)
+    })
 }
 
 /// A default accessor's JVM access. Visibility is an exact checked declaration fact; the backend
