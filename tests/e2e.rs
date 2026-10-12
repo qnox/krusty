@@ -2959,3 +2959,6 @@ mod field_store_lines_e2e;
 
 #[path = "volatile_field_e2e.rs"]
 mod volatile_field_e2e;
+
+#[path = "in_place_delegate_e2e.rs"]
+mod in_place_delegate_e2e;

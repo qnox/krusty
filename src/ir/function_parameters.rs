@@ -112,6 +112,9 @@ pub enum IrGeneratedParameterRole {
     /// Enclosing instance a member-extension local delegated accessor receives ahead of the
     /// delegate. The JVM spells it `this$0`.
     LocalDelegateDispatch,
+    /// The owner or extension receiver a generated property-delegate accessor receives for its
+    /// property. The JVM spells it `<this>`.
+    DelegateMethodReceiver,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

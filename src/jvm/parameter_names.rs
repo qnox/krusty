@@ -78,6 +78,7 @@ pub(super) fn local_variable(
                 identity.source_name.as_ref().map(|name| format!("${name}"))
             }
             IrGeneratedParameterRole::LocalDelegateDispatch => Some("this$0".to_string()),
+            IrGeneratedParameterRole::DelegateMethodReceiver => Some("<this>".to_string()),
         },
     }
 }

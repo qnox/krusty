@@ -64,6 +64,10 @@ pub fn realize_delegate_static_field_names(ir: &mut IrFile) {
     let mut used: std::collections::HashMap<Option<crate::types::TypeName>, Vec<String>> =
         std::collections::HashMap::new();
     for index in 0..ir.statics.len() {
+        // A delegate evaluated in place declares no field to name.
+        if ir.is_retired_jvm_delegate_static(index as u32) {
+            continue;
+        }
         let owner = ir.statics[index].owner;
         let current = ir.static_field_jvm_name(index as u32).to_string();
         let bucket = used.entry(owner).or_default();

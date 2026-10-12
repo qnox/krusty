@@ -5239,7 +5239,7 @@ fn suspend_method_sig(
     let continuation = formatter.continuation(*ret, Wildcards::Declared)?;
     let mut s = String::from("(");
     for p in params {
-        s.push_str(&formatter.method_ty(p, Wildcards::Declared)?);
+        s.push_str(&formatter.parameter_ty(p)?);
     }
     s.push_str(&continuation);
     s.push_str(")Ljava/lang/Object;");
@@ -5270,12 +5270,8 @@ fn method_parameterized_sig(
     {
         return None;
     }
-    let mut s = String::from("(");
-    for p in params {
-        s.push_str(&formatter.method_ty(p, Wildcards::Declared)?);
-    }
-    s.push(')');
-    s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
+    // A `Unit` parameter is the `kotlin.Unit` object, not `void`.
+    let s = formatter.method_positions(params, ret)?;
     (s != ir_method_desc(params, ret)).then_some(s)
 }
 

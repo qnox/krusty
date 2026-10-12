@@ -111,10 +111,12 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
                         .copied()
                         .unwrap_or(false)
                 };
+                // A parameter is a value slot: a `Unit` one is the `kotlin.Unit` reference.
+                let physical = crate::jvm::method_descriptors::jvm_value_ty(t);
                 if nullable {
-                    ann_of(*t, Ty::nullable(semantic))
+                    ann_of(physical, Ty::nullable(semantic))
                 } else {
-                    ann_of(*t, semantic)
+                    ann_of(physical, semantic)
                 }
             }
         })

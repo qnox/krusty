@@ -59,6 +59,7 @@ mod inline_copies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
+mod jvm_delegate_realization;
 mod jvm_static_realization;
 mod lambda_classes;
 mod lifting_sequences;
@@ -1863,6 +1864,9 @@ pub struct IrFile {
     /// Statics realized as `@JvmField` public fields (no accessors, no bridges) by JVM property
     /// storage passes. Common lowering never populates this physical realization table.
     jvm_field_statics: std::collections::HashSet<u32>,
+    /// Delegated properties the JVM realized without delegate storage (a singleton or constant
+    /// delegate) and their `get<X>$delegate` methods. Common lowering never populates it.
+    jvm_in_place_delegates: jvm_delegate_realization::JvmInPlaceDelegates,
     /// Exact companion property declaration → its JVM outer-class static realization. The property
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.

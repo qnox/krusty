@@ -120,7 +120,7 @@ impl<'a> JvmSignatureFormatter<'a> {
     }
 
     /// A parameter position. `Unit` is a value there, the `kotlin.Unit` object, not `void`.
-    fn parameter_ty(&self, parameter: &Ty) -> Option<String> {
+    pub(super) fn parameter_ty(&self, parameter: &Ty) -> Option<String> {
         if *parameter == Ty::Unit {
             return self.ty_at(parameter, Wildcards::Declared);
         }
