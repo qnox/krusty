@@ -630,9 +630,10 @@ fun call(value: String?) {
         return;
     };
 
+    // kotlinc 2.4.20 resolves the call to `required` and reports the argument, not the static.
     assert_eq!(
         diagnostics,
-        ["unresolved Java static 'PlatformApi.required' for given argument types"]
+        ["argument type mismatch: actual type is 'String?', but 'String' was expected."]
     );
 }
 
