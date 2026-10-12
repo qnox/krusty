@@ -63,8 +63,8 @@ pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
-pub(crate) use value_class_results::completion_box;
-use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
+pub(crate) use value_class_results::{box_may_be_null, completion_box};
+use value_class_results::{boxed_carrier, boxed_on_resume, resumed_box, resumed_carrier};
 mod value_liveness;
 
 use crate::backend::coroutines::desugar_value_try;
@@ -2194,16 +2194,7 @@ impl Flat<'_> {
         // the box its continuation resumes with. A suspend function value already returned that
         // box (`SuspendFunctionN.invoke` erases its result); boxing it again nests one box inside
         // the carrier.
-        let function_value = matches!(
-            self.ir.exprs.get(point as usize),
-            Some(IrExpr::InvokeFunction { .. })
-        );
-        let resume_box = if function_value {
-            None
-        } else {
-            boxed_on_resume(self.ir, point, self.suspend)
-        };
-        if let Some((classifier, carrier)) = resume_box {
+        if let Some((classifier, carrier)) = resumed_box(self.ir, point, self.suspend) {
             vg = boxed_carrier(self.ir, vg, classifier, carrier);
         }
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
