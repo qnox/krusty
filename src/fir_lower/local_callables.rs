@@ -142,6 +142,17 @@ impl BodyLowering<'_> {
         }
     }
 
+    /// Whether a captured value's declaration is a binding no code can reassign.
+    pub(super) fn captured_value_is_stable(
+        &self,
+        enclosing_depth: u32,
+        source: crate::fir::LocalValueId,
+    ) -> bool {
+        self.capture_slots
+            .get(&(enclosing_depth, crate::fir::FirCaptureSource::Value(source)))
+            .is_some_and(|capture| capture.stable && !capture.shared_cell)
+    }
+
     pub(super) fn captured_value_holder(
         &mut self,
         enclosing_depth: u32,
@@ -1095,6 +1106,24 @@ impl BodyLowering<'_> {
         Ok((function, owner))
     }
 
+    /// Whether the value `capture` reads from this body is a binding no code can reassign: one of
+    /// this body's stable bindings, or a stable value this body captured in turn.
+    fn capture_source_is_stable(&self, capture: &crate::fir::FirCapture) -> bool {
+        match capture.enclosing_depth.checked_sub(1) {
+            None => match capture.source {
+                crate::fir::FirCaptureSource::Value(value) => {
+                    self.binding_stability.get(&value)
+                        == Some(&crate::ir::IrBindingStability::Stable)
+                }
+                _ => false,
+            },
+            Some(depth) => self
+                .capture_slots
+                .get(&(depth, capture.source))
+                .is_some_and(|slot| slot.stable),
+        }
+    }
+
     fn lower_nested_function(
         &mut self,
         body: &FirBody,
@@ -1138,6 +1167,7 @@ impl BodyLowering<'_> {
                         slot: u32::try_from(slot).expect("too many FIR captures"),
                         ty: capture.ty,
                         shared_cell: capture.shared_cell,
+                        stable: self.capture_source_is_stable(capture),
                         declared,
                     },
                 )

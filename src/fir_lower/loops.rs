@@ -347,18 +347,24 @@ impl BodyLowering<'_> {
             .expr(iterable)
             .ok_or(FirLoweringFailure::MissingExpression(iterable))?;
         let iterable_ty = iterable_expression.ty.get().non_null();
-        let stable_local = match &iterable_expression.kind {
-            crate::fir::FirExprKind::ValueRead(value) if !self.local_value_is_mutable(*value) => {
-                Some(*value)
-            }
-            _ => None,
+        // kotlinc copies the iterable to a temporary only when it `canChangeValueDuringExecution`:
+        // a read of a `val`, a parameter or a receiver is re-read instead.
+        let stable_read = match &iterable_expression.kind {
+            crate::fir::FirExprKind::ValueRead(value) => !self.local_value_is_mutable(*value),
+            crate::fir::FirExprKind::CapturedValueRead {
+                enclosing_depth,
+                source,
+            } => self.captured_value_is_stable(*enclosing_depth, *source),
+            crate::fir::FirExprKind::ImplicitReceiver { .. }
+            | crate::fir::FirExprKind::CapturedImplicitReceiver { .. } => true,
+            _ => false,
         };
         let iterable_value = self.expression(iterable)?;
-        let stable_slot = stable_local.and_then(|value| {
-            matches!(self.ir.expr(iterable_value), IrExpr::GetValue(slot) if *slot == self.value_slot(value))
-                .then_some(self.value_slot(value))
-        });
-        // The receiver each read re-reads: a stable local, the constant itself (kotlinc's
+        let stable_slot = match self.ir.expr(iterable_value) {
+            IrExpr::GetValue(slot) if stable_read => Some(*slot),
+            _ => None,
+        };
+        // The receiver each read re-reads: a stable read, the constant itself (kotlinc's
         // `JvmOptimizationLowering` inlines a temporary `val` holding a constant), or a temporary.
         let (receiver_leaf, iterable_declaration) = if let Some(slot) = stable_slot {
             (self.ir.add_expr(IrExpr::GetValue(slot)), None)

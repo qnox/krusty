@@ -1728,6 +1728,8 @@ mod all_tail_calls_e2e;
 mod classpath_tail_forward_e2e;
 #[path = "for_loop_iterable_slot_e2e.rs"]
 mod for_loop_iterable_slot_e2e;
+#[path = "indexed_loop_subject_e2e.rs"]
+mod indexed_loop_subject_e2e;
 #[path = "inline_arguments_in_place_e2e.rs"]
 mod inline_arguments_in_place_e2e;
 mod inline_format_arguments_e2e;
