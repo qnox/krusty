@@ -72,6 +72,26 @@ class CustomSetter {\n\
 fun box(): String = if (CustomSetter.throughReference() == 41) \"OK\" else \"FAIL\"\n\
 ";
 
+const RETAINED_COMPANION_INITIALIZER_SOURCE: &str = "\
+package store\n\
+\n\
+class RetainedInitializer {\n\
+    companion object {\n\
+        var count = 1\n\
+        lateinit var text: String\n\
+\n\
+        init {\n\
+            count = 2\n\
+            text = \"OK\"\n\
+        }\n\
+\n\
+        fun shown(): String = if (count == 2) text else \"fail:$count\"\n\
+    }\n\
+}\n\
+\n\
+fun box(): String = RetainedInitializer.shown()\n\
+";
+
 #[test]
 fn an_init_assigned_companion_property_is_an_outer_static() {
     for class in [
@@ -106,6 +126,31 @@ fn a_reference_to_a_hoisted_property_keeps_its_declared_setter() {
     assert_eq!(
         common::compile_and_run_with_stdlib(CUSTOM_SETTER_SOURCE, "CompanionCustomSetterReference")
             .as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn a_non_hoisted_field_keeps_the_companion_initializer_in_source_order() {
+    for class in [
+        "store/RetainedInitializer",
+        "store/RetainedInitializer$Companion",
+    ] {
+        common::byte_diff_against_kotlinc_cp(
+            "RetainedCompanionInitializer",
+            RETAINED_COMPANION_INITIALIZER_SOURCE,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+    assert_eq!(
+        common::compile_and_run_with_stdlib(
+            RETAINED_COMPANION_INITIALIZER_SOURCE,
+            "RetainedCompanionInitializer",
+        )
+        .as_deref(),
         Some("OK")
     );
 }

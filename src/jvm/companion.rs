@@ -439,28 +439,12 @@ pub(crate) fn lower_companion_properties(
             || stmts
                 .iter()
                 .any(|statement| !removed_stores.contains(statement));
-        // Hoisted stores become outer-class static stores. When the body also has an `init`
-        // block and every field it touches is moving with it, keep those stores in the body so
-        // `<clinit>` runs one source-ordered initializer after the companion instance is stored.
-        // A field that is not moving (an open property, a lateinit, a boxed value class)
-        // stays private to the companion, so an initializer that still touches it stays on
-        // the constructor. A custom accessor or a delegate moves with the other fields, and
-        // the body stays one source-ordered initializer.
-        let hoisted_fields = candidates
-            .iter()
-            .filter(|candidate| candidate.companion == companion)
-            .map(|candidate| candidate.field)
-            .collect::<HashSet<_>>();
-        if has_other_statement
-            && class_companion_clinit_owner(ir, companion).is_some()
-            && !initializer_needs_companion_instance(
-                ir,
-                companion,
-                body,
-                &removed_stores,
-                &hoisted_fields,
-            )
-        {
+        // Hoisted stores become outer-class static stores. When the body also has an `init` block
+        // (or any other statement), keep every declaration store in that same body so its source
+        // order remains indivisible. The scheduler below either moves the complete body to the
+        // outer `<clinit>`, or leaves the complete body on the companion constructor when a field
+        // that cannot be hoisted still needs the companion instance.
+        if has_other_statement && class_companion_clinit_owner(ir, companion).is_some() {
             retain_initializer_stores.insert(companion);
             continue;
         }
