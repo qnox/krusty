@@ -248,7 +248,7 @@ pub(crate) fn eliminate_redundant_locals(
     }
     let ids = method.insns.ids();
     let unreachable: HashSet<usize> = (0..ids.len())
-        .filter(|&index| frames[index].is_none())
+        .filter(|&index| frames.get(index).is_none())
         .collect();
 
     // A local variable whose whole range is unreachable or has no instruction goes.

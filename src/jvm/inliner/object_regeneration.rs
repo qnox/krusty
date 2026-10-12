@@ -412,7 +412,7 @@ fn pair_constructions(
     .map_err(|error| InlineError::Analysis(error.message))?;
     let mut news = Vec::new();
     for (at, entry) in node.nodes.iter().enumerate() {
-        let Some(frame) = &frames[at] else {
+        let Some(frame) = frames.get(at) else {
             // Unreachable, so deleted with the rest of the dead code.
             continue;
         };

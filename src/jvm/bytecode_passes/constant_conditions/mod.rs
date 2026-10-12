@@ -22,7 +22,7 @@ mod interpreter;
 #[cfg(test)]
 mod tests;
 
-use super::analysis::{analyze, opcode, AnalyzerError, Frame};
+use super::analysis::{analyze, opcode, AnalyzerError, FrameView};
 use super::opcodes::*;
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 use interpreter::{int_constant, ConstValue, ConstantPropagationInterpreter};
@@ -102,12 +102,12 @@ fn has_optimizable_conditions(method: &MethodNode) -> bool {
 }
 
 /// The value `depth` entries below the top of `frame`'s stack.
-fn peek(frame: &Frame<ConstValue>, depth: usize) -> Option<&ConstValue> {
+fn peek<'a>(frame: FrameView<'a, ConstValue>, depth: usize) -> Option<&'a ConstValue> {
     frame.stack.iter().rev().nth(depth)
 }
 
 /// What the jump `op` becomes before `frame`, if the constants decide anything.
-fn rewrite(op: u8, frame: &Frame<ConstValue>) -> Option<Rewrite> {
+fn rewrite(op: u8, frame: FrameView<'_, ConstValue>) -> Option<Rewrite> {
     if is_zero_jump(op) {
         let value = peek(frame, 0)?.known()?;
         return Some(Rewrite::Decided {

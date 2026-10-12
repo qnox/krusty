@@ -6,6 +6,7 @@ mod basic_values;
 mod control_flow;
 mod fast_analyzer;
 mod frame;
+mod frame_store;
 mod liveness;
 
 pub(crate) use basic_values::{intern_descriptor, merge_references, BasicInterpreter, BasicValue};
@@ -14,6 +15,7 @@ pub(crate) use fast_analyzer::{
     analyze, analyze_with, AnalyzerError, AnalyzerOptions, Executor, PlainFrames,
 };
 pub(crate) use frame::{At, Frame, Interpreter, Value};
+pub(crate) use frame_store::{FrameView, Frames};
 pub(crate) use liveness::{analyze_liveness, VariableLiveness};
 
 use super::opcodes::*;

@@ -7,7 +7,7 @@
 //! lambda around are deleted. So is every instruction no path reaches.
 
 use crate::jvm::bytecode_passes::analysis::{
-    analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, Frame,
+    analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, FrameView,
     Interpreter, PlainFrames, Value,
 };
 use crate::jvm::bytecode_passes::descriptors;
@@ -165,8 +165,8 @@ fn is_load_before_parameter_check(nodes: &[Node], at: usize) -> bool {
         && is_check(nodes.get(at + 2))
 }
 
-fn top(frame: Option<&Frame<ArgumentValue>>, depth: usize) -> Option<&ArgumentValue> {
-    let stack = &frame?.stack;
+fn top(frame: Option<FrameView<'_, ArgumentValue>>, depth: usize) -> Option<&ArgumentValue> {
+    let stack = frame?.stack;
     stack.len().checked_sub(depth + 1).map(|at| &stack[at])
 }
 
@@ -189,8 +189,8 @@ pub(super) fn mark_places(
     };
     let frames = analyze_with(node, "fake", &mut interpreter, &mut PlainFrames, options)
         .map_err(|error| InlineError::Analysis(error.message))?;
-    let lambda_after = |at: usize| top(frames.get(at + 1)?.as_ref(), 0)?.lambda();
-    let lambda_before = |at: usize, depth: usize| top(frames[at].as_ref(), depth)?.lambda();
+    let lambda_after = |at: usize| top(frames.get(at + 1), 0)?.lambda();
+    let lambda_before = |at: usize, depth: usize| top(frames.get(at), depth)?.lambda();
 
     let mut delete = vec![false; node.nodes.len()];
     // `markObsoleteInstruction`.
@@ -211,7 +211,7 @@ pub(super) fn mark_places(
     }
     let mut invokes = Vec::new();
     for (at, entry) in node.nodes.iter().enumerate() {
-        let Some(frame) = &frames[at] else {
+        let Some(frame) = frames.get(at) else {
             // Unreachable: the instruction and its line number go; a label stays, since a
             // handler's range may start there.
             if !matches!(entry, Node::Label(_)) {

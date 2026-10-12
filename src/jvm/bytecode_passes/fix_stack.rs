@@ -393,9 +393,9 @@ pub(crate) fn fix_stack(method: &mut EditableMethod, owner: &str) -> Result<(), 
                 .position(|(opening, _)| opening == before)
                 .expect("an opening marker's stack is saved until its closing one");
             let saved = live[position].1.clone();
-            let stack = frames[index].as_ref().map(|frame| frame.stack.clone());
+            let stack = frames.get(index).map(|frame| frame.stack);
             match stack {
-                Some(stack) if !saved.values.is_empty() => match stack.as_slice() {
+                Some(stack) if !saved.values.is_empty() => match stack {
                     [result] => {
                         let result = *result;
                         let result_local = first_unused(&live);

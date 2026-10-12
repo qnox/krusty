@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use super::analysis::{
-    analyze, AnalyzerError, At, BasicInterpreter, BasicValue, Frame, Interpreter, Value,
+    analyze, AnalyzerError, At, BasicInterpreter, BasicValue, Frames, Interpreter, Value,
 };
 use super::descriptors;
 use super::insn_list::{EditableMethod, NodeId};
@@ -366,13 +366,9 @@ pub(crate) fn eliminate(method: &mut MethodNode, owner: &str) -> Result<bool, An
 }
 
 /// `trackPops`: a `pop` of a `Ref` moves it; a `pop2` of two words that are `Ref`s rules them out.
-fn track_pops(
-    method: &MethodNode,
-    frames: &[Option<Frame<TrackedValue>>],
-    vars: &mut [CapturedVar],
-) {
+fn track_pops(method: &MethodNode, frames: &Frames<TrackedValue>, vars: &mut [CapturedVar]) {
     for (index, node) in method.nodes.iter().enumerate() {
-        let Some(frame) = &frames[index] else {
+        let Some(frame) = frames.get(index) else {
             continue;
         };
         let top = |depth: usize| {
@@ -404,7 +400,7 @@ fn track_pops(
 /// over; a `Ref` without one, or whose element needs two words, gets a new slot.
 fn assign_local_vars(
     method: &mut MethodNode,
-    frames: &[Option<Frame<TrackedValue>>],
+    frames: &Frames<TrackedValue>,
     vars: &mut [CapturedVar],
 ) {
     let positions = crate::jvm::method_node::LabelPositions::of(method);
@@ -412,7 +408,7 @@ fn assign_local_vars(
         if !is_shared_var_descriptor(&local.desc) {
             continue;
         }
-        let Some(frame) = &frames[positions.at(local.start)] else {
+        let Some(frame) = frames.get(positions.at(local.start)) else {
             continue;
         };
         let Some(var) = frame

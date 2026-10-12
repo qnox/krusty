@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::analysis::{
-    analyze, AnalyzerError, At, BasicInterpreter, BasicValue, Frame, Interpreter, Value,
+    analyze, AnalyzerError, At, BasicInterpreter, BasicValue, Frames, Interpreter, Value,
 };
 use super::super::descriptors;
 use super::super::insn_list::EditableMethod;
@@ -250,7 +250,7 @@ fn coercion(method: &mut EditableMethod, descriptor: &str) -> Vec<Node> {
 pub(crate) fn spilled_variable_field_types(
     method: &mut EditableMethod,
     owner: &str,
-) -> Result<Vec<Option<Frame<BasicValue>>>, CoroutineError> {
+) -> Result<Frames<BasicValue>, CoroutineError> {
     let snapshot = method.snapshot();
     let mut interpreter = IntLikeCoerceInterpreter::default();
     analyze(&snapshot, owner, &mut interpreter).map_err(CoroutineError::Analysis)?;

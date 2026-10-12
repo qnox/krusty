@@ -7,7 +7,7 @@
 //! still finds it while nothing keeps it reachable.
 
 use super::super::analysis::{
-    analyze_liveness, is_meaningful, stored_slot, BasicValue, ControlFlowGraph, Frame,
+    analyze_liveness, is_meaningful, stored_slot, BasicValue, ControlFlowGraph, Frames,
     VariableLiveness,
 };
 use super::super::descriptors;
@@ -141,8 +141,8 @@ pub(crate) fn spill_variables(
             .ok_or(CoroutineError::Unsupported(
                 "a suspension point without a following instruction",
             ))?;
-        let result_stack = frames[method.insns.index_of(after)]
-            .as_ref()
+        let result_stack = frames
+            .get(method.insns.index_of(after))
             .ok_or(CoroutineError::Unsupported(
                 "an unreachable suspension-point continuation",
             ))?
@@ -246,12 +246,12 @@ pub(crate) fn spill_variables(
 fn variables_to_spill(
     method: &EditableMethod,
     context: &SpillContext,
-    frames: &[Option<Frame<BasicValue>>],
+    frames: &Frames<BasicValue>,
     liveness: &[VariableLiveness],
     begin: usize,
     counts: &mut Vec<(String, usize)>,
 ) -> Result<Vec<SpillableVariable>, CoroutineError> {
-    let frame = frames[begin].as_ref().ok_or(CoroutineError::Unsupported(
+    let frame = frames.get(begin).ok_or(CoroutineError::Unsupported(
         "a suspension point in dead code",
     ))?;
     let alive_here = &liveness[begin];

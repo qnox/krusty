@@ -310,7 +310,7 @@ pub(crate) fn all_suspension_points_are_tail_calls(
             || is_inline_marker(node, None)
             || part_of_suspend_marker
     };
-    let top_is_from_suspension = |index: usize| match &frames[index] {
+    let top_is_from_suspension = |index: usize| match frames.get(index) {
         Some(frame) => frame
             .stack
             .last()
