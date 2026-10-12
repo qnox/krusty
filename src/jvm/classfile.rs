@@ -1314,11 +1314,13 @@ impl ClassWriter {
 
     /// Attach `@NotNull` / `@Nullable` (a `RuntimeInvisibleAnnotations`) to a previously-added field by
     /// name — kotlinc annotates the backing field of a non-null reference property. No-op if not found.
-    pub fn set_field_nullability(&mut self, name: &str, ann_type: &str) {
+    /// The field's name and descriptor intern before the annotation, as kotlinc visits the field.
+    pub fn set_field_nullability(&mut self, name: &str, desc: &str, ann_type: &str) {
         if !self.nullability_annotations {
             return;
         }
         let n = self.cp.utf8(name);
+        self.cp.utf8(desc);
         let ti = self.cp.utf8(ann_type);
         let ann = vec![(ti >> 8) as u8, ti as u8, 0, 0];
         if let Some(f) = self.fields.iter_mut().find(|f| f.name == n) {

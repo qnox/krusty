@@ -16991,6 +16991,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same uses its emitter routes through them. Test: `tests/companion_field_bridge_use_e2e.rs`.
   Corpus: `classes/kt1018.kt`, `objects/kt1047.kt`, `objects/kt1047a.kt`,
   `properties/kt4252.kt`.
+- **A backing field's descriptor interns before its nullability annotation.** kotlinc's class
+  writer visits the fields after the methods, each as its name, its descriptor and then its
+  `@NotNull`/`@Nullable` annotation. A private field no method reads or writes therefore adds its
+  descriptor to the constant pool ahead of the annotation type. Test:
+  `tests/unread_field_annotation_order_e2e.rs`.
 - **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
   kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
   `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and
