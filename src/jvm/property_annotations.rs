@@ -50,26 +50,10 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
                 .methods
                 .iter()
                 .position(|&fid| ir.functions[fid as usize].name == getter);
-            let ret = ir.add_expr(IrExpr::Return(None));
-            let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
-            });
-            let marker = ir.add_fun(IrFunction {
-                name: marker_name,
-                params: vec![],
-                ret: Ty::Unit,
-                body: Some(body),
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
+            let marker = synthesize_marker(ir, marker_name);
             // Not `final` (kotlinc emits none), not a described declaration (`synthetic_methods` keeps
             // it out of `@Metadata`'s function list — it is named by the PROPERTY's signature instead),
             // and deprecated so a Kotlin consumer never calls it.
-            ir.open_methods.insert(marker);
-            ir.synthetic_methods.insert(marker);
-            ir.deprecated_methods.insert(marker);
             ir.function_annotations.insert(marker, property.annotations);
             let class_identity = ir.classes[class_index].fq_name_id();
             ir.property_annotation_markers
@@ -81,4 +65,37 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
             }
         }
     }
+
+    let package_properties = ir
+        .package_properties
+        .iter()
+        .filter(|property| property.suppressed_source_annotation_application)
+        .map(|property| (property.property, property.name.clone()))
+        .collect::<Vec<_>>();
+    for (property, name) in package_properties {
+        let marker_name = format!("{}$annotations", property_getter_name(&name));
+        let marker = synthesize_marker(ir, marker_name);
+        ir.mark_jvm_package_property_annotation_marker(property, marker);
+    }
+}
+
+fn synthesize_marker(ir: &mut IrFile, name: String) -> u32 {
+    let ret = ir.add_expr(IrExpr::Return(None));
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![ret],
+        value: None,
+    });
+    let marker = ir.add_fun(IrFunction {
+        name,
+        params: vec![],
+        ret: Ty::Unit,
+        body: Some(body),
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+    ir.open_methods.insert(marker);
+    ir.synthetic_methods.insert(marker);
+    ir.deprecated_methods.insert(marker);
+    marker
 }

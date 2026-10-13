@@ -7,6 +7,24 @@
 use super::{IrFile, IrStaticAccessor, TypeName};
 
 impl IrFile {
+    pub(crate) fn mark_jvm_package_property_annotation_marker(
+        &mut self,
+        property: crate::fir::PropertyId,
+        function: u32,
+    ) {
+        self.jvm_package_property_annotation_markers
+            .insert(property, function);
+    }
+
+    pub(crate) fn jvm_package_property_annotation_marker(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<u32> {
+        self.jvm_package_property_annotation_markers
+            .get(&property)
+            .copied()
+    }
+
     /// Record/query the JVM-only companion backing-storage realization selected after common
     /// lowering. Keeping this in a backend-populated side table prevents a physical JVM layout bit
     /// from becoming part of an ordinary common-IR static declaration.

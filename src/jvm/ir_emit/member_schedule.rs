@@ -30,12 +30,23 @@ pub(super) fn facade_source_ordered_members(
             _ => None,
         })
         .collect();
+    let annotation_markers: crate::fx_hash::HashMap<u32, u32> = ir
+        .package_properties
+        .iter()
+        .filter_map(|property| {
+            ir.jvm_package_property_annotation_marker(property.property)
+                .map(|marker| (marker, property.source_order))
+        })
+        .collect();
     let slot = |accessor: StaticAccessor| match accessor {
         StaticAccessor::Getter => 0,
         StaticAccessor::Setter => 1,
     };
     let mut ordered: Vec<((u32, u8), FacadeMember)> = functions
         .map(|function| {
+            if let Some(&order) = annotation_markers.get(&function) {
+                return ((order, 2), FacadeMember::Function(function));
+            }
             let order = ir
                 .fn_source_order
                 .get(&function)

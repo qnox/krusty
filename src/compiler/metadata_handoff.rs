@@ -293,7 +293,7 @@ pub(super) fn attach_stable_function_inference_metadata(
 
 /// Record the annotations on `property`'s accessors for the accessor declarations lowering
 /// materializes from it.
-fn attach_accessor_annotations(
+fn attach_property_metadata(
     property: &crate::ast::PropDecl,
     declaration: DeclarationId,
     info: &crate::resolve::TypeInfo,
@@ -301,11 +301,21 @@ fn attach_accessor_annotations(
     ir: &mut IrFile,
 ) {
     let annotations = super::declaration_metadata::accessor_annotations(property, info);
-    if !annotations.declares_annotations() {
+    let Some(property_id) = index.property_for_declaration(declaration) else {
         return;
+    };
+    if annotations.declares_annotations() {
+        ir.accessor_annotations.insert(property_id, annotations);
     }
-    if let Some(property) = index.property_for_declaration(declaration) {
-        ir.accessor_annotations.insert(property, annotations);
+    if let Some(package_property) = ir
+        .package_properties
+        .iter_mut()
+        .find(|package_property| package_property.property == property_id)
+    {
+        package_property.suppressed_source_annotation_application =
+            super::declaration_metadata::top_level_property_retains_suppressed_source_application(
+                property, info,
+            );
     }
 }
 
@@ -332,7 +342,7 @@ pub(super) fn attach_checked_declaration_metadata(
         attach_function_metadata(function, selected_root, info, index, ir);
     }
     if let Some(property) = active.property(file, selected_root) {
-        attach_accessor_annotations(property, selected_root, info, index, ir);
+        attach_property_metadata(property, selected_root, info, index, ir);
     }
     let Some((source_class, class)) = active.class(file, selected_root) else {
         return;
@@ -423,7 +433,7 @@ pub(super) fn attach_checked_declaration_metadata(
     }
     for (property_index, property) in class.body_props.iter().enumerate() {
         if let Some(declaration) = body_property_declaration(property_index) {
-            attach_accessor_annotations(property, declaration, info, index, ir);
+            attach_property_metadata(property, declaration, info, index, ir);
         }
     }
 

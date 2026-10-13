@@ -119,3 +119,20 @@ fn suppressed_volatile_on_an_immutable_property_remains_a_field_modifier() {
     .expect("reference kotlinc is provisioned")
     .unwrap_or_else(|diff| panic!("suppressed immutable @Volatile differs from kotlinc: {diff}"));
 }
+
+/// The same suppressed SOURCE application on a package property remains a metadata declaration
+/// fact. Its facade carries the empty synthetic annotation marker named by the property signature.
+#[test]
+fn suppressed_volatile_on_an_immutable_top_level_property_keeps_its_marker() {
+    const SOURCE: &str = "package store\n\
+        @Suppress(\"VOLATILE_ON_VALUE\")\n\
+        @Volatile val value: Int = 1\n";
+    let classes =
+        common::classes_against_kotlinc_module(&[("SuppressedTopLevelVolatile.kt", SOURCE)]);
+    let differences = classes.differences();
+    assert!(
+        differences.is_empty(),
+        "suppressed top-level immutable @Volatile differs from kotlinc:\n\n{}",
+        differences.join("\n\n")
+    );
+}

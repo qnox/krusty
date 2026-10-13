@@ -95,6 +95,16 @@ pub(super) fn accessor_annotations(
     }
 }
 
+pub(super) fn top_level_property_retains_suppressed_source_application(
+    property: &ast::PropDecl,
+    info: &TypeInfo,
+) -> bool {
+    property
+        .annotations
+        .iter()
+        .any(|annotation| info.retains_suppressed_source_property_application(annotation))
+}
+
 pub(super) fn value_parameter_annotations(
     declared: &[ast::AnnotationRef],
     info: &TypeInfo,

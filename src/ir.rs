@@ -1884,6 +1884,9 @@ pub struct IrFile {
     /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
     pub property_annotation_markers: crate::fx_hash::HashMap<(TypeName, String), u32>,
+    /// Package property declaration → the JVM facade's synthetic annotation marker. Populated only
+    /// by JVM realization; common lowering carries only the property's semantic annotation facts.
+    jvm_package_property_annotation_markers: crate::fx_hash::HashMap<crate::fir::PropertyId, u32>,
     pub exprs: Vec<IrExpr>,
     /// Checked source/synthetic origin for every expression produced by FIR lowering. Legacy IR may
     /// leave this sparse during migration; the consuming FIR path records every generated node.

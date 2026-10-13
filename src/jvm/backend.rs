@@ -1459,6 +1459,10 @@ pub fn facade_package_metadata_from_ir(
                         &Default::default(),
                     )
                 }),
+                annotation_method: ir
+                    .jvm_package_property_annotation_marker(declaration.property)
+                    .and_then(|marker| ir.functions.get(marker as usize))
+                    .map(|marker| (marker.name.clone(), "()V".to_string())),
                 ..crate::metadata::declaration_records::package_property(
                     ir,
                     declaration,
@@ -1805,6 +1809,7 @@ mod tests {
             has_constant: true,
             visibility: crate::types::Visibility::Public,
             annotations: Box::new([]),
+            suppressed_source_annotation_application: false,
             flags: crate::fir::DeclarationFlags::default(),
             spellings: crate::spelling::DeclaredSpellings::default(),
             has_backing_field: true,

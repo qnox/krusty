@@ -135,6 +135,8 @@ pub(crate) fn package_property(
         has_backing_field: declaration.has_backing_field,
         modifiers: declaration.modifiers,
         setter_visibility: declaration.setter_visibility,
+        declares_annotations: declaration.suppressed_source_annotation_application,
+        annotation_method: None,
         companion: declaration.is_companion_extension(),
         accessor_annotations: ir
             .accessor_annotations
