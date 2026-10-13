@@ -16,6 +16,7 @@ pub(super) fn validate(
     diags: &mut DiagSink,
 ) -> Result<(), ()> {
     let platform_clash = report_platform_declaration_clashes(ir, override_results, diags)
+        | report_in_place_delegate_method_clashes(ir, override_results, diags)
         | report_jvm_field_companion_alias_clashes(ir, diags)
         | report_jvm_field_enum_entry_clashes(ir, diags)
         | report_jvm_field_companion_block_const_clashes(ir, diags)
@@ -103,6 +104,128 @@ fn report_delegated_property_array_clashes(
     let found = !clashes.is_empty();
     for (offset, message) in clashes {
         diags.error(Span::new(offset, offset), message);
+    }
+    found
+}
+
+/// An in-place delegated property publishes a generated `get<X>$delegate` method. It is not a
+/// source function and therefore deliberately has no `fn_signature_offsets` entry, but it still
+/// occupies the owner's JVM method namespace. Validate its recorded function identity against the
+/// source declarations after every representation pass has fixed names and descriptors.
+fn report_in_place_delegate_method_clashes(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    diags: &mut DiagSink,
+) -> bool {
+    let mut clashes = Vec::new();
+    let mut generated_methods = ir.jvm_delegate_methods_with_getters().collect::<Vec<_>>();
+    generated_methods.sort_by_key(|&(generated, getter)| {
+        (
+            ir.fn_source_order.get(&getter).copied().unwrap_or(u32::MAX),
+            getter,
+            generated,
+        )
+    });
+    for (generated, _) in generated_methods {
+        let Some(function) = ir.functions.get(generated as usize) else {
+            continue;
+        };
+        let descriptor = crate::jvm::ir_emit::function_descriptor(ir, override_results, generated);
+        let owner = ir.classes.iter().enumerate().find(|(_, class)| {
+            class
+                .methods
+                .iter()
+                .any(|&candidate| candidate == generated)
+        });
+        if let Some((class_index, class)) = owner {
+            let declarations = class
+                .methods
+                .iter()
+                .copied()
+                .filter(|&candidate| candidate != generated)
+                .filter_map(|candidate| {
+                    let &offset = ir.fn_signature_offsets.get(&candidate)?;
+                    let candidate_function = ir.functions.get(candidate as usize)?;
+                    (candidate_function.name == function.name
+                        && crate::jvm::ir_emit::function_descriptor(
+                            ir,
+                            override_results,
+                            candidate,
+                        ) == descriptor)
+                        .then_some((candidate, Span::new(offset, offset)))
+                })
+                .collect::<Vec<_>>();
+            if declarations.is_empty() {
+                continue;
+            }
+            let Ok(generated_declaration) =
+                render_generated_member_delegate(function, class.fq_name)
+            else {
+                continue;
+            };
+            let mut rendered = vec![generated_declaration];
+            let mut located = vec![(
+                ir.class_diagnostic_span(class_index as u32)
+                    .unwrap_or_else(|| Span::new(0, 0)),
+                rendered[0].clone(),
+            )];
+            for (declaration, span) in declarations {
+                let Ok(source) = render_member_function(ir, declaration, class.fq_name) else {
+                    continue;
+                };
+                rendered.push(source.clone());
+                located.push((span, source));
+            }
+            if located.len() < 2 {
+                continue;
+            }
+            let message = clash_message(&function.name, &descriptor, &rendered);
+            clashes.extend(located.into_iter().map(|(span, _)| (span, message.clone())));
+        } else {
+            let declarations = ir
+                .package_functions
+                .iter()
+                .filter(|declaration| {
+                    let candidate = &ir.functions[declaration.function as usize];
+                    candidate.name == function.name
+                        && crate::jvm::ir_emit::function_descriptor(
+                            ir,
+                            override_results,
+                            declaration.function,
+                        ) == descriptor
+                })
+                .collect::<Vec<_>>();
+            if declarations.is_empty() {
+                continue;
+            }
+            let Ok(generated_declaration) =
+                render_generated_package_delegate(function, ir.package.as_deref())
+            else {
+                continue;
+            };
+            let mut rendered = vec![generated_declaration];
+            for declaration in &declarations {
+                let Ok(source) = render_declaration(declaration, ir.package.as_deref()) else {
+                    continue;
+                };
+                rendered.push(source);
+            }
+            if rendered.len() < 2 {
+                continue;
+            }
+            let message = clash_message(&function.name, &descriptor, &rendered);
+            clashes.push((Span::new(0, 0), message.clone()));
+            clashes.extend(
+                declarations
+                    .into_iter()
+                    .map(|declaration| (declaration.signature_span, message.clone())),
+            );
+        }
+    }
+    clashes.sort_by_key(|(span, _)| span.lo);
+    let found = !clashes.is_empty();
+    for (span, message) in clashes {
+        diags.error(span, message);
     }
     found
 }
@@ -1460,6 +1583,73 @@ fn render_declaration(
         Some(package) if !package.is_empty() => rendered.push_str(package),
         _ => rendered.push_str("root package"),
     }
+    Ok(rendered)
+}
+
+fn render_generated_package_delegate(
+    function: &crate::ir::IrFunction,
+    package: Option<&str>,
+) -> Result<String, UndeterminedDiagnosticType> {
+    render_physical_function(
+        function,
+        (0..function.params.len()).map(|_| "<this>"),
+        package
+            .filter(|package| !package.is_empty())
+            .unwrap_or("root package"),
+    )
+}
+
+fn render_generated_member_delegate(
+    function: &crate::ir::IrFunction,
+    owner: crate::types::TypeName,
+) -> Result<String, UndeterminedDiagnosticType> {
+    render_physical_function(
+        function,
+        (0..function.params.len()).map(|_| "<this>"),
+        &owner.render().replace(['/', '$'], "."),
+    )
+}
+
+fn render_member_function(
+    ir: &IrFile,
+    function: FunId,
+    owner: crate::types::TypeName,
+) -> Result<String, UndeterminedDiagnosticType> {
+    let declaration = &ir.functions[function as usize];
+    let identities = ir
+        .function_parameter_identities(function)
+        .ok_or(UndeterminedDiagnosticType::InvalidContextParameterCount)?;
+    let names = identities
+        .iter()
+        .map(|identity| identity.source_name.as_deref())
+        .collect::<Option<Vec<_>>>()
+        .ok_or(UndeterminedDiagnosticType::InvalidContextParameterCount)?;
+    render_physical_function(declaration, names, &owner.render().replace(['/', '$'], "."))
+}
+
+fn render_physical_function<'a>(
+    function: &crate::ir::IrFunction,
+    parameter_names: impl IntoIterator<Item = &'a str>,
+    owner: &str,
+) -> Result<String, UndeterminedDiagnosticType> {
+    determined_function_signature(function)?;
+    let names = parameter_names.into_iter().collect::<Vec<_>>();
+    if names.len() != function.params.len() {
+        return Err(UndeterminedDiagnosticType::InvalidContextParameterCount);
+    }
+    let mut rendered = format!("fun {}(", rendered_callable_name(&function.name));
+    for (index, (name, ty)) in names.into_iter().zip(&function.params).enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&rendered_callable_name(name));
+        rendered.push_str(": ");
+        rendered.push_str(&source_type_name(*ty)?);
+    }
+    rendered.push_str("): ");
+    rendered.push_str(&source_type_name(function.ret)?);
+    rendered.push_str(" defined in ");
+    rendered.push_str(owner);
     Ok(rendered)
 }
 

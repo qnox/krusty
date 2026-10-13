@@ -174,7 +174,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                     last_accessor: declaration.setter.unwrap_or(declaration.getter?),
                     annotation_marker: ir
                         .property_annotation_markers
-                        .get(&(owner, declaration.name.clone()))
+                        .get(&(owner, declaration.source_order))
                         .copied(),
                     receivers: vec![owner_receiver],
                 })
@@ -194,7 +194,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                         last_accessor: declaration.setter.unwrap_or(declaration.getter),
                         annotation_marker: ir
                             .property_annotation_markers
-                            .get(&(owner, declaration.name.clone()))
+                            .get(&(owner, declaration.source_order))
                             .copied(),
                         receivers: vec![
                             owner_receiver,

@@ -237,6 +237,99 @@ fn annotated_member_extension_marker_precedes_its_delegate_method() {
     });
 }
 
+/// An accessor's recorded realization, rather than the conventional property spelling, owns the
+/// marker name and position. An explicit getter JVM name therefore keeps the marker between that
+/// getter and the generated in-place delegate method.
+const RENAMED_ANNOTATED_MEMBER_EXTENSION_DELEGATE: &str = "package store\n\
+    \n\
+    import kotlin.jvm.JvmName\n\
+    import kotlin.reflect.KProperty\n\
+    \n\
+    @Target(AnnotationTarget.PROPERTY)\n\
+    annotation class Marker\n\
+    \n\
+    operator fun Unit.getValue(thisRef: String, property: KProperty<*>): Int = 1\n\
+    \n\
+    class RenamedAnnotatedExtensionHost {\n\
+    \x20   @Marker\n\
+    \x20   @get:JvmName(\"readExtension\")\n\
+    \x20   val String.extension: Int by Unit\n\
+    }\n";
+
+#[test]
+fn renamed_annotated_member_extension_marker_precedes_its_delegate_method() {
+    common::byte_diff_against_kotlinc_cp(
+        "RenamedAnnotatedMemberExtensionDelegate",
+        RENAMED_ANNOTATED_MEMBER_EXTENSION_DELEGATE,
+        "store/RenamedAnnotatedExtensionHost",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| {
+        panic!("renamed annotated member extension delegate differs from kotlinc: {diff}")
+    });
+}
+
+/// A generated delegate method occupies the same JVM namespace as source functions. It must join
+/// post-realization clash validation even though it has no source `fun` span of its own.
+#[test]
+fn package_delegate_method_clash_matches_kotlinc_exactly() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
+        \n\
+        val x: Int by Unit\n\
+        fun `getX$delegate`(): Any? = Unit\n";
+    let result = common::compiler_diagnostics(
+        &[("PackageDelegateMethodClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "package generated delegate-method clash");
+}
+
+/// Generated methods live in an internal map, but platform-clash diagnostics follow their
+/// properties' stable source order when several generated declarations share the file-start span.
+#[test]
+fn package_delegate_method_clashes_keep_source_order() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
+        \n\
+        val first: Int by Unit\n\
+        fun `getFirst$delegate`(): Any? = Unit\n\
+        \n\
+        val second: Int by Unit\n\
+        fun `getSecond$delegate`(): Any? = Unit\n";
+    let result = common::compiler_diagnostics(
+        &[("PackageDelegateMethodClashOrder.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "ordered package delegate-method clashes");
+}
+
+#[test]
+fn member_delegate_method_clash_matches_kotlinc_exactly() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun Unit.getValue(thisRef: Host, property: KProperty<*>): Int = 1\n\
+        \n\
+        class Host {\n\
+        \x20   val x: Int by Unit\n\
+        \x20   fun `getX$delegate`(other: Host): Any? = Unit\n\
+        }\n";
+    let result = common::compiler_diagnostics(
+        &[("MemberDelegateMethodClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "member generated delegate-method clash");
+}
+
 /// The reported shape runs, and the JVM declares the `get<X>$delegate` methods in place of the
 /// delegate fields.
 const RUN: &str = "package store\n\
