@@ -18,39 +18,10 @@ pub(super) fn validate(
         | report_jvm_field_enum_entry_clashes(ir, diags)
         | report_jvm_field_companion_block_const_clashes(ir, diags)
         | report_delegated_property_array_clashes(ir, delegated_arrays, diags);
-    for (class_id, class) in ir.classes.iter().enumerate() {
+    for class in &ir.classes {
         if let Err(message) = reject_duplicate_constructors(class) {
             diags.error(Span::new(0, 0), message);
             return Err(());
-        }
-        let Some(properties) = ir.member_ext_props.get(&class.fq_name) else {
-            continue;
-        };
-        for property in properties {
-            for (accessor, span) in [
-                (Some(property.getter), property.getter_diagnostic_span),
-                (property.setter, property.setter_diagnostic_span),
-            ] {
-                let Some(accessor) = accessor else { continue };
-                // The exact inventory owns every declaration with semantic provenance. Keep this
-                // representation fallback only for compiler-generated methods which have not yet
-                // published such provenance; otherwise a marker/accessor clash would be reported a
-                // second time as a generic Span(0, 0) error.
-                if let Err(message) = reject_uninventoried_duplicate_method(
-                    ir,
-                    override_results,
-                    class_id as u32,
-                    class,
-                    accessor,
-                ) {
-                    diags.error(
-                        span.or(property.diagnostic_span)
-                            .unwrap_or_else(|| Span::new(0, 0)),
-                        message,
-                    );
-                    return Err(());
-                }
-            }
         }
     }
     let package_clashes = match package_function_signature_clashes(ir) {
@@ -338,6 +309,9 @@ enum MemberMethodDeclaration {
         offset: u32,
         function: FunId,
     },
+    GeneratedMethod {
+        offset: u32,
+    },
     PropertyAnnotationMarker {
         offset: u32,
         function: FunId,
@@ -387,8 +361,20 @@ fn report_platform_declaration_clashes(
                     offset,
                     function: method,
                 }
-            } else {
+            } else if member_method_is_inventoried(ir, class_id as u32, class, method) {
+                // A property accessor or annotation marker is inserted below with its semantic
+                // declaration identity and exact source span.
                 continue;
+            } else {
+                // Representation-only methods, including interface-delegation forwarders, still
+                // occupy the same physical namespace as implicit property accessors. Associate
+                // them with the owning class for diagnostics; the group key already carries the
+                // descriptor selected by the backend from their function identity.
+                MemberMethodDeclaration::GeneratedMethod {
+                    offset: ir
+                        .class_diagnostic_span(class_id as u32)
+                        .map_or(0, |span| span.lo),
+                }
             };
             let descriptor = crate::jvm::ir_emit::function_descriptor(ir, override_results, method);
             groups
@@ -545,11 +531,17 @@ fn report_platform_declaration_clashes(
                     MemberMethodDeclaration::GeneratedDataMember { .. }
                 )
             });
-            let message = if includes_marker || includes_generated_data_member {
+            let includes_generated_method = declarations.iter().any(|declaration| {
+                matches!(declaration, MemberMethodDeclaration::GeneratedMethod { .. })
+            });
+            let message = if !includes_generated_method
+                && (includes_marker || includes_generated_data_member)
+            {
                 let owner = class.fq_name.render().replace(['/', '$'], ".");
                 let mut listed = declarations.clone();
                 listed.sort_by_key(|declaration| match declaration {
                     MemberMethodDeclaration::GeneratedDataMember { .. } => 0,
+                    MemberMethodDeclaration::GeneratedMethod { .. } => 0,
                     MemberMethodDeclaration::PropertyAccessor {
                         property: PropertyAccessorDeclaration::MemberExtension(_),
                         ..
@@ -574,6 +566,7 @@ fn report_platform_declaration_clashes(
                 let offset = match declaration {
                     MemberMethodDeclaration::Source { offset, .. }
                     | MemberMethodDeclaration::GeneratedDataMember { offset, .. }
+                    | MemberMethodDeclaration::GeneratedMethod { offset, .. }
                     | MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. }
                     | MemberMethodDeclaration::PropertyAccessor { offset, .. } => offset,
                 };
@@ -602,6 +595,9 @@ fn render_member_method_declaration(
         }
         MemberMethodDeclaration::GeneratedDataMember { function, .. } => {
             return render_source_member_method(ir, function, name, owner);
+        }
+        MemberMethodDeclaration::GeneratedMethod { .. } => {
+            unreachable!("generated methods use the generic platform-clash diagnostic")
         }
         MemberMethodDeclaration::PropertyAccessor {
             function,
@@ -917,45 +913,6 @@ fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), Strin
                 class.fq_name
             ));
         }
-    }
-    Ok(())
-}
-
-fn reject_uninventoried_duplicate_method(
-    ir: &IrFile,
-    override_results: &crate::jvm::override_results::OverrideResults,
-    class_id: crate::ir::ClassId,
-    class: &crate::ir::IrClass,
-    accessor: FunId,
-) -> Result<(), String> {
-    let Some(accessor_function) = ir.functions.get(accessor as usize) else {
-        return Err("internal error: member extension accessor has no JVM function".to_string());
-    };
-    let descriptor = crate::jvm::ir_emit::function_descriptor(ir, override_results, accessor);
-    let accessor_is_inventoried = member_method_is_inventoried(ir, class_id, class, accessor);
-    if class.methods.iter().copied().any(|candidate| {
-        candidate != accessor
-            // Two inventoried declarations were compared by the exact inventory above. When this
-            // accessor has no semantic provenance, however, it was absent from that inventory and
-            // must still be compared with every physical method, including source declarations.
-            && (!accessor_is_inventoried
-                || !member_method_is_inventoried(ir, class_id, class, candidate))
-            && ir
-                .functions
-                .get(candidate as usize)
-                .is_some_and(|function| {
-                    function.name == accessor_function.name
-                        && crate::jvm::ir_emit::function_descriptor(
-                            ir,
-                            override_results,
-                            candidate,
-                        ) == descriptor
-                })
-    }) {
-        return Err(format!(
-            "platform declaration clash: '{}' contains duplicate JVM method {}{}",
-            class.fq_name, accessor_function.name, descriptor
-        ));
     }
     Ok(())
 }
@@ -1455,8 +1412,25 @@ mod tests {
         }
     }
 
+    fn platform_clash_rows(
+        ir: &IrFile,
+        override_results: &crate::jvm::override_results::OverrideResults,
+    ) -> Vec<(Span, String)> {
+        let mut diagnostics = DiagSink::new();
+        assert!(report_platform_declaration_clashes(
+            ir,
+            override_results,
+            &mut diagnostics,
+        ));
+        diagnostics
+            .diags
+            .into_iter()
+            .map(|diagnostic| (diagnostic.span, diagnostic.msg))
+            .collect()
+    }
+
     #[test]
-    fn uninventoried_member_extension_accessor_still_clashes_with_source_method() {
+    fn uninventoried_generated_method_still_clashes_with_source_method() {
         let mut ir = IrFile::default();
         let owner = crate::types::type_name("fixtures/Owner");
         let source = ir.add_fun(member_function(owner, "getValue"));
@@ -1466,26 +1440,6 @@ mod tests {
         let mut class = crate::ir::IrClass::synthetic(owner);
         class.methods = vec![source, generated_accessor];
         let class_id = ir.add_class(class);
-        ir.member_ext_props
-            .entry(owner)
-            .or_default()
-            .push(crate::ir::MemberExtProp {
-                name: "value".to_string(),
-                diagnostic_span: None,
-                getter_diagnostic_span: None,
-                setter_diagnostic_span: None,
-                source_order: u32::MAX,
-                receiver: crate::types::Ty::Int,
-                ty: crate::types::Ty::Int,
-                is_var: false,
-                is_abstract: false,
-                modifiers: crate::ir::IrPropertyModifiers::default(),
-                delegate_field: None,
-                getter: generated_accessor,
-                setter: None,
-                visibility: crate::types::Visibility::Public,
-                type_params: Vec::new(),
-            });
 
         assert!(member_method_is_inventoried(
             &ir,
@@ -1499,18 +1453,16 @@ mod tests {
             &ir.classes[class_id as usize],
             generated_accessor,
         ));
+        let message = "platform declaration clash: The following declarations have the same JVM signature (getValue()I):";
         assert_eq!(
-            reject_uninventoried_duplicate_method(
+            platform_clash_rows(
                 &ir,
                 &crate::jvm::override_results::OverrideResults::default(),
-                class_id,
-                &ir.classes[class_id as usize],
-                generated_accessor,
             ),
-            Err(
-                "platform declaration clash: 'fixtures/Owner' contains duplicate JVM method getValue()I"
-                    .to_string(),
-            ),
+            vec![
+                (Span::new(0, 0), message.to_string()),
+                (Span::new(11, 11), message.to_string()),
+            ],
         );
     }
 
@@ -1522,6 +1474,7 @@ mod tests {
         let mut generated = member_function(owner, "getValue");
         generated.ret = crate::types::Ty::nullable(crate::types::Ty::Int);
         let generated_accessor = ir.add_fun(generated);
+        ir.fn_signature_offsets.insert(boxed_override, 11);
 
         let mut class = crate::ir::IrClass::synthetic(owner);
         class.methods = vec![boxed_override, generated_accessor];
@@ -1533,27 +1486,7 @@ mod tests {
             public_inline: false,
             function_adapter: false,
         });
-        let class_id = ir.add_class(class);
-        ir.member_ext_props
-            .entry(owner)
-            .or_default()
-            .push(crate::ir::MemberExtProp {
-                name: "value".to_string(),
-                diagnostic_span: None,
-                getter_diagnostic_span: None,
-                setter_diagnostic_span: None,
-                source_order: u32::MAX,
-                receiver: crate::types::Ty::Int,
-                ty: crate::types::Ty::nullable(crate::types::Ty::Int),
-                is_var: false,
-                is_abstract: false,
-                modifiers: crate::ir::IrPropertyModifiers::default(),
-                delegate_field: None,
-                getter: generated_accessor,
-                setter: None,
-                visibility: crate::types::Visibility::Public,
-                type_params: Vec::new(),
-            });
+        ir.add_class(class);
 
         let override_results = crate::jvm::override_results::box_scalar_override_results(
             &ir,
@@ -1565,18 +1498,13 @@ mod tests {
             crate::jvm::ir_emit::function_descriptor(&ir, &override_results, boxed_override),
             "()Ljava/lang/Integer;"
         );
+        let message = "platform declaration clash: The following declarations have the same JVM signature (getValue()Ljava/lang/Integer;):";
         assert_eq!(
-            reject_uninventoried_duplicate_method(
-                &ir,
-                &override_results,
-                class_id,
-                &ir.classes[class_id as usize],
-                generated_accessor,
-            ),
-            Err(
-                "platform declaration clash: 'fixtures/Owner' contains duplicate JVM method getValue()Ljava/lang/Integer;"
-                    .to_string(),
-            ),
+            platform_clash_rows(&ir, &override_results),
+            vec![
+                (Span::new(0, 0), message.to_string()),
+                (Span::new(11, 11), message.to_string()),
+            ],
         );
     }
 

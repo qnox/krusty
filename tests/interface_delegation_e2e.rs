@@ -126,6 +126,45 @@ fun box(): String {\n\
     );
 }
 
+/// A delegation forwarder has no source declaration of its own, but it still occupies the class's
+/// physical method namespace. Its scalar result is boxed when it implements a type-parameter slot;
+/// that boxed descriptor must clash with a member-extension property's nullable-scalar getter just
+/// as it does in kotlinc.
+#[test]
+fn a_boxed_delegation_forwarder_clashes_with_a_member_extension_getter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base<T> { fun getValue(receiver: Int): T }\n\
+             interface Boxed : Base<Int> { override fun getValue(receiver: Int): Int }\n\
+             class Impl : Boxed { override fun getValue(receiver: Int): Int = receiver }\n\
+             class C(impl: Boxed) : Boxed by impl {\n\
+             \x20   val Int.value: Int? get() = null\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// A stored property's default getter is emitted directly from its property declaration and has no
+/// `IrFunction`. It nevertheless shares the class method namespace with generated delegation
+/// forwarders, so the collision inventory must compare those two representation paths.
+#[test]
+fn a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base<T> { fun getValue(): T }\n\
+             interface Boxed : Base<Int> { override fun getValue(): Int }\n\
+             class Impl : Boxed { override fun getValue(): Int = 1 }\n\
+             class C(impl: Boxed) : Boxed by impl {\n\
+             \x20   val value: Int? = null\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
 /// Delegation to a generic interface instantiated with a REFERENCE type argument (`A<String> by a`):
 /// the interface method `foo(): T` erases to `Object`, so a raw forward through the synthesized field
 /// is correct (the unbox/checkcast happens at the call site). The non-`val` param uses a `$$delegate_N`.
