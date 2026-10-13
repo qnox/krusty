@@ -558,7 +558,7 @@ pub(super) fn emit_class_static_fields(
         // plugin generated, say — records them on the class itself. `@JvmField` changes the
         // property's JVM surface, not the ownership of its backing-field annotations.
         if let Some(annotations) = static_field_annotations(ir, c, static_index) {
-            cw.set_last_late_field_annotations(&annotations.annotations);
+            cw.set_last_late_field_annotations(annotations);
         }
     }
 }
@@ -567,12 +567,19 @@ fn static_field_annotations<'a>(
     ir: &'a IrFile,
     owner: &'a IrClass,
     static_index: u32,
-) -> Option<&'a crate::ir::FieldAnnotations> {
+) -> Option<&'a crate::ir::DeclarationAnnotations> {
+    if let Some(property) = ir.companion_blocks.property_for_storage(static_index) {
+        return property
+            .field_annotations
+            .declares_annotations()
+            .then_some(&property.field_annotations);
+    }
     if let Some((companion, property)) = ir.jvm_companion_static_declaration(static_index) {
         return companion
             .field_annotations
             .iter()
             .find(|annotations| annotations.field == property.name)
+            .map(|annotations| &annotations.annotations)
             .or_else(|| {
                 // Enum metadata currently records a companion field annotation on the physical
                 // enum inventory. It can belong to this exact companion declaration only when the
@@ -586,6 +593,7 @@ fn static_field_annotations<'a>(
                             .field_annotations
                             .iter()
                             .find(|annotations| annotations.field == property.name)
+                            .map(|annotations| &annotations.annotations)
                     })
                     .flatten()
             });
@@ -595,6 +603,7 @@ fn static_field_annotations<'a>(
         .field_annotations
         .iter()
         .find(|annotations| annotations.field == *field)
+        .map(|annotations| &annotations.annotations)
 }
 
 /// An enum class's own statics, after its property fields and before its entry constants: a
@@ -646,7 +655,7 @@ pub(super) fn emit_enum_static_fields(
             ann,
         );
         if let Some(annotations) = static_field_annotations(ir, c, index) {
-            cw.set_last_late_field_annotations(&annotations.annotations);
+            cw.set_last_late_field_annotations(annotations);
         }
     }
 }

@@ -1334,7 +1334,7 @@ fn companion_block_property(
             property.setter,
         ),
         annotations: property_annotations(class, property.source_order),
-        field_annotations: Default::default(),
+        field_annotations: MetadataAnnotations::of(&property.field_annotations),
         accessor_annotations: Default::default(),
         companion: true,
     }

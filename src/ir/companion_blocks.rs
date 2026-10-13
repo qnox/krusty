@@ -32,6 +32,11 @@ pub struct IrCompanionBlockProperty {
     /// Exact accessor declaration spans, beginning at the first accessor annotation when present.
     pub getter_diagnostic_span: Option<crate::diag::Span>,
     pub setter_diagnostic_span: Option<crate::diag::Span>,
+    /// Checked FIELD-targeted applications owned by this exact property declaration. Block
+    /// properties are hoisted out of the classifier's ordinary property list, so their backing
+    /// field annotations travel with the stable block-property record instead of being joined by
+    /// field spelling.
+    pub field_annotations: crate::ir::DeclarationAnnotations,
     pub ty: Ty,
     pub is_var: bool,
     pub is_const: bool,
@@ -101,6 +106,16 @@ impl IrCompanionBlocks {
         self.properties
             .iter()
             .filter(move |property| property.class == class)
+    }
+
+    /// The block property whose physical backing storage is `static_index`.
+    pub(crate) fn property_for_storage(
+        &self,
+        static_index: u32,
+    ) -> Option<&IrCompanionBlockProperty> {
+        self.properties
+            .iter()
+            .find(|property| property.storage == Some(static_index))
     }
 
     pub fn mark_constant_initializer(&mut self, property: crate::fir::PropertyId) {

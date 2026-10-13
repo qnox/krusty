@@ -82,7 +82,12 @@ pub(super) fn accept_active_debug_metadata(
     for declaration in active.stable_declarations() {
         if let Some((_, classifier)) = active.class(file, declaration) {
             if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
-                ir.record_class_diagnostic_span(class, classifier.span);
+                let declaration_span = file
+                    .declaration_prefixes
+                    .at(classifier.span.lo)
+                    .map(|prefix| crate::diag::Span::new(prefix.start.lo, classifier.span.hi))
+                    .unwrap_or(classifier.span);
+                ir.record_class_diagnostic_span(class, declaration_span);
                 for (entry, source) in ir.classes[class as usize]
                     .enum_entries
                     .iter_mut()
@@ -326,20 +331,28 @@ fn attach_property_metadata(
         .declaration_header(declaration)
         .expect("a checked property retains its declaration header");
     if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
-        let annotations =
+        let property_annotations =
             super::declaration_metadata::companion_block_property_annotations(property, info);
-        if annotations.declares_annotations() {
-            let declaring_class = index
+        let field_annotations =
+            super::declaration_metadata::companion_block_field_annotations(property, info);
+        if field_annotations.declares_annotations() {
+            ir.companion_block_field_annotations
+                .insert(property_id, field_annotations);
+        }
+        if property_annotations.declares_annotations() {
+            let declaring_classifier = index
                 .property(property_id)
                 .and_then(|property| property.extension_receiver)
                 .and_then(|receiver| receiver.get().non_null().obj_internal())
-                .and_then(|classifier| index.classifier_declaration(classifier))
-                .and_then(|classifier| ir.checked_classifier_classes.get(&classifier))
-                .copied()
-                .expect("a companion-block property retains its declaring classifier");
+                .expect("a companion-block property retains its declaring classifier identity");
             let source_order = index
                 .source_order(declaration)
                 .expect("a companion-block property retains its stable source order");
+            let declaring_class = index
+                .classifier_declaration(declaring_classifier)
+                .and_then(|classifier| ir.checked_classifier_classes.get(&classifier))
+                .copied()
+                .expect("a companion-block property retains its declaring classifier");
             let owner = &mut ir.classes[declaring_class as usize];
             assert!(
                 !owner
@@ -353,7 +366,7 @@ fn attach_property_metadata(
                 .push(crate::ir::PropertyAnnotations {
                     source_order,
                     property: property.name.clone(),
-                    annotations,
+                    annotations: property_annotations,
                 });
         }
     }

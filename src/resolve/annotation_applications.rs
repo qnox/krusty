@@ -181,7 +181,16 @@ impl Checker<'_> {
     ) -> usize {
         let policy_depth =
             self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
-        let fieldless_target = (owner_forbids_fields || !crate::ast::has_backing_field(property))
+        // The parser hoists a `companion { ... }` property as a classifier-associated extension,
+        // but an initialized/lateinit/explicit-field declaration still owns static storage on the
+        // declaring classifier. Validate its `@field:` site from that semantic storage shape, not
+        // from the parser-only receiver used to retain the association.
+        let companion_block_storage = property.is_companion_block_member
+            && (property.init.is_some()
+                || property.is_lateinit
+                || property.explicit_backing_field.is_some());
+        let fieldless_target = (owner_forbids_fields
+            || !(crate::ast::has_backing_field(property) || companion_block_storage))
             .then_some(fieldless_description);
         for (annotation, arguments) in property.annotations.iter().zip(&property.annotation_args) {
             self.check_annotation_application_for_host(

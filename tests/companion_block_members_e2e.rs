@@ -79,6 +79,36 @@ fn block_property_annotations_reach_the_marker_and_metadata() {
 }
 
 #[test]
+fn block_property_field_annotations_reach_the_exact_static_field() {
+    const SRC: &str = "@Retention(AnnotationRetention.RUNTIME)\n\
+        @Target(AnnotationTarget.FIELD)\n\
+        annotation class Mark(val value: String)\n\
+        class A {\n\
+        \x20   companion {\n\
+        \x20       @field:Mark(\"block\") val value: Int = 1\n\
+        \x20   }\n\
+        }\n";
+    let comparison = assert_members_and_metadata_match_kotlinc_on(
+        "BlockPropertyFieldAnnotation",
+        SRC,
+        &["A"],
+        &[common::stdlib_jar()],
+    )
+    .pop()
+    .expect("A comparison");
+    let header = "private static final int value;";
+    let reference = common::method_block(&comparison.reference, header);
+    let krusty = common::method_block(&comparison.krusty, header);
+    assert!(
+        reference
+            .iter()
+            .any(|line| line == "RuntimeVisibleAnnotations:"),
+        "kotlinc field carries the runtime annotation: {reference:#?}"
+    );
+    assert_eq!(krusty, reference, "field annotation facts match kotlinc");
+}
+
+#[test]
 fn block_member_calls_block_member_and_companion_extension_unqualified() {
     const SRC: &str = "class A {\n\
         \x20   companion {\n\

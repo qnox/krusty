@@ -2188,6 +2188,11 @@ pub struct IrFile {
     /// Annotations written on a source property's accessors, by property. A declared accessor's
     /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
     pub accessor_annotations: crate::fx_hash::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
+    /// FIELD-targeted applications on parser-hoisted `companion { ... }` properties. Metadata
+    /// handoff publishes them under stable property identity before common lowering realizes the
+    /// exact static storage that will own them.
+    pub(crate) companion_block_field_annotations:
+        crate::fx_hash::HashMap<crate::fir::PropertyId, DeclarationAnnotations>,
     /// Per declared function, whether each PHYSICAL source parameter carries Kotlin's semantic
     /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
     /// metadata projection removes that slot again. This is inference policy, not a JVM fact.

@@ -120,6 +120,21 @@ pub(super) fn companion_block_property_annotations(
     )
 }
 
+/// The FIELD-targeted applications declared on a separately hoisted `companion { ... }`
+/// property. They belong to the block property's exact static storage declaration, not to an
+/// ordinary same-named field of the classifier.
+pub(super) fn companion_block_field_annotations(
+    property: &ast::PropDecl,
+    info: &TypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    property_site_annotations(
+        &property.annotations,
+        info,
+        false,
+        crate::types::PropertyAnnotationSite::Field,
+    )
+}
+
 pub(super) fn value_parameter_annotations(
     declared: &[ast::AnnotationRef],
     info: &TypeInfo,

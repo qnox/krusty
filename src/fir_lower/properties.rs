@@ -937,6 +937,10 @@ fn record_companion_block_property(
     let class = ir.classes[owner as usize].fq_name_id();
     let has_constant = index.compile_time_constant(property.declaration).is_some()
         || ir.companion_blocks.has_constant_initializer(property_id);
+    let field_annotations = ir
+        .companion_block_field_annotations
+        .remove(&property_id)
+        .unwrap_or_default();
     ir.companion_blocks
         .record_property(crate::ir::IrCompanionBlockProperty {
             class,
@@ -944,6 +948,7 @@ fn record_companion_block_property(
             diagnostic_span: property.diagnostic_span,
             getter_diagnostic_span: property.getter_diagnostic_span,
             setter_diagnostic_span: property.setter_diagnostic_span,
+            field_annotations,
             ty: property.ty,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_const: property.flags.has(DeclarationFlags::CONST),

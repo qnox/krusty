@@ -144,6 +144,20 @@ fn a_renamed_member_extension_accessor_clashes_with_a_context_extension_marker()
 }
 
 #[test]
+fn a_renamed_member_extension_accessor_clashes_with_a_generated_data_method() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "GeneratedDataMethodClash.kt",
+            "data class D(val x: Int) {\n\
+             \x20   val Int.foo: D\n\
+             \x20       @JvmName(\"copy\") get() = this@D\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
 fn a_renamed_companion_block_accessor_clashes_with_a_context_property_marker() {
     common::assert_error_blocks_match_kotlinc(
         &[(

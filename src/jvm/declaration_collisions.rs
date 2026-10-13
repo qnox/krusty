@@ -18,7 +18,7 @@ pub(super) fn validate(
         | report_jvm_field_enum_entry_clashes(ir, diags)
         | report_jvm_field_companion_block_const_clashes(ir, diags)
         | report_delegated_property_array_clashes(ir, delegated_arrays, diags);
-    for class in &ir.classes {
+    for (class_id, class) in ir.classes.iter().enumerate() {
         if let Err(message) = reject_duplicate_constructors(class) {
             diags.error(Span::new(0, 0), message);
             return Err(());
@@ -32,14 +32,18 @@ pub(super) fn validate(
                 (property.setter, property.setter_diagnostic_span),
             ] {
                 let Some(accessor) = accessor else { continue };
-                // Source accessors joined the exact platform-clash inventory above. This fallback
-                // remains only for dependency and compiler-generated member extensions without a
-                // source declaration at which an exact Kotlin diagnostic can be reported.
-                if span.or(property.diagnostic_span).is_some() {
-                    continue;
-                }
-                if let Err(message) = reject_duplicate_method(ir, class, accessor) {
-                    diags.error(Span::new(0, 0), message);
+                // The exact inventory owns every declaration with semantic provenance. Keep this
+                // representation fallback only for compiler-generated methods which have not yet
+                // published such provenance; otherwise a marker/accessor clash would be reported a
+                // second time as a generic Span(0, 0) error.
+                if let Err(message) =
+                    reject_uninventoried_duplicate_method(ir, class_id as u32, class, accessor)
+                {
+                    diags.error(
+                        span.or(property.diagnostic_span)
+                            .unwrap_or_else(|| Span::new(0, 0)),
+                        message,
+                    );
                     return Err(());
                 }
             }
@@ -326,6 +330,10 @@ enum MemberMethodDeclaration {
         offset: u32,
         function: FunId,
     },
+    GeneratedDataMember {
+        offset: u32,
+        function: FunId,
+    },
     PropertyAnnotationMarker {
         offset: u32,
         function: FunId,
@@ -356,20 +364,33 @@ fn report_platform_declaration_clashes(
         let mut groups: crate::fx_hash::HashMap<(String, String), Vec<MemberMethodDeclaration>> =
             crate::fx_hash::HashMap::default();
         for &method in &class.methods {
-            let Some(&offset) = ir.fn_signature_offsets.get(&method) else {
+            let Some(function) = ir.functions.get(method as usize) else {
                 continue;
             };
-            let Some(function) = ir.functions.get(method as usize) else {
+            let declaration = if let Some(&offset) = ir.fn_signature_offsets.get(&method) {
+                MemberMethodDeclaration::Source {
+                    offset,
+                    function: method,
+                }
+            } else if ir.is_data_class_member(class.fq_name_id(), method) {
+                let Some(offset) = ir
+                    .class_diagnostic_span(class_id as u32)
+                    .map(|span| span.lo)
+                else {
+                    continue;
+                };
+                MemberMethodDeclaration::GeneratedDataMember {
+                    offset,
+                    function: method,
+                }
+            } else {
                 continue;
             };
             let descriptor = crate::jvm::ir_emit::function_descriptor(ir, override_results, method);
             groups
                 .entry((function.name.clone(), descriptor))
                 .or_default()
-                .push(MemberMethodDeclaration::Source {
-                    offset,
-                    function: method,
-                });
+                .push(declaration);
         }
         for (property_index, property) in class.properties.iter().enumerate() {
             for (setter, function, span, side) in [
@@ -514,10 +535,17 @@ fn report_platform_declaration_clashes(
                     MemberMethodDeclaration::PropertyAnnotationMarker { .. }
                 )
             });
-            let message = if includes_marker {
+            let includes_generated_data_member = declarations.iter().any(|declaration| {
+                matches!(
+                    declaration,
+                    MemberMethodDeclaration::GeneratedDataMember { .. }
+                )
+            });
+            let message = if includes_marker || includes_generated_data_member {
                 let owner = class.fq_name.render().replace(['/', '$'], ".");
                 let mut listed = declarations.clone();
                 listed.sort_by_key(|declaration| match declaration {
+                    MemberMethodDeclaration::GeneratedDataMember { .. } => 0,
                     MemberMethodDeclaration::PropertyAccessor {
                         property: PropertyAccessorDeclaration::MemberExtension(_),
                         ..
@@ -541,6 +569,7 @@ fn report_platform_declaration_clashes(
             for declaration in declarations {
                 let offset = match declaration {
                     MemberMethodDeclaration::Source { offset, .. }
+                    | MemberMethodDeclaration::GeneratedDataMember { offset, .. }
                     | MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. }
                     | MemberMethodDeclaration::PropertyAccessor { offset, .. } => offset,
                 };
@@ -565,6 +594,9 @@ fn render_member_method_declaration(
 ) -> String {
     let (function, parameters) = match declaration {
         MemberMethodDeclaration::Source { function, .. } => {
+            return render_source_member_method(ir, function, name, owner);
+        }
+        MemberMethodDeclaration::GeneratedDataMember { function, .. } => {
             return render_source_member_method(ir, function, name, owner);
         }
         MemberMethodDeclaration::PropertyAccessor {
@@ -725,6 +757,7 @@ fn render_property_accessor_declaration(
 
 fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: &str) -> String {
     let parameters = semantic_function_parameters(ir, function);
+    let defaults = ir.declared_param_defaults(function);
     let identities = ir
         .function_parameter_identities(function)
         .unwrap_or_default();
@@ -736,6 +769,7 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
     let mut contexts = Vec::new();
     let mut receiver = None;
     let mut values = Vec::new();
+    let mut value_index = 0;
     for (identity, &ty) in identities.iter().zip(parameters) {
         let ty = source_type_name(ty).expect("a reported member clash has determined source types");
         match identity.role {
@@ -761,7 +795,15 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
                     .source_name
                     .as_deref()
                     .expect("a source value parameter retains its source spelling");
-                values.push(format!("{}: {ty}", rendered_callable_name(name)));
+                let mut value = format!("{}: {ty}", rendered_callable_name(name));
+                if defaults
+                    .and_then(|defaults| defaults.get(value_index))
+                    .is_some_and(Option::is_some)
+                {
+                    value.push_str(" = ...");
+                }
+                values.push(value);
+                value_index += 1;
             }
             role => panic!("a source member clash contains non-source parameter role {role:?}"),
         }
@@ -875,8 +917,9 @@ fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), Strin
     Ok(())
 }
 
-fn reject_duplicate_method(
+fn reject_uninventoried_duplicate_method(
     ir: &IrFile,
+    class_id: crate::ir::ClassId,
     class: &crate::ir::IrClass,
     accessor: FunId,
 ) -> Result<(), String> {
@@ -887,6 +930,7 @@ fn reject_duplicate_method(
         crate::jvm::names::method_descriptor(&accessor_function.params, accessor_function.ret);
     if class.methods.iter().copied().any(|candidate| {
         candidate != accessor
+            && !member_method_is_inventoried(ir, class_id, class, candidate)
             && ir
                 .functions
                 .get(candidate as usize)
@@ -902,6 +946,71 @@ fn reject_duplicate_method(
         ));
     }
     Ok(())
+}
+
+/// Whether the exact declaration-clash inventory above already owns this method identity.
+///
+/// Compiler passes may append representation-only helpers to `class.methods` without a source
+/// signature. Those still need the conservative duplicate-method fallback. Source functions,
+/// property accessors, annotation markers, and generated data-class declarations all have a
+/// semantic declaration shape and must not also produce that fallback's generic diagnostic.
+fn member_method_is_inventoried(
+    ir: &IrFile,
+    class_id: crate::ir::ClassId,
+    class: &crate::ir::IrClass,
+    function: FunId,
+) -> bool {
+    ir.fn_signature_offsets.contains_key(&function)
+        || (ir.is_data_class_member(class.fq_name_id(), function)
+            && ir.class_diagnostic_span(class_id).is_some())
+        || class.properties.iter().any(|property| {
+            (property.getter == Some(function)
+                && property
+                    .getter_diagnostic_span
+                    .or(property.diagnostic_span)
+                    .is_some())
+                || (property.setter == Some(function)
+                    && property
+                        .setter_diagnostic_span
+                        .or(property.diagnostic_span)
+                        .is_some())
+        })
+        || ir
+            .member_ext_props
+            .get(&class.fq_name)
+            .is_some_and(|properties| {
+                properties.iter().any(|property| {
+                    (property.getter == function
+                        && property
+                            .getter_diagnostic_span
+                            .or(property.diagnostic_span)
+                            .is_some())
+                        || (property.setter == Some(function)
+                            && property
+                                .setter_diagnostic_span
+                                .or(property.diagnostic_span)
+                                .is_some())
+                })
+            })
+        || ir
+            .companion_blocks
+            .properties_of(class.fq_name_id())
+            .any(|property| {
+                (property.getter == Some(function)
+                    && property
+                        .getter_diagnostic_span
+                        .or(property.diagnostic_span)
+                        .is_some())
+                    || (property.setter == Some(function)
+                        && property
+                            .setter_diagnostic_span
+                            .or(property.diagnostic_span)
+                            .is_some())
+            })
+        || ir
+            .property_annotation_markers
+            .iter()
+            .any(|(&(owner, _), &marker)| owner == class.fq_name_id() && marker == function)
 }
 
 /// Source package functions and generated property-annotation markers whose representation passes
