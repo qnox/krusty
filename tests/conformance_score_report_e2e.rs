@@ -500,10 +500,14 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
     let lane = workflow_job(&workflow, "conformance");
+    let klib_lane = workflow_job(&workflow, "conformance-klib");
     assert!(
         lane.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            && lane.contains("target: [jvm, native, wasm]"),
-        "every version exposes independent JVM, Native and Wasm rows: {lane}"
+            && lane.contains("target: [jvm]")
+            && lane.contains("steps: &conformance-steps")
+            && klib_lane.contains("target: [native, wasm]")
+            && klib_lane.contains("steps: *conformance-steps"),
+        "every version exposes JVM, Native and Wasm rows from one shared step inventory: {lane}\n{klib_lane}"
     );
     assert!(
         lane.contains(
