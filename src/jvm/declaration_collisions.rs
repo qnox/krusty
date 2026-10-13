@@ -928,9 +928,14 @@ fn reject_uninventoried_duplicate_method(
     };
     let descriptor =
         crate::jvm::names::method_descriptor(&accessor_function.params, accessor_function.ret);
+    let accessor_is_inventoried = member_method_is_inventoried(ir, class_id, class, accessor);
     if class.methods.iter().copied().any(|candidate| {
         candidate != accessor
-            && !member_method_is_inventoried(ir, class_id, class, candidate)
+            // Two inventoried declarations were compared by the exact inventory above. When this
+            // accessor has no semantic provenance, however, it was absent from that inventory and
+            // must still be compared with every physical method, including source declarations.
+            && (!accessor_is_inventoried
+                || !member_method_is_inventoried(ir, class_id, class, candidate))
             && ir
                 .functions
                 .get(candidate as usize)
@@ -1430,6 +1435,76 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member_function(owner: crate::types::TypeName, name: &str) -> crate::ir::IrFunction {
+        crate::ir::IrFunction {
+            name: name.to_string(),
+            params: Vec::new(),
+            ret: crate::types::Ty::Int,
+            body: None,
+            is_static: false,
+            dispatch_receiver: Some(owner),
+            param_checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn uninventoried_member_extension_accessor_still_clashes_with_source_method() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("fixtures/Owner");
+        let source = ir.add_fun(member_function(owner, "getValue"));
+        let generated_accessor = ir.add_fun(member_function(owner, "getValue"));
+        ir.fn_signature_offsets.insert(source, 11);
+
+        let mut class = crate::ir::IrClass::synthetic(owner);
+        class.methods = vec![source, generated_accessor];
+        let class_id = ir.add_class(class);
+        ir.member_ext_props
+            .entry(owner)
+            .or_default()
+            .push(crate::ir::MemberExtProp {
+                name: "value".to_string(),
+                diagnostic_span: None,
+                getter_diagnostic_span: None,
+                setter_diagnostic_span: None,
+                source_order: u32::MAX,
+                receiver: crate::types::Ty::Int,
+                ty: crate::types::Ty::Int,
+                is_var: false,
+                is_abstract: false,
+                modifiers: crate::ir::IrPropertyModifiers::default(),
+                delegate_field: None,
+                getter: generated_accessor,
+                setter: None,
+                visibility: crate::types::Visibility::Public,
+                type_params: Vec::new(),
+            });
+
+        assert!(member_method_is_inventoried(
+            &ir,
+            class_id,
+            &ir.classes[class_id as usize],
+            source,
+        ));
+        assert!(!member_method_is_inventoried(
+            &ir,
+            class_id,
+            &ir.classes[class_id as usize],
+            generated_accessor,
+        ));
+        assert_eq!(
+            reject_uninventoried_duplicate_method(
+                &ir,
+                class_id,
+                &ir.classes[class_id as usize],
+                generated_accessor,
+            ),
+            Err(
+                "platform declaration clash: 'fixtures/Owner' contains duplicate JVM method getValue()I"
+                    .to_string(),
+            ),
+        );
+    }
 
     #[test]
     fn diagnostic_type_rendering_rejects_undetermined_types() {
