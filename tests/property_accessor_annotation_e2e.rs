@@ -314,10 +314,10 @@ fn an_explicit_field_site_rejects_a_non_property_declaration() {
     );
 }
 
-/// Suppression silences the invalid-site diagnostic but cannot retarget the checked application to
-/// the class declaration. The retained classfile annotations still match kotlinc exactly.
+/// Suppression silences the invalid-site diagnostic, and kotlinc retains the application on the
+/// actual class declaration despite the `@field:` prefix.
 #[test]
-fn a_suppressed_field_site_on_a_class_is_not_published() {
+fn a_suppressed_field_site_on_a_class_is_published_on_the_class() {
     assert_module_matches_kotlinc(&[(
         "FieldSite.kt",
         "@Retention(AnnotationRetention.RUNTIME)\n\

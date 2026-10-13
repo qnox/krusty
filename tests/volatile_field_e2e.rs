@@ -120,8 +120,9 @@ fn suppressed_volatile_on_an_immutable_property_remains_a_field_modifier() {
     .unwrap_or_else(|diff| panic!("suppressed immutable @Volatile differs from kotlinc: {diff}"));
 }
 
-/// The same suppressed SOURCE application on a package property remains a metadata declaration
-/// fact. Its facade carries the empty synthetic annotation marker named by the property signature.
+/// The same suppressed SOURCE application on a package property remains target provenance without
+/// setting metadata's `HAS_ANNOTATIONS` bit. Its facade still carries the empty synthetic marker
+/// named by the property signature.
 #[test]
 fn suppressed_volatile_on_an_immutable_top_level_property_keeps_its_marker() {
     const SOURCE: &str = "package store\n\

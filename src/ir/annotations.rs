@@ -58,8 +58,10 @@ pub struct DeclarationAnnotations {
     /// file or metadata record names them, yet the declaration's metadata flags still report
     /// `hasAnnotations` (kotlinc derives that flag from FIR, before the removal).
     erased_optional_expectations: bool,
-    /// A suppressed SOURCE application that remains a semantic declaration fact even though its
-    /// payload does not survive retention (suppressed immutable `@Volatile` is such a property).
+    /// A suppressed SOURCE application that remains declaration provenance even though its payload
+    /// does not survive retention (suppressed immutable `@Volatile` is such a property). The JVM
+    /// uses this provenance to retain the property's empty annotation marker; it does not set
+    /// Kotlin metadata's `HAS_ANNOTATIONS` bit.
     suppressed_source_application: bool,
 }
 
@@ -96,13 +98,19 @@ impl DeclarationAnnotations {
         annotations
     }
 
-    /// Whether the declaration declares annotations — the `hasAnnotations` fact its metadata
-    /// reports: a retained application, an erased optional expectation, or a suppressed SOURCE
-    /// application retained as declaration provenance. Never derive it from [`Self::retains_none`].
+    /// Whether the declaration carries annotation provenance: a retained application, an erased
+    /// optional expectation, or a suppressed SOURCE application retained for target realization.
+    /// Never derive it from [`Self::retains_none`].
     pub fn declares_annotations(&self) -> bool {
         !self.retained.is_empty()
             || self.erased_optional_expectations
             || self.suppressed_source_application
+    }
+
+    /// Whether Kotlin metadata reports `HAS_ANNOTATIONS`. Suppressed SOURCE provenance can require
+    /// a target carrier without making the source declaration annotated in metadata.
+    pub(crate) fn declares_metadata_annotations(&self) -> bool {
+        !self.retained.is_empty() || self.erased_optional_expectations
     }
 
     pub(crate) fn with_suppressed_source_application(mut self, retained: bool) -> Self {

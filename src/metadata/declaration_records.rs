@@ -135,7 +135,9 @@ pub(crate) fn package_property(
         has_backing_field: declaration.has_backing_field,
         modifiers: declaration.modifiers,
         setter_visibility: declaration.setter_visibility,
-        declares_annotations: declaration.suppressed_source_annotation_application,
+        // Suppressed SOURCE provenance retains the JVM marker but does not set metadata's
+        // `HAS_ANNOTATIONS` property flag.
+        declares_annotations: false,
         annotation_method: None,
         companion: declaration.is_companion_extension(),
         accessor_annotations: ir

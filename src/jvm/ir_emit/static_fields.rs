@@ -780,13 +780,36 @@ pub(super) fn emit_class_static_initializer(
             env.signature_symbols,
         ));
         e.record_locals = true;
+        let has_delegated_array = delegated_property_array::exists(env, c.fq_name);
+        let canonical_delegated_array = has_delegated_array
+            && env
+                .property_reference_realizations
+                .delegated_arrays
+                .field_name(c.fq_name)
+                == crate::jvm::property_references::delegated_arrays::FIELD;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
-        let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
+        if canonical_delegated_array {
+            e.cw.omit_method_lines("<clinit>", "()V");
+        }
+        // PropertyReferenceLowering suppresses the whole class-initializer line table while its
+        // generated array keeps the canonical spelling. If a public source field displaces that
+        // array to `$N`, kotlinc instead retains the delegated property's element mark and the
+        // following source initializer marks.
+        let mut clinit_lines: Vec<(u16, u32)> = if has_delegated_array && !canonical_delegated_array
+        {
+            clinit
+                .line_marks()
+                .iter()
+                .map(|&(pc, line)| (pc, u32::from(line)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         emit_companion_init(e.cw, &mut clinit, fq_name, c);
-        // kotlinc omits the generated delegated-array element marks. Every hoisted-property store
-        // gets an entry at its pc, mapping to the property's declaration line in the COMPANION
-        // source. The `Companion` construction itself has no entry.
+        // Every hoisted-property store gets an entry at its pc, mapping to the property's
+        // declaration line in the COMPANION source. The `Companion` construction itself has no
+        // entry.
         for &(static_index, s, _) in &clinit_statics {
             let Some(init) = stored_clinit_initializer(ir, s) else {
                 continue;
@@ -815,7 +838,7 @@ pub(super) fn emit_class_static_initializer(
         clinit.ensure_locals(e.frame.max());
         clinit.link();
         e.cw.add_method(0x0008, "<clinit>", "()V", &clinit);
-        if byte_parity && !clinit_lines.is_empty() {
+        if byte_parity && !canonical_delegated_array && !clinit_lines.is_empty() {
             e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
         }
     }
@@ -1045,9 +1068,12 @@ impl Emitter<'_> {
                         .ir
                         .jvm_companion_static_declaration(i)
                         .map(|(_, property)| property)
+                        // A visibility-only setter keeps the default implementation, but its
+                        // written header still delimits the preceding default getter. Its missing
+                        // body, rather than `declared_setter`, identifies that exact source shape.
                         .filter(|property| {
-                            !property.modifiers.declared_setter
-                                && property.accessor_lines.setter != 0
+                            property.accessor_lines.setter != 0
+                                && property.accessor_lines.setter_end == 0
                                 && property.accessor_lines.setter != property.decl_line
                         })
                         .map(|property| property.accessor_lines.setter);

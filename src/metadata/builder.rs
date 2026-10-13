@@ -774,8 +774,8 @@ pub struct PropMeta {
     /// The setter's own visibility; one narrower than the property's (`internal set`,
     /// `private set`) makes the setter's word non-default.
     pub setter_visibility: crate::types::Visibility,
-    /// Whether the source property declares annotations, including a suppressed SOURCE application
-    /// whose payload does not survive into metadata records.
+    /// Whether Kotlin metadata reports that the source property declares annotations. Suppressed
+    /// SOURCE provenance may retain a target marker without setting this bit.
     pub declares_annotations: bool,
     /// JVM-only synthetic annotation marker selected by facade realization.
     pub annotation_method: Option<(String, String)>,

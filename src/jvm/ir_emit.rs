@@ -6234,13 +6234,13 @@ impl<'a> Emitter<'a> {
             );
         } else if let Some(receiver) = operation.receiver {
             let receiver_ty = accessor_receiver_ty(&access, access_owner);
-            if writes_static_field
-                && self.static_property_write_evaluates_receiver(operation.expression)
-            {
-                // Unlike a read through a static `@JvmField` qualifier, a write evaluates its
-                // explicit receiver even when companion lookup retargeted storage to the outer.
-                self.emit_value(receiver, code);
-                code.pop();
+            if writes_static_field {
+                if self.static_property_write_evaluates_receiver(operation.expression) {
+                    // Unlike a read through a static `@JvmField` qualifier, a write evaluates its
+                    // explicit receiver even when companion lookup retargeted storage to the outer.
+                    self.emit_value(receiver, code);
+                    code.pop();
+                }
             } else {
                 self.emit_property_receiver(
                     receiver,

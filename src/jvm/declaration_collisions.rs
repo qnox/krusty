@@ -403,7 +403,8 @@ fn reject_duplicate_method(
     Ok(())
 }
 
-/// Package functions whose representation passes selected the same JVM method.
+/// Source package functions and generated property-annotation markers whose representation passes
+/// selected the same facade method.
 ///
 /// Different Kotlin shapes (`fun <T> id(): Int` and `fun id(): Int`, or `List<T>` and
 /// `List<String>`) stay distinct in the resolver. They collide only once the physical name and
@@ -413,8 +414,14 @@ fn reject_duplicate_method(
 /// report instead.
 type ClashRows = Vec<(crate::diag::Span, String)>;
 
+#[derive(Clone, Copy)]
+enum PackageMethodDeclaration {
+    Function(usize),
+    PropertyAnnotationMarker(FunId),
+}
+
 fn package_function_signature_clashes(ir: &IrFile) -> Result<ClashRows, ClashRows> {
-    let mut groups: Vec<((String, String), Vec<usize>)> = Vec::new();
+    let mut groups: Vec<((String, String), Vec<PackageMethodDeclaration>)> = Vec::new();
     for (index, declaration) in ir.package_functions.iter().enumerate() {
         if declaration.companion {
             continue;
@@ -437,9 +444,33 @@ fn package_function_signature_clashes(ir: &IrFile) -> Result<ClashRows, ClashRow
             crate::jvm::names::method_descriptor(&function.params, function.ret),
         );
         if let Some((_, members)) = groups.iter_mut().find(|(key, _)| *key == signature) {
-            members.push(index);
+            members.push(PackageMethodDeclaration::Function(index));
         } else {
-            groups.push((signature, vec![index]));
+            groups.push((signature, vec![PackageMethodDeclaration::Function(index)]));
+        }
+    }
+    for property in &ir.package_properties {
+        let Some(marker) = ir.jvm_package_property_annotation_marker(property.property) else {
+            continue;
+        };
+        let Some(function) = ir.functions.get(marker as usize) else {
+            return Err(vec![(
+                Span::new(0, 0),
+                "internal error: package property annotation marker has no IR function".to_string(),
+            )]);
+        };
+        if let Err(kind) = determined_function_signature(function) {
+            return Err(vec![(Span::new(0, 0), undetermined_type_message(kind))]);
+        }
+        let signature = (
+            function.name.clone(),
+            crate::jvm::names::method_descriptor(&function.params, function.ret),
+        );
+        let declaration = PackageMethodDeclaration::PropertyAnnotationMarker(marker);
+        if let Some((_, members)) = groups.iter_mut().find(|(key, _)| *key == signature) {
+            members.push(declaration);
+        } else {
+            groups.push((signature, vec![declaration]));
         }
     }
     let mut clashes = Vec::new();
@@ -448,34 +479,82 @@ fn package_function_signature_clashes(ir: &IrFile) -> Result<ClashRows, ClashRow
             continue;
         }
         let mut rendered = Vec::with_capacity(members.len());
-        for &index in &members {
-            let declaration = &ir.package_functions[index];
-            let key = declaration_order(declaration).map_err(|kind| {
-                vec![(declaration.signature_span, undetermined_type_message(kind))]
+        for &declaration in &members {
+            let key = package_declaration_order(ir, declaration).map_err(|kind| {
+                vec![(
+                    package_declaration_span(ir, declaration),
+                    undetermined_type_message(kind),
+                )]
             })?;
             rendered.push((declaration, key));
         }
         rendered.sort_by(|(_, left), (_, right)| left.cmp(right));
         let listed = rendered
             .iter()
-            .map(|(declaration, _)| render_declaration(declaration, ir.package.as_deref()))
+            .map(|(declaration, _)| render_package_declaration(ir, *declaration))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|kind| {
                 vec![(
-                    rendered[0].0.signature_span,
+                    package_declaration_span(ir, rendered[0].0),
                     undetermined_type_message(kind),
                 )]
             })?;
         let message = clash_message(&name, &descriptor, &listed);
         let mut located = members
             .into_iter()
-            .map(|index| (ir.package_functions[index].signature_span, message.clone()))
+            .map(|declaration| (package_declaration_span(ir, declaration), message.clone()))
             .collect::<Vec<_>>();
         located.sort_by_key(|(span, _)| span.lo);
         clashes.extend(located);
     }
     clashes.sort_by_key(|(span, _)| span.lo);
     Ok(clashes)
+}
+
+fn package_declaration_span(ir: &IrFile, declaration: PackageMethodDeclaration) -> Span {
+    match declaration {
+        PackageMethodDeclaration::Function(index) => ir.package_functions[index].signature_span,
+        // kotlinc locates a generated package-property annotation marker at the file header.
+        PackageMethodDeclaration::PropertyAnnotationMarker(_) => Span::new(0, 0),
+    }
+}
+
+fn package_declaration_order(
+    ir: &IrFile,
+    declaration: PackageMethodDeclaration,
+) -> Result<(String, String, Vec<String>, usize), UndeterminedDiagnosticType> {
+    match declaration {
+        PackageMethodDeclaration::Function(index) => {
+            declaration_order(&ir.package_functions[index])
+        }
+        PackageMethodDeclaration::PropertyAnnotationMarker(function) => {
+            let function = &ir.functions[function as usize];
+            Ok((function.name.clone(), String::new(), Vec::new(), 0))
+        }
+    }
+}
+
+fn render_package_declaration(
+    ir: &IrFile,
+    declaration: PackageMethodDeclaration,
+) -> Result<String, UndeterminedDiagnosticType> {
+    match declaration {
+        PackageMethodDeclaration::Function(index) => {
+            render_declaration(&ir.package_functions[index], ir.package.as_deref())
+        }
+        PackageMethodDeclaration::PropertyAnnotationMarker(function) => {
+            let function = &ir.functions[function as usize];
+            let mut rendered = format!(
+                "fun {}(): Unit defined in ",
+                rendered_callable_name(&function.name)
+            );
+            match ir.package.as_deref() {
+                Some(package) if !package.is_empty() => rendered.push_str(package),
+                _ => rendered.push_str("root package"),
+            }
+            Ok(rendered)
+        }
+    }
 }
 
 fn clash_message(name: &str, descriptor: &str, declarations: &[String]) -> String {
@@ -533,7 +612,7 @@ fn render_declaration(
         rendered.push_str(&source_type_name(receiver)?);
         rendered.push('.');
     }
-    rendered.push_str(&function.name);
+    rendered.push_str(&rendered_callable_name(&function.name));
     rendered.push('(');
     for (index, (name, ty)) in value_parameters(function)?.iter().enumerate() {
         if index > 0 {
@@ -551,6 +630,19 @@ fn render_declaration(
         _ => rendered.push_str("root package"),
     }
     Ok(rendered)
+}
+
+fn rendered_callable_name(name: &str) -> String {
+    let mut characters = name.chars();
+    let ordinary = characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && characters.all(|character| character == '_' || character.is_alphanumeric());
+    if ordinary {
+        name.to_string()
+    } else {
+        format!("`{name}`")
+    }
 }
 
 /// kotlinc's `MemberComparator` order: name, then rendered receiver and value-parameter types

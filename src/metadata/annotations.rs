@@ -6,10 +6,10 @@ use crate::ir::{AppliedAnnotation, DeclarationAnnotations};
 /// constructor, function, property, value parameter): the `HAS_ANNOTATIONS` flag and the
 /// annotation records written beside it.
 ///
-/// The flag is the frontend's fact that the source declaration declares annotations. It travels
-/// explicitly and is never reconstructed from the records: an `@OptionalExpectation` application
-/// this platform erased, or a suppressed SOURCE application retained only as declaration
-/// provenance, leaves no record, yet kotlinc still sets the flag (it derives that fact from FIR).
+/// The flag is the frontend's fact that the source declaration declares metadata annotations. It
+/// travels explicitly and is never reconstructed from the records: an `@OptionalExpectation`
+/// application this platform erased leaves no record yet still sets the flag. Suppressed SOURCE
+/// provenance may retain a target carrier, but does not set this metadata flag.
 #[derive(Clone, Debug, Default)]
 pub struct MetadataAnnotations {
     declared: bool,
@@ -42,7 +42,7 @@ impl MetadataAnnotations {
     ) -> Self {
         debug_assert_eq!(records.len(), annotations.applications().count());
         Self {
-            declared: annotations.declares_annotations(),
+            declared: annotations.declares_metadata_annotations(),
             records,
         }
     }

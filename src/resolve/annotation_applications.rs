@@ -413,13 +413,12 @@ impl Checker<'_> {
         internal: TypeName,
         host: AnnotationApplicationHost<'_>,
     ) -> bool {
-        // A source annotation class is checked before and after its declaration policies are
-        // published. The early pass may bind the classifier but cannot diagnose a use site from
-        // the default target set without inventing policy; the publishing pass below will validate
-        // the same application against the declaration-owned facts.
-        if !self.fragment.publishes_annotation_metadata()
-            && (access_control::module_declares_classifier(&self.module, internal)
-                || self.module.annotation_retention(internal).is_some())
+        // A source annotation class can be checked before its declaration policies are published,
+        // including while the metadata-publication fragment is being assembled. Bind the
+        // application, but defer its use-site diagnostic until declaration-owned target facts are
+        // available; applying the default target set here would publish a duplicate, false error.
+        if (access_control::module_declares_classifier(&self.module, internal)
+            || self.module.annotation_retention(internal).is_some())
             && self
                 .module
                 .annotation_targets()
@@ -466,7 +465,14 @@ impl Checker<'_> {
         };
         if site == crate::types::PropertyAnnotationSite::Field {
             if let Some(declaration_target) = fieldless_target {
-                if !self.suppresses_diagnostic(wrong_target_suppression) {
+                let suppressed = self.suppresses_diagnostic(wrong_target_suppression);
+                // kotlinc retains a suppressed use-site application on a non-property's actual
+                // declaration host. A fieldless property remains different: it has no declaration
+                // capable of carrying a field application, so its application is still discarded.
+                if suppressed && matches!(host, AnnotationApplicationHost::NonProperty(_)) {
+                    return true;
+                }
+                if !suppressed {
                     let applicable = targets
                         .applicable()
                         .iter()
