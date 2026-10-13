@@ -705,6 +705,14 @@ fn member_method_declaration_is_renderable(
             ) => true,
             _ => false,
         })
+        && ir.signatures.get(&function).is_none_or(|signature| {
+            signature.type_params.iter().all(|parameter| {
+                parameter
+                    .bounds
+                    .iter()
+                    .all(|(bound, _)| ensure_determined_type(*bound).is_ok())
+            })
+        })
 }
 
 fn render_member_method_declaration(
@@ -956,6 +964,12 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
         rendered.push_str(") ");
     }
     rendered.push_str("fun ");
+    let trailing_bounds = ir
+        .signatures
+        .get(&function)
+        .map_or_else(Vec::new, |signature| {
+            render_member_type_parameters(&mut rendered, &signature.type_params)
+        });
     if let Some(receiver) = receiver {
         rendered.push_str(&receiver);
         rendered.push('.');
@@ -968,13 +982,72 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
         .vc_declared_sigs
         .get(&function)
         .map(|(_, _, ret)| *ret)
+        .or_else(|| {
+            ir.signatures
+                .get(&function)
+                .and_then(|signature| signature.ret)
+        })
         .unwrap_or(ir.functions[function as usize].ret);
     rendered.push_str(
         &source_type_name(ret).expect("a reported member clash has a determined return type"),
     );
+    render_member_where_clause(&mut rendered, &trailing_bounds);
     rendered.push_str(" defined in ");
     rendered.push_str(owner);
     rendered
+}
+
+fn render_member_type_parameters<'a>(
+    rendered: &mut String,
+    parameters: &'a [crate::ir::IrTypeParameter],
+) -> Vec<(&'a str, crate::types::Ty)> {
+    if parameters.is_empty() {
+        return Vec::new();
+    }
+    let mut trailing_bounds = Vec::new();
+    rendered.push('<');
+    for (index, parameter) in parameters.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(&parameter.name);
+        let bounds = parameter
+            .bounds
+            .iter()
+            .map(|(bound, _)| *bound)
+            .filter(|bound| !is_default_bound(*bound))
+            .collect::<Vec<_>>();
+        if let Some((&first, remaining)) = bounds.split_first() {
+            rendered.push_str(" : ");
+            rendered.push_str(
+                &source_type_name(first)
+                    .expect("a reported member clash has determined type-parameter bounds"),
+            );
+            for &bound in remaining {
+                trailing_bounds.push((parameter.name.as_str(), bound));
+            }
+        }
+    }
+    rendered.push_str("> ");
+    trailing_bounds
+}
+
+fn render_member_where_clause(rendered: &mut String, trailing_bounds: &[(&str, crate::types::Ty)]) {
+    if trailing_bounds.is_empty() {
+        return;
+    }
+    rendered.push_str(" where ");
+    for (index, (parameter, bound)) in trailing_bounds.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(parameter);
+        rendered.push_str(" : ");
+        rendered.push_str(
+            &source_type_name(*bound)
+                .expect("a reported member clash has determined type-parameter bounds"),
+        );
+    }
 }
 
 fn semantic_function_parameters(ir: &IrFile, function: FunId) -> &[crate::types::Ty] {
@@ -1386,12 +1459,9 @@ fn declaration_order(
 }
 
 fn is_default_bound(bound: crate::types::Ty) -> bool {
-    let inner = match bound {
-        crate::types::Ty::Nullable(inner) => *inner,
-        other => other,
-    };
-    matches!(inner, crate::types::Ty::Obj(name, arguments)
-        if arguments.is_empty() && name == crate::types::wk::any())
+    matches!(bound, crate::types::Ty::Nullable(inner)
+        if matches!(*inner, crate::types::Ty::Obj(name, arguments)
+            if arguments.is_empty() && name == crate::types::wk::any()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1655,6 +1725,10 @@ mod tests {
         let owner = crate::types::type_name("fixtures/Owner");
         let mut delegated = member_function(owner, "value");
         delegated.params = vec![crate::types::Ty::Int];
+        let bound = crate::types::Ty::obj("kotlin/CharSequence");
+        let parameter = crate::types::Ty::ty_param("T", bound);
+        let comparable = crate::types::Ty::obj_args("kotlin/Comparable", &[parameter]);
+        delegated.ret = bound;
         let delegated = ir.add_fun(delegated);
         ir.fn_params.insert(
             delegated,
@@ -1662,6 +1736,21 @@ mod tests {
                 crate::ir::IrGeneratedParameterRole::InterfaceDelegationValue { ordinal: 0 },
                 None,
             )]),
+        );
+        ir.signatures.insert(
+            delegated,
+            crate::ir::IrGenericSig {
+                type_params: vec![crate::ir::IrTypeParameter {
+                    name: "T".to_string(),
+                    semantic_name: "T".to_string(),
+                    bounds: vec![(bound, false), (comparable, true)],
+                    variance: crate::types::TypeVariance::Invariant,
+                    reified: false,
+                }],
+                params: vec![crate::types::Ty::Int],
+                ret: Some(parameter),
+                supers: Vec::new(),
+            },
         );
 
         assert!(member_method_declaration_is_renderable(
@@ -1673,7 +1762,7 @@ mod tests {
         ));
         assert_eq!(
             render_source_member_method(&ir, delegated, "value", "fixtures.Owner"),
-            "fun value(p0: Int): Int defined in fixtures.Owner"
+            "fun <T : CharSequence> value(p0: Int): T where T : Comparable<T> defined in fixtures.Owner"
         );
     }
 
@@ -1780,6 +1869,9 @@ mod tests {
     fn default_bound_uses_resolved_builtin_identity() {
         assert!(is_default_bound(crate::types::Ty::nullable(
             crate::types::Ty::obj_name(crate::types::wk::any())
+        )));
+        assert!(!is_default_bound(crate::types::Ty::obj_name(
+            crate::types::wk::any()
         )));
         assert!(!is_default_bound(crate::types::Ty::obj("repo/Any")));
     }

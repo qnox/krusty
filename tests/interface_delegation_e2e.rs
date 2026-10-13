@@ -165,6 +165,34 @@ fn a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter() {
     );
 }
 
+/// Generic forwarders retain their declaration type parameters and non-default bounds in the
+/// detailed clash diagnostic instead of looking like an unresolved use of the type parameter.
+#[test]
+fn a_generic_delegation_forwarder_renders_its_type_parameter_bound() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base { fun <T : Any> getValue(): T }\n\
+             class C(base: Base) : Base by base { val value: Any? = null }\n",
+        )],
+        &[],
+    );
+}
+
+/// Kotlin renders a callable type parameter's first bound inline and each additional bound in a
+/// trailing `where` clause, including on a generated delegation forwarder.
+#[test]
+fn a_generic_delegation_forwarder_renders_additional_bounds_in_a_where_clause() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base { fun <T> getValue(): T where T : CharSequence, T : Comparable<T> }\n\
+             class C(base: Base) : Base by base { val value: CharSequence? = null }\n",
+        )],
+        &[],
+    );
+}
+
 /// Delegated property accessors retain property semantics in clash diagnostics: their callable
 /// spelling is `<get-name>`/`<set-name>`, and a setter's final parameter is `<set-?>` rather than an
 /// ordinary source value parameter.
