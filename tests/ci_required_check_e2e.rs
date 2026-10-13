@@ -61,6 +61,7 @@ fn run_script(job: &str) -> String {
 fn run_predicate(
     script: &str,
     ci: &str,
+    lint: &str,
     conformance: &str,
     gradle_plugin: &str,
     gradle: &str,
@@ -71,6 +72,7 @@ fn run_predicate(
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("CI_RESULT", ci)
+        .env("LINT_RESULT", lint)
         .env("CONFORMANCE_RESULT", conformance)
         .env("GRADLE_PLUGIN_RESULT", gradle_plugin)
         .env("GRADLE_RESULT", gradle)
@@ -98,8 +100,9 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         "the check context is pinned by an explicit name: {aggregate}"
     );
     assert!(
-        aggregate
-            .contains("\n    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools]\n"),
+        aggregate.contains(
+            "\n    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools]\n"
+        ),
         "the aggregate waits on every merge gate: {aggregate}"
     );
     assert!(
@@ -112,6 +115,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         aggregate.contains("CI_RESULT: ${{ needs.ci.result }}\n")
+            && aggregate.contains("LINT_RESULT: ${{ needs.lint.result }}\n")
             && aggregate.contains("CONFORMANCE_RESULT: ${{ needs.conformance.result }}\n")
             && aggregate
                 .contains("GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}\n")
@@ -132,6 +136,22 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     assert_eq!(
         triggers, "\non:\n  pull_request:\n  merge_group:\n  push:\n    branches: [master]\n",
         "the aggregate runs for pull requests, merge groups, and master pushes"
+    );
+
+    let ci = job(&workflow, "ci");
+    let lint = job(&workflow, "lint");
+    assert!(
+        ci.contains("run: just coverage-gate\n")
+            && !ci.contains("run: just ci\n")
+            && !ci.contains("run: just lint\n")
+            && !ci.contains("needs:"),
+        "coverage must start on its own runner without waiting for lint: {ci}"
+    );
+    assert!(
+        lint.contains("run: just lint\n")
+            && !lint.contains("coverage-gate")
+            && !lint.contains("needs:"),
+        "lint must run independently instead of extending the coverage critical path: {lint}"
     );
 
     let conformance = job(&workflow, "conformance");
@@ -233,7 +253,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         job(&workflow, "release").contains(
-            "    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]\n"
+            "    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]\n"
         ),
         "master release keeps its broader prerequisites"
     );
@@ -243,12 +263,12 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
 fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let run = |results: [&str; 5]| {
+    let run = |results: [&str; 6]| {
         run_predicate(
-            &script, results[0], results[1], results[2], results[3], results[4],
+            &script, results[0], results[1], results[2], results[3], results[4], results[5],
         )
     };
-    let success = ["success"; 5];
+    let success = ["success"; 6];
     let output = run(success);
     assert!(
         output.status.success(),
@@ -257,12 +277,13 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\nbuild-tools: success\n",
+        "ci: success\nlint: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\nbuild-tools: success\n",
         "the log names every dependency result"
     );
 
     let gates = [
         "ci",
+        "lint",
         "conformance",
         "build-gradle-plugin",
         "gradle",
@@ -279,7 +300,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
             );
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr),
-                "core CI, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed\n",
+                "lint, coverage, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed\n",
                 "{gate}={result:?}"
             );
         }
