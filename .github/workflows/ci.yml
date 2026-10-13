@@ -23,15 +23,11 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  # Lint + coverage (`just ci`). Conformance and Gradle run prebuilt artifact families from their
-  # independent producer jobs below.
-  # Neither matrix compiles krusty again.
-  ci:
+  # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
+  # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
+  # families from their independent producer jobs below; neither matrix compiles krusty again.
+  lint:
     runs-on: ubuntu-latest
-    env:
-      # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
-      # instrumenting compiler on the same immutable nightly.
-      KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
     steps:
       - uses: actions/checkout@v7
         with:
@@ -52,6 +48,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: lint
+        run: just lint
+
+  ci:
+    runs-on: ubuntu-latest
+    env:
+      # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
+      # instrumenting compiler on the same immutable nightly.
+      KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: install coverage tooling
         run: rustup toolchain install "$KRUSTY_COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
       # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
@@ -141,7 +154,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
-      - name: just ci
+      - name: coverage gate
         env:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
           # minutes leaves room for a slow runner and still fails a hung binary.
@@ -152,7 +165,7 @@ jobs:
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
           KRUSTY_TOOLCHAIN_RUN_MISSING: 1
-        run: just ci
+        run: just coverage-gate
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@v6
@@ -573,29 +586,32 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools]
+    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: require every merge gate to succeed
         env:
           CI_RESULT: ${{ needs.ci.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
         run: |
           echo "ci: $CI_RESULT"
+          echo "lint: $LINT_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
           if [ "$CI_RESULT" != success ] \
+            || [ "$LINT_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ]; then
-            echo "core CI, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed" >&2
+            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed" >&2
             exit 1
           fi
 
@@ -808,7 +824,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]
+    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.

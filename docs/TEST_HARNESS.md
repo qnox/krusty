@@ -371,8 +371,9 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs core `ci`, the whole `conformance` matrix, `build-gradle-plugin`, and the whole `gradle`
-compatibility matrix. Every supported Kotlin version has distinct JVM, Native and Wasm conformance
+It needs the independent `lint` and coverage-owning `ci` jobs, the whole `conformance` matrix,
+`build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every supported Kotlin version
+has distinct JVM, Native and Wasm conformance
 rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
 kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
 remains the focused local recipe. One backend-neutral multimodule case table runs through the
