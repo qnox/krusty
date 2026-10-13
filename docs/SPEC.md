@@ -5031,6 +5031,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameters; without that record the attribute was missing. Test:
   `tests/delegation_forwarder_signature_e2e.rs`.
 
+- **A delegation forwarder participates in declaration clashes by its physical JVM descriptor.**
+  A generated forwarder has no source function declaration, but it occupies the same method
+  namespace as declared functions and property accessors. Descriptor comparison happens after the
+  backend's override representation is selected: when `Boxed : Base<Int>` overrides
+  `Base<T>.getValue`, the delegated `getValue` result is the boxed `Integer`, not the raw semantic
+  `Int`. It therefore clashes with either a nullable-`Int` member-extension getter having the same
+  receiver parameter or a stored nullable-`Int` property's emission-only implicit getter. krusty
+  reports the platform declaration clash like kotlinc instead of emitting duplicate class methods.
+  Tests:
+  `tests/interface_delegation_e2e.rs::a_boxed_delegation_forwarder_clashes_with_a_member_extension_getter`,
+  `…::a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter`.
+
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
   AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,
