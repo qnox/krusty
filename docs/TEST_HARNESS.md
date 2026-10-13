@@ -139,8 +139,12 @@ invocation separately because each is a separate process with its own wall time.
 unfiltered binary name.
 
 CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. The JVM row runs its box
-corpus and JVM-owned regressions. The Native and Wasm rows run their own box corpora followed by
+independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. GitHub resolves a job's
+producer dependencies before it expands the matrix, so JVM rows use an early scheduler matrix that
+does not wait for the focused KLIB test binaries; Native and Wasm use a second scheduler matrix once
+that target-only artifact is ready. Both matrices execute one YAML-anchored conformance step
+inventory and the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
+regressions. The Native and Wasm rows run their own box corpora followed by
 their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
 target test consumes JVM artifacts and no target waits for another target's corpus result.
 `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and
@@ -371,9 +375,9 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs the independent `lint` and coverage-owning `ci` jobs, the whole `conformance` matrix,
-`build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every supported Kotlin version
-has distinct JVM, Native and Wasm conformance
+It needs the independent `lint` and coverage-owning `ci` jobs, both scheduler halves of the shared
+conformance matrix, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
+supported Kotlin version has distinct JVM, Native and Wasm conformance
 rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
 kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
 remains the focused local recipe. One backend-neutral multimodule case table runs through the

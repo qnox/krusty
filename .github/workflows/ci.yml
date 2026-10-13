@@ -282,14 +282,16 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]
+    # JVM consumes neither focused KLIB test binary. Keep it off that producer's critical path;
+    # the Native/Wasm rows below reuse this exact step inventory after the KLIB artifact exists.
+    needs: [build-conformance-bin, build-tool-bins, versions]
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.versions.outputs.matrix) }}
-        target: [jvm, native, wasm]
+        target: [jvm]
     runs-on: ubuntu-latest
-    steps:
+    steps: &conformance-steps
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
@@ -579,6 +581,20 @@ jobs:
           path: jvm-byte-equality.txt
           if-no-files-found: error
 
+  # GitHub resolves `needs` before expanding a matrix, so target-specific producer dependencies
+  # require a second scheduler job. Both jobs execute the one anchored conformance step inventory;
+  # this is not a separate semantic suite or target-specific case list.
+  conformance-klib:
+    name: conformance (${{ matrix.version }}, ${{ matrix.target }})
+    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.versions.outputs.matrix) }}
+        target: [native, wasm]
+    runs-on: ubuntu-latest
+    steps: *conformance-steps
+
   # The one check a ruleset requires: its context does not change with either matrix. A required
   # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
   # core CI, the complete conformance matrix (including KLIB semantics), the plugin build, and the
@@ -586,7 +602,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -595,6 +611,7 @@ jobs:
           CI_RESULT: ${{ needs.ci.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
+          KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
@@ -602,12 +619,14 @@ jobs:
           echo "ci: $CI_RESULT"
           echo "lint: $LINT_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
+          echo "KLIB conformance: $KLIB_CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
+            || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ]; then
@@ -824,7 +843,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
