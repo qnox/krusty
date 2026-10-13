@@ -165,6 +165,26 @@ fn a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter() {
     );
 }
 
+/// Emission compares an existing delegation method by its selected physical descriptor, not by
+/// the pre-boxing IR return. A primitive property getter therefore remains present beside the
+/// boxed implementation method and its erased bridge when all three slots are distinct.
+#[test]
+fn a_primitive_property_getter_survives_a_boxed_delegation_forwarder() {
+    const SRC: &str = "interface Base<T> { fun getValue(): T }\n\
+interface Boxed : Base<Int> { override fun getValue(): Int }\n\
+class Impl : Boxed { override fun getValue(): Int = 1 }\n\
+class C(impl: Boxed) : Boxed by impl { val value: Int = 2 }\n\
+fun box(): String {\n\
+    val c = C(Impl())\n\
+    val base: Base<Int> = c\n\
+    return if (c.getValue() == 1 && base.getValue() == 1 && c.value == 2) \"OK\" else \"fail\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("all distinct physical getters are emitted"),
+        "OK"
+    );
+}
+
 /// Generic forwarders retain their declaration type parameters and non-default bounds in the
 /// detailed clash diagnostic instead of looking like an unresolved use of the type parameter.
 #[test]

@@ -18,12 +18,13 @@ pub(in crate::jvm) struct EmittedAccessorSignature {
     pub(in crate::jvm) descriptor: String,
 }
 
-/// The exact default accessor this class writer will emit for `property` on `side`.
+/// The exact default accessor the property declaration claims for `property` on `side`.
 ///
 /// A source-written accessor already occupies its method slot and is represented by its IR
-/// function instead. Keeping this decision beside emission lets declaration-clash validation
-/// inventory the same physical surface without re-deriving backend representation rules.
-pub(in crate::jvm) fn emitted_signature(
+/// function instead. The declaration still claims this physical slot when another generated
+/// method already occupies it: declaration-clash validation must diagnose that collision before
+/// emission suppresses a duplicate classfile method.
+pub(in crate::jvm) fn declared_signature(
     ir: &IrFile,
     class: &crate::ir::IrClass,
     property: &crate::ir::IrProperty,
@@ -66,11 +67,31 @@ pub(in crate::jvm) fn emitted_signature(
         ),
         PropertyAccessorSide::Setter => return None,
     };
+    Some(EmittedAccessorSignature { name, descriptor })
+}
+
+/// The default accessor the class writer can emit without duplicating an existing method slot.
+fn emitted_signature(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    property: &crate::ir::IrProperty,
+    side: PropertyAccessorSide,
+    override_results: &crate::jvm::override_results::OverrideResults,
+) -> Option<EmittedAccessorSignature> {
+    let written_accessor = match side {
+        PropertyAccessorSide::Getter => property.getter,
+        PropertyAccessorSide::Setter => property.setter,
+    };
+    if written_accessor.is_some() {
+        return None;
+    }
+    let signature = declared_signature(ir, class, property, side, override_results)?;
     let occupied = class.methods.iter().any(|&fid| {
         let function = &ir.functions[fid as usize];
-        function.name == name && ir_method_desc(&function.params, &function.ret) == descriptor
+        function.name == signature.name
+            && function_descriptor(ir, override_results, fid) == signature.descriptor
     });
-    (!occupied).then_some(EmittedAccessorSignature { name, descriptor })
+    (!occupied).then_some(signature)
 }
 
 /// The nullability annotation an accessor's header carries for the reference type `jt`. A field

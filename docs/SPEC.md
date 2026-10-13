@@ -5039,6 +5039,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Int`. It therefore clashes with either a nullable-`Int` member-extension getter having the same
   receiver parameter or a stored nullable-`Int` property's emission-only implicit getter. krusty
   reports the platform declaration clash like kotlinc instead of emitting duplicate class methods.
+  Conversely, a primitive property getter remains emitted beside a boxed delegation forwarder and
+  its erased bridge when their backend-selected descriptors are distinct.
   A generic forwarder retains its declared type parameters and non-default bounds in the detailed
   declaration list; the first bound is inline and additional bounds use Kotlin's trailing `where`
   clause. Backticked type-parameter names retain their Kotlin escaping in forwarder and implicit
@@ -5048,6 +5050,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generated functions. Tests:
   `tests/interface_delegation_e2e.rs::a_boxed_delegation_forwarder_clashes_with_a_member_extension_getter`,
   `…::a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter`,
+  `…::a_primitive_property_getter_survives_a_boxed_delegation_forwarder`,
   `…::a_generic_delegation_forwarder_renders_its_type_parameter_bound`,
   `…::a_generic_delegation_forwarder_renders_additional_bounds_in_a_where_clause`,
   `…::an_implicit_property_getter_escapes_its_class_type_parameter`,

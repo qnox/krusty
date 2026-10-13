@@ -836,7 +836,8 @@ fn render_member_method_declaration(
         rendered.push_str(&rendered_callable_name(parameter));
         rendered.push_str(": ");
         rendered.push_str(
-            &source_type_name(ty).expect("a reported member clash has determined source types"),
+            &source_member_type_name(ty)
+                .expect("a reported member clash has determined source types"),
         );
     }
     rendered.push_str("): ");
@@ -846,7 +847,8 @@ fn render_member_method_declaration(
         .map(|(_, _, ret)| *ret)
         .unwrap_or(ir.functions[function as usize].ret);
     rendered.push_str(
-        &source_type_name(ret).expect("a reported member clash has a determined return type"),
+        &source_member_type_name(ret)
+            .expect("a reported member clash has a determined return type"),
     );
     rendered.push_str(" defined in ");
     rendered.push_str(owner);
@@ -1457,8 +1459,8 @@ fn rendered_callable_name(name: &str) -> String {
     let mut characters = name.chars();
     let ordinary = characters
         .next()
-        .is_some_and(|first| first == '_' || first.is_alphabetic())
-        && characters.all(|character| character == '_' || character.is_alphanumeric())
+        .is_some_and(crate::lexer::is_kotlin_identifier_start)
+        && characters.all(crate::lexer::is_kotlin_identifier_continue)
         && name != "_"
         && !matches!(
             name,
@@ -1812,8 +1814,10 @@ mod tests {
             },
         );
 
+        let class = crate::ir::IrClass::synthetic(owner);
         assert!(member_method_declaration_is_renderable(
             &ir,
+            &class,
             MemberMethodDeclaration::DelegationForwarder {
                 offset: 0,
                 function: delegated,
@@ -1941,5 +1945,8 @@ mod tests {
         assert_eq!(rendered_callable_name("_"), "`_`");
         assert_eq!(rendered_callable_name("value"), "value");
         assert_eq!(rendered_callable_name("T value"), "`T value`");
+        assert_eq!(rendered_callable_name("π٢"), "π٢");
+        assert_eq!(rendered_callable_name("Ⅻ"), "`Ⅻ`");
+        assert_eq!(rendered_callable_name("²"), "`²`");
     }
 }

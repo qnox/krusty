@@ -2071,7 +2071,7 @@ pub(super) enum PropertyAccessorSide {
     Setter,
 }
 
-pub(in crate::jvm) use declared_property_accessor::emitted_signature as declared_property_accessor_signature;
+pub(in crate::jvm) use declared_property_accessor::declared_signature as declared_property_accessor_signature;
 
 /// What emitting one class's property accessors (and the `$annotations` markers beside them) needs
 /// besides the IR: the class's JVM name, its file facade, the signature formatter, and the emit

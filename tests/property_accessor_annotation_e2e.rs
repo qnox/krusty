@@ -92,6 +92,22 @@ fn a_member_extension_marker_clash_renders_its_receiver_parameter() {
 }
 
 #[test]
+fn a_member_extension_marker_clash_escapes_its_generic_receiver_parameter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "GenericExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<`T value`> {\n\
+             \x20   @Marker val `T value`.item: Int get() = 1\n\
+             \x20   fun `getItem$annotations`(receiver: `T value`) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
 fn a_member_extension_function_marker_clash_renders_its_receiver() {
     common::assert_error_blocks_match_kotlinc(
         &[(
