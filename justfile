@@ -1,7 +1,7 @@
 # krusty build-system entrypoint.
 #
-# `just` is the single command CI and contributors share — `just ci` is lint and coverage, and the
-# release pipeline reuses these recipes, so anything CI does can be reproduced locally.
+# `just` is the build-system interface CI and contributors share. `just ci` runs lint and coverage
+# locally; CI runs those same two recipes on independent runners to keep lint off the critical path.
 #
 #   just            list recipes
 #   just ci         PR gate: lint + coverage
@@ -36,7 +36,7 @@ manifest := "kotlin-versions"
 default:
     @just --list
 
-# === PR gate: the one command the ci job runs ===
+# === PR gate: one local command for the two independently scheduled CI jobs ===
 # Own tests run once under coverage. Conformance is not here: the workflow builds
 # that binary once, runs the box suite for every supported Kotlin version, and
 # runs every other test in the binary for every supported Kotlin version.

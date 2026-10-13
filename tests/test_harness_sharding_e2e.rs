@@ -733,7 +733,7 @@ fn ci_splits_every_version_into_independent_target_rows() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
+            "needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
