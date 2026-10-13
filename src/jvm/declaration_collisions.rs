@@ -312,6 +312,10 @@ enum MemberMethodDeclaration {
     GeneratedMethod {
         offset: u32,
     },
+    DelegationForwarder {
+        offset: u32,
+        function: FunId,
+    },
     PropertyAnnotationMarker {
         offset: u32,
         function: FunId,
@@ -330,6 +334,48 @@ enum PropertyAccessorDeclaration {
     Member(usize),
     MemberExtension(usize),
     CompanionBlock(u32),
+}
+
+fn property_accessor_declaration(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    function: FunId,
+) -> Option<(PropertyAccessorDeclaration, bool)> {
+    for (index, property) in class.properties.iter().enumerate() {
+        if property.getter == Some(function) {
+            return Some((PropertyAccessorDeclaration::Member(index), false));
+        }
+        if property.setter == Some(function) {
+            return Some((PropertyAccessorDeclaration::Member(index), true));
+        }
+    }
+    if let Some(properties) = ir.member_ext_props.get(&class.fq_name) {
+        for (index, property) in properties.iter().enumerate() {
+            if property.getter == function {
+                return Some((PropertyAccessorDeclaration::MemberExtension(index), false));
+            }
+            if property.setter == Some(function) {
+                return Some((PropertyAccessorDeclaration::MemberExtension(index), true));
+            }
+        }
+    }
+    ir.companion_blocks
+        .properties_of(class.fq_name_id())
+        .find_map(|property| {
+            if property.getter == Some(function) {
+                Some((
+                    PropertyAccessorDeclaration::CompanionBlock(property.source_order),
+                    false,
+                ))
+            } else if property.setter == Some(function) {
+                Some((
+                    PropertyAccessorDeclaration::CompanionBlock(property.source_order),
+                    true,
+                ))
+            } else {
+                None
+            }
+        })
 }
 
 fn report_platform_declaration_clashes(
@@ -365,11 +411,28 @@ fn report_platform_declaration_clashes(
                 // A property accessor or annotation marker is inserted below with its semantic
                 // declaration identity and exact source span.
                 continue;
+            } else if ir.interface_delegation_forwarders.contains(&method) {
+                let offset = ir
+                    .class_diagnostic_span(class_id as u32)
+                    .map_or(0, |span| span.lo);
+                if let Some((property, setter)) = property_accessor_declaration(ir, class, method) {
+                    MemberMethodDeclaration::PropertyAccessor {
+                        offset,
+                        function: Some(method),
+                        property,
+                        setter,
+                    }
+                } else {
+                    MemberMethodDeclaration::DelegationForwarder {
+                        offset,
+                        function: method,
+                    }
+                }
             } else {
-                // Representation-only methods, including interface-delegation forwarders, still
-                // occupy the same physical namespace as implicit property accessors. Associate
-                // them with the owning class for diagnostics; the group key already carries the
-                // descriptor selected by the backend from their function identity.
+                // Uninventoried representation-only methods still occupy the same physical
+                // namespace as implicit property accessors. Associate them with the owning class
+                // for diagnostics; the group key already carries the descriptor selected by the
+                // backend from their function identity.
                 MemberMethodDeclaration::GeneratedMethod {
                     offset: ir
                         .class_diagnostic_span(class_id as u32)
@@ -534,14 +597,30 @@ fn report_platform_declaration_clashes(
             let includes_generated_method = declarations.iter().any(|declaration| {
                 matches!(declaration, MemberMethodDeclaration::GeneratedMethod { .. })
             });
+            let includes_delegation_forwarder =
+                declarations.iter().any(|declaration| match declaration {
+                    MemberMethodDeclaration::DelegationForwarder { .. } => true,
+                    MemberMethodDeclaration::PropertyAccessor {
+                        function: Some(function),
+                        ..
+                    } => ir.interface_delegation_forwarders.contains(function),
+                    _ => false,
+                });
+            let declarations_are_renderable = declarations
+                .iter()
+                .all(|&declaration| member_method_declaration_is_renderable(ir, declaration));
             let message = if !includes_generated_method
-                && (includes_marker || includes_generated_data_member)
+                && declarations_are_renderable
+                && (includes_marker
+                    || includes_generated_data_member
+                    || includes_delegation_forwarder)
             {
                 let owner = class.fq_name.render().replace(['/', '$'], ".");
                 let mut listed = declarations.clone();
                 listed.sort_by_key(|declaration| match declaration {
                     MemberMethodDeclaration::GeneratedDataMember { .. } => 0,
                     MemberMethodDeclaration::GeneratedMethod { .. } => 0,
+                    MemberMethodDeclaration::DelegationForwarder { .. } => 1,
                     MemberMethodDeclaration::PropertyAccessor {
                         property: PropertyAccessorDeclaration::MemberExtension(_),
                         ..
@@ -567,6 +646,7 @@ fn report_platform_declaration_clashes(
                     MemberMethodDeclaration::Source { offset, .. }
                     | MemberMethodDeclaration::GeneratedDataMember { offset, .. }
                     | MemberMethodDeclaration::GeneratedMethod { offset, .. }
+                    | MemberMethodDeclaration::DelegationForwarder { offset, .. }
                     | MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. }
                     | MemberMethodDeclaration::PropertyAccessor { offset, .. } => offset,
                 };
@@ -580,6 +660,51 @@ fn report_platform_declaration_clashes(
         diags.error(Span::new(offset, offset), message);
     }
     found
+}
+
+fn member_method_declaration_is_renderable(
+    ir: &IrFile,
+    declaration: MemberMethodDeclaration,
+) -> bool {
+    let function = match declaration {
+        MemberMethodDeclaration::Source { function, .. }
+        | MemberMethodDeclaration::GeneratedDataMember { function, .. }
+        | MemberMethodDeclaration::DelegationForwarder { function, .. } => Some(function),
+        MemberMethodDeclaration::PropertyAccessor {
+            function,
+            property:
+                PropertyAccessorDeclaration::MemberExtension(_)
+                | PropertyAccessorDeclaration::CompanionBlock(_),
+            ..
+        } => function,
+        MemberMethodDeclaration::PropertyAccessor {
+            property: PropertyAccessorDeclaration::Member(_),
+            ..
+        } => None,
+        MemberMethodDeclaration::PropertyAnnotationMarker { .. } => return true,
+        MemberMethodDeclaration::GeneratedMethod { .. } => return false,
+    };
+    let Some(function) = function else {
+        return true;
+    };
+    let parameters = semantic_function_parameters(ir, function);
+    let Some(identities) = ir.function_parameter_identities(function) else {
+        return false;
+    };
+    identities.len() == parameters.len()
+        && identities.iter().all(|identity| match identity.role {
+            crate::ir::IrParameterRole::ContextValue | crate::ir::IrParameterRole::Value => {
+                identity.source_name.is_some()
+            }
+            crate::ir::IrParameterRole::AnonymousContextParameter { .. }
+            | crate::ir::IrParameterRole::ContextReceiver { .. }
+            | crate::ir::IrParameterRole::ExtensionReceiver
+            | crate::ir::IrParameterRole::PropertySetterValue
+            | crate::ir::IrParameterRole::Generated(
+                crate::ir::IrGeneratedParameterRole::InterfaceDelegationValue { .. },
+            ) => true,
+            _ => false,
+        })
 }
 
 fn render_member_method_declaration(
@@ -598,6 +723,9 @@ fn render_member_method_declaration(
         }
         MemberMethodDeclaration::GeneratedMethod { .. } => {
             unreachable!("generated methods use the generic platform-clash diagnostic")
+        }
+        MemberMethodDeclaration::DelegationForwarder { function, .. } => {
+            return render_source_member_method(ir, function, name, owner);
         }
         MemberMethodDeclaration::PropertyAccessor {
             function,
@@ -803,6 +931,19 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
                     value.push_str(" = ...");
                 }
                 values.push(value);
+                value_index += 1;
+            }
+            crate::ir::IrParameterRole::PropertySetterValue => {
+                values.push(format!("{}: {ty}", rendered_callable_name("<set-?>")));
+                value_index += 1;
+            }
+            crate::ir::IrParameterRole::Generated(
+                crate::ir::IrGeneratedParameterRole::InterfaceDelegationValue { ordinal },
+            ) => {
+                values.push(format!(
+                    "{}: {ty}",
+                    rendered_callable_name(&format!("p{ordinal}"))
+                ));
                 value_index += 1;
             }
             role => panic!("a source member clash contains non-source parameter role {role:?}"),
@@ -1505,6 +1646,95 @@ mod tests {
                 (Span::new(0, 0), message.to_string()),
                 (Span::new(11, 11), message.to_string()),
             ],
+        );
+    }
+
+    #[test]
+    fn delegation_forwarder_renders_provider_owned_parameter_ordinals() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("fixtures/Owner");
+        let mut delegated = member_function(owner, "value");
+        delegated.params = vec![crate::types::Ty::Int];
+        let delegated = ir.add_fun(delegated);
+        ir.fn_params.insert(
+            delegated,
+            crate::ir::FnParamInfo::identities(vec![crate::ir::IrParameterIdentity::generated(
+                crate::ir::IrGeneratedParameterRole::InterfaceDelegationValue { ordinal: 0 },
+                None,
+            )]),
+        );
+
+        assert!(member_method_declaration_is_renderable(
+            &ir,
+            MemberMethodDeclaration::DelegationForwarder {
+                offset: 0,
+                function: delegated,
+            },
+        ));
+        assert_eq!(
+            render_source_member_method(&ir, delegated, "value", "fixtures.Owner"),
+            "fun value(p0: Int): Int defined in fixtures.Owner"
+        );
+    }
+
+    #[test]
+    fn cps_delegation_forwarder_uses_generic_clash_diagnostic() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("fixtures/Owner");
+        let continuation = crate::types::Ty::obj_args(
+            "kotlin/coroutines/Continuation",
+            &[crate::types::Ty::String],
+        );
+        let erased_result =
+            crate::types::Ty::nullable(crate::types::Ty::obj_name(crate::types::wk::any()));
+        let mut source = member_function(owner, "fetch");
+        source.params = vec![crate::types::Ty::Int, continuation];
+        source.ret = erased_result;
+        let source = ir.add_fun(source);
+        let mut delegated = member_function(owner, "fetch");
+        delegated.params = vec![crate::types::Ty::Int, continuation];
+        delegated.ret = erased_result;
+        let delegated = ir.add_fun(delegated);
+        ir.fn_signature_offsets.insert(source, 11);
+        ir.fn_params.insert(
+            source,
+            crate::ir::FnParamInfo::source_names(vec![
+                "value".to_string(),
+                "continuation".to_string(),
+            ]),
+        );
+        ir.fn_params.insert(
+            delegated,
+            crate::ir::FnParamInfo::identities(vec![
+                crate::ir::IrParameterIdentity::generated(
+                    crate::ir::IrGeneratedParameterRole::InterfaceDelegationValue { ordinal: 0 },
+                    None,
+                ),
+                crate::ir::IrParameterIdentity::generated(
+                    crate::ir::IrGeneratedParameterRole::Continuation,
+                    None,
+                ),
+            ]),
+        );
+        ir.interface_delegation_forwarders.insert(delegated);
+
+        let mut class = crate::ir::IrClass::synthetic(owner);
+        class.methods = vec![source, delegated];
+        ir.add_class(class);
+
+        let descriptor = "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;";
+        let message = format!(
+            "platform declaration clash: The following declarations have the same JVM signature (fetch{descriptor}):"
+        );
+        assert_eq!(
+            platform_clash_rows(
+                &ir,
+                &crate::jvm::override_results::OverrideResults::default(),
+            ),
+            vec![
+                (Span::new(0, 0), message.clone()),
+                (Span::new(11, 11), message),
+            ]
         );
     }
 

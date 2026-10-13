@@ -165,6 +165,27 @@ fn a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter() {
     );
 }
 
+/// Delegated property accessors retain property semantics in clash diagnostics: their callable
+/// spelling is `<get-name>`/`<set-name>`, and a setter's final parameter is `<set-?>` rather than an
+/// ordinary source value parameter.
+#[test]
+fn delegated_property_forwarders_render_accessor_clashes() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Read { val foo: Int }\n\
+             class ReadImpl(override val foo: Int) : Read\n\
+             class Getter(read: Read) : Read by read { fun getFoo(): Int = 0 }\n\
+             interface Mutable { var bar: Int }\n\
+             class MutableImpl(override var bar: Int) : Mutable\n\
+             class Setter(mutable: Mutable) : Mutable by mutable {\n\
+             \x20   fun setBar(value: Int) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
 /// Delegation to a generic interface instantiated with a REFERENCE type argument (`A<String> by a`):
 /// the interface method `foo(): T` erases to `Object`, so a raw forward through the synthesized field
 /// is correct (the unbox/checkcast happens at the call site). The non-`val` param uses a `$$delegate_N`.

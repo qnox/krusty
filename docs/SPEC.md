@@ -5039,9 +5039,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Int`. It therefore clashes with either a nullable-`Int` member-extension getter having the same
   receiver parameter or a stored nullable-`Int` property's emission-only implicit getter. krusty
   reports the platform declaration clash like kotlinc instead of emitting duplicate class methods.
-  Tests:
+  A delegated property's generated accessors retain property syntax in that diagnostic
+  (`<get-name>`/`<set-name>` and the setter value `<set-?>`), rather than rendering as ordinary
+  generated functions. Tests:
   `tests/interface_delegation_e2e.rs::a_boxed_delegation_forwarder_clashes_with_a_member_extension_getter`,
-  `…::a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter`.
+  `…::a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter`,
+  `…::delegated_property_forwarders_render_accessor_clashes`.
 
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
