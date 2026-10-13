@@ -63,6 +63,7 @@ fn run_predicate(
     ci: &str,
     lint: &str,
     conformance: &str,
+    klib_conformance: &str,
     gradle_plugin: &str,
     gradle: &str,
     build_tools: &str,
@@ -74,6 +75,7 @@ fn run_predicate(
         .env("CI_RESULT", ci)
         .env("LINT_RESULT", lint)
         .env("CONFORMANCE_RESULT", conformance)
+        .env("KLIB_CONFORMANCE_RESULT", klib_conformance)
         .env("GRADLE_PLUGIN_RESULT", gradle_plugin)
         .env("GRADLE_RESULT", gradle)
         .env("BUILD_TOOLS_RESULT", build_tools)
@@ -101,7 +103,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         aggregate.contains(
-            "\n    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools]\n"
+            "\n    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools]\n"
         ),
         "the aggregate waits on every merge gate: {aggregate}"
     );
@@ -117,6 +119,8 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         aggregate.contains("CI_RESULT: ${{ needs.ci.result }}\n")
             && aggregate.contains("LINT_RESULT: ${{ needs.lint.result }}\n")
             && aggregate.contains("CONFORMANCE_RESULT: ${{ needs.conformance.result }}\n")
+            && aggregate
+                .contains("KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}\n")
             && aggregate
                 .contains("GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}\n")
             && aggregate.contains("GRADLE_RESULT: ${{ needs.gradle.result }}\n")
@@ -155,14 +159,23 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
 
     let conformance = job(&workflow, "conformance");
+    let klib_conformance = job(&workflow, "conformance-klib");
     assert!(
-        conformance.contains(
-            "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]\n"
-        )
+        conformance.contains("    needs: [build-conformance-bin, build-tool-bins, versions]\n")
             && conformance.contains("      fail-fast: false\n")
             && conformance
-                .contains("        version: ${{ fromJson(needs.versions.outputs.matrix) }}\n"),
-        "conformance still expands every manifest version without cancelling siblings: {conformance}"
+                .contains("        version: ${{ fromJson(needs.versions.outputs.matrix) }}\n")
+            && conformance.contains("        target: [jvm]\n")
+            && conformance.contains("    steps: &conformance-steps\n")
+            && !conformance.contains("build-klib-test-bins"),
+        "JVM conformance must start without waiting for the focused KLIB binaries: {conformance}"
+    );
+    assert!(
+        klib_conformance.contains(
+            "    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]\n"
+        ) && klib_conformance.contains("        target: [native, wasm]\n")
+            && klib_conformance.contains("    steps: *conformance-steps\n"),
+        "Native and Wasm alone wait for KLIB binaries while reusing the shared inventory: {klib_conformance}"
     );
     let conformance_build = job(&workflow, "build-conformance-bin");
     assert!(
@@ -222,7 +235,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     for artifact in ["conformance-bin", "klib-test-bins", "tool-bins"] {
         assert!(
             conformance.contains(&format!("          name: {artifact}\n")),
-            "the conformance matrix consumes its three independently built artifact families ({artifact}): {conformance}"
+            "the shared conformance inventory consumes {artifact}: {conformance}"
         );
     }
     assert!(
@@ -253,7 +266,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         job(&workflow, "release").contains(
-            "    needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]\n"
+            "    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, versions, build-release]\n"
         ),
         "master release keeps its broader prerequisites"
     );
@@ -263,12 +276,13 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
 fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let run = |results: [&str; 6]| {
+    let run = |results: [&str; 7]| {
         run_predicate(
             &script, results[0], results[1], results[2], results[3], results[4], results[5],
+            results[6],
         )
     };
-    let success = ["success"; 6];
+    let success = ["success"; 7];
     let output = run(success);
     assert!(
         output.status.success(),
@@ -277,7 +291,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nlint: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\nbuild-tools: success\n",
+        "ci: success\nlint: success\nconformance: success\nKLIB conformance: success\nbuild-gradle-plugin: success\ngradle: success\nbuild-tools: success\n",
         "the log names every dependency result"
     );
 
@@ -285,6 +299,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
         "ci",
         "lint",
         "conformance",
+        "KLIB conformance",
         "build-gradle-plugin",
         "gradle",
         "build-tools",

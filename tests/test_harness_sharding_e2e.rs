@@ -691,7 +691,7 @@ fn prebuilt_conformance_regressions_enforce_the_deadline() {
 }
 
 #[test]
-fn ci_splits_every_version_into_independent_target_rows() {
+fn ci_starts_jvm_without_waiting_for_native_test_binaries() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workflow =
         fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci workflow");
@@ -703,9 +703,15 @@ fn ci_splits_every_version_into_independent_target_rows() {
         "conformance job must expand every supported Kotlin version"
     );
     assert!(
-        workflow.contains("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
-            && workflow.contains("target: [jvm, native, wasm]"),
-        "each exact Kotlin version must expose independent JVM, Native and Wasm matrix rows"
+        workflow
+            .matches("name: conformance (${{ matrix.version }}, ${{ matrix.target }})")
+            .count()
+            == 2
+            && workflow.contains("target: [jvm]")
+            && workflow.contains("target: [native, wasm]")
+            && workflow.contains("steps: &conformance-steps")
+            && workflow.contains("steps: *conformance-steps"),
+        "each exact Kotlin version must expose JVM, Native and Wasm rows from one shared inventory"
     );
     let box_run = workflow[matrix..]
         .find("just conformance-run \"$PWD/conformance-bin\" \"${{ matrix.version }}\"")
@@ -733,7 +739,7 @@ fn ci_splits_every_version_into_independent_target_rows() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, lint, conformance, build-gradle-plugin, gradle, build-tools, versions, build-release]",
+            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, versions, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
@@ -935,11 +941,13 @@ fn ci_splits_every_version_into_independent_target_rows() {
         "a Gradle lane runs the prebuilt krusty-build tests"
     );
     assert!(
-        workflow.contains(
-            "needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]"
-        ) && workflow.contains("needs: [build-tool-bins, build-gradle-plugin]")
+        workflow.contains("needs: [build-conformance-bin, build-tool-bins, versions]")
+            && workflow.contains(
+                "needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins, versions]"
+            )
+            && workflow.contains("needs: [build-tool-bins, build-gradle-plugin]")
             && workflow.contains("needs: [build-tool-bins, versions]"),
-        "each consumer waits only on its independently built artifact families"
+        "JVM starts before focused KLIB binaries while each other consumer waits only on its artifact families"
     );
     assert!(
         !workflow.contains("build-shared-bins"),
