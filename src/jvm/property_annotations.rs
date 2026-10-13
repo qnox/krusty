@@ -19,8 +19,12 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
     for class_index in 0..ir.classes.len() {
         let annotated = ir.classes[class_index].property_annotations.clone();
         for property in annotated {
-            // Nothing survives into the class file (an erased optional expectation, say).
-            if property.annotations.retains_none() {
+            // A retained application needs its JVM carrier. A suppressed SOURCE application has
+            // no annotation attribute, but kotlinc still emits the empty marker that its property
+            // metadata names. An erased optional expectation needs neither.
+            if property.annotations.retains_none()
+                && !property.annotations.has_suppressed_source_application()
+            {
                 continue;
             }
             let getter = property_getter_name(&property.property);

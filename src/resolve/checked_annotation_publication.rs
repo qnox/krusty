@@ -77,7 +77,7 @@ pub(crate) fn publish_checked_classifier_annotations(
                     facts: annotation.facts,
                 })
                 .collect::<Vec<_>>();
-            let expected = class
+            let fully_checked = class
                 .annotations
                 .iter()
                 .filter(|annotation| {
@@ -85,8 +85,11 @@ pub(crate) fn publish_checked_classifier_annotations(
                         .resolved_annotation(file_index as u32, annotation)
                         .is_some()
                 })
-                .count();
-            if applications.len() == expected {
+                .all(|annotation| {
+                    info.applied_annotation(annotation).is_some()
+                        || info.discarded_annotation_application(annotation)
+                });
+            if fully_checked {
                 checked.push((internal, applications));
             } else if !diags.has_errors() {
                 diags.error(

@@ -286,6 +286,19 @@ fn an_explicit_field_site_rejects_an_annotation_class_property() {
     );
 }
 
+/// A primary-constructor property defaults to the value-parameter site before considering its
+/// field, including when that constructor is the element list of an annotation class.
+#[test]
+fn an_annotation_class_property_defaults_to_its_constructor_parameter_site() {
+    assert_module_matches_kotlinc(&[(
+        "ConstructorPropertySite.kt",
+        "@Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FIELD)\n\
+         annotation class Mark\n\
+         annotation class Token(@Mark val value: Int)\n",
+    )]);
+}
+
 /// A use-site target is constrained by its declaration host even when the annotation class permits
 /// both the declaration's ordinary target and `FIELD`.
 #[test]

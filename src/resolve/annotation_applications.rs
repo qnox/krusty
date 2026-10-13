@@ -13,6 +13,7 @@ use super::*;
 pub(super) struct CheckedAnnotationApplications {
     checked: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
     discarded: crate::fx_hash::HashSet<(u32, u32)>,
+    suppressed_source_property_applications: crate::fx_hash::HashSet<(u32, u32)>,
 }
 
 impl CheckedAnnotationApplications {
@@ -30,6 +31,7 @@ impl CheckedAnnotationApplications {
     fn discard(&mut self, annotation: &AnnotationRef) {
         let key = (annotation.span.lo, annotation.span.hi);
         self.checked.remove(&key);
+        self.suppressed_source_property_applications.remove(&key);
         self.discarded.insert(key);
     }
 
@@ -38,8 +40,18 @@ impl CheckedAnnotationApplications {
         self.checked.insert(key, applied);
     }
 
+    fn retain_suppressed_source_property_application(&mut self, annotation: &AnnotationRef) {
+        self.suppressed_source_property_applications
+            .insert((annotation.span.lo, annotation.span.hi));
+    }
+
     fn was_discarded(&self, annotation: &AnnotationRef) -> bool {
         self.discarded
+            .contains(&(annotation.span.lo, annotation.span.hi))
+    }
+
+    fn retains_suppressed_source_property_application(&self, annotation: &AnnotationRef) -> bool {
+        self.suppressed_source_property_applications
             .contains(&(annotation.span.lo, annotation.span.hi))
     }
 }
@@ -56,6 +68,14 @@ impl TypeInfo {
         self.applied_annotations
             .get(&(annotation.span.lo, annotation.span.hi))
     }
+
+    pub(crate) fn retains_suppressed_source_property_application(
+        &self,
+        annotation: &AnnotationRef,
+    ) -> bool {
+        self.applied_annotations
+            .retains_suppressed_source_property_application(annotation)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +84,7 @@ enum AnnotationApplicationHost<'a> {
     Property {
         fieldless_target: Option<&'a str>,
         mutable: bool,
+        constructor_parameter: bool,
     },
     NonProperty(&'static str),
 }
@@ -170,6 +191,7 @@ impl Checker<'_> {
                 AnnotationApplicationHost::Property {
                     fieldless_target,
                     mutable: property.is_var,
+                    constructor_parameter: false,
                 },
             );
         }
@@ -198,6 +220,7 @@ impl Checker<'_> {
                     fieldless_target: owner_is_annotation
                         .then_some("member property without backing field or delegate"),
                     mutable: parameter.is_var,
+                    constructor_parameter: true,
                 }
             } else {
                 AnnotationApplicationHost::NonProperty("value parameter")
@@ -236,6 +259,10 @@ impl Checker<'_> {
             return true;
         }
         if self.suppresses_diagnostic("VOLATILE_ON_VALUE") {
+            // Suppression keeps this SOURCE application as a declaration fact even though its
+            // annotation payload does not survive retention.
+            self.applied_annotations
+                .retain_suppressed_source_property_application(annotation);
             return true;
         }
         self.diags.error(
@@ -391,7 +418,8 @@ impl Checker<'_> {
         // the default target set without inventing policy; the publishing pass below will validate
         // the same application against the declaration-owned facts.
         if !self.fragment.publishes_annotation_metadata()
-            && access_control::module_declares_classifier(&self.module, internal)
+            && (access_control::module_declares_classifier(&self.module, internal)
+                || self.module.annotation_retention(internal).is_some())
             && self
                 .module
                 .annotation_targets()
@@ -418,8 +446,9 @@ impl Checker<'_> {
         let site = annotation.property_site.or_else(|| match host {
             AnnotationApplicationHost::Property {
                 fieldless_target: Some(_),
+                constructor_parameter,
                 ..
-            } => targets.property_declaration_site(false),
+            } => targets.property_declaration_site(constructor_parameter),
             _ => None,
         });
         let Some(site) = site else { return true };

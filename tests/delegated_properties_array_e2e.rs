@@ -1,9 +1,9 @@
 //! kotlinc keeps the `KProperty` references its delegated-property operators receive in one
 //! `$$delegatedProperties` array per class (`PropertyReferenceLowering`): a leading
 //! `static final synthetic` field, filled first in `<clinit>` in declaration order, read as
-//! `$$delegatedProperties[i]`. An ordinary such `<clinit>` has no line table; when a source
-//! `@JvmField` initializer follows the array, kotlinc retains the array-element and field-store
-//! lines. A delegate's constructor store maps to its property's line.
+//! `$$delegatedProperties[i]`. The generated array elements themselves do not contribute lines to
+//! `<clinit>`; a following source `@JvmField` initializer contributes only its own store line. A
+//! delegate's constructor store maps to its property's line.
 //!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.

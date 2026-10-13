@@ -531,29 +531,18 @@ pub(crate) fn lower_companion_properties(
                 }
             }
             IrExpr::SetField {
-                receiver,
+                receiver: _,
                 class,
                 index,
                 value,
             } if static_for_field.contains_key(&(class, index)) => {
-                let write = IrExpr::SetStatic {
+                // The checked field identity is now outer static storage. Its companion receiver
+                // was the declaration's lookup coordinate; the outer `putstatic` triggers the
+                // same class initialization and kotlinc does not emit a `Companion` load/pop.
+                Some(IrExpr::SetStatic {
                     index: static_for_field[&(class, index)],
                     value,
-                };
-                // Outside the companion initializer, a canonical singleton reference still runs
-                // class initialization and is then discarded. An arbitrary receiver expression
-                // is only a companion lookup coordinate and is not evaluated.
-                if redundant_companion_receiver(ir, class, receiver)
-                    && !crate::ir::expr_runs_no_code(ir, receiver)
-                {
-                    let write = ir.add_expr(write);
-                    Some(IrExpr::Block {
-                        stmts: vec![receiver, write],
-                        value: None,
-                    })
-                } else {
-                    Some(write)
-                }
+                })
             }
             IrExpr::LateinitInitialized {
                 receiver,

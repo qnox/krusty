@@ -58,6 +58,9 @@ pub struct DeclarationAnnotations {
     /// file or metadata record names them, yet the declaration's metadata flags still report
     /// `hasAnnotations` (kotlinc derives that flag from FIR, before the removal).
     erased_optional_expectations: bool,
+    /// A suppressed SOURCE application that remains a semantic declaration fact even though its
+    /// payload does not survive retention (suppressed immutable `@Volatile` is such a property).
+    suppressed_source_application: bool,
 }
 
 impl DeclarationAnnotations {
@@ -65,6 +68,7 @@ impl DeclarationAnnotations {
         Self {
             retained: annotations,
             erased_optional_expectations: false,
+            suppressed_source_application: false,
         }
     }
 
@@ -93,10 +97,23 @@ impl DeclarationAnnotations {
     }
 
     /// Whether the declaration declares annotations — the `hasAnnotations` fact its metadata
-    /// reports: a retained application or an erased optional expectation. Never derive it from
-    /// [`Self::retains_none`].
+    /// reports: a retained application, an erased optional expectation, or a suppressed SOURCE
+    /// application retained as declaration provenance. Never derive it from [`Self::retains_none`].
     pub fn declares_annotations(&self) -> bool {
-        !self.retained.is_empty() || self.erased_optional_expectations
+        !self.retained.is_empty()
+            || self.erased_optional_expectations
+            || self.suppressed_source_application
+    }
+
+    pub(crate) fn with_suppressed_source_application(mut self, retained: bool) -> Self {
+        self.suppressed_source_application = retained;
+        self
+    }
+
+    /// Whether a suppressed SOURCE application remains part of the declaration's semantic
+    /// provenance even though [`Self::retains_none`] is true.
+    pub fn has_suppressed_source_application(&self) -> bool {
+        self.suppressed_source_application
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {

@@ -17122,9 +17122,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   SOURCE retention, so the flag is all that reaches the class file. The JVM backend reads the
   property's resolved annotation identities for a class, constructor or object property, a
   companion property hoisted to its outer class and a top-level property.
-  `kotlin.concurrent.Volatile` resolves to the same identity. An immutable property never publishes
-  the volatile modifier, even when `VOLATILE_ON_VALUE` is suppressed, because a JVM field cannot be
-  both final and volatile. Test:
+  `kotlin.concurrent.Volatile` resolves to the same identity. An unsuppressed immutable property is
+  rejected and does not publish the application. Suppressing `VOLATILE_ON_VALUE` retains it, and
+  kotlinc emits the unusual `ACC_FINAL | ACC_VOLATILE` field flags; the backend matches that
+  classfile shape even though a JVM may reject the illegal modifier pair when loading it. Test:
   `tests/volatile_field_e2e.rs`. Corpus: `volatile/volatileInt.kt` and its siblings.
 - **An outer class bridges a hoisted companion field only for another class's use.** kotlinc's
   `SyntheticAccessorLowering` creates `access$get…$cp` / `access$set…$cp` when code outside the

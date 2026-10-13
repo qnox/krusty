@@ -58,7 +58,12 @@ fn property_site_annotations(
             (selected == Some(site)).then_some(applied)
         })
     });
+    let suppressed_source_application = site == crate::types::PropertyAnnotationSite::Property
+        && declared
+            .iter()
+            .any(|annotation| info.retains_suppressed_source_property_application(annotation));
     checked_annotations(applications)
+        .with_suppressed_source_application(suppressed_source_application)
 }
 
 fn checked_annotations<'a>(

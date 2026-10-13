@@ -780,35 +780,13 @@ pub(super) fn emit_class_static_initializer(
             env.signature_symbols,
         ));
         e.record_locals = true;
-        let keep_delegated_array_lines = byte_parity
-            && delegated_property_array::exists(env, c.fq_name)
-            && clinit_statics.iter().any(|&(static_index, s, _)| {
-                ir.is_jvm_field_static(static_index)
-                    && stored_clinit_initializer(ir, s).is_some()
-                    && c.companion_class
-                        .as_ref()
-                        .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
-                        .is_some_and(|&line| line != 0)
-            });
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
-        let mut clinit_lines: Vec<(u16, u32)> = if keep_delegated_array_lines {
-            clinit
-                .line_marks()
-                .iter()
-                .map(|&(pc, line)| (pc, u32::from(line)))
-                .collect()
-        } else {
-            if delegated_property_array::exists(env, c.fq_name) {
-                e.cw.omit_method_lines("<clinit>", "()V");
-            }
-            Vec::new()
-        };
+        let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
         emit_companion_init(e.cw, &mut clinit, fq_name, c);
-        // kotlinc's `<clinit>` LineNumberTable: a source `@JvmField` initializer keeps the
-        // delegated-array element marks, then every hoisted-property store gets an entry at its
-        // pc, mapping to the property's declaration line in the COMPANION source. The `Companion`
-        // construction itself has no entry.
+        // kotlinc omits the generated delegated-array element marks. Every hoisted-property store
+        // gets an entry at its pc, mapping to the property's declaration line in the COMPANION
+        // source. The `Companion` construction itself has no entry.
         for &(static_index, s, _) in &clinit_statics {
             let Some(init) = stored_clinit_initializer(ir, s) else {
                 continue;
@@ -1068,7 +1046,7 @@ impl Emitter<'_> {
                         .jvm_companion_static_declaration(i)
                         .map(|(_, property)| property)
                         .filter(|property| {
-                            property.setter.is_none()
+                            !property.modifiers.declared_setter
                                 && property.accessor_lines.setter != 0
                                 && property.accessor_lines.setter != property.decl_line
                         })
