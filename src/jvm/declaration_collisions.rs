@@ -36,9 +36,13 @@ pub(super) fn validate(
                 // representation fallback only for compiler-generated methods which have not yet
                 // published such provenance; otherwise a marker/accessor clash would be reported a
                 // second time as a generic Span(0, 0) error.
-                if let Err(message) =
-                    reject_uninventoried_duplicate_method(ir, class_id as u32, class, accessor)
-                {
+                if let Err(message) = reject_uninventoried_duplicate_method(
+                    ir,
+                    override_results,
+                    class_id as u32,
+                    class,
+                    accessor,
+                ) {
                     diags.error(
                         span.or(property.diagnostic_span)
                             .unwrap_or_else(|| Span::new(0, 0)),
@@ -919,6 +923,7 @@ fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), Strin
 
 fn reject_uninventoried_duplicate_method(
     ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
     class_id: crate::ir::ClassId,
     class: &crate::ir::IrClass,
     accessor: FunId,
@@ -926,8 +931,7 @@ fn reject_uninventoried_duplicate_method(
     let Some(accessor_function) = ir.functions.get(accessor as usize) else {
         return Err("internal error: member extension accessor has no JVM function".to_string());
     };
-    let descriptor =
-        crate::jvm::names::method_descriptor(&accessor_function.params, accessor_function.ret);
+    let descriptor = crate::jvm::ir_emit::function_descriptor(ir, override_results, accessor);
     let accessor_is_inventoried = member_method_is_inventoried(ir, class_id, class, accessor);
     if class.methods.iter().copied().any(|candidate| {
         candidate != accessor
@@ -941,8 +945,11 @@ fn reject_uninventoried_duplicate_method(
                 .get(candidate as usize)
                 .is_some_and(|function| {
                     function.name == accessor_function.name
-                        && crate::jvm::names::method_descriptor(&function.params, function.ret)
-                            == descriptor
+                        && crate::jvm::ir_emit::function_descriptor(
+                            ir,
+                            override_results,
+                            candidate,
+                        ) == descriptor
                 })
     }) {
         return Err(format!(
@@ -1495,12 +1502,79 @@ mod tests {
         assert_eq!(
             reject_uninventoried_duplicate_method(
                 &ir,
+                &crate::jvm::override_results::OverrideResults::default(),
                 class_id,
                 &ir.classes[class_id as usize],
                 generated_accessor,
             ),
             Err(
                 "platform declaration clash: 'fixtures/Owner' contains duplicate JVM method getValue()I"
+                    .to_string(),
+            ),
+        );
+    }
+
+    #[test]
+    fn uninventoried_accessor_compares_boxed_override_descriptor() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("fixtures/Owner");
+        let boxed_override = ir.add_fun(member_function(owner, "getValue"));
+        let mut generated = member_function(owner, "getValue");
+        generated.ret = crate::types::Ty::nullable(crate::types::Ty::Int);
+        let generated_accessor = ir.add_fun(generated);
+
+        let mut class = crate::ir::IrClass::synthetic(owner);
+        class.methods = vec![boxed_override, generated_accessor];
+        class.sam_wrapper = Some(crate::ir::IrSamWrapperClass {
+            interface: crate::types::type_name("fixtures/GenericGetter"),
+            method: boxed_override,
+            boxes_primitive_result: true,
+            suspend_arity: None,
+            public_inline: false,
+            function_adapter: false,
+        });
+        let class_id = ir.add_class(class);
+        ir.member_ext_props
+            .entry(owner)
+            .or_default()
+            .push(crate::ir::MemberExtProp {
+                name: "value".to_string(),
+                diagnostic_span: None,
+                getter_diagnostic_span: None,
+                setter_diagnostic_span: None,
+                source_order: u32::MAX,
+                receiver: crate::types::Ty::Int,
+                ty: crate::types::Ty::nullable(crate::types::Ty::Int),
+                is_var: false,
+                is_abstract: false,
+                modifiers: crate::ir::IrPropertyModifiers::default(),
+                delegate_field: None,
+                getter: generated_accessor,
+                setter: None,
+                visibility: crate::types::Visibility::Public,
+                type_params: Vec::new(),
+            });
+
+        let override_results = crate::jvm::override_results::box_scalar_override_results(
+            &ir,
+            &crate::backend::CheckedBackendCallables::default(),
+            &crate::jvm::property_realizations::PropertyRealizations::default(),
+        )
+        .expect("the generated SAM wrapper has a complete physical result plan");
+        assert_eq!(
+            crate::jvm::ir_emit::function_descriptor(&ir, &override_results, boxed_override),
+            "()Ljava/lang/Integer;"
+        );
+        assert_eq!(
+            reject_uninventoried_duplicate_method(
+                &ir,
+                &override_results,
+                class_id,
+                &ir.classes[class_id as usize],
+                generated_accessor,
+            ),
+            Err(
+                "platform declaration clash: 'fixtures/Owner' contains duplicate JVM method getValue()Ljava/lang/Integer;"
                     .to_string(),
             ),
         );
