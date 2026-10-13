@@ -322,6 +322,41 @@ fn attach_property_metadata(
     if annotations.declares_annotations() {
         ir.accessor_annotations.insert(property_id, annotations);
     }
+    let header = index
+        .declaration_header(declaration)
+        .expect("a checked property retains its declaration header");
+    if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
+        let annotations =
+            super::declaration_metadata::companion_block_property_annotations(property, info);
+        if annotations.declares_annotations() {
+            let declaring_class = index
+                .property(property_id)
+                .and_then(|property| property.extension_receiver)
+                .and_then(|receiver| receiver.get().non_null().obj_internal())
+                .and_then(|classifier| index.classifier_declaration(classifier))
+                .and_then(|classifier| ir.checked_classifier_classes.get(&classifier))
+                .copied()
+                .expect("a companion-block property retains its declaring classifier");
+            let source_order = index
+                .source_order(declaration)
+                .expect("a companion-block property retains its stable source order");
+            let owner = &mut ir.classes[declaring_class as usize];
+            assert!(
+                !owner
+                    .property_annotations
+                    .iter()
+                    .any(|existing| existing.source_order == source_order),
+                "one property declaration publishes its annotations once"
+            );
+            owner
+                .property_annotations
+                .push(crate::ir::PropertyAnnotations {
+                    source_order,
+                    property: property.name.clone(),
+                    annotations,
+                });
+        }
+    }
     if let Some(package_property) = ir
         .package_properties
         .iter_mut()

@@ -615,6 +615,9 @@ fn materialize_member_extension_property(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            diagnostic_span: property.diagnostic_span,
+            getter_diagnostic_span: property.getter_diagnostic_span,
+            setter_diagnostic_span: property.setter_diagnostic_span,
             source_order,
             receiver,
             ty: property.ty,

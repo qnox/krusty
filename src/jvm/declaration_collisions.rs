@@ -27,7 +27,17 @@ pub(super) fn validate(
             continue;
         };
         for property in properties {
-            for accessor in std::iter::once(property.getter).chain(property.setter) {
+            for (accessor, span) in [
+                (Some(property.getter), property.getter_diagnostic_span),
+                (property.setter, property.setter_diagnostic_span),
+            ] {
+                let Some(accessor) = accessor else { continue };
+                // Source accessors joined the exact platform-clash inventory above. This fallback
+                // remains only for dependency and compiler-generated member extensions without a
+                // source declaration at which an exact Kotlin diagnostic can be reported.
+                if span.or(property.diagnostic_span).is_some() {
+                    continue;
+                }
                 if let Err(message) = reject_duplicate_method(ir, class, accessor) {
                     diags.error(Span::new(0, 0), message);
                     return Err(());
@@ -332,6 +342,7 @@ enum MemberMethodDeclaration {
 #[derive(Clone, Copy)]
 enum PropertyAccessorDeclaration {
     Member(usize),
+    MemberExtension(usize),
     CompanionBlock(u32),
 }
 
@@ -410,6 +421,39 @@ fn report_platform_declaration_clashes(
                 );
             }
         }
+        if let Some(properties) = ir.member_ext_props.get(&class.fq_name) {
+            for (property_index, property) in properties.iter().enumerate() {
+                for (setter, function, span) in [
+                    (
+                        false,
+                        Some(property.getter),
+                        property.getter_diagnostic_span,
+                    ),
+                    (true, property.setter, property.setter_diagnostic_span),
+                ] {
+                    let Some(function) = function else { continue };
+                    if ir.fn_signature_offsets.contains_key(&function) {
+                        continue;
+                    }
+                    let Some(offset) = span.or(property.diagnostic_span).map(|span| span.lo) else {
+                        continue;
+                    };
+                    let declaration = &ir.functions[function as usize];
+                    let signature = (
+                        declaration.name.clone(),
+                        crate::jvm::ir_emit::function_descriptor(ir, override_results, function),
+                    );
+                    groups.entry(signature).or_default().push(
+                        MemberMethodDeclaration::PropertyAccessor {
+                            offset,
+                            function: Some(function),
+                            property: PropertyAccessorDeclaration::MemberExtension(property_index),
+                            setter,
+                        },
+                    );
+                }
+            }
+        }
         for property in ir.companion_blocks.properties_of(class.fq_name_id()) {
             for (setter, function, span) in [
                 (false, property.getter, property.getter_diagnostic_span),
@@ -474,6 +518,10 @@ fn report_platform_declaration_clashes(
                 let owner = class.fq_name.render().replace(['/', '$'], ".");
                 let mut listed = declarations.clone();
                 listed.sort_by_key(|declaration| match declaration {
+                    MemberMethodDeclaration::PropertyAccessor {
+                        property: PropertyAccessorDeclaration::MemberExtension(_),
+                        ..
+                    } => 2,
                     MemberMethodDeclaration::PropertyAccessor { .. } => 0,
                     MemberMethodDeclaration::PropertyAnnotationMarker { .. } => 1,
                     MemberMethodDeclaration::Source { .. } => 2,
@@ -532,6 +580,20 @@ fn render_member_method_declaration(
                         &class.properties[property],
                         function,
                         setter,
+                        owner,
+                    )
+                }
+                PropertyAccessorDeclaration::MemberExtension(property) => {
+                    let property = &ir.member_ext_props[&class.fq_name][property];
+                    let callable = if setter {
+                        format!("<set-{}>", property.name)
+                    } else {
+                        format!("<get-{}>", property.name)
+                    };
+                    render_source_member_method(
+                        ir,
+                        function.expect("a source member-extension accessor has a function"),
+                        &callable,
                         owner,
                     )
                 }

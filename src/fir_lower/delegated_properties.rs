@@ -675,6 +675,9 @@ pub(super) fn materialize_member_extension_delegate(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            diagnostic_span: property.diagnostic_span,
+            getter_diagnostic_span: property.getter_diagnostic_span,
+            setter_diagnostic_span: property.setter_diagnostic_span,
             source_order: declaration.source_order,
             receiver: extension_receiver,
             ty: property.ty,

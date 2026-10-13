@@ -67,6 +67,18 @@ fn block_members_are_static_members_of_their_class() {
 }
 
 #[test]
+fn block_property_annotations_reach_the_marker_and_metadata() {
+    const SRC: &str = "@Target(AnnotationTarget.PROPERTY)\n\
+        annotation class Mark\n\
+        class A {\n\
+        \x20   companion {\n\
+        \x20       @Mark val value: Int = 1\n\
+        \x20   }\n\
+        }\n";
+    assert_members_and_metadata_match_kotlinc("BlockPropertyAnnotation", SRC, &["A"]);
+}
+
+#[test]
 fn block_member_calls_block_member_and_companion_extension_unqualified() {
     const SRC: &str = "class A {\n\
         \x20   companion {\n\

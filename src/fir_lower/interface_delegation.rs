@@ -499,6 +499,9 @@ fn materialize_delegation(
                         .or_default()
                         .push(crate::ir::MemberExtProp {
                             name,
+                            diagnostic_span: None,
+                            getter_diagnostic_span: None,
+                            setter_diagnostic_span: None,
                             source_order: u32::MAX,
                             receiver,
                             ty,

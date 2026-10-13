@@ -125,6 +125,25 @@ fn a_renamed_property_accessor_clashes_with_an_extension_marker() {
 }
 
 #[test]
+fn a_renamed_member_extension_accessor_clashes_with_a_context_extension_marker() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "MemberExtensionAccessorMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   context(_: Int)\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   var Int.other: String\n\
+             \x20       get() = \"\"\n\
+             \x20       @JvmName(\"getItem\\$annotations\") set(value) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
 fn a_renamed_companion_block_accessor_clashes_with_a_context_property_marker() {
     common::assert_error_blocks_match_kotlinc(
         &[(

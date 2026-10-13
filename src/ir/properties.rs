@@ -195,6 +195,11 @@ pub struct IrCheckedProperty {
 #[derive(Clone, Debug)]
 pub struct MemberExtProp {
     pub name: String,
+    /// Exact source spans for diagnostics about the declaration and its accessors. Dependency and
+    /// compiler-generated member extensions have no source location.
+    pub diagnostic_span: Option<crate::diag::Span>,
+    pub getter_diagnostic_span: Option<crate::diag::Span>,
+    pub setter_diagnostic_span: Option<crate::diag::Span>,
     /// Stable source declaration order. This identifies the property for declaration-owned facts
     /// such as its checked type spelling; `name` is metadata payload and may be shared by overloads.
     pub source_order: u32,

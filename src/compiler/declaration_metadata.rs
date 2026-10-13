@@ -105,6 +105,21 @@ pub(super) fn top_level_property_retains_suppressed_source_application(
         .any(|annotation| info.retains_suppressed_source_property_application(annotation))
 }
 
+/// The PROPERTY-targeted applications declared on a separately hoisted `companion { ... }`
+/// property. The property is not part of its classifier's ordinary AST property lists, so its
+/// checked applications cross the metadata handoff with that declaration itself.
+pub(super) fn companion_block_property_annotations(
+    property: &ast::PropDecl,
+    info: &TypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    property_site_annotations(
+        &property.annotations,
+        info,
+        false,
+        crate::types::PropertyAnnotationSite::Property,
+    )
+}
+
 pub(super) fn value_parameter_annotations(
     declared: &[ast::AnnotationRef],
     info: &TypeInfo,
