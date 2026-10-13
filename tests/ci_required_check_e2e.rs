@@ -160,6 +160,37 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
             && !klib_build.contains("needs:"),
         "one independent producer owns both focused KLIB binaries: {klib_build}"
     );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let klib_builder = fs::read_to_string(root.join("scripts/build-klib-test-binaries.sh"))
+        .expect("read focused KLIB binary builder");
+    assert!(
+        klib_builder.contains("--lib --test klib_e2e")
+            && klib_builder.contains("--features focused-klib-tests")
+            && !klib_builder.contains("--test e2e"),
+        "the focused producer must not compile the complete e2e graph: {klib_builder}"
+    );
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo manifest");
+    assert!(
+        manifest.contains(
+            "name = \"klib_e2e\"\npath = \"tests/klib_e2e.rs\"\nrequired-features = [\"focused-klib-tests\"]"
+        ),
+        "the focused target stays opt-in instead of duplicating tests in the ordinary suite: {manifest}"
+    );
+    let focused_klib =
+        fs::read_to_string(root.join("tests/klib_e2e.rs")).expect("read focused KLIB test target");
+    for module in [
+        "klib_class_surface_e2e",
+        "klib_container_e2e",
+        "klib_semantic_e2e",
+        "outcome_lists_guard_e2e",
+        "value_class_declaration_e2e",
+        "native_value_classes_e2e",
+    ] {
+        assert!(
+            focused_klib.contains(&format!("mod {module};")),
+            "the focused target preserves the Native row's existing {module} inventory: {focused_klib}"
+        );
+    }
     let tool_build = job(&workflow, "build-tool-bins");
     assert!(
         tool_build.contains("cargo build --profile gate -p krusty-cli")
