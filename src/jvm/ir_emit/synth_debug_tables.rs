@@ -186,7 +186,8 @@ pub(super) fn attach_synth_debug_tables(
     }
     // HOISTED companion properties: no companion field, but the delegating accessors get the same
     // debug shape kotlinc gives ordinary accessors (getter: `this` only; a `var` setter also has
-    // its `<set-?>` value parameter, guarded when the property type is a non-null reference).
+    // its `<set-?>` value parameter, guarded when the property type is a non-null reference). An
+    // explicit setter keeps its own header line; otherwise the setter uses the property line.
     // A `@JvmField` property has NO accessors — nothing to describe.
     for (property_index, property) in c.properties.iter().enumerate() {
         if property.backing_field.is_some()
@@ -206,6 +207,11 @@ pub(super) fn attach_synth_debug_tables(
         let (g, s) = accessor_jvm_names(c, &property.name);
         cw.set_method_debug(&g, &format!("(){pd}"), Some((0, pline)), &this_only);
         if hoisted.is_var {
+            let setter_line = if property.accessor_lines.setter != 0 {
+                property.accessor_lines.setter
+            } else {
+                pline
+            };
             let set_pc = if param_assertions && is_nonnull_ref(&property.name, hoisted.ty) {
                 aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
             } else {
@@ -214,7 +220,7 @@ pub(super) fn attach_synth_debug_tables(
             cw.set_method_debug(
                 &s,
                 &format!("({pd})V"),
-                Some((set_pc, pline)),
+                Some((set_pc, setter_line)),
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
                     ("<set-?>".to_string(), pd.clone(), 1),

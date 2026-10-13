@@ -1108,6 +1108,13 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
 /// `JvmProtoBuf.propertySignature` (f100): the field and accessors a JVM facade realizes the
 /// property with.
 fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
+    // The annotation marker is f2 and kotlinc interns its signature before either accessor, even
+    // though the field (f1) is serialized first below. Build every nested method record in that
+    // visit order so the package string table matches the class-metadata builder.
+    let annotation_method = m
+        .annotation_method
+        .as_ref()
+        .map(|(name, descriptor)| jvm_method_sig(st, name, descriptor));
     // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
     // entry alone.
     let (getter, setter) = if m.is_const {
@@ -1131,8 +1138,8 @@ fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
         }
         jvm.field_message(1, &field);
     }
-    if let Some((name, descriptor)) = &m.annotation_method {
-        jvm.field_message(2, &jvm_method_sig(st, name, descriptor));
+    if let Some(annotation_method) = &annotation_method {
+        jvm.field_message(2, annotation_method);
     }
     if let Some(getter) = &getter {
         jvm.field_message(3, getter);

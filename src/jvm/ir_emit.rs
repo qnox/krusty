@@ -1971,13 +1971,16 @@ fn return_primitive(code: &mut CodeBuilder, ty: Ty) {
 fn property_marker_signature(
     ir: &IrFile,
     c: &crate::ir::IrClass,
-    property: &str,
+    source_order: u32,
 ) -> Option<(String, String)> {
     let marker = ir
         .property_annotation_markers
-        .get(&(c.fq_name_id(), property.to_string()))?;
+        .get(&(c.fq_name_id(), source_order))?;
     let function = ir.functions.get(*marker as usize)?;
-    Some((function.name.clone(), "()V".to_string()))
+    Some((
+        function.name.clone(),
+        ir_method_desc(&function.params, &function.ret),
+    ))
 }
 
 fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
@@ -2063,10 +2066,12 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
 /// setter synthesized, and a custom setter still needs its implicit default getter. A same-named method
 /// with a different return descriptor does not hide the accessor.
 #[derive(Clone, Copy)]
-enum PropertyAccessorSide {
+pub(super) enum PropertyAccessorSide {
     Getter,
     Setter,
 }
+
+pub(in crate::jvm) use declared_property_accessor::emitted_signature as declared_property_accessor_signature;
 
 /// What emitting one class's property accessors (and the `$annotations` markers beside them) needs
 /// besides the IR: the class's JVM name, its file facade, the signature formatter, and the emit
@@ -2119,7 +2124,7 @@ fn emit_declared_property_accessors(
         // method table (and the constant pool behind it) matches kotlinc's.
         if let Some(&marker) = ir
             .property_annotation_markers
-            .get(&(c.fq_name_id(), property.name.clone()))
+            .get(&(c.fq_name_id(), property.source_order))
         {
             // The marker is STATIC (kotlinc's shape): no `this` slot.
             emit_method(
@@ -2200,7 +2205,7 @@ fn emit_scheduled_member(
             // directly after that property's accessors — it has no source order of its own.
             if let Some(&marker) = ir
                 .property_annotation_markers
-                .get(&(c.fq_name_id(), property.name.clone()))
+                .get(&(c.fq_name_id(), property.source_order))
             {
                 // The marker is STATIC (kotlinc's shape): no `this` slot.
                 emit_method(

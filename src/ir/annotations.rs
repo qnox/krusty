@@ -46,6 +46,9 @@ pub struct RetainedAnnotation {
 /// the declaration onto its physical representation (a JVM marker method, for example).
 #[derive(Clone, Debug)]
 pub struct PropertyAnnotations {
+    /// Stable source declaration order. This is the declaration identity; `property` is payload and
+    /// may be shared by an ordinary property and a member extension property.
+    pub source_order: u32,
     pub property: String,
     pub annotations: DeclarationAnnotations,
 }

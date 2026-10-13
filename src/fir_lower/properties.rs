@@ -178,6 +178,8 @@ pub(super) fn predeclare_properties(
                     IrCheckedProperty {
                         declaration,
                         diagnostic_span: None,
+                        getter_diagnostic_span: None,
+                        setter_diagnostic_span: None,
                         source_order,
                         decl_line: 0,
                         decl_start_line: 0,
@@ -937,6 +939,8 @@ fn record_companion_block_property(
             class,
             name: property.name.clone(),
             diagnostic_span: property.diagnostic_span,
+            getter_diagnostic_span: property.getter_diagnostic_span,
+            setter_diagnostic_span: property.setter_diagnostic_span,
             ty: property.ty,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_const: property.flags.has(DeclarationFlags::CONST),
@@ -1397,6 +1401,8 @@ fn materialize_member_property(
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
         diagnostic_span: property.diagnostic_span,
+        getter_diagnostic_span: property.getter_diagnostic_span,
+        setter_diagnostic_span: property.setter_diagnostic_span,
         context_params: named_context_parameters(index, property.declaration, &context_parameters)?,
         source_order,
         decl_line: 0,

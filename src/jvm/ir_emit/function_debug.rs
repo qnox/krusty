@@ -6,7 +6,8 @@ use crate::jvm::classfile::ClassWriter;
 
 /// Attach kotlinc's `LineNumberTable` + `LocalVariableTable` to a declared method. Source methods
 /// take their line/name identities from lowering; generated methods use their producer-owned
-/// publication contract. Both paths reject incomplete parameter identities.
+/// publication contract. A property-annotation marker has no source line but still publishes its
+/// receiver/context parameters as locals. Every path rejects incomplete parameter identities.
 pub(super) fn attach_declared_function_debug(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
@@ -17,6 +18,14 @@ pub(super) fn attach_declared_function_debug(
     let Some(function) = ir.functions.get(fid as usize) else {
         return;
     };
+    if ir
+        .property_annotation_markers
+        .values()
+        .any(|&marker| marker == fid)
+    {
+        attach_property_annotation_marker_debug(ir, fid, cw);
+        return;
+    }
     let generated = ir.generated_function_publication(fid);
     let line = match generated {
         Some(publication) if publication.debug.records_locals() => publication.debug.line(),
@@ -111,6 +120,32 @@ pub(super) fn attach_declared_function_debug(
         &descriptor,
         &[(body_pc, start), (return_pc, fallthrough_line)],
     );
+}
+
+fn attach_property_annotation_marker_debug(ir: &IrFile, fid: u32, cw: &mut ClassWriter) {
+    let function = &ir.functions[fid as usize];
+    if function.body.is_none() {
+        return;
+    }
+    let param_tys = jvm_function_params(ir, fid);
+    let identities = ir.function_parameter_identities(fid).unwrap_or_default();
+    assert_eq!(
+        identities.len(),
+        param_tys.len(),
+        "a property annotation marker retains every parameter identity"
+    );
+    let names = crate::jvm::parameter_names::property_annotation_marker_locals(ir, fid, &param_tys)
+        .unwrap_or_default();
+    let mut slot = 0;
+    let mut locals = Vec::new();
+    for (ty, name) in param_tys.iter().zip(names) {
+        if let Some(name) = name {
+            locals.push((name, crate::jvm::names::type_descriptor(*ty), slot));
+        }
+        slot += slot_words(*ty);
+    }
+    let descriptor = method_descriptor(&param_tys, function.ret);
+    cw.set_method_debug(&function.name, &descriptor, None, &locals);
 }
 
 /// `iconst_0` plus `istore` of the `$i$f$` local an emitted top-level inline function opens with.

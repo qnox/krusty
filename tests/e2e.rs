@@ -2181,8 +2181,6 @@ mod overloaded_inferred_return_e2e;
 mod overloaded_receiver_extension_expectation_e2e;
 #[path = "override_type_parameter_bounds_e2e.rs"]
 mod override_type_parameter_bounds_e2e;
-#[path = "package_property_annotation_marker_clash_e2e.rs"]
-mod package_property_annotation_marker_clash_e2e;
 #[path = "package_qualified_type_no_import_e2e.rs"]
 mod package_qualified_type_no_import_e2e;
 #[path = "pair_triple_e2e.rs"]

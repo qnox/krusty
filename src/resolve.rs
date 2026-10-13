@@ -36866,13 +36866,13 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn annotations_contain_in_scope(
+    fn resolved_annotation_in_scope<'b>(
         &self,
         scope: &CheckerScope<'_>,
-        annotations: &[AnnotationRef],
+        annotations: &'b [AnnotationRef],
         identity: &str,
-    ) -> bool {
-        annotations.iter().any(|annotation| {
+    ) -> Option<&'b AnnotationRef> {
+        annotations.iter().find(|annotation| {
             self.annotation_identity_in_scope(scope, annotation)
                 .is_some_and(|resolved| resolved.matches(identity))
         })
@@ -36910,11 +36910,12 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         annotations: &[AnnotationRef],
     ) -> bool {
-        self.annotations_contain_in_scope(
+        self.resolved_annotation_in_scope(
             scope,
             annotations,
             "kotlin/internal/LowPriorityInOverloadResolution",
         )
+        .is_some()
     }
 
     fn parameter_has_implicit_integer_coercion(
@@ -36922,11 +36923,12 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         annotations: &[AnnotationRef],
     ) -> bool {
-        self.annotations_contain_in_scope(
+        self.resolved_annotation_in_scope(
             scope,
             annotations,
             "kotlin/internal/ImplicitIntegerCoercion",
         )
+        .is_some()
     }
 
     fn implicit_integer_coercion_applies(
@@ -48035,15 +48037,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn has_resolved_annotation(
-        &self,
-        scope: &CheckerScope<'_>,
-        annotations: &[crate::ast::AnnotationRef],
-        identity: &str,
-    ) -> bool {
-        self.annotations_contain_in_scope(scope, annotations, identity)
-    }
-
     fn is_optional_expectation_classifier(&self, classifier: TypeName) -> bool {
         self.libraries.is_optional_expectation(classifier)
             || self.resolved_index.is_some_and(|index| {
@@ -48992,12 +48985,14 @@ impl<'a> Checker<'a> {
             }
             prop_ty
         };
-        if self.has_resolved_annotation(scope, &p.annotations, "kotlin/jvm/JvmField")
-            && self.ty_is_value_class(resolved_property_ty)
+        let jvm_field_span = self
+            .resolved_annotation_in_scope(scope, &p.annotations, "kotlin/jvm/JvmField")
+            .map(|annotation| Span::new(annotation.at, annotation.span.hi));
+        if let Some(span) = jvm_field_span.filter(|_| self.ty_is_value_class(resolved_property_ty))
         {
             self.diags.error(
-                p.span,
-                "@JvmField cannot be applied to a property of a value class type".to_string(),
+                span,
+                "jvmField cannot be applied to a property of a value class type.".to_string(),
             );
         }
         self.this_extension_receiver = prev_extension_receiver;
@@ -49595,7 +49590,7 @@ impl<'a> Checker<'a> {
         });
         let current_classifier =
             current_owner.and_then(|owner| self.fed_source().classifier(owner));
-        let mut any_jvm_field = false;
+        let (mut any_jvm_field, mut first_jvm_field_span) = (false, None);
         let mut interface_companion_uniform = true;
         let mut invalid_value_class_fields = Vec::new();
         let declared_property_ty = |name: &str| {
@@ -49606,9 +49601,14 @@ impl<'a> Checker<'a> {
                 .map(|property| property.ty)
         };
         for property in &cl.body_props {
-            let annotated =
-                self.has_resolved_annotation(scope, &property.annotations, "kotlin/jvm/JvmField");
+            let jvm_field_span = self
+                .resolved_annotation_in_scope(scope, &property.annotations, "kotlin/jvm/JvmField")
+                .map(|annotation| Span::new(annotation.at, annotation.span.hi));
+            let annotated = jvm_field_span.is_some();
             any_jvm_field |= annotated;
+            if first_jvm_field_span.is_none() {
+                first_jvm_field_span = jvm_field_span;
+            }
             interface_companion_uniform &= annotated
                 && !property.is_var
                 && property.visibility.is_public()
@@ -49616,31 +49616,40 @@ impl<'a> Checker<'a> {
             if annotated
                 && declared_property_ty(&property.name).is_some_and(|ty| self.ty_is_value_class(ty))
             {
-                invalid_value_class_fields.push(property.span);
+                invalid_value_class_fields.push(
+                    jvm_field_span.expect("an annotated property retains its annotation span"),
+                );
             }
         }
         for property in cl.props.iter().filter(|property| property.is_property) {
-            let annotated =
-                self.has_resolved_annotation(scope, &property.annotations, "kotlin/jvm/JvmField");
+            let jvm_field_span = self
+                .resolved_annotation_in_scope(scope, &property.annotations, "kotlin/jvm/JvmField")
+                .map(|annotation| Span::new(annotation.at, annotation.span.hi));
+            let annotated = jvm_field_span.is_some();
             any_jvm_field |= annotated;
+            if first_jvm_field_span.is_none() {
+                first_jvm_field_span = jvm_field_span;
+            }
             interface_companion_uniform &=
                 annotated && !property.is_var && property.visibility.is_public();
             if annotated
                 && declared_property_ty(&property.name).is_some_and(|ty| self.ty_is_value_class(ty))
             {
-                invalid_value_class_fields.push(property.span);
+                invalid_value_class_fields.push(
+                    jvm_field_span.expect("an annotated property retains its annotation span"),
+                );
             }
         }
         for span in invalid_value_class_fields {
             self.diags.error(
                 span,
-                "@JvmField cannot be applied to a property of a value class type".to_string(),
+                "jvmField cannot be applied to a property of a value class type.".to_string(),
             );
         }
         if companion_outer_is_interface && any_jvm_field && !interface_companion_uniform {
             self.diags.error(
-                cl.span,
-                "an interface companion using @JvmField must contain only public final @JvmField properties"
+                first_jvm_field_span.expect("an interface companion with @JvmField retains its span"),
+                "jvmField could be applied only if all interface companion properties are 'public final val' with '@JvmField' annotation."
                     .to_string(),
             );
         }

@@ -29,6 +29,9 @@ pub struct IrCompanionBlockProperty {
     pub name: String,
     /// Exact source name span for representation-level declaration-clash diagnostics.
     pub diagnostic_span: Option<crate::diag::Span>,
+    /// Exact accessor declaration spans, beginning at the first accessor annotation when present.
+    pub getter_diagnostic_span: Option<crate::diag::Span>,
+    pub setter_diagnostic_span: Option<crate::diag::Span>,
     pub ty: Ty,
     pub is_var: bool,
     pub is_const: bool,

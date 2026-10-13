@@ -541,7 +541,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                     ir,
                     property.setter,
                 ),
-                annotations: property_annotations(c, &property.name),
+                annotations: property_annotations(c, property.source_order),
                 field_annotations: property_backing_field_annotations(c, &property.name),
                 accessor_annotations: crate::metadata::AccessorMetadataAnnotations::of(
                     &property.accessor_annotations,
@@ -581,7 +581,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
             receiver: None,
             type_params: Vec::new(),
             setter_parameter_name: None,
-            annotations: property_annotations(c, &prop.name),
+            annotations: property_annotations(c, prop.source_order),
             field_annotations: property_backing_field_annotations(c, &prop.name),
             accessor_annotations: Default::default(),
             companion: false,
@@ -600,7 +600,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                 (
                     property.source_order,
                     PropertyOrigin::CompanionBlock(index),
-                    companion_block_property(ir, property),
+                    companion_block_property(ir, c, property),
                 )
             }),
     );
@@ -646,7 +646,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
             setter_parameter_name: crate::metadata::declaration_records::explicit_setter_name(
                 ir, ext.setter,
             ),
-            annotations: property_annotations(c, &ext.name),
+            annotations: property_annotations(c, ext.source_order),
             field_annotations: Default::default(),
             accessor_annotations: Default::default(),
             companion: false,
@@ -1311,6 +1311,7 @@ fn any_override(member: IrValueClassAnyMember) -> FnMeta {
 /// A `companion { … }` block property's record: a static member of the class declaring the block.
 fn companion_block_property(
     ir: &IrFile,
+    class: &IrClass,
     property: &crate::ir::IrCompanionBlockProperty,
 ) -> PropMeta {
     PropMeta {
@@ -1332,7 +1333,7 @@ fn companion_block_property(
             ir,
             property.setter,
         ),
-        annotations: Default::default(),
+        annotations: property_annotations(class, property.source_order),
         field_annotations: Default::default(),
         accessor_annotations: Default::default(),
         companion: true,
@@ -1464,11 +1465,11 @@ pub(crate) fn sorted_sealed_subclasses(c: &IrClass) -> Vec<TypeName> {
 /// The annotations of a PROPERTY's own applications. The records name the same applications a
 /// target's annotation carrier holds; a property whose only application is an erased optional
 /// expectation has no carrier yet still declares annotations.
-fn property_annotations(c: &IrClass, property: &str) -> MetadataAnnotations {
+fn property_annotations(c: &IrClass, source_order: u32) -> MetadataAnnotations {
     MetadataAnnotations::of_optional(
         c.property_annotations
             .iter()
-            .find(|annotations| annotations.property == property)
+            .find(|annotations| annotations.source_order == source_order)
             .map(|annotations| &annotations.annotations),
     )
 }

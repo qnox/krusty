@@ -412,6 +412,8 @@ pub(super) fn materialize_member_delegate(
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
         diagnostic_span: property.diagnostic_span,
+        getter_diagnostic_span: property.getter_diagnostic_span,
+        setter_diagnostic_span: property.setter_diagnostic_span,
         context_params: Vec::new(),
         source_order,
         decl_line: 0,

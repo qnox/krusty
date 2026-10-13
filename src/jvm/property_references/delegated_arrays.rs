@@ -235,17 +235,36 @@ pub(super) fn place(ir: &mut IrFile, operands: Vec<DelegatedOperand>) -> Delegat
             .enumerate()
             .map(|(slot, operand)| {
                 index.insert((owner, operand.property), slot);
-                operand.element.clone()
+                let line = match operand.property {
+                    DelegatedProperty::Declared(property) => ir
+                        .checked_properties
+                        .get(&property)
+                        .map_or(0, |declaration| declaration.decl_line),
+                    DelegatedProperty::Local(_) => 0,
+                };
+                (operand.element.clone(), line)
             })
             .collect::<Vec<_>>();
         allocated.push((owner, elements));
     }
     for (owner, elements) in allocated {
-        let elements = elements.into_iter().map(|element| ir.add_expr(element));
-        arrays.by_owner.insert(owner, elements.collect());
-        arrays
-            .field_names
-            .insert(owner, generated_field_name(ir, owner));
+        let field_name = generated_field_name(ir, owner);
+        // A public source field can displace the generated array from its canonical spelling.
+        // kotlinc then retains the declaration line of each delegated property whose reflected
+        // value is constructed; a canonical array suppresses the complete `<clinit>` line table.
+        let displaced = field_name != FIELD;
+        let elements = elements
+            .into_iter()
+            .map(|(element, line)| {
+                let expression = ir.add_expr(element);
+                if displaced && line != 0 {
+                    ir.expr_source_lines.insert(expression, line);
+                }
+                expression
+            })
+            .collect();
+        arrays.by_owner.insert(owner, elements);
+        arrays.field_names.insert(owner, field_name);
     }
     for operand in operands {
         let slot = index[&(operand.owner, operand.property)];

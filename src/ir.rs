@@ -1189,7 +1189,7 @@ pub struct IrClass {
     /// class whose fields carry none.
     pub field_annotations: Vec<FieldAnnotations>,
     /// User annotations that landed on the PROPERTY itself (`@Anno val v`, where the annotation's
-    /// `@Target` admits `PROPERTY`), by property name. Kotlin properties have no class-file
+    /// `@Target` admits `PROPERTY`), by stable property source order. Kotlin properties have no class-file
     /// declaration, so these are emitted onto a synthetic `get<Name>$annotations()` marker method
     /// that the property's `JvmPropertySignature` names. Empty for a class whose properties carry
     /// none. The marker pass consumes every entry that retains an annotation; an entry left after
@@ -1880,10 +1880,10 @@ pub struct IrFile {
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: crate::fx_hash::HashMap<u32, DeclarationAnnotations>,
-    /// `(class, property name)` → the synthetic `get<Name>$annotations()` marker method that carries
+    /// `(class, property source order)` → the synthetic `get<Name>$annotations()` marker method that carries
     /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
-    pub property_annotation_markers: crate::fx_hash::HashMap<(TypeName, String), u32>,
+    pub property_annotation_markers: crate::fx_hash::HashMap<(TypeName, u32), u32>,
     /// Package property declaration → the JVM facade's synthetic annotation marker. Populated only
     /// by JVM realization; common lowering carries only the property's semantic annotation facts.
     jvm_package_property_annotation_markers: crate::fx_hash::HashMap<crate::fir::PropertyId, u32>,

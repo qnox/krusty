@@ -60,6 +60,91 @@ fn annotations_on_member_accessors_match_kotlinc() {
 }
 
 #[test]
+fn same_named_member_and_extension_properties_keep_distinct_annotation_markers() {
+    assert_module_matches_kotlinc(&[(
+        "OverloadedMarkers.kt",
+        "package accessors\n\
+         \n\
+         @Target(AnnotationTarget.PROPERTY)\n\
+         annotation class Marker(val value: String)\n\
+         \n\
+         class OverloadedMarkers {\n\
+         \x20   @Marker(\"member\") val item: Int = 1\n\
+         \x20   @Marker(\"extension\") val String.item: Int get() = length\n\
+         }\n",
+    )]);
+}
+
+#[test]
+fn a_member_extension_marker_clash_renders_its_receiver_parameter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "ExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   fun `getItem$annotations`(receiver: String) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_function_marker_clash_renders_its_receiver() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "ExtensionFunctionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   fun String.`getItem$annotations`() {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_renamed_property_accessor_clashes_with_an_extension_marker() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "AccessorMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   var other: String = \"\"\n\
+             \x20       @JvmName(\"getItem\\$annotations\") set(value) { field = value }\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_renamed_companion_block_accessor_clashes_with_a_context_property_marker() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "CompanionBlockAccessorMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   context(_: Int)\n\
+             \x20   @Marker val item: Int get() = 0\n\
+             \x20   companion {\n\
+             \x20       var other: Int = 0\n\
+             \x20           @JvmName(\"getItem\\$annotations\") set(value) { field = value }\n\
+             \x20   }\n\
+             }\n",
+        )],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
 fn annotations_on_top_level_accessors_match_kotlinc() {
     assert_module_matches_kotlinc(&[
         ("Annotations.kt", ANNOTATIONS),
@@ -325,6 +410,51 @@ fn a_suppressed_field_site_on_a_class_is_published_on_the_class() {
          annotation class ClassOrField\n\
          @Suppress(\"WRONG_ANNOTATION_TARGET_WITH_USE_SITE_TARGET\")\n\
          @field:ClassOrField class C\n",
+    )]);
+}
+
+/// A source member is not the synthetic carrier merely because its spelling matches the marker
+/// name. The generated no-arg marker and the source declaration are a physical JVM clash.
+#[test]
+fn a_suppressed_property_marker_clashes_with_a_same_signature_source_member() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "MarkerClash.kt",
+            "class C {\n\
+             \x20   @Suppress(\"VOLATILE_ON_VALUE\")\n\
+             \x20   @Volatile val value: Int = 1\n\
+             \x20   fun `getValue$annotations`() {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// A same-named source overload with a parameter remains separate from the generated `()V`
+/// marker. Marker reuse is selected by compiler provenance and exact signature, not spelling.
+#[test]
+fn a_suppressed_property_marker_coexists_with_a_source_overload() {
+    assert_module_matches_kotlinc(&[(
+        "MarkerOverload.kt",
+        "class C {\n\
+         \x20   @Suppress(\"VOLATILE_ON_VALUE\")\n\
+         \x20   @Volatile val value: Int = 1\n\
+         \x20   fun `getValue$annotations`(number: Int) {}\n\
+         }\n",
+    )]);
+}
+
+/// A Kotlin `Unit` property getter returns the boxed `kotlin.Unit`; it does not use the JVM `void`
+/// descriptor of an annotation marker. The two same-named methods therefore coexist.
+#[test]
+fn a_suppressed_property_marker_coexists_with_a_unit_property_getter() {
+    assert_module_matches_kotlinc(&[(
+        "MarkerProperty.kt",
+        "class C {\n\
+         \x20   @Suppress(\"VOLATILE_ON_VALUE\")\n\
+         \x20   @Volatile val foo: Int = 1\n\
+         \x20   val `foo$annotations`: Unit = Unit\n\
+         }\n",
     )]);
 }
 

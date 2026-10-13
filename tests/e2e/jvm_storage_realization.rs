@@ -20,6 +20,8 @@ mod inner_outer_field_signature_e2e;
 mod jvmfield_companion_e2e;
 #[path = "../metadata_jvm_field_e2e.rs"]
 mod metadata_jvm_field_e2e;
+#[path = "../package_property_annotation_marker_clash_e2e.rs"]
+mod package_property_annotation_marker_clash_e2e;
 #[path = "../property_accessor_annotation_e2e.rs"]
 mod property_accessor_annotation_e2e;
 #[path = "../unread_field_annotation_order_e2e.rs"]

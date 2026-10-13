@@ -275,16 +275,23 @@ fn publishes_api(ir: &IrFile, function: FunId) -> bool {
     ir.classes.iter().any(|class| {
         class.properties.iter().any(|property| {
             (property.getter == Some(function) || property.setter == Some(function))
-                && property_publishes_api(class, &property.name)
+                && property_publishes_api(class, property.source_order)
+        })
+    }) || ir.member_ext_props.iter().any(|(owner, properties)| {
+        let Some(class) = ir.classes.iter().find(|class| class.fq_name == *owner) else {
+            return false;
+        };
+        properties.iter().any(|property| {
+            (property.getter == function || property.setter == Some(function))
+                && property_publishes_api(class, property.source_order)
         })
     })
 }
 
-fn property_publishes_api(class: &crate::ir::IrClass, property: &str) -> bool {
-    class
-        .property_annotations
-        .iter()
-        .any(|entry| entry.property == property && annotations_publish_api(&entry.annotations))
+fn property_publishes_api(class: &crate::ir::IrClass, source_order: u32) -> bool {
+    class.property_annotations.iter().any(|entry| {
+        entry.source_order == source_order && annotations_publish_api(&entry.annotations)
+    })
 }
 
 fn annotations_publish_api(annotations: &crate::ir::DeclarationAnnotations) -> bool {
@@ -311,7 +318,7 @@ fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<Synthesi
         let Some(class) = ir.classes.get(class_id as usize) else {
             continue;
         };
-        if class.fq_name == facade || property_publishes_api(class, &checked.name) {
+        if class.fq_name == facade || property_publishes_api(class, checked.source_order) {
             continue;
         }
         let Some(member) = class

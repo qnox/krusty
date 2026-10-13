@@ -165,6 +165,21 @@ pub(super) fn accept_active_debug_metadata(
                 property.diagnostic_span = body_property
                     .map(|property| property.span)
                     .or_else(|| constructor_parameter.map(|property| property.span));
+                property.getter_diagnostic_span = body_property.and_then(|property| {
+                    let mut span = property.getter_span?;
+                    if let Some(annotation) = property.getter_annotations.first() {
+                        span.lo = annotation.at;
+                    }
+                    Some(span)
+                });
+                property.setter_diagnostic_span = body_property.and_then(|property| {
+                    let setter = property.setter.as_ref()?;
+                    let mut span = setter.span;
+                    if let Some(annotation) = setter.annotations.first() {
+                        span.lo = annotation.at;
+                    }
+                    Some(span)
+                });
                 if let Some(line) = property_line.filter(|line| *line != 0) {
                     property.decl_line = line;
                     let accessor_lines = accessor_lines.unwrap_or_default();
@@ -351,13 +366,38 @@ pub(super) fn attach_checked_declaration_metadata(
     let Some(class_id) = ir.checked_classifier_classes.get(&stable_class).copied() else {
         return;
     };
+    let property_source_orders = class
+        .props
+        .iter()
+        .enumerate()
+        .filter(|(_, property)| property.is_property)
+        .map(|(property_index, _)| {
+            active
+                .constructor_property_declaration(
+                    source_class,
+                    u32::try_from(property_index).expect("too many constructor properties"),
+                )
+                .and_then(|declaration| index.source_order(declaration))
+        })
+        .chain((0..class.body_props.len()).map(|property_index| {
+            active
+                .class_body_property_declaration(
+                    source_class,
+                    u32::try_from(property_index).expect("too many class properties"),
+                )
+                .and_then(|declaration| index.source_order(declaration))
+        }))
+        .collect::<Vec<_>>();
     let classifier = ir.classes[class_id as usize].fq_name_id();
     let ir_class = &mut ir.classes[class_id as usize];
     ir_class.applied_annotations =
         super::declaration_metadata::declaration_annotations(&class.annotations, info);
     ir_class.field_annotations = super::declaration_metadata::class_field_annotations(class, info);
-    ir_class.property_annotations =
-        super::declaration_metadata::class_property_annotations(class, info);
+    ir_class.property_annotations = super::declaration_metadata::class_property_annotations(
+        class,
+        info,
+        &property_source_orders,
+    );
     ir_class.primary_ctor_annotations = super::declaration_metadata::declaration_annotations(
         class
             .primary_ctor_annotations

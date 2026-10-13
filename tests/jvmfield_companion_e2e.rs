@@ -336,13 +336,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let diagnostics = common::front_end_diagnostics_files_with_stdlib(&[src]);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("@JvmField")),
-        "mixed interface companion must be rejected: {diagnostics:?}"
-    );
+    common::assert_error_blocks_match_kotlinc(&[("MixedInterfaceCompanion.kt", src)], &[]);
 }
 
 /// Kotlin rejects a value-class-typed `@JvmField` property. This is a declaration-semantic error,
@@ -359,13 +353,7 @@ class C {
 }
 fun box(): String = if (C.a.x == 41) "OK" else "F:" + C.a.x
 "#;
-    let diagnostics = common::front_end_diagnostics_files_with_stdlib(&[src]);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("@JvmField")),
-        "value-class @JvmField must be rejected: {diagnostics:?}"
-    );
+    common::assert_error_blocks_match_kotlinc(&[("ValueClassJvmField.kt", src)], &[]);
 }
 
 // ---- Runtime: write receiver side effects --------------------------------------------------------

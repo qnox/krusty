@@ -435,11 +435,16 @@ impl PluginContext {
         class: ClassId,
         property: &str,
     ) -> Option<&'ir crate::ir::DeclarationAnnotations> {
-        ir.classes
-            .get(class as usize)?
+        let class = ir.classes.get(class as usize)?;
+        let source_order = class
+            .properties
+            .iter()
+            .find(|candidate| candidate.name == property)?
+            .source_order;
+        class
             .property_annotations
             .iter()
-            .find(|annotations| annotations.property == property)
+            .find(|annotations| annotations.source_order == source_order)
             .map(|annotations| &annotations.annotations)
     }
 

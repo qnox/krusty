@@ -161,8 +161,20 @@ pub(super) fn class_field_annotations(
 pub(super) fn class_property_annotations(
     class: &ast::ClassDecl,
     info: &TypeInfo,
+    source_orders: &[Option<u32>],
 ) -> Vec<crate::ir::PropertyAnnotations> {
     let mut out = Vec::new();
+    let declaration_count = class
+        .props
+        .iter()
+        .filter(|parameter| parameter.is_property)
+        .count()
+        + class.body_props.len();
+    assert_eq!(
+        declaration_count,
+        source_orders.len(),
+        "every class property has one stable declaration identity slot"
+    );
     let declarations = class
         .props
         .iter()
@@ -174,15 +186,18 @@ pub(super) fn class_property_annotations(
                 .iter()
                 .map(|property| (&property.name, &property.annotations, false)),
         );
-    for (name, declared, on_constructor_parameter) in declarations {
+    for ((name, declared, on_constructor_parameter), &source_order) in
+        declarations.zip(source_orders)
+    {
         let annotations = property_site_annotations(
             declared,
             info,
             on_constructor_parameter,
             crate::types::PropertyAnnotationSite::Property,
         );
-        if annotations.declares_annotations() {
+        if let Some(source_order) = source_order.filter(|_| annotations.declares_annotations()) {
             out.push(crate::ir::PropertyAnnotations {
+                source_order,
                 property: name.clone(),
                 annotations,
             });

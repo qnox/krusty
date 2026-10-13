@@ -307,15 +307,42 @@ fn report_jvm_field_companion_block_const_clashes(ir: &IrFile, diags: &mut DiagS
 
 /// Source methods whose physical JVM name and descriptor are identical. Kotlin already rejected
 /// members that share a declaration signature, so a group here differs in Kotlin and collides only
-/// after erasure. Methods without a recorded `fun` offset are representations, not declarations.
+/// after erasure. A generated property-annotation marker is the one representation that must join
+/// these groups: it occupies the class method namespace and kotlinc reports its clash at the class
+/// header as well as at each colliding source method.
+#[derive(Clone, Copy)]
+enum MemberMethodDeclaration {
+    Source {
+        offset: u32,
+        function: FunId,
+    },
+    PropertyAnnotationMarker {
+        offset: u32,
+        function: FunId,
+        source_order: u32,
+    },
+    PropertyAccessor {
+        offset: u32,
+        function: Option<FunId>,
+        property: PropertyAccessorDeclaration,
+        setter: bool,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum PropertyAccessorDeclaration {
+    Member(usize),
+    CompanionBlock(u32),
+}
+
 fn report_platform_declaration_clashes(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
     diags: &mut DiagSink,
 ) -> bool {
     let mut clashes = Vec::new();
-    for class in &ir.classes {
-        let mut groups: crate::fx_hash::HashMap<(String, String), Vec<u32>> =
+    for (class_id, class) in ir.classes.iter().enumerate() {
+        let mut groups: crate::fx_hash::HashMap<(String, String), Vec<MemberMethodDeclaration>> =
             crate::fx_hash::HashMap::default();
         for &method in &class.methods {
             let Some(&offset) = ir.fn_signature_offsets.get(&method) else {
@@ -328,16 +355,147 @@ fn report_platform_declaration_clashes(
             groups
                 .entry((function.name.clone(), descriptor))
                 .or_default()
-                .push(offset);
+                .push(MemberMethodDeclaration::Source {
+                    offset,
+                    function: method,
+                });
         }
-        for ((name, descriptor), offsets) in groups {
-            if offsets.len() < 2 {
+        for (property_index, property) in class.properties.iter().enumerate() {
+            for (setter, function, span, side) in [
+                (
+                    false,
+                    property.getter,
+                    property.getter_diagnostic_span,
+                    crate::jvm::ir_emit::PropertyAccessorSide::Getter,
+                ),
+                (
+                    true,
+                    property.setter,
+                    property.setter_diagnostic_span,
+                    crate::jvm::ir_emit::PropertyAccessorSide::Setter,
+                ),
+            ] {
+                let Some(offset) = span.or(property.diagnostic_span).map(|span| span.lo) else {
+                    continue;
+                };
+                let signature = if let Some(function) = function {
+                    if ir.fn_signature_offsets.contains_key(&function) {
+                        continue;
+                    }
+                    let declaration = &ir.functions[function as usize];
+                    Some((
+                        declaration.name.clone(),
+                        crate::jvm::ir_emit::function_descriptor(ir, override_results, function),
+                    ))
+                } else {
+                    crate::jvm::ir_emit::declared_property_accessor_signature(
+                        ir,
+                        class,
+                        property,
+                        side,
+                        override_results,
+                    )
+                    .map(|signature| (signature.name, signature.descriptor))
+                };
+                let Some(signature) = signature else {
+                    continue;
+                };
+                groups.entry(signature).or_default().push(
+                    MemberMethodDeclaration::PropertyAccessor {
+                        offset,
+                        function,
+                        property: PropertyAccessorDeclaration::Member(property_index),
+                        setter,
+                    },
+                );
+            }
+        }
+        for property in ir.companion_blocks.properties_of(class.fq_name_id()) {
+            for (setter, function, span) in [
+                (false, property.getter, property.getter_diagnostic_span),
+                (true, property.setter, property.setter_diagnostic_span),
+            ] {
+                let Some(function) = function else {
+                    continue;
+                };
+                if ir.fn_signature_offsets.contains_key(&function) {
+                    continue;
+                }
+                let Some(offset) = span.or(property.diagnostic_span).map(|span| span.lo) else {
+                    continue;
+                };
+                let declaration = &ir.functions[function as usize];
+                let signature = (
+                    declaration.name.clone(),
+                    crate::jvm::ir_emit::function_descriptor(ir, override_results, function),
+                );
+                groups.entry(signature).or_default().push(
+                    MemberMethodDeclaration::PropertyAccessor {
+                        offset,
+                        function: Some(function),
+                        property: PropertyAccessorDeclaration::CompanionBlock(
+                            property.source_order,
+                        ),
+                        setter,
+                    },
+                );
+            }
+        }
+        for (&(owner, source_order), &marker) in &ir.property_annotation_markers {
+            if owner != class.fq_name_id() {
                 continue;
             }
-            let message = format!(
-                "platform declaration clash: The following declarations have the same JVM signature ({name}{descriptor}):"
-            );
-            for offset in offsets {
+            let class_offset = ir
+                .class_diagnostic_span(class_id as u32)
+                .expect("a source class with an annotation marker retains its diagnostic span")
+                .lo;
+            let function = &ir.functions[marker as usize];
+            let descriptor = crate::jvm::ir_emit::function_descriptor(ir, override_results, marker);
+            groups
+                .entry((function.name.clone(), descriptor))
+                .or_default()
+                .push(MemberMethodDeclaration::PropertyAnnotationMarker {
+                    offset: class_offset,
+                    function: marker,
+                    source_order,
+                });
+        }
+        for ((name, descriptor), declarations) in groups {
+            if declarations.len() < 2 {
+                continue;
+            }
+            let includes_marker = declarations.iter().any(|declaration| {
+                matches!(
+                    declaration,
+                    MemberMethodDeclaration::PropertyAnnotationMarker { .. }
+                )
+            });
+            let message = if includes_marker {
+                let owner = class.fq_name.render().replace(['/', '$'], ".");
+                let mut listed = declarations.clone();
+                listed.sort_by_key(|declaration| match declaration {
+                    MemberMethodDeclaration::PropertyAccessor { .. } => 0,
+                    MemberMethodDeclaration::PropertyAnnotationMarker { .. } => 1,
+                    MemberMethodDeclaration::Source { .. } => 2,
+                });
+                let listed = listed
+                    .into_iter()
+                    .map(|declaration| {
+                        render_member_method_declaration(ir, class, declaration, &name, &owner)
+                    })
+                    .collect::<Vec<_>>();
+                clash_message(&name, &descriptor, &listed)
+            } else {
+                format!(
+                    "platform declaration clash: The following declarations have the same JVM signature ({name}{descriptor}):"
+                )
+            };
+            for declaration in declarations {
+                let offset = match declaration {
+                    MemberMethodDeclaration::Source { offset, .. }
+                    | MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. }
+                    | MemberMethodDeclaration::PropertyAccessor { offset, .. } => offset,
+                };
                 clashes.push((offset, message.clone()));
             }
         }
@@ -348,6 +506,287 @@ fn report_platform_declaration_clashes(
         diags.error(Span::new(offset, offset), message);
     }
     found
+}
+
+fn render_member_method_declaration(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    declaration: MemberMethodDeclaration,
+    name: &str,
+    owner: &str,
+) -> String {
+    let (function, parameters) = match declaration {
+        MemberMethodDeclaration::Source { function, .. } => {
+            return render_source_member_method(ir, function, name, owner);
+        }
+        MemberMethodDeclaration::PropertyAccessor {
+            function,
+            property,
+            setter,
+            ..
+        } => {
+            return match property {
+                PropertyAccessorDeclaration::Member(property) => {
+                    render_property_accessor_declaration(
+                        ir,
+                        &class.properties[property],
+                        function,
+                        setter,
+                        owner,
+                    )
+                }
+                PropertyAccessorDeclaration::CompanionBlock(source_order) => {
+                    let property = ir
+                        .companion_blocks
+                        .properties_of(class.fq_name_id())
+                        .find(|property| property.source_order == source_order)
+                        .expect("a recorded companion-block accessor retains its property");
+                    let callable = if setter {
+                        format!("<set-{}>", property.name)
+                    } else {
+                        format!("<get-{}>", property.name)
+                    };
+                    render_source_member_method(
+                        ir,
+                        function.expect("a source companion-block accessor has a function"),
+                        &callable,
+                        owner,
+                    )
+                }
+            };
+        }
+        MemberMethodDeclaration::PropertyAnnotationMarker {
+            function,
+            source_order,
+            ..
+        } => (
+            function,
+            property_marker_semantic_parameters(ir, class, source_order),
+        ),
+    };
+    let identities = ir
+        .function_parameter_identities(function)
+        .unwrap_or_default();
+    assert_eq!(
+        identities.len(),
+        parameters.len(),
+        "a colliding method retains one identity per semantic parameter"
+    );
+    let physical = &ir.functions[function as usize].params;
+    let marker_names =
+        crate::jvm::parameter_names::property_annotation_marker_locals(ir, function, physical)
+            .expect("a property annotation marker retains its parameter identities");
+    let mut rendered = format!("fun {}(", rendered_callable_name(name));
+    for (index, ty) in parameters.into_iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        let parameter = marker_names[index]
+            .as_deref()
+            .expect("a marker parameter has a diagnostic spelling");
+        rendered.push_str(&rendered_callable_name(parameter));
+        rendered.push_str(": ");
+        rendered.push_str(
+            &source_type_name(ty).expect("a reported member clash has determined source types"),
+        );
+    }
+    rendered.push_str("): ");
+    let ret = ir
+        .vc_declared_sigs
+        .get(&function)
+        .map(|(_, _, ret)| *ret)
+        .unwrap_or(ir.functions[function as usize].ret);
+    rendered.push_str(
+        &source_type_name(ret).expect("a reported member clash has a determined return type"),
+    );
+    rendered.push_str(" defined in ");
+    rendered.push_str(owner);
+    rendered
+}
+
+fn render_property_accessor_declaration(
+    ir: &IrFile,
+    property: &crate::ir::IrProperty,
+    function: Option<FunId>,
+    setter: bool,
+    owner: &str,
+) -> String {
+    let callable = if setter {
+        format!("<set-{}>", property.name)
+    } else {
+        format!("<get-{}>", property.name)
+    };
+    if let Some(function) = function {
+        return render_source_member_method(ir, function, &callable, owner);
+    }
+    let mut parameters = property
+        .context_params
+        .iter()
+        .map(|(name, kind, ty)| {
+            let name = match kind {
+                crate::types::ContextParameterKind::Named => name.as_str(),
+                crate::types::ContextParameterKind::Anonymous => "_",
+                crate::types::ContextParameterKind::LegacyReceiver => "_",
+                crate::types::ContextParameterKind::None => {
+                    panic!("a property context parameter retains its semantic role")
+                }
+            };
+            format!(
+                "{}: {}",
+                rendered_callable_name(name),
+                source_type_name(*ty)
+                    .expect("a reported property-accessor clash has determined source types")
+            )
+        })
+        .collect::<Vec<_>>();
+    if setter {
+        parameters.push(format!(
+            "{}: {}",
+            rendered_callable_name("<set-?>"),
+            source_type_name(property.ty)
+                .expect("a reported property-accessor clash has a determined property type")
+        ));
+    }
+    let ret = if setter {
+        crate::types::Ty::Unit
+    } else {
+        property.ty
+    };
+    format!(
+        "fun {}({}): {} defined in {owner}",
+        rendered_callable_name(&callable),
+        parameters.join(", "),
+        source_type_name(ret)
+            .expect("a reported property-accessor clash has a determined return type")
+    )
+}
+
+fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: &str) -> String {
+    let parameters = semantic_function_parameters(ir, function);
+    let identities = ir
+        .function_parameter_identities(function)
+        .unwrap_or_default();
+    assert_eq!(
+        identities.len(),
+        parameters.len(),
+        "a colliding source method retains one identity per semantic parameter"
+    );
+    let mut contexts = Vec::new();
+    let mut receiver = None;
+    let mut values = Vec::new();
+    for (identity, &ty) in identities.iter().zip(parameters) {
+        let ty = source_type_name(ty).expect("a reported member clash has determined source types");
+        match identity.role {
+            crate::ir::IrParameterRole::ContextValue => {
+                let name = identity
+                    .source_name
+                    .as_deref()
+                    .expect("a named context parameter retains its source spelling");
+                contexts.push(format!("{}: {ty}", rendered_callable_name(name)));
+            }
+            crate::ir::IrParameterRole::AnonymousContextParameter { .. } => {
+                contexts.push(format!("_: {ty}"));
+            }
+            crate::ir::IrParameterRole::ContextReceiver { .. } => contexts.push(ty),
+            crate::ir::IrParameterRole::ExtensionReceiver => {
+                assert!(
+                    receiver.replace(ty).is_none(),
+                    "a function has one extension receiver"
+                );
+            }
+            crate::ir::IrParameterRole::Value => {
+                let name = identity
+                    .source_name
+                    .as_deref()
+                    .expect("a source value parameter retains its source spelling");
+                values.push(format!("{}: {ty}", rendered_callable_name(name)));
+            }
+            role => panic!("a source member clash contains non-source parameter role {role:?}"),
+        }
+    }
+    let mut rendered = String::new();
+    if !contexts.is_empty() {
+        rendered.push_str("context(");
+        rendered.push_str(&contexts.join(", "));
+        rendered.push_str(") ");
+    }
+    rendered.push_str("fun ");
+    if let Some(receiver) = receiver {
+        rendered.push_str(&receiver);
+        rendered.push('.');
+    }
+    rendered.push_str(&rendered_callable_name(name));
+    rendered.push('(');
+    rendered.push_str(&values.join(", "));
+    rendered.push_str("): ");
+    let ret = ir
+        .vc_declared_sigs
+        .get(&function)
+        .map(|(_, _, ret)| *ret)
+        .unwrap_or(ir.functions[function as usize].ret);
+    rendered.push_str(
+        &source_type_name(ret).expect("a reported member clash has a determined return type"),
+    );
+    rendered.push_str(" defined in ");
+    rendered.push_str(owner);
+    rendered
+}
+
+fn semantic_function_parameters(ir: &IrFile, function: FunId) -> &[crate::types::Ty] {
+    ir.vc_declared_sigs
+        .get(&function)
+        .map(|(_, parameters, _)| parameters.as_slice())
+        .or_else(|| {
+            ir.signatures
+                .get(&function)
+                .map(|signature| signature.params.as_slice())
+        })
+        .unwrap_or(&ir.functions[function as usize].params)
+}
+
+fn property_marker_semantic_parameters(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    source_order: u32,
+) -> Vec<crate::types::Ty> {
+    if let Some(property) = class
+        .properties
+        .iter()
+        .find(|property| property.source_order == source_order)
+    {
+        return property.getter.map_or_else(
+            || {
+                property
+                    .context_params
+                    .iter()
+                    .map(|(_, _, ty)| *ty)
+                    .collect()
+            },
+            |getter| semantic_function_parameters(ir, getter).to_vec(),
+        );
+    }
+    if let Some(property) = ir
+        .member_ext_props
+        .get(&class.fq_name_id())
+        .and_then(|properties| {
+            properties
+                .iter()
+                .find(|property| property.source_order == source_order)
+        })
+    {
+        return semantic_function_parameters(ir, property.getter).to_vec();
+    }
+    if let Some(property) = ir
+        .companion_blocks
+        .properties_of(class.fq_name_id())
+        .find(|property| property.source_order == source_order)
+    {
+        return property
+            .getter
+            .map(|getter| semantic_function_parameters(ir, getter).to_vec())
+            .unwrap_or_default();
+    }
+    Vec::new()
 }
 
 fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), String> {

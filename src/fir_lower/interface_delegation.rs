@@ -516,6 +516,8 @@ fn materialize_delegation(
                 ir.classes[class as usize].properties.push(IrProperty {
                     name,
                     diagnostic_span: None,
+                    getter_diagnostic_span: None,
+                    setter_diagnostic_span: None,
                     context_params,
                     source_order: u32::MAX,
                     decl_line: 0,

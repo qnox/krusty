@@ -848,6 +848,8 @@ mod tests {
         ir.classes[a as usize].properties = vec![IrProperty {
             name: "v".to_string(),
             diagnostic_span: None,
+            getter_diagnostic_span: None,
+            setter_diagnostic_span: None,
             context_params: Vec::new(),
             source_order: 0,
             decl_line: 1,

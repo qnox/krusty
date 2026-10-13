@@ -157,6 +157,12 @@ pub(super) fn source_ordered_members<'a>(
             })
         })
         .collect();
+    let property_marker_slots: crate::fx_hash::HashMap<u32, (u32, u8)> = ir
+        .property_annotation_markers
+        .iter()
+        .filter(|((owner, _), _)| *owner == class.fq_name_id())
+        .map(|((_, source_order), marker)| (*marker, (*source_order, 2)))
+        .collect();
     let mut ordered: Vec<((u32, u8), SourceOrderedMember<'a>)> = Vec::with_capacity(
         class.properties.len() + class.methods.len() + class.secondary_ctors.len(),
     );
@@ -211,6 +217,7 @@ pub(super) fn source_ordered_members<'a>(
                 None => Some((
                     block_accessor_slots
                         .get(&function)
+                        .or_else(|| property_marker_slots.get(&function))
                         .copied()
                         .unwrap_or((function_order(function), 0)),
                     SourceOrderedMember::Function(function),
@@ -455,7 +462,7 @@ pub(super) fn property_annotation_marker_fids(
         .iter()
         .filter_map(|property| {
             ir.property_annotation_markers
-                .get(&(c.fq_name_id(), property.name.clone()))
+                .get(&(c.fq_name_id(), property.source_order))
                 .copied()
         })
         .collect()

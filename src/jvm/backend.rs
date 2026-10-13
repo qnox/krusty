@@ -1533,7 +1533,10 @@ fn property_field(
         _ => return None,
     };
     let field = ir.statics.get(storage as usize)?;
-    Some((name, crate::jvm::names::type_descriptor(field.ty)))
+    Some((
+        name,
+        crate::jvm::names::type_descriptor(crate::jvm::method_descriptors::jvm_value_ty(&field.ty)),
+    ))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,
