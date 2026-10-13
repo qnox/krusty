@@ -8,9 +8,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::common_core as common;
+use super::reference_box_support::{kotlinc_box_result, kotlinc_box_result_with_classpath};
 use super::reference_compiler_support::{
     compiler_errors, error_blocks, kotlinc_paths_result, render_errors, write_fixture_sources,
 };
+use super::target_diagnostics_support::front_end_diagnostics_located_for;
 
 /// [`common::compile_in_process`] with selected classpath entries treated as Kotlin friend modules
 /// (kotlinc `-Xfriend-paths`), as a test source set compiles against its main output.
@@ -753,11 +755,6 @@ pub fn kotlinc_source_result(tag: &str, source: &str) -> (i32, String) {
     kotlinc_source_result_with_args(tag, source, &[])
 }
 
-/// Compile one `Main.kt` fixture with kotlinc and run its `box()` result on the shared JVM.
-pub fn kotlinc_box_result(source: &str) -> String {
-    kotlinc_box_result_with_classpath(source, &[])
-}
-
 /// Run the same `box()` fixture with kotlinc and krusty and require the exact same successful
 /// result. The explicit `OK` assertion prevents an identically wrong failure string from making a
 /// differential test pass.
@@ -823,35 +820,6 @@ pub fn expect_box_same_as_kotlinc_with_args(source: &str, stem: &str, shared_arg
         .expect("run krusty shared-argument fixture");
     let _ = std::fs::remove_dir_all(work);
     assert_eq!(krusty, reference, "{stem}: compiler box results differ");
-}
-
-/// Compile one `Main.kt` fixture with kotlinc against caller-supplied dependencies and run its
-/// `box()` result on the shared JVM. The fixture's `// LANGUAGE:` directives become kotlinc flags.
-pub fn kotlinc_box_result_with_classpath(source: &str, classpath: &[PathBuf]) -> String {
-    let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
-    let source_paths = write_fixture_sources(&work, &[("Main.kt", source)]);
-    let output = work.join("out");
-    let mut extra_args = common::language_directives::kotlinc_args(source);
-    if !classpath.is_empty() {
-        extra_args.push("-cp".to_string());
-        extra_args.push(
-            std::env::join_paths(classpath)
-                .expect("build reference-runtime classpath")
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
-    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &extra_args);
-    assert_eq!(code, 0, "kotlinc rejected runtime fixture: {diagnostics}");
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let mut runtime_classpath = vec![output];
-    runtime_classpath.extend_from_slice(classpath);
-    runtime_classpath.extend([stdlib, jdk]);
-    let result =
-        common::run_box(&[], "MainKt", &runtime_classpath).expect("run kotlinc-built box fixture");
-    let _ = std::fs::remove_dir_all(work);
-    result
 }
 
 /// One class compiled from the same multi-file module by both compilers.
@@ -1038,41 +1006,6 @@ pub fn front_end_diagnostics_located(
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
     front_end_diagnostics_located_for(CompilationTarget::Jvm, src, cp_jars, jdk_modules)
-}
-
-/// [`front_end_diagnostics_located`] under `target`'s source rules.
-pub fn front_end_diagnostics_located_for(
-    target: krusty::compilation_target::CompilationTarget,
-    src: &str,
-    cp_jars: &[PathBuf],
-    jdk_modules: Option<&std::path::Path>,
-) -> Vec<String> {
-    let cp = common::cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
-    );
-    let inputs = [krusty::source::SourceInput::kotlin(src)];
-    let mut diags = krusty::diag::DiagSink::new();
-    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
-        &inputs,
-        common::with_native_plugins(target, platform),
-        &krusty::features::LangFeatures::new(),
-        |_, _| {},
-        &mut diags,
-    );
-    let _ = krusty::compiler::check_frontend_only(analysis, &mut diags);
-    diags
-        .diags
-        .iter()
-        .map(|diagnostic| {
-            let (line, column) = krusty::diag::line_col(src, diagnostic.span.lo);
-            let severity = match diagnostic.severity {
-                krusty::diag::Severity::Error => "error",
-                _ => "warning",
-            };
-            format!("{line}:{column}: {severity}: {}", diagnostic.msg)
-        })
-        .collect()
 }
 
 /// Every file below `dir`, by its path relative to `dir`, with its bytes, sorted. A missing

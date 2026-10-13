@@ -22,12 +22,16 @@ mod compiler_plugin_fixture;
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
+#[path = "common/reference_box.rs"]
+mod reference_box_support;
 #[path = "common/reference_compiler.rs"]
 mod reference_compiler_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "common/target_diagnostics.rs"]
+mod target_diagnostics_support;
 
 mod common {
     pub use super::bytecode_comparison_support::*;
@@ -36,8 +40,10 @@ mod common {
     pub use super::inner_class_rows_support::{
         assert_same_inner_classes, compile_with_kotlinc, compile_with_kotlinc_for_target,
     };
+    pub use super::reference_box_support::*;
     pub use super::reference_compiler_support::*;
     pub use super::reference_targets_support::*;
+    pub use super::target_diagnostics_support::*;
 }
 
 #[path = "abstract_instantiation_check_e2e.rs"]
@@ -2459,6 +2465,8 @@ mod serialization_object_serializer_e2e;
 mod serialization_plain_enum_element_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]
 mod serialization_roundtrip_e2e;
+#[path = "common/serialization_runtime.rs"]
+mod serialization_runtime_support;
 #[path = "common/serialization.rs"]
 mod serialization_test_support;
 #[path = "serialization_transient_diagnostics_e2e.rs"]
