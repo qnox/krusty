@@ -629,6 +629,11 @@ fn materialize_member_extension_property(
             setter,
             visibility: property.visibility,
             type_params,
+            accessor_annotations: ir
+                .accessor_annotations
+                .get(&property_id)
+                .cloned()
+                .unwrap_or_default(),
         });
     realizations.insert(
         property_id,

@@ -72,6 +72,9 @@ pub(super) struct ClassSlots {
     /// Offset of the byte after the pool.
     pub(super) pool_end: usize,
     pub(super) slots: Vec<Slot>,
+    /// Values ASM receives with the class header even though the class file stores their indices in
+    /// a trailing attribute. A first rewritten method must not claim and relocate these entries.
+    pub(super) early_class_entries: Vec<u16>,
     /// The positions in `slots` of the fields' slots.
     fields: Range<usize>,
     /// The position in `slots` where each method's slots start.
@@ -135,6 +138,7 @@ struct Reader<'a> {
     at: usize,
     entries: Vec<Option<Entry>>,
     slots: Vec<Slot>,
+    early_class_entries: Vec<u16>,
     fields: Range<usize>,
     method_starts: Vec<usize>,
     methods_end: usize,
@@ -148,6 +152,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         at: 8,
         entries: Vec::new(),
         slots: Vec::new(),
+        early_class_entries: Vec::new(),
         fields: 0..0,
         method_starts: Vec::new(),
         methods_end: 0,
@@ -164,6 +169,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         entries: reader.entries,
         pool_end,
         slots: reader.slots,
+        early_class_entries: reader.early_class_entries,
         fields: reader.fields,
         method_starts: reader.method_starts,
         methods_end: reader.methods_end,
@@ -357,8 +363,12 @@ impl Reader<'_> {
             ("LineNumberTable", Scope::Code(_))
             | ("SourceDebugExtension", Scope::Class)
             | ("Deprecated" | "Synthetic", _) => self.skip(len)?,
+            ("Signature", Scope::Class) => {
+                let signature = self.index(class)?;
+                self.early_class_entries.push(signature);
+            }
             ("ConstantValue" | "Signature", Scope::Member | Scope::Method(_))
-            | ("Signature" | "SourceFile" | "NestHost", Scope::Class) => {
+            | ("SourceFile" | "NestHost", Scope::Class) => {
                 self.index(class)?;
             }
             ("Exceptions", Scope::Method(_))

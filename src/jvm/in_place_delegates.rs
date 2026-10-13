@@ -17,7 +17,7 @@ use crate::ir::{
     ClassId, ExprId, FnParamInfo, FunId, IrConst, IrExpr, IrFile, IrFunction,
     IrGeneratedParameterRole, IrLocalPropertyLayout, IrParameterIdentity, IrTypeOp,
 };
-use crate::types::{Ty, Visibility};
+use crate::types::{Ty, TypeName, Visibility};
 
 /// What evaluating a delegate in place keeps at its initialization site.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,6 +134,7 @@ fn realize_package_delegates(ir: &mut IrFile) {
             ir,
             DelegateMethod {
                 name: format!("{}$delegate", ir.functions[getter as usize].name),
+                dispatch_receiver: None,
                 receivers: receiver.into_iter().collect(),
                 delegate,
                 storage_ty,
@@ -176,6 +177,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                         .property_annotation_markers
                         .get(&(owner, declaration.source_order))
                         .copied(),
+                    dispatch_receiver: None,
                     receivers: vec![owner_receiver],
                 })
             })
@@ -187,6 +189,22 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 .flatten()
                 .enumerate()
                 .filter_map(|(property, declaration)| {
+                    let receiver = approximate_delegate_receiver(
+                        declaration.receiver,
+                        declaration
+                            .type_params
+                            .iter()
+                            .map(|parameter| parameter.semantic_name.as_str()),
+                        owner_type_parameters.iter().map(String::as_str),
+                    );
+                    // A value-class-bearing extension delegate method remains a private instance
+                    // member in kotlinc. Its owner is the dispatch receiver, not an explicit first
+                    // parameter, so value-class ABI mangling sees only the extension receiver.
+                    let dispatch_receiver =
+                        extension_receiver_names_value_class(ir, declaration.receiver)
+                            .then_some(owner);
+                    let receivers = dispatch_receiver
+                        .map_or_else(|| vec![owner_receiver, receiver], |_| vec![receiver]);
                     Some(MemberDelegateCandidate {
                         declaration: MemberDelegateDeclaration::Extension(property as u32),
                         field: declaration.delegate_field?,
@@ -196,17 +214,8 @@ fn realize_member_delegates(ir: &mut IrFile) {
                             .property_annotation_markers
                             .get(&(owner, declaration.source_order))
                             .copied(),
-                        receivers: vec![
-                            owner_receiver,
-                            approximate_delegate_receiver(
-                                declaration.receiver,
-                                declaration
-                                    .type_params
-                                    .iter()
-                                    .map(|parameter| parameter.semantic_name.as_str()),
-                                owner_type_parameters.iter().map(String::as_str),
-                            ),
-                        ],
+                        dispatch_receiver,
+                        receivers,
                     })
                 }),
         );
@@ -217,6 +226,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 getter,
                 last_accessor,
                 annotation_marker,
+                dispatch_receiver,
                 receivers,
             } = candidate;
             let Some((store, delegate)) = delegate_store(ir, class, field) else {
@@ -253,6 +263,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 ir,
                 DelegateMethod {
                     name: format!("{}$delegate", ir.functions[getter as usize].name),
+                    dispatch_receiver,
                     receivers,
                     delegate,
                     storage_ty,
@@ -299,6 +310,22 @@ fn approximate_delegate_receiver<'a>(
         .map(str::to_owned)
         .collect::<HashSet<_>>();
     approximate_type_parameters(receiver, &parameters, &mut HashSet::default())
+}
+
+/// Whether the extension receiver's erased upper bound is a value class. This declaration fact is
+/// already carried by common IR; representation and hashing remain in value-class lowering.
+fn extension_receiver_names_value_class(ir: &IrFile, receiver: Ty) -> bool {
+    let mut current = receiver.non_null();
+    let mut seen = HashSet::default();
+    loop {
+        match current {
+            Ty::Obj(classifier, _) => return ir.is_value_class_name(classifier),
+            Ty::TyParam(name, bound) if seen.insert(name.to_owned()) => {
+                current = bound.non_null();
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// Type parameters declared across the JVM owner application, outermost first. A non-static inner
@@ -354,7 +381,12 @@ fn approximate_owner_receiver(ir: &IrFile, owner: crate::types::TypeName) -> Ty 
         .map(|parameter| {
             let bound = crate::jvm::generic_erasure::declared_primary_bound(parameter)
                 .unwrap_or_else(|| Ty::obj_name(crate::types::wk::any()));
-            approximate_type_parameters(bound, &parameters, &mut HashSet::default()).non_null()
+            // `bound` is already the first substitution for this declaration's parameter. Mark
+            // that parameter active so an F-bound such as `T : Comparable<T>` exposes its nested
+            // occurrence as `*`, rather than expanding the bound a second time.
+            let mut visiting = HashSet::default();
+            visiting.insert(parameter.semantic_name.clone());
+            approximate_type_parameters(bound, &parameters, &mut visiting).non_null()
         })
         .collect::<Vec<_>>();
     Ty::obj_args_name(owner, &arguments)
@@ -453,6 +485,8 @@ struct MemberDelegateCandidate {
     getter: FunId,
     last_accessor: FunId,
     annotation_marker: Option<FunId>,
+    /// The declaring class when a value-class-bearing extension keeps an instance delegate method.
+    dispatch_receiver: Option<TypeName>,
     /// Dispatch receiver followed by the extension receiver, when present.
     receivers: Vec<Ty>,
 }
@@ -529,6 +563,7 @@ fn accessor_line(ir: &IrFile, getter: u32) -> u32 {
 
 struct DelegateMethod {
     name: String,
+    dispatch_receiver: Option<TypeName>,
     /// The owner (a member property) or extension receiver the method takes as `<this>`.
     receivers: Vec<Ty>,
     delegate: ExprId,
@@ -538,7 +573,7 @@ struct DelegateMethod {
     source_order_of: u32,
 }
 
-/// `private static Object get<X>$delegate([<this>])`, returning the delegate.
+/// `private [static] Object get<X>$delegate([<this>])`, returning the delegate.
 fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
     let result = Ty::nullable(Ty::obj("kotlin/Any"));
     let value = ir.add_expr(ir.expr(method.delegate).clone());
@@ -569,8 +604,8 @@ fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
         params,
         ret: result,
         body: Some(body),
-        is_static: true,
-        dispatch_receiver: None,
+        is_static: method.dispatch_receiver.is_none(),
+        dispatch_receiver: method.dispatch_receiver,
         param_checks: Vec::new(),
     });
     ir.fn_params.insert(

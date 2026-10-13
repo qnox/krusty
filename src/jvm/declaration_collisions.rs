@@ -126,6 +126,10 @@ fn report_in_place_delegate_method_clashes(
             generated,
         )
     });
+    // A package facade is one generated declaration owner. kotlinc attaches only its first
+    // synthetic-method clash to the file start; every colliding source declaration still receives
+    // its own diagnostic below.
+    let mut reported_package_owner = false;
     for (generated, _) in generated_methods {
         let Some(function) = ir.functions.get(generated as usize) else {
             continue;
@@ -214,7 +218,10 @@ fn report_in_place_delegate_method_clashes(
                 continue;
             }
             let message = clash_message(&function.name, &descriptor, &rendered);
-            clashes.push((Span::new(0, 0), message.clone()));
+            if !reported_package_owner {
+                clashes.push((Span::new(0, 0), message.clone()));
+                reported_package_owner = true;
+            }
             clashes.extend(
                 declarations
                     .into_iter()
@@ -1296,8 +1303,9 @@ fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), Strin
 ///
 /// Compiler passes may append representation-only helpers to `class.methods` without a source
 /// signature. Those still need the conservative duplicate-method fallback. Source functions,
-/// property accessors, annotation markers, and generated data-class declarations all have a
-/// semantic declaration shape and must not also produce that fallback's generic diagnostic.
+/// property accessors, annotation markers, generated data-class declarations, and recorded
+/// in-place delegate methods all have a semantic declaration shape and must not also produce that
+/// fallback's generic diagnostic.
 fn member_method_is_inventoried(
     ir: &IrFile,
     class_id: crate::ir::ClassId,
@@ -1307,6 +1315,7 @@ fn member_method_is_inventoried(
     ir.fn_signature_offsets.contains_key(&function)
         || (ir.is_data_class_member(class.fq_name_id(), function)
             && ir.class_diagnostic_span(class_id).is_some())
+        || ir.is_jvm_delegate_method(function)
         || class.properties.iter().any(|property| {
             (property.getter == Some(function)
                 && property

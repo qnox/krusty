@@ -218,11 +218,15 @@ pub(super) fn source_ordered_members<'a>(
                     )
                 }),
                 None => Some((
-                    block_accessor_slots
-                        .get(&function)
-                        .or_else(|| property_marker_slots.get(&function))
-                        .copied()
-                        .unwrap_or((function_order(function), 0)),
+                    if ir.is_jvm_delegate_method(function) {
+                        (function_order(function), 3)
+                    } else {
+                        block_accessor_slots
+                            .get(&function)
+                            .or_else(|| property_marker_slots.get(&function))
+                            .copied()
+                            .unwrap_or((function_order(function), 0))
+                    },
                     SourceOrderedMember::Function(function),
                 )),
             }),

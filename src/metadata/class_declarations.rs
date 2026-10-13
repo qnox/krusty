@@ -651,7 +651,9 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
             ),
             annotations: property_annotations(c, ext.source_order),
             field_annotations: Default::default(),
-            accessor_annotations: Default::default(),
+            accessor_annotations: crate::metadata::AccessorMetadataAnnotations::of(
+                &ext.accessor_annotations,
+            ),
             companion: false,
         };
         props.push(record);

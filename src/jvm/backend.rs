@@ -385,6 +385,12 @@ fn run_backend_passes_after_plugins(
     // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
     // names those from the value-class spelling and only then appends `$<module>` to the member.
     crate::jvm::internal_names::mangle_internal_members(ir, module_name, facade);
+    // A delegated property's reflected signature names its declaration's physical getter. Its
+    // exact FunId was retained when the reference was built; consume that identity only after
+    // value-class and internal-member naming have fixed the accessor's final JVM ABI.
+    facts
+        .property_reference_realizations
+        .finalize_delegated_getter_signatures(ir);
     // A specialized suspend lambda is already a real class when suspend lowering completes, but
     // its JVM name depends on the caller's final placement and lifted spelling. Realize that name
     // only now and keep the coroutine-emission facts keyed by the same physical identity.

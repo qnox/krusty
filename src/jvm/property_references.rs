@@ -172,14 +172,25 @@ pub(super) fn realize(
                     .referenced_module_properties
                     .get(&target)
                     .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
-                let getter = super::module_calls::property_getter_name(declaration);
-                let setter = mutable.then(|| crate::names::property_setter_name(&declaration.name));
+                let declared = declared_accessors(ir, target);
+                let getter = declared
+                    .getter
+                    .and_then(|getter| ir.functions.get(getter as usize))
+                    .map(|getter| getter.name.clone())
+                    .unwrap_or_else(|| super::module_calls::property_getter_name(declaration));
+                let setter = mutable.then(|| {
+                    declared
+                        .setter
+                        .and_then(|setter| ir.functions.get(setter as usize))
+                        .map(|setter| setter.name.clone())
+                        .unwrap_or_else(|| crate::names::property_setter_name(&declaration.name))
+                });
                 module_property(
                     declaration,
                     stems,
                     target,
                     mutable,
-                    declared_accessors(ir, target),
+                    declared,
                     (&getter, setter.as_deref()),
                     ModulePropertySite {
                         caller: reference_owner,
@@ -274,8 +285,12 @@ pub(super) fn realize(
                 .get(&target)
                 .map(|checked| checked.source_order)
                 .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
-            let (owner, element) =
+            let getter = declared_accessors(ir, target).getter;
+            let (owner, element, signature) =
                 synthesize_delegated(ir, stems, target, &declaration, property, mutable)?;
+            if let Some(getter) = getter {
+                realizations.record_delegated_getter_signature(signature, getter);
+            }
             delegated_operands.push(delegated_arrays::DelegatedOperand {
                 operand: raw as u32,
                 owner,
@@ -325,7 +340,7 @@ fn synthesize_delegated(
     declaration: &IrModuleProperty,
     property: PropRef,
     mutable: bool,
-) -> Result<(TypeName, IrExpr), PropertyReferenceRealizationTarget> {
+) -> Result<(TypeName, IrExpr, crate::ir::ExprId), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !declaration.context_parameters.is_empty() {
         return Err(failure);
@@ -382,6 +397,7 @@ fn synthesize_delegated(
             defaults: Box::new([]),
             default_prefix_count: 0,
         },
+        signature,
     ))
 }
 

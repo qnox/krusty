@@ -173,6 +173,10 @@ pub enum PropertyAnnotationSite {
     Property,
     /// The backing field.
     Field,
+    /// The property's getter declaration.
+    Getter,
+    /// The property's setter declaration.
+    Setter,
 }
 
 impl AnnotationTargets {

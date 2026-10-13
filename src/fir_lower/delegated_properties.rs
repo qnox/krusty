@@ -203,6 +203,10 @@ pub(super) fn materialize_top_level_delegate(
     if let Some(setter) = setter {
         ir.fn_source_order.insert(setter, source_order);
     }
+    let type_params = declaration_type_parameters(index, property.declaration);
+    for function in std::iter::once(getter).chain(setter) {
+        attach_accessor_type_parameters(ir, function, &type_params);
+    }
     realizations.insert(
         property_id,
         IrLocalPropertyLayout::TopLevelAccessor {
@@ -655,8 +659,13 @@ pub(super) fn materialize_member_extension_delegate(
             ir.open_methods.insert(function);
         }
         ir.classes[class_id as usize].methods.push(function);
+        // An extension receiver may name a type parameter of the declaring class rather than one
+        // owned by the property. Preserve those semantic positions independently of the property's
+        // own generic declaration so JVM Signature emission can write `(TA;)...` after erasure.
+        let signature = &ir.functions[function as usize];
+        ir.member_semantic_sigs
+            .insert(function, (signature.params.clone(), signature.ret));
         if !type_params.is_empty() {
-            let signature = &ir.functions[function as usize];
             ir.signatures.insert(
                 function,
                 crate::ir::IrGenericSig {
@@ -687,6 +696,11 @@ pub(super) fn materialize_member_extension_delegate(
             setter,
             visibility: property.visibility,
             type_params,
+            accessor_annotations: ir
+                .accessor_annotations
+                .get(&property_id)
+                .cloned()
+                .unwrap_or_default(),
         });
     realizations.insert(
         property_id,
