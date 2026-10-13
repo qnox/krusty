@@ -16,7 +16,7 @@ artifacts=$(mktemp)
 trap 'rm -f "$artifacts"' EXIT
 
 set +e
-cargo test --no-run --profile gate -p krusty --lib --test klib_e2e \
+cargo test --no-run --profile klib-test -p krusty --lib --test klib_e2e \
   --features focused-klib-tests \
   --message-format=json >"$artifacts"
 cargo_status=$?

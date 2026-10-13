@@ -108,6 +108,19 @@ incremental = true
 opt-level = 2
 codegen-units = 16
 
+# The focused KLIB artifact producer builds krusty twice: once as the library behind `klib_e2e`
+# and once as the cfg(test) unit-test harness. Those binaries run only the small KLIB/Native
+# regression inventory, so optimizing both compiler copies like the full box corpus spends more
+# wall time compiling than it saves while running. Retain gate's overflow/debug behavior, but give
+# these two binaries a cheaper package build with enough codegen units to use the hosted runner.
+[profile.klib-test]
+inherits = "gate"
+lto = "off"
+
+[profile.klib-test.package.krusty]
+opt-level = 1
+codegen-units = 256
+
 # Instrumented-coverage profile (scripts/coverage.sh). The e2e suite compiles every dependency-lib
 # fixture with krusty in-process, so the instrumented binary IS the compiler under measurement:
 # at `dev` (opt 0 + debuginfo + overflow checks) the branch-instrumented run cost about 4x an
