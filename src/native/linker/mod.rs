@@ -507,24 +507,47 @@ mod tests {
             .map(Some)
     }
 
-    /// Run `executable`, directly or under `emulator`, and return its exit status.
-    fn run(executable: &Path, emulator: Option<&Path>) -> std::process::ExitStatus {
+    /// Run `executable`, directly or under `emulator`, and capture its output.
+    fn run(executable: &Path, emulator: Option<&Path>) -> std::io::Result<std::process::Output> {
         let (program, args): (OsString, Vec<OsString>) = match emulator {
             None => (executable.into(), Vec::new()),
             Some(emulator) => (emulator.into(), vec![executable.into()]),
         };
-        // Another test thread forking while the file was open for writing leaves it "busy" for a
-        // moment (ETXTBSY); that is the host, not the executable.
-        let mut attempts = 0;
+        retry_text_file_busy(|| std::process::Command::new(&program).args(&args).output())
+    }
+
+    /// Another test thread forking while the file was open for writing leaves it "busy" until that
+    /// child execs and closes the inherited descriptor. Retry that host race, but no program error.
+    fn retry_text_file_busy<T>(mut run: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        /// `ETXTBSY`. `ErrorKind::ExecutableFileBusy` is not stable yet.
+        const TEXT_FILE_BUSY: i32 = 26;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            match std::process::Command::new(&program).args(&args).status() {
-                Err(error) if error.raw_os_error() == Some(26) && attempts < 50 => {
-                    attempts += 1;
-                    std::thread::yield_now();
+            match run() {
+                Err(error)
+                    if error.raw_os_error() == Some(TEXT_FILE_BUSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
-                other => break other.expect("run the linked executable"),
+                other => return other,
             }
         }
+    }
+
+    #[test]
+    fn running_a_fresh_executable_retries_text_file_busy() {
+        let mut attempts = 0;
+        let output = retry_text_file_busy(|| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::from_raw_os_error(26))
+            } else {
+                Ok("ran")
+            }
+        })
+        .expect("the transient host race is retried");
+        assert_eq!((output, attempts), ("ran", 2));
     }
 
     /// A program linked against the real runtime RUNS, for every target this host can run: its
@@ -553,9 +576,10 @@ mod tests {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                     .expect("make the executable executable");
             }
-            let status = run(&path, emulator.as_deref());
+            let output = run(&path, emulator.as_deref());
             let _ = std::fs::remove_file(&path);
-            assert_eq!(status.code(), Some(0), "{target}: {status}");
+            let output = output.expect("run the linked executable");
+            assert_eq!(output.status.code(), Some(0), "{target}: {output:?}");
         }
     }
 
@@ -706,7 +730,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                 .expect("make the executable executable");
         }
-        let output = std::process::Command::new(&path).output();
+        let output = run(&path, None);
         let _ = std::fs::remove_file(&path);
         let output = output.expect("run the linked executable");
         assert_eq!(output.status.code(), Some(0), "{target}: {output:?}");
