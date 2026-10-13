@@ -5041,7 +5041,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reports the platform declaration clash like kotlinc instead of emitting duplicate class methods.
   A generic forwarder retains its declared type parameters and non-default bounds in the detailed
   declaration list; the first bound is inline and additional bounds use Kotlin's trailing `where`
-  clause.
+  clause. Backticked type-parameter names retain their Kotlin escaping in forwarder and implicit
+  property-accessor type positions.
   A delegated property's generated accessors retain property syntax in that diagnostic
   (`<get-name>`/`<set-name>` and the setter value `<set-?>`), rather than rendering as ordinary
   generated functions. Tests:
@@ -5049,6 +5050,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `…::a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter`,
   `…::a_generic_delegation_forwarder_renders_its_type_parameter_bound`,
   `…::a_generic_delegation_forwarder_renders_additional_bounds_in_a_where_clause`,
+  `…::an_implicit_property_getter_escapes_its_class_type_parameter`,
   `…::delegated_property_forwarders_render_accessor_clashes`.
 
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field

@@ -186,8 +186,24 @@ fn a_generic_delegation_forwarder_renders_additional_bounds_in_a_where_clause() 
     common::assert_error_blocks_match_kotlinc(
         &[(
             "Main.kt",
-            "interface Base { fun <T> getValue(): T where T : CharSequence, T : Comparable<T> }\n\
+            "interface Base { fun <`class`> getValue(): `class` where `class` : CharSequence, `class` : Comparable<`class`> }\n\
              class C(base: Base) : Base by base { val value: CharSequence? = null }\n",
+        )],
+        &[],
+    );
+}
+
+/// An implicit stored-property accessor has no `IrFunction`, so its class-owned type parameter
+/// must still use Kotlin identifier escaping when it is listed beside a delegation forwarder.
+#[test]
+fn an_implicit_property_getter_escapes_its_class_type_parameter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base { fun getValue(): Any? }\n\
+             class C<`T value`>(base: Base, x: `T value`) : Base by base {\n\
+                 val value: `T value` = x\n\
+             }\n",
         )],
         &[],
     );

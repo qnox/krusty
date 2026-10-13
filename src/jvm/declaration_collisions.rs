@@ -606,9 +606,9 @@ fn report_platform_declaration_clashes(
                     } => ir.interface_delegation_forwarders.contains(function),
                     _ => false,
                 });
-            let declarations_are_renderable = declarations
-                .iter()
-                .all(|&declaration| member_method_declaration_is_renderable(ir, declaration));
+            let declarations_are_renderable = declarations.iter().all(|&declaration| {
+                member_method_declaration_is_renderable(ir, class, declaration)
+            });
             let message = if !includes_generated_method
                 && declarations_are_renderable
                 && (includes_marker
@@ -664,6 +664,7 @@ fn report_platform_declaration_clashes(
 
 fn member_method_declaration_is_renderable(
     ir: &IrFile,
+    class: &crate::ir::IrClass,
     declaration: MemberMethodDeclaration,
 ) -> bool {
     let function = match declaration {
@@ -671,22 +672,40 @@ fn member_method_declaration_is_renderable(
         | MemberMethodDeclaration::GeneratedDataMember { function, .. }
         | MemberMethodDeclaration::DelegationForwarder { function, .. } => Some(function),
         MemberMethodDeclaration::PropertyAccessor {
+            function: Some(function),
+            property: PropertyAccessorDeclaration::Member(_),
+            ..
+        } => Some(function),
+        MemberMethodDeclaration::PropertyAccessor {
+            function: None,
+            property: PropertyAccessorDeclaration::Member(index),
+            ..
+        } => {
+            let Some(property) = class.properties.get(index) else {
+                return false;
+            };
+            return ensure_determined_type(property.ty).is_ok()
+                && property
+                    .context_params
+                    .iter()
+                    .all(|(_, _, ty)| ensure_determined_type(*ty).is_ok());
+        }
+        MemberMethodDeclaration::PropertyAccessor {
             function,
             property:
                 PropertyAccessorDeclaration::MemberExtension(_)
                 | PropertyAccessorDeclaration::CompanionBlock(_),
             ..
-        } => function,
-        MemberMethodDeclaration::PropertyAccessor {
-            property: PropertyAccessorDeclaration::Member(_),
-            ..
-        } => None,
+        } => {
+            let Some(function) = function else {
+                return false;
+            };
+            Some(function)
+        }
         MemberMethodDeclaration::PropertyAnnotationMarker { .. } => return true,
         MemberMethodDeclaration::GeneratedMethod { .. } => return false,
     };
-    let Some(function) = function else {
-        return true;
-    };
+    let function = function.expect("renderable source declaration has a function identity");
     let parameters = semantic_function_parameters(ir, function);
     let Some(identities) = ir.function_parameter_identities(function) else {
         return false;
@@ -864,7 +883,7 @@ fn render_property_accessor_declaration(
             format!(
                 "{}: {}",
                 rendered_callable_name(name),
-                source_type_name(*ty)
+                source_member_type_name(*ty)
                     .expect("a reported property-accessor clash has determined source types")
             )
         })
@@ -873,7 +892,7 @@ fn render_property_accessor_declaration(
         parameters.push(format!(
             "{}: {}",
             rendered_callable_name("<set-?>"),
-            source_type_name(property.ty)
+            source_member_type_name(property.ty)
                 .expect("a reported property-accessor clash has a determined property type")
         ));
     }
@@ -886,7 +905,7 @@ fn render_property_accessor_declaration(
         "fun {}({}): {} defined in {owner}",
         rendered_callable_name(&callable),
         parameters.join(", "),
-        source_type_name(ret)
+        source_member_type_name(ret)
             .expect("a reported property-accessor clash has a determined return type")
     )
 }
@@ -907,7 +926,8 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
     let mut values = Vec::new();
     let mut value_index = 0;
     for (identity, &ty) in identities.iter().zip(parameters) {
-        let ty = source_type_name(ty).expect("a reported member clash has determined source types");
+        let ty = source_member_type_name(ty)
+            .expect("a reported member clash has determined source types");
         match identity.role {
             crate::ir::IrParameterRole::ContextValue => {
                 let name = identity
@@ -989,7 +1009,8 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
         })
         .unwrap_or(ir.functions[function as usize].ret);
     rendered.push_str(
-        &source_type_name(ret).expect("a reported member clash has a determined return type"),
+        &source_member_type_name(ret)
+            .expect("a reported member clash has a determined return type"),
     );
     render_member_where_clause(&mut rendered, &trailing_bounds);
     rendered.push_str(" defined in ");
@@ -1010,7 +1031,7 @@ fn render_member_type_parameters<'a>(
         if index > 0 {
             rendered.push_str(", ");
         }
-        rendered.push_str(&parameter.name);
+        rendered.push_str(&rendered_callable_name(&parameter.name));
         let bounds = parameter
             .bounds
             .iter()
@@ -1020,7 +1041,7 @@ fn render_member_type_parameters<'a>(
         if let Some((&first, remaining)) = bounds.split_first() {
             rendered.push_str(" : ");
             rendered.push_str(
-                &source_type_name(first)
+                &source_member_type_name(first)
                     .expect("a reported member clash has determined type-parameter bounds"),
             );
             for &bound in remaining {
@@ -1041,13 +1062,20 @@ fn render_member_where_clause(rendered: &mut String, trailing_bounds: &[(&str, c
         if index > 0 {
             rendered.push_str(", ");
         }
-        rendered.push_str(parameter);
+        rendered.push_str(&rendered_callable_name(parameter));
         rendered.push_str(" : ");
         rendered.push_str(
-            &source_type_name(*bound)
+            &source_member_type_name(*bound)
                 .expect("a reported member clash has determined type-parameter bounds"),
         );
     }
+}
+
+fn source_member_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagnosticType> {
+    ensure_determined_type(ty)?;
+    Ok(ty.source_name_with_type_parameter(&|name| {
+        rendered_callable_name(crate::types::type_parameter_source_name(name))
+    }))
 }
 
 fn semantic_function_parameters(ir: &IrFile, function: FunId) -> &[crate::types::Ty] {
@@ -1430,7 +1458,38 @@ fn rendered_callable_name(name: &str) -> String {
     let ordinary = characters
         .next()
         .is_some_and(|first| first == '_' || first.is_alphabetic())
-        && characters.all(|character| character == '_' || character.is_alphanumeric());
+        && characters.all(|character| character == '_' || character.is_alphanumeric())
+        && name != "_"
+        && !matches!(
+            name,
+            "as" | "break"
+                | "class"
+                | "continue"
+                | "do"
+                | "else"
+                | "false"
+                | "for"
+                | "fun"
+                | "if"
+                | "in"
+                | "interface"
+                | "is"
+                | "null"
+                | "object"
+                | "package"
+                | "return"
+                | "super"
+                | "this"
+                | "throw"
+                | "true"
+                | "try"
+                | "typealias"
+                | "typeof"
+                | "val"
+                | "var"
+                | "when"
+                | "while"
+        );
     if ordinary {
         name.to_string()
     } else {
@@ -1726,7 +1785,7 @@ mod tests {
         let mut delegated = member_function(owner, "value");
         delegated.params = vec![crate::types::Ty::Int];
         let bound = crate::types::Ty::obj("kotlin/CharSequence");
-        let parameter = crate::types::Ty::ty_param("T", bound);
+        let parameter = crate::types::Ty::ty_param("T value", bound);
         let comparable = crate::types::Ty::obj_args("kotlin/Comparable", &[parameter]);
         delegated.ret = bound;
         let delegated = ir.add_fun(delegated);
@@ -1741,8 +1800,8 @@ mod tests {
             delegated,
             crate::ir::IrGenericSig {
                 type_params: vec![crate::ir::IrTypeParameter {
-                    name: "T".to_string(),
-                    semantic_name: "T".to_string(),
+                    name: "T value".to_string(),
+                    semantic_name: "T value".to_string(),
                     bounds: vec![(bound, false), (comparable, true)],
                     variance: crate::types::TypeVariance::Invariant,
                     reified: false,
@@ -1762,7 +1821,7 @@ mod tests {
         ));
         assert_eq!(
             render_source_member_method(&ir, delegated, "value", "fixtures.Owner"),
-            "fun <T : CharSequence> value(p0: Int): T where T : Comparable<T> defined in fixtures.Owner"
+            "fun <`T value` : CharSequence> value(p0: Int): `T value` where `T value` : Comparable<`T value`> defined in fixtures.Owner"
         );
     }
 
@@ -1874,5 +1933,13 @@ mod tests {
             crate::types::wk::any()
         )));
         assert!(!is_default_bound(crate::types::Ty::obj("repo/Any")));
+    }
+
+    #[test]
+    fn diagnostic_identifiers_escape_hard_keywords_and_bare_underscore() {
+        assert_eq!(rendered_callable_name("class"), "`class`");
+        assert_eq!(rendered_callable_name("_"), "`_`");
+        assert_eq!(rendered_callable_name("value"), "value");
+        assert_eq!(rendered_callable_name("T value"), "`T value`");
     }
 }
