@@ -306,7 +306,7 @@ fn klib_serialization_plugin_declarations_match_kotlinc_native() {
     let mut diags = DiagSink::new();
     let (analysis, stems) = common::native_analysis_with_plugins(
         &[("Foo", &source)],
-        &crate::serialization_test_support::runtime_libraries(),
+        &crate::serialization_runtime_support::runtime_libraries(),
         &mut diags,
     )
     .expect("the directed KLIB regression has its required analysis toolchain");

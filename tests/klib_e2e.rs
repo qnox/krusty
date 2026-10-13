@@ -6,22 +6,25 @@
 
 #[path = "common/mod.rs"]
 mod common_core;
-#[path = "common/e2e.rs"]
-mod e2e_support;
+#[path = "common/reference_box.rs"]
+mod reference_box_support;
 #[path = "common/reference_compiler.rs"]
 mod reference_compiler_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
-#[path = "common/serialization.rs"]
-mod serialization_test_support;
+#[path = "common/serialization_runtime.rs"]
+mod serialization_runtime_support;
+#[path = "common/target_diagnostics.rs"]
+mod target_diagnostics_support;
 
 mod common {
     pub use super::common_core::*;
-    pub use super::e2e_support::*;
+    pub use super::reference_box_support::*;
     pub use super::reference_compiler_support::*;
     pub use super::reference_targets_support::*;
+    pub use super::target_diagnostics_support::*;
 }
 
 #[path = "klib_class_surface_e2e.rs"]
