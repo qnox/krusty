@@ -8347,7 +8347,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the method inliner: the duplicated receiver is that call's own argument and is stored before the
   body. Only a value left underneath the argument keeps the call on the byte splice. After that
   inline the caller's line is marked again on the null path's `pop`; the expression-body `return`
-  does not repeat it. A chain
+  does not repeat it. The same holds when the safe call's receiver is folded out of its temporary
+  (`simplifyKnownSafeCallPatterns`) after a same-module inline selector: kotlinc's label
+  normalization merges the null result's line label into the jump's own, and the fold puts the
+  `pop` right after that label, so the line describes the `pop`. A discarded null result leaves a
+  `nop` behind it. Tests: `tests/safe_call_null_line_e2e.rs`,
+  `temporaries::tests::a_line_at_a_label_adjacent_to_the_null_target_describes_its_pop`. A chain
   (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a selector that
   reads the receiver more than once keep the temporary. Tests: `tests/safe_call_dup_e2e.rs`,
   `tests/safe_call_inline_callable_reference_e2e.rs`.

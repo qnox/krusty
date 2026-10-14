@@ -186,39 +186,48 @@ impl Emitter<'_> {
         // A guard folded to a constant `null` receiver jumps unconditionally: the selector is dead
         // and is not laid down, as `emit_when` treats a constant-false arm.
         let always_null = self.emit_cond_branch(guard, null_path, true, code);
-        let emit_arm = |emitter: &mut Self, arm: u32, code: &mut CodeBuilder| {
-            if emission.is_stmt {
-                // A discarded value is never materialized: its implicit conversion (boxing into the
-                // safe call's nullable result) is not written, and a discarded constant is nothing
-                // at all, not a push and a `pop`.
-                let mut arm = arm;
-                while let IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg,
-                    ..
-                } = emitter.ir.expr(arm)
-                {
-                    arm = *arg;
+        let emit_arm =
+            |emitter: &mut Self, arm: u32, after_diverging: bool, code: &mut CodeBuilder| {
+                if emission.is_stmt {
+                    // A discarded value is never materialized: its implicit conversion (boxing into the
+                    // safe call's nullable result) is not written, and a discarded constant is nothing
+                    // at all, not a push and a `pop`.
+                    let mut arm = arm;
+                    while let IrExpr::TypeOp {
+                        op: IrTypeOp::ImplicitCoercion,
+                        arg,
+                        ..
+                    } = emitter.ir.expr(arm)
+                    {
+                        arm = *arg;
+                    }
+                    match emitter.ir.expr(arm) {
+                        // kotlinc still visits the constant, marking its line, and its optimizer leaves
+                        // a `nop` where it removes the constant and its `pop`. The `nop` survives only
+                        // where that line is new, after an inlined selector. After a selector that
+                        // diverges, the label of that mark is dead code kotlinc removes: the null path
+                        // keeps neither the line nor the `nop`.
+                        IrExpr::Const(_) if after_diverging => {}
+                        IrExpr::Const(_) => {
+                            emitter.mark_expression_start(arm, code);
+                            code.nop();
+                        }
+                        IrExpr::UnitInstance => {}
+                        _ => emitter.emit(arm, code),
+                    }
+                    emitter.discarding_diverges(arm)
+                } else {
+                    emitter.emit_value(arm, code);
+                    emitter.adapt_physical_operand_for(
+                        arm,
+                        emitter.value_ty(arm),
+                        emission.result_ty,
+                        code,
+                    );
+                    emitter.diverges(arm)
                 }
-                if !matches!(
-                    emitter.ir.expr(arm),
-                    IrExpr::Const(_) | IrExpr::UnitInstance
-                ) {
-                    emitter.emit(arm, code);
-                }
-                emitter.discarding_diverges(arm)
-            } else {
-                emitter.emit_value(arm, code);
-                emitter.adapt_physical_operand_for(
-                    arm,
-                    emitter.value_ty(arm),
-                    emission.result_ty,
-                    code,
-                );
-                emitter.diverges(arm)
-            }
-        };
-        let selector_diverges = always_null || emit_arm(self, selector, code);
+            };
+        let selector_diverges = always_null || emit_arm(self, selector, false, code);
         if matches!(exit, Some((_, false))) {
             return;
         }
@@ -231,7 +240,7 @@ impl Emitter<'_> {
             self.unassigned_values.extend(temporaries);
         }
         code.set_stack(emission.entry_height);
-        let _ = emit_arm(self, null_result, code);
+        let _ = emit_arm(self, null_result, selector_diverges, code);
         self.bind(emission.end, code);
     }
 
