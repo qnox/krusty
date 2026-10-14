@@ -4,6 +4,56 @@ use crate::types::Ty;
 
 use super::{MemberMethodDeclaration, PropertyAccessorDeclaration};
 
+pub(super) fn member_method_group_source_order(
+    ir: &crate::ir::IrFile,
+    class: &crate::ir::IrClass,
+    declarations: &[MemberMethodDeclaration],
+) -> (u32, u8, u32) {
+    declarations
+        .iter()
+        .map(|declaration| match *declaration {
+            MemberMethodDeclaration::Source { offset, function }
+            | MemberMethodDeclaration::GeneratedDataMember { offset, function }
+            | MemberMethodDeclaration::DelegationForwarder { offset, function } => (
+                ir.fn_source_order.get(&function).copied().unwrap_or(offset),
+                0,
+                function,
+            ),
+            MemberMethodDeclaration::GeneratedMethod { offset } => (offset, 1, 0),
+            MemberMethodDeclaration::PropertyAnnotationMarker {
+                function,
+                source_order,
+                ..
+            } => (source_order, 2, function),
+            MemberMethodDeclaration::PropertyAccessor {
+                offset,
+                function,
+                property,
+                setter,
+            } => {
+                let source_order = match property {
+                    PropertyAccessorDeclaration::Member(index) => class
+                        .properties
+                        .get(index)
+                        .map_or(offset, |property| property.source_order),
+                    PropertyAccessorDeclaration::MemberExtension(index) => ir
+                        .member_ext_props
+                        .get(&class.fq_name)
+                        .and_then(|properties| properties.get(index))
+                        .map_or(offset, |property| property.source_order),
+                    PropertyAccessorDeclaration::CompanionBlock(source_order) => source_order,
+                };
+                (
+                    source_order,
+                    3 + u8::from(setter),
+                    function.unwrap_or(u32::MAX),
+                )
+            }
+        })
+        .min()
+        .expect("a collision group contains at least two declarations")
+}
+
 pub(super) fn marker_parameters(ir: &crate::ir::IrFile, function: crate::ir::FunId) -> Vec<Ty> {
     ir.functions[function as usize]
         .params

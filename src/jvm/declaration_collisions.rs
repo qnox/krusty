@@ -580,10 +580,21 @@ fn report_platform_declaration_clashes(
                     source_order,
                 });
         }
+        let mut groups = groups
+            .into_iter()
+            .filter(|(_, declarations)| declarations.len() >= 2)
+            .collect::<Vec<_>>();
+        groups.sort_by(|(left_signature, left), (right_signature, right)| {
+            property_marker_diagnostics::member_method_group_source_order(ir, class, left)
+                .cmp(
+                    &property_marker_diagnostics::member_method_group_source_order(
+                        ir, class, right,
+                    ),
+                )
+                .then_with(|| left_signature.cmp(right_signature))
+        });
+        let mut reported_marker_header = false;
         for ((name, descriptor), declarations) in groups {
-            if declarations.len() < 2 {
-                continue;
-            }
             let includes_marker = declarations.iter().any(|declaration| {
                 matches!(
                     declaration,
@@ -664,8 +675,14 @@ fn report_platform_declaration_clashes(
                     | MemberMethodDeclaration::GeneratedDataMember { offset, .. }
                     | MemberMethodDeclaration::GeneratedMethod { offset, .. }
                     | MemberMethodDeclaration::DelegationForwarder { offset, .. }
-                    | MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. }
                     | MemberMethodDeclaration::PropertyAccessor { offset, .. } => offset,
+                    MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. } => {
+                        if reported_marker_header {
+                            continue;
+                        }
+                        reported_marker_header = true;
+                        offset
+                    }
                 };
                 clashes.push((offset, message.clone()));
             }

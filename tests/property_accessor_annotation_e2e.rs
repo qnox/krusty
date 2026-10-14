@@ -193,6 +193,24 @@ fn a_marker_bound_and_star_projection_with_the_same_diagnostic_shape_have_stable
 }
 
 #[test]
+fn independent_marker_clash_groups_follow_property_source_order() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "IndependentExtensionMarkerClashes.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T> {\n\
+             \x20   @Marker val T.zed: Int get() = 1\n\
+             \x20   fun `getZed$annotations`(receiver: T) {}\n\
+             \x20   @Marker val T.alpha: Int get() = 1\n\
+             \x20   fun `getAlpha$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
 fn a_member_extension_marker_clash_erases_a_function_bound() {
     common::assert_error_blocks_match_kotlinc(
         &[(
