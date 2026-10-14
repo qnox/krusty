@@ -306,6 +306,46 @@ fn package_delegate_method_clashes_with_a_computed_property_accessor() {
     common::expect_identical_rejection(&result, "package delegate-method/property-accessor clash");
 }
 
+#[test]
+fn package_delegate_method_clashes_with_a_default_property_accessor() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
+        \n\
+        val x: Int by Unit\n\
+        val `x$delegate`: Any? = null\n";
+    let result = common::compiler_diagnostics(
+        &[("PackageDelegateDefaultPropertyAccessorClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(
+        &result,
+        "package delegate-method/default-property-accessor clash",
+    );
+}
+
+#[test]
+fn package_delegate_method_clashes_with_a_companion_extension_default_accessor() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        class Host\n\
+        companion val Host.`x$delegate`: Any? = null\n\
+        operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
+        val x: Int by Unit\n";
+    let result = common::compiler_diagnostics(
+        &[("PackageDelegateCompanionPropertyAccessorClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(
+        &result,
+        "package delegate-method/companion-property-accessor clash",
+    );
+}
+
 /// Generated methods live in an internal map, but platform-clash diagnostics follow their
 /// properties' stable source order when several generated declarations share the file-start span.
 #[test]
@@ -345,6 +385,25 @@ fn member_delegate_method_clash_matches_kotlinc_exactly() {
         &[common::stdlib_jar()],
     );
     common::expect_identical_rejection(&result, "member generated delegate-method clash");
+}
+
+#[test]
+fn member_delegate_method_clashes_with_an_extension_property_accessor() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun Unit.getValue(thisRef: Host, property: KProperty<*>): Int = 1\n\
+        \n\
+        class Host {\n\
+        \x20   val x: Int by Unit\n\
+        \x20   val Host.`x$delegate`: Any? get() = null\n\
+        }\n";
+    let result = common::compiler_diagnostics(
+        &[("MemberDelegatePropertyAccessorClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "member delegate-method/property-accessor clash");
 }
 
 #[test]

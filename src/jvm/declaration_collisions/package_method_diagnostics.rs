@@ -12,7 +12,7 @@ enum Declaration {
     Function(usize),
     PropertyAccessor {
         property: usize,
-        function: FunId,
+        function: Option<FunId>,
         setter: bool,
     },
     PropertyAnnotationMarker(FunId),
@@ -61,35 +61,54 @@ pub(super) fn report(
         let Some(layout) = ir.local_property_layouts.get(&property.property) else {
             continue;
         };
-        let (getter, setter) = match layout {
-            crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. } => {
-                (*getter, *setter)
-            }
+        let (storage, getter, setter) = match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                storage,
+                getter,
+                setter,
+                ..
+            } => (Some(*storage), *getter, *setter),
             crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
-                (Some(*getter), *setter)
+                (None, Some(*getter), *setter)
             }
             _ => continue,
         };
         for (setter, function) in [(false, getter), (true, setter)] {
-            let Some(function) = function else { continue };
-            let Some(declaration) = ir.functions.get(function as usize) else {
-                return Err(vec![(
-                    property_accessor_span(ir, index, setter),
-                    "internal error: package property accessor has no IR function".to_string(),
-                )]);
-            };
-            if let Err(kind) = super::determined_function_signature(declaration) {
-                return Err(vec![(
-                    property_accessor_span(ir, index, setter),
-                    super::undetermined_type_message(kind),
-                )]);
-            }
-            push(
-                &mut groups,
-                (
+            let signature = if let Some(function) = function {
+                let Some(declaration) = ir.functions.get(function as usize) else {
+                    return Err(vec![(
+                        property_accessor_span(ir, index, setter),
+                        "internal error: package property accessor has no IR function".to_string(),
+                    )]);
+                };
+                if let Err(kind) = super::determined_function_signature(declaration) {
+                    return Err(vec![(
+                        property_accessor_span(ir, index, setter),
+                        super::undetermined_type_message(kind),
+                    )]);
+                }
+                Some((
                     declaration.name.clone(),
                     crate::jvm::ir_emit::function_descriptor(ir, override_results, function),
-                ),
+                ))
+            } else {
+                let side = if setter {
+                    crate::jvm::ir_emit::PropertyAccessorSide::Setter
+                } else {
+                    crate::jvm::ir_emit::PropertyAccessorSide::Getter
+                };
+                storage
+                    .and_then(|storage| {
+                        crate::jvm::ir_emit::declared_default_static_accessor_signature(
+                            ir, storage, side,
+                        )
+                    })
+                    .map(|signature| (signature.name, signature.descriptor))
+            };
+            let Some(signature) = signature else { continue };
+            push(
+                &mut groups,
+                signature,
                 Declaration::PropertyAccessor {
                     property: index,
                     function,
@@ -260,7 +279,7 @@ fn delegate_group_order(ir: &IrFile, declaration: Declaration) -> (u8, u32, FunI
         } => (
             1 + u8::from(setter),
             ir.package_properties[property].source_order,
-            function,
+            function.unwrap_or(u32::MAX),
         ),
         Declaration::PropertyAnnotationMarker(function) => (3, u32::MAX, function),
     }
@@ -272,7 +291,20 @@ fn declaration_order(
 ) -> Result<(String, String, Vec<String>, usize), UndeterminedDiagnosticType> {
     match declaration {
         Declaration::Function(index) => function_order(&ir.package_functions[index]),
-        Declaration::PropertyAccessor { function, .. }
+        Declaration::PropertyAccessor {
+            property,
+            function: None,
+            setter,
+        } => Ok((
+            ir.package_properties[property].name.clone(),
+            String::new(),
+            Vec::new(),
+            usize::from(setter),
+        )),
+        Declaration::PropertyAccessor {
+            function: Some(function),
+            ..
+        }
         | Declaration::InPlaceDelegate { function, .. }
         | Declaration::PropertyAnnotationMarker(function) => {
             let function = &ir.functions[function as usize];
@@ -295,15 +327,19 @@ fn render(ir: &IrFile, declaration: Declaration) -> Result<String, UndeterminedD
             } else {
                 format!("<get-{}>", property.name)
             };
-            let mut type_context = super::semantic_function_parameters(ir, function).to_vec();
-            type_context.push(ir.functions[function as usize].ret);
-            Ok(super::render_source_member_method(
-                ir,
-                function,
-                &callable,
-                owner(ir),
-                &type_context,
-            ))
+            if let Some(function) = function {
+                let mut type_context = super::semantic_function_parameters(ir, function).to_vec();
+                type_context.push(ir.functions[function as usize].ret);
+                Ok(super::render_source_member_method(
+                    ir,
+                    function,
+                    &callable,
+                    owner(ir),
+                    &type_context,
+                ))
+            } else {
+                render_default_property_accessor(ir, property, setter, &callable)
+            }
         }
         Declaration::PropertyAnnotationMarker(function) => {
             let function = &ir.functions[function as usize];
@@ -319,6 +355,37 @@ fn render(ir: &IrFile, declaration: Declaration) -> Result<String, UndeterminedD
             owner(ir),
         ),
     }
+}
+
+fn render_default_property_accessor(
+    ir: &IrFile,
+    property: &crate::ir::IrPackageProperty,
+    setter: bool,
+    callable: &str,
+) -> Result<String, UndeterminedDiagnosticType> {
+    debug_assert!(property.type_params.is_empty());
+    debug_assert!(property.receiver.is_none() || property.is_companion_extension());
+    debug_assert!(property.context_parameters.is_empty());
+    let parameters = if setter {
+        format!(
+            "{}: {}",
+            super::rendered_callable_name("<set-?>"),
+            super::source_type_name(property.ty)?
+        )
+    } else {
+        String::new()
+    };
+    let result = if setter {
+        crate::types::Ty::Unit
+    } else {
+        property.ty
+    };
+    Ok(format!(
+        "fun {}({parameters}): {} defined in {}",
+        super::rendered_callable_name(callable),
+        super::source_type_name(result)?,
+        owner(ir)
+    ))
 }
 
 fn render_function(

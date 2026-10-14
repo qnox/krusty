@@ -267,6 +267,39 @@ pub(super) enum StaticAccessor {
     Setter,
 }
 
+/// The exact compiler-default accessor one static property claims. Collision planning calls the
+/// same operation as emission so a diagnostic cannot drift from the method the class writer will
+/// publish after value-class storage erasure or setter-name mangling.
+pub(in crate::jvm) fn declared_default_static_accessor_signature(
+    ir: &IrFile,
+    static_index: u32,
+    side: PropertyAccessorSide,
+) -> Option<super::declared_property_accessor::EmittedAccessorSignature> {
+    let present = match side {
+        PropertyAccessorSide::Getter => ir.has_jvm_default_static_getter(static_index),
+        PropertyAccessorSide::Setter => ir.has_jvm_default_static_setter(static_index),
+    };
+    if !present {
+        return None;
+    }
+    let storage = &ir.statics[static_index as usize];
+    let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
+    let (name, descriptor) = match side {
+        PropertyAccessorSide::Getter => (
+            property_getter_name(&storage.name),
+            format!("(){descriptor}"),
+        ),
+        PropertyAccessorSide::Setter => (
+            storage
+                .setter_jvm_name
+                .clone()
+                .unwrap_or_else(|| property_setter_name(&storage.name)),
+            format!("({descriptor})V"),
+        ),
+    };
+    Some(super::declared_property_accessor::EmittedAccessorSignature { name, descriptor })
+}
+
 /// The compiler-default public `getX` or `setX` of one static property stored on `owner`, emitted
 /// at the property's place among its owner's declared members: kotlinc's JvmPropertiesLowering
 /// replaces each property with its accessors in place. The owner is the file facade for a top-level
@@ -283,13 +316,15 @@ pub(super) fn emit_default_static_accessor(
     static_index: u32,
     accessor: StaticAccessor,
 ) {
-    let present = match accessor {
-        StaticAccessor::Getter => ir.has_jvm_default_static_getter(static_index),
-        StaticAccessor::Setter => ir.has_jvm_default_static_setter(static_index),
+    let side = match accessor {
+        StaticAccessor::Getter => PropertyAccessorSide::Getter,
+        StaticAccessor::Setter => PropertyAccessorSide::Setter,
     };
-    if !present {
+    let Some(accessor_signature) =
+        declared_default_static_accessor_signature(ir, static_index, side)
+    else {
         return;
-    }
+    };
     let s = &ir.statics[static_index as usize];
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let jt = jvm_declared_ty(&s.ty);
@@ -316,6 +351,8 @@ pub(super) fn emit_default_static_accessor(
             s,
             ir.static_field_jvm_name(static_index),
             DefaultSetterHeader {
+                name: &accessor_signature.name,
+                descriptor: &accessor_signature.descriptor,
                 signature: signatures.setter.as_deref(),
                 nullability: acc_ann,
                 annotations: declared.map(|declared| &declared.setter),
@@ -324,15 +361,14 @@ pub(super) fn emit_default_static_accessor(
         );
         return;
     }
-    let gname = property_getter_name(&s.name);
     let field_name = ir.static_field_jvm_name(static_index);
     // kotlinc interns an accessor's `Signature` between its descriptor and its annotations (the
     // declared ones, then nullability), BEFORE the body's field cluster.
     let annotations = declared.map(|declared| &declared.getter);
     reserve_default_accessor_pool(
         cw,
-        &gname,
-        &format!("(){desc}"),
+        &accessor_signature.name,
+        &accessor_signature.descriptor,
         signatures.getter.as_deref(),
         acc_ann,
         annotations,
@@ -364,15 +400,25 @@ pub(super) fn emit_default_static_accessor(
     emit_return(jt, &mut g);
     finish_code_sig::<0x0019>(
         cw,
-        &gname,
-        &format!("(){desc}"),
+        &accessor_signature.name,
+        &accessor_signature.descriptor,
         &mut g,
         0,
         signatures.getter.as_deref(),
     );
-    cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
+    cw.set_method_nullability(
+        &accessor_signature.name,
+        &accessor_signature.descriptor,
+        acc_ann,
+        &[None],
+    );
     if let Some(annotations) = annotations {
-        super::function_annotations::emit_declared(cw, annotations, &gname, &format!("(){desc}"));
+        super::function_annotations::emit_declared(
+            cw,
+            annotations,
+            &accessor_signature.name,
+            &accessor_signature.descriptor,
+        );
     }
 }
 
@@ -399,6 +445,8 @@ fn reserve_default_accessor_pool(
 
 /// What a default static setter's header carries besides its name and descriptor.
 struct DefaultSetterHeader<'a> {
+    name: &'a str,
+    descriptor: &'a str,
     signature: Option<&'a str>,
     nullability: Option<&'a str>,
     annotations: Option<&'a crate::ir::DeclarationAnnotations>,
@@ -414,32 +462,21 @@ fn emit_default_static_setter(
     checks_parameter: bool,
 ) {
     let DefaultSetterHeader {
+        name,
+        descriptor,
         signature,
         nullability: acc_ann,
         annotations,
     } = header;
     let jt = jvm_declared_ty(&s.ty);
-    let desc = type_descriptor(jt);
-    // A value-class-typed property's setter carries the value-class mangle: the parameter
-    // it takes is the carrier, and a value-class PARAMETER always mangles.
-    let sname = s
-        .setter_jvm_name
-        .clone()
-        .unwrap_or_else(|| property_setter_name(&s.name));
-    cw.reserve_method_name(&sname);
-    cw.seed_utf8(&format!("({desc})V"));
+    let field_descriptor = type_descriptor(jt);
+    cw.reserve_method_name(name);
+    cw.seed_utf8(descriptor);
     if let Some(signature) = signature {
         cw.seed_utf8(signature);
     }
     if let Some(annotations) = annotations {
-        reserve_default_accessor_pool(
-            cw,
-            &sname,
-            &format!("({desc})V"),
-            signature,
-            None,
-            Some(annotations),
-        );
+        reserve_default_accessor_pool(cw, name, descriptor, signature, None, Some(annotations));
     }
     let words = slot_words(jt);
     let mut st = CodeBuilder::new(words);
@@ -460,23 +497,23 @@ fn emit_default_static_setter(
         st.mark_line(s.line);
     }
     load(jt, 0, &mut st);
-    let fref = cw.fieldref(owner, field_name, &desc);
+    let fref = cw.fieldref(owner, field_name, &field_descriptor);
     st.putstatic(fref, slot_words(jt) as i32);
     st.ret_void();
     // kotlinc writes the setter's `LocalVariableTable` as it finishes the method, so the
     // `<set-?>` name joins the pool right after the body's constants.
     cw.seed_utf8("<set-?>");
-    finish_code_sig::<0x0019>(cw, &sname, &format!("({desc})V"), &mut st, words, signature);
-    cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
+    finish_code_sig::<0x0019>(cw, name, descriptor, &mut st, words, signature);
+    cw.set_method_nullability(name, descriptor, None, &[acc_ann]);
     if let Some(annotations) = annotations {
-        super::function_annotations::emit_declared(cw, annotations, &sname, &format!("({desc})V"));
+        super::function_annotations::emit_declared(cw, annotations, name, descriptor);
     }
     // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
     cw.set_method_debug(
-        &sname,
-        &format!("({desc})V"),
+        name,
+        descriptor,
         None,
-        &[("<set-?>".to_string(), desc.clone(), 0)],
+        &[("<set-?>".to_string(), field_descriptor, 0)],
     );
 }
 
