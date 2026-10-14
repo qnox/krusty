@@ -10503,6 +10503,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   exemption; a concrete or `open` class still has to implement every abstract member itself.
   Tests: `tests/classpath_abstract_subclass_e2e.rs` (repository-owned classpath superclass,
   source-declared members, concrete/open negatives, and kotlinc differentials).
+- **Platform override equivalence is provider-owned.** Common hierarchy checking compares only an
+  opaque provider slot plus semantic result covariance; it does not inspect JVM names, descriptors,
+  erasure, or declaration origin. The JVM provider maps a source function type and the corresponding
+  raw Java `Function0`...`Function22`/high-arity `FunctionN` input to the same physical carrier,
+  while keeping value-class declarations out because their JVM names are mangled. Tests:
+  `tests/override_candidate_rendering_e2e.rs`.
 - **Override diagnostics list the declarations they are about, rendered as kotlinc renders them.**
   `'f' overrides nothing.` gains ` Potential signatures for overriding:` and one line per open,
   non-private same-name member, in declaration order. A class that does

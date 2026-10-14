@@ -271,6 +271,38 @@ fn a_member_extension_implements_the_matching_raw_java_method() {
     );
 }
 
+/// Function types and raw JVM function interfaces name the same provider override slot. The JVM
+/// provider selects the numbered carrier through arity 22 and the shared `FunctionN` carrier above
+/// it; common hierarchy checking sees only the resulting opaque slot identity.
+#[test]
+fn function_member_extensions_implement_matching_raw_java_methods() {
+    let stdlib = common::stdlib_jar();
+    let (library, _) = common::javac_compile(
+        &[(
+            "J.java".to_string(),
+            "package fixture; public abstract class J {\n\
+             public abstract void fixed(kotlin.jvm.functions.Function1<Object, Object> value);\n\
+             public abstract void high(kotlin.jvm.functions.FunctionN<Object> value);\n\
+             }"
+            .to_string(),
+        )],
+        std::slice::from_ref(&stdlib),
+    )
+    .expect("javac must build the function-interface fixture");
+    let source = "abstract class Base : fixture.J() {\n\
+        fun ((Any?) -> Any?).fixed() {}\n\
+        fun ((Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?) -> Any?).high() {}\n\
+        }\n\
+        class Derived : Base()\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[library, stdlib]);
+    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
+    assert_eq!(expected, [] as [&str; 0]);
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+}
+
 /// A source member extension does not satisfy a raw Java slot merely by sharing its source name;
 /// the complete physical input shape must match.
 #[test]

@@ -9,27 +9,14 @@ use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum JvmOverrideSlotInput {
-    Type(Ty),
-    Function(usize),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct JvmOverrideKey {
     effective_name: String,
-    inputs: Box<[JvmOverrideSlotInput]>,
+    inputs: Box<[Ty]>,
 }
 
-fn erased_type(input: JvmOverrideSlotInput) -> Ty {
-    match input {
-        JvmOverrideSlotInput::Type(ty) => ty,
-        JvmOverrideSlotInput::Function(arity) => Ty::obj(&format!("kotlin/Function{arity}")),
-    }
-}
-
-fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> JvmOverrideSlotInput {
+fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> Ty {
     let ty = libraries.library_value_form(ty);
-    let erased = match ty {
+    match ty {
         unsigned if unsigned.is_unsigned() => unsigned.scalar_value_repr().unwrap(),
         Ty::String => Ty::obj("kotlin/String"),
         Ty::Obj(name, arguments) if name == crate::types::wk::array() => {
@@ -37,36 +24,25 @@ fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> JvmOverrideSlotInput {
                 .first()
                 .copied()
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            Ty::obj_args(
-                "kotlin/Array",
-                &[erased_type(normalized_input(libraries, element))],
-            )
+            Ty::obj_args("kotlin/Array", &[normalized_input(libraries, element)])
         }
         Ty::Obj(name, _) => Ty::Obj(name, &[]),
         Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
-        Ty::Fun(signature) => {
-            return JvmOverrideSlotInput::Function(
-                signature.params.len() + usize::from(signature.suspend),
-            );
-        }
+        Ty::Fun(signature) => Ty::obj(&crate::jvm::names::function_interface_internal_name(
+            signature.params.len() + usize::from(signature.suspend),
+        )),
         Ty::Nullable(inner) => match *inner {
             Ty::UInt => Ty::obj("kotlin/UInt"),
             Ty::ULong => Ty::obj("kotlin/ULong"),
-            other if other.boxed_ref().is_some() => erased_type(normalized_input(
-                libraries,
-                other.boxed_ref().unwrap_or(other),
-            )),
-            other => erased_type(normalized_input(libraries, other)),
+            other if other.boxed_ref().is_some() => {
+                normalized_input(libraries, other.boxed_ref().unwrap_or(other))
+            }
+            other => normalized_input(libraries, other),
         },
-        Ty::PlatformNullable(inner) => {
-            return normalized_input(libraries, Ty::nullable(*inner));
-        }
-        Ty::TyParam(_, bound) | Ty::DefinitelyNotNull(bound) => {
-            return normalized_input(libraries, *bound);
-        }
+        Ty::PlatformNullable(inner) => normalized_input(libraries, Ty::nullable(*inner)),
+        Ty::TyParam(_, bound) | Ty::DefinitelyNotNull(bound) => normalized_input(libraries, *bound),
         other => other,
-    };
-    JvmOverrideSlotInput::Type(erased)
+    }
 }
 
 pub(super) fn slot(
@@ -127,7 +103,45 @@ pub(super) fn result_refines(
 ) -> bool {
     crate::symbol_resolver::resolution_subtype(
         source,
-        erased_type(normalized_input(libraries, implementation)),
-        erased_type(normalized_input(libraries, declaration)),
+        normalized_input(libraries, implementation),
+        normalized_input(libraries, declaration),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn libraries() -> Option<JvmLibraries> {
+        let stdlib = crate::toolchain::stdlib_jar()?;
+        JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib],
+        )))
+        .ok()
+    }
+
+    #[test]
+    fn semantic_and_physical_function_inputs_share_the_numbered_carrier() {
+        let Some(libraries) = libraries() else {
+            return;
+        };
+        assert_eq!(
+            normalized_input(&libraries, Ty::fun(vec![Ty::obj("kotlin/Any")], Ty::Unit)),
+            normalized_input(&libraries, Ty::obj("kotlin/jvm/functions/Function1"))
+        );
+    }
+
+    #[test]
+    fn semantic_and_physical_high_arity_inputs_share_function_n() {
+        let Some(libraries) = libraries() else {
+            return;
+        };
+        assert_eq!(
+            normalized_input(
+                &libraries,
+                Ty::fun(vec![Ty::obj("kotlin/Any"); 23], Ty::Unit)
+            ),
+            normalized_input(&libraries, Ty::obj("kotlin/jvm/functions/FunctionN"))
+        );
+    }
 }
