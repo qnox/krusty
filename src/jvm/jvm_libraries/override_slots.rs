@@ -4,15 +4,27 @@
 //! Common hierarchy code consumes only [`ProviderOverrideSlot`] identity and ownership.
 
 use super::JvmLibraries;
-use crate::libraries::{FunctionInfo, OverrideSlotInput, ProviderOverrideSlot, SemanticPlatform};
+use crate::libraries::{FunctionInfo, ProviderOverrideSlot, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
-pub(super) fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> OverrideSlotInput {
-    fn erased_ty(input: OverrideSlotInput) -> Ty {
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum JvmOverrideSlotInput {
+    Type(Ty),
+    Function(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JvmOverrideKey {
+    effective_name: String,
+    inputs: Box<[JvmOverrideSlotInput]>,
+}
+
+fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> JvmOverrideSlotInput {
+    fn erased_ty(input: JvmOverrideSlotInput) -> Ty {
         match input {
-            OverrideSlotInput::Type(ty) => ty,
-            OverrideSlotInput::Function(arity) => Ty::obj(&format!("kotlin/Function{arity}")),
+            JvmOverrideSlotInput::Type(ty) => ty,
+            JvmOverrideSlotInput::Function(arity) => Ty::obj(&format!("kotlin/Function{arity}")),
         }
     }
 
@@ -33,7 +45,7 @@ pub(super) fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> OverrideSlot
         Ty::Obj(name, _) => Ty::Obj(name, &[]),
         Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
         Ty::Fun(signature) => {
-            return OverrideSlotInput::Function(
+            return JvmOverrideSlotInput::Function(
                 signature.params.len() + usize::from(signature.suspend),
             );
         }
@@ -54,7 +66,25 @@ pub(super) fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> OverrideSlot
         }
         other => other,
     };
-    OverrideSlotInput::Type(erased)
+    JvmOverrideSlotInput::Type(erased)
+}
+
+pub(super) fn slot(
+    libraries: &JvmLibraries,
+    owner: TypeName,
+    effective_name: String,
+    inputs: impl IntoIterator<Item = Ty>,
+) -> ProviderOverrideSlot {
+    ProviderOverrideSlot::new(
+        owner,
+        JvmOverrideKey {
+            effective_name,
+            inputs: inputs
+                .into_iter()
+                .map(|input| normalized_input(libraries, input))
+                .collect(),
+        },
+    )
 }
 
 pub(super) fn source_slot(
@@ -81,12 +111,10 @@ pub(super) fn source_slot(
     }) {
         return None;
     }
-    Some(ProviderOverrideSlot::new(
+    Some(slot(
+        libraries,
         crate::jvm::jvm_class_map::to_jvm_type_name(function.callable.owner),
         function.callable.name.clone(),
-        inputs
-            .into_iter()
-            .map(|input| normalized_input(libraries, input))
-            .collect(),
+        inputs,
     ))
 }

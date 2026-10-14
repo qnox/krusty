@@ -879,10 +879,9 @@ fn property_overrides_in_family(
         && resolution_subtype(source, implementation.ty, inherited.ty)
 }
 
-/// Freeze exact property override edges while the complete applied hierarchy is available. Mapped
-/// Java realizations such as `AbstractCollection.size()` have distinct provider identities from
-/// `Collection.size`; downstream diagnostics consume this edge instead of comparing spellings or
-/// backend method shapes.
+/// Freeze exact property override edges while the complete applied hierarchy is available.
+/// Provider-normalized realizations may have distinct identities for the same semantic property;
+/// downstream diagnostics consume this edge instead of comparing spellings or target shapes.
 fn record_overridden_property_declarations(
     source: &dyn SymbolSource,
     properties: &mut PropertySet,

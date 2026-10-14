@@ -4863,7 +4863,8 @@ impl JvmLibraries {
                         let provider_override_slot = (!t.is_kotlin
                             || super::jvm_class_map::maps_to_distinct_jvm_internal(cn))
                         .then(|| {
-                            crate::libraries::ProviderOverrideSlot::new(
+                            override_slots::slot(
+                                self,
                                 // `physical_owner` remains the semantic classifier for most mapped
                                 // builtins so ordinary call emission can retain its selected Kotlin
                                 // declaration identity. Java override scope is different: its owner is
@@ -4874,12 +4875,7 @@ impl JvmLibraries {
                                     .physical_name
                                     .clone()
                                     .unwrap_or_else(|| callable.name.clone()),
-                                callable
-                                    .physical_params
-                                    .iter()
-                                    .copied()
-                                    .map(|input| override_slots::normalized_input(self, input))
-                                    .collect(),
+                                callable.physical_params.iter().copied(),
                             )
                         });
                         overloads.push(FunctionInfo {

@@ -390,9 +390,9 @@ impl Checker<'_> {
                 )
             })
             .collect::<Vec<_>>();
-        // Preserve the normalized declaration views across callable spellings. A mapped Java
-        // accessor can override a Kotlin property under a different source name (`entrySet` /
-        // `entries`); the provider-recorded override edge, not either spelling, joins them.
+        // Preserve normalized declaration views across callable spellings. A provider may expose
+        // one declaration as both a function and a property; its recorded override edge, not either
+        // spelling, joins those views.
         let normalized_functions = families
             .iter()
             .flat_map(|(_, callables)| callables.functions())
@@ -402,9 +402,9 @@ impl Checker<'_> {
             .flat_map(|(_, callables)| callables.properties())
             .collect::<Vec<_>>();
 
-        // A dependency property accessor can also be exposed as its physical Java method. It is
-        // one Kotlin declaration and therefore one obligation: validate the selected semantic
-        // property below and do not count its duplicate function facet independently.
+        // A dependency property accessor can also have a function facet. It is one semantic
+        // declaration and therefore one obligation: validate the selected property below and do
+        // not count its duplicate function facet independently.
         let property_accessor_targets = families
             .iter()
             .flat_map(|(_, callables)| callables.properties())
@@ -667,9 +667,9 @@ fn declaration_order(classifier: &LibraryType, name: &str) -> usize {
 }
 
 /// The nearest declaration of the abstract property `obligation` (for a missing setter, of its
-/// setter). A Java class declares a mapped property through its accessor method alone
-/// (`AbstractCollection.size()` is `Collection.size`), so that method places the obligation on
-/// its class, while the property itself renders from the nearest classifier that declares it.
+/// setter). A provider may declare a normalized property through an accessor method alone, so that
+/// method places the obligation on its class while the property renders from the nearest
+/// classifier that declares it.
 fn declared_property(
     classifiers: &[Arc<LibraryType>],
     normalized_functions: &[&FunctionInfo],
@@ -848,10 +848,8 @@ fn implements_abstract_function(
         )
 }
 
-/// Kotlin override slots admit either bound of a Java platform type. Keep declaration-owned
-/// generic shape and member-extension receivers exact while applying that flexibility to the
-/// occurrence types. This preserves the existing mapped-collection override relation without
-/// reverting obligation identity to JVM erasure.
+/// Flexible semantic types admit either bound in an override slot. Keep declaration-owned generic
+/// shape and member-extension receivers exact while applying that flexibility to occurrence types.
 fn flexible_function_keys_match(left: &FunctionInfo, right: &FunctionInfo) -> bool {
     let left = function_key(left);
     let right = function_key(right);

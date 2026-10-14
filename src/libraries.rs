@@ -25,6 +25,7 @@ mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
+mod provider_override;
 mod result_nullability;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
@@ -51,6 +52,7 @@ pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
 pub use property_producer::PropertyProducer;
+pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
@@ -1519,51 +1521,6 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
         items
     } else {
         Vec::new()
-    }
-}
-
-/// One input in a provider-normalized override slot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OverrideSlotInput {
-    Type(Ty),
-    Function(usize),
-}
-
-/// Provider-normalized identity of one platform override slot. The common hierarchy may compare
-/// this typed contract, but it never reconstructs the slot from target representation facts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderOverrideSlot {
-    owner: TypeName,
-    key: ProviderOverrideKey,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ProviderOverrideKey {
-    effective_name: String,
-    inputs: Box<[OverrideSlotInput]>,
-}
-
-impl ProviderOverrideSlot {
-    pub(crate) fn new(
-        owner: TypeName,
-        effective_name: String,
-        inputs: Box<[OverrideSlotInput]>,
-    ) -> Self {
-        Self {
-            owner,
-            key: ProviderOverrideKey {
-                effective_name,
-                inputs,
-            },
-        }
-    }
-
-    pub(crate) fn owner(&self) -> TypeName {
-        self.owner
-    }
-
-    pub(crate) fn same_key(&self, other: &Self) -> bool {
-        self.key == other.key
     }
 }
 
