@@ -3664,6 +3664,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The same rule instantiates the reified element of `filterIsInstanceTo` from the
   destination collection. Tests: `tests/generic_bound_projection_e2e.rs` and
   `tests/backend_rejection_coverage_e2e.rs`.
+- **A lambda's written parameter type is an upper bound, not a lower one.** When a lambda
+  `{ x: A -> }` is passed where `(P) -> R`, or a functional interface whose method takes `P`,
+  is expected, it must satisfy `P <: A` because function parameters are contravariant. With `P = T`
+  this is the upper bound `T <: A`, whatever variance the interface declares for `T` (`in`,
+  invariant, a Kotlin function type and a Java `Consumer<T>` all behave alike). So
+  `fun <T> choose(s: Sink<T>, v: T): T` called as `choose({ x: Any -> }, "s")` fixes `T` to
+  `String`, not `Any`. The upper bound alone fixes a variable no argument bounds from below
+  (`only { x: Long -> }` for `(T) -> Unit` gives `T = Long`). A variable inside an invariant
+  argument is an equality: `{ x: Box<Any> -> }` for `(Box<T>) -> Unit` fixes `T` to `Any`.
+  Several written types on one variable meet: `{ a: Left, b: Right -> }` for `(T, T) -> Unit`
+  gives `T = Left & Right`, and `{ a: Any, b: Left -> }` gives `T = Left`.
+  Known gap: a lambda's result is a lower bound, and kotlinc joins it with the other lower
+  bounds (`{ 1 }` for `Src<out T>` beside `"s"` gives `Comparable<*> & Serializable`); krusty
+  checks the lambda against the `T` the other arguments fixed and rejects `1`.
+  Tests: `tests/sam_lambda_parameter_inference_e2e.rs`.
 - **Incompatible upper bounds infer an intersection, not `Nothing`.** A type variable
   constrained only from contravariant inputs (`In<Int>()` and `In<String>()` against
   `fun <E> intersect(vararg x: In<E>): E`) is fixed to `Int & String`. That intersection

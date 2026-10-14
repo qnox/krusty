@@ -39142,55 +39142,6 @@ impl<'a> Checker<'a> {
                     )
                 },
             );
-            // Function subtyping makes a stored function value's parameter types upper
-            // constraints. A lambda literal's *written* parameter annotations are different: they
-            // are declaration-site equalities that participate in builder/call inference. Collect
-            // only those annotated slots as lower bindings, leaving unannotated lambda parameters
-            // and ordinary function values on the variance-aware constraint path above.
-            let mut explicit_lambda_bindings = crate::symbol_resolver::GSigBinds::default();
-            for (argument, &visible_parameter) in parameters.iter().enumerate() {
-                let Some(declared_annotations) =
-                    self.file.lambda_param_types.get(&args[argument].0)
-                else {
-                    continue;
-                };
-                let Some(&parameter) = initial_shape.parameter_indices.get(visible_parameter)
-                else {
-                    continue;
-                };
-                if !candidate
-                    .call_sig
-                    .parameter_contributes_to_inference(parameter)
-                {
-                    continue;
-                }
-                let (Ty::Fun(declared), Ty::Fun(actual)) = (
-                    signature.params[parameter].non_null(),
-                    arg_tys[argument].non_null(),
-                ) else {
-                    continue;
-                };
-                let value_start = declared.context_count.min(declared.params.len())
-                    + usize::from(declared.has_receiver);
-                for (index, annotation) in declared_annotations.iter().enumerate() {
-                    if annotation.is_none() {
-                        continue;
-                    }
-                    let Some((&declared, &actual)) = declared
-                        .params
-                        .get(value_start + index)
-                        .zip(actual.params.get(value_start + index))
-                    else {
-                        continue;
-                    };
-                    crate::symbol_resolver::unify_ty_from_symbols(
-                        &source,
-                        declared,
-                        actual,
-                        &mut explicit_lambda_bindings,
-                    );
-                }
-            }
             // A lambda literal used as an extension receiver is still context-sensitive. Only a
             // value-argument constraint that proves the receiver is Unit-coercible may replace its
             // provisional result. Rerun the shared solver with that proven semantic receiver so
@@ -39268,14 +39219,6 @@ impl<'a> Checker<'a> {
                 &receiver_bindings,
                 &mut bindings,
                 inferred.bindings,
-            );
-            crate::symbol_resolver::merge_call_argument_bindings(
-                &source,
-                &signature,
-                type_args,
-                &receiver_bindings,
-                &mut bindings,
-                explicit_lambda_bindings,
             );
             crate::symbol_resolver::merge_call_argument_bindings(
                 &source,
@@ -42124,41 +42067,31 @@ impl<'a> Checker<'a> {
                     |(parameter, actual)| actual.map(|actual| (parameter, actual, false)),
                 ));
             }
-            let mut inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
-                &self.fed_source(),
+            let source = self.fed_source();
+            // The constraint seam reads a function value or lambda through the parameter's
+            // function type or functional-interface method, so a written lambda parameter type
+            // is an upper bound (`{ x: Any -> }` for `Sink<T>` gives `T <: Any`). An upper bound
+            // fills only a formal that no other argument bound; joining it with the selected
+            // lower bound (`T = String`) as if it were one would widen `T` to `Any`.
+            let constraints = crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+                &source,
                 signature,
                 actuals.clone(),
                 selected.call_sig.vararg_index,
             );
+            let mut inferred = constraints.bindings.clone();
+            let has_postponed_constraints =
+                !inferred.is_empty() || !constraints.upper_only.is_empty();
+            for (formal, upper) in constraints.denotable_upper_bindings(&source) {
+                if !selected_bindings.contains_key(&formal) {
+                    inferred.insert(formal, upper);
+                }
+            }
             crate::trace_compiler!(
                 "generic_return",
                 "selected call={} post-context actuals={actuals:?} prior={selected_bindings:?} inferred={inferred:?}",
                 selected.callable.name,
             );
-            let has_postponed_constraints = !inferred.is_empty();
-            if let Some(sam_signatures) = sam_signatures {
-                for ((sam, &argument), &actual) in sam_signatures.iter().zip(args).zip(arg_tys) {
-                    let Some(sam) = sam else { continue };
-                    crate::symbol_resolver::unify_ty(
-                        Ty::fun_with_shape(
-                            sam.params.clone(),
-                            sam.ret,
-                            sam.context_count,
-                            sam.has_receiver,
-                            sam.suspend,
-                        ),
-                        actual,
-                        &mut inferred,
-                    );
-                    crate::trace_compiler!(
-                        "resolve",
-                        "SAM argument={argument:?} expected_params={:?} expected_ret={:?} actual={actual:?} inferred={inferred:?}",
-                        sam.params,
-                        sam.ret,
-                    );
-                }
-            }
-            let source = self.fed_source();
             crate::symbol_resolver::merge_generic_bindings_from(
                 Some(&source),
                 signature,
