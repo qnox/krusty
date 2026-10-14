@@ -11240,7 +11240,7 @@ fn instantiate_member_extension_with(
             .and_then(|signature| signature.formal_bounds.get(index))
             .and_then(|bounds| bounds.first())
             .copied()
-            .map(|bound| crate::symbol_resolver::ty_subst(bound, &bindings))
+            .map(|bound| crate::symbol_resolver::unsolved_formal_bound(bound, parameter, &bindings))
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
         bindings.entry(parameter.clone()).or_insert(fallback);
     }
