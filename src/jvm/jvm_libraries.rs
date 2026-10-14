@@ -4855,7 +4855,15 @@ impl JvmLibraries {
                         callable.physical_parameter_plan = m.physical_parameter_plan.clone();
                         callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
                         let inline_body_plan = callable.inline_body_plan.clone();
+                        // Java erasure governs raw Java declarations and Kotlin mapped-builtin
+                        // slots. An ordinary Kotlin metadata declaration keeps Kotlin override
+                        // identity even when its physical descriptor happens to erase like an
+                        // unrelated Java member (notably `Int` versus the mangled `UInt`).
+                        let java_override_scope_owner = (!t.is_kotlin
+                            || super::jvm_class_map::maps_to_distinct_jvm_internal(cn))
+                        .then_some(physical_owner);
                         overloads.push(FunctionInfo {
+                            java_override_scope_owner,
                             ret: ReturnInfo::new(
                                 m.ret_nullable()
                                     || builtin_ret_nullable

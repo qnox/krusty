@@ -1516,6 +1516,11 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Provider-normalized classifier whose language override scope declares this member. JVM
+    /// providers use the mapped Java classifier here when Java erasure governs the slot (for
+    /// example `kotlin.collections.MutableList.addAll` is declared in `java.util.List`'s Java
+    /// scope). This is a semantic override fact, distinct from the callable's physical emit owner.
+    pub java_override_scope_owner: Option<TypeName>,
     /// Provider-normalized receiver-less declaration in a classifier's static namespace. The
     /// checker uses this only as source call shape; target realization remains on the callable.
     pub classifier_static: bool,
@@ -1780,6 +1785,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            java_override_scope_owner: None,
             classifier_static: false,
             associated_classifier: None,
             associated_access_owner: None,

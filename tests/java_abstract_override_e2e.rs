@@ -187,6 +187,41 @@ fn an_unrelated_java_method_does_not_implement_a_kotlin_interface_member() {
     );
 }
 
+/// A Java classifier may inherit two Kotlin declarations without changing their Kotlin override
+/// identity. Their JVM parameter carriers are both `int`, but the concrete signed default must not
+/// discharge the separately mangled unsigned abstract declaration.
+#[test]
+fn a_java_join_does_not_merge_ordinary_kotlin_members_by_erasure() {
+    let kotlin = common::kotlinc_lib_out(&[(
+        "Contracts.kt",
+        "package fixture\ninterface Signed { fun f(x: Int) {} }\ninterface Unsigned { fun f(x: UInt) }\n",
+    )])
+    .expect("reference kotlinc is provisioned");
+    let java_source = "package fixture; public abstract class Join implements Signed, Unsigned {}";
+    let (java, _) = common::javac_compile(
+        &[("fixture/Join.java".to_string(), java_source.to_string())],
+        &[kotlin.clone(), common::stdlib_jar()],
+    )
+    .expect("javac compiles the Java join");
+    let source = "class Derived : fixture.Join()\n";
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", source)],
+        &[kotlin, java, common::stdlib_jar()],
+    );
+    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
+    assert_eq!(
+        expected,
+        [
+            "Main.kt:1:1: class 'Derived' is not abstract and does not implement abstract member:",
+            "| fun f(x: UInt): Unit",
+        ]
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+}
+
 /// kotlinc 2.4.20 reports both the unimplemented `from(String!)` and the `from(Int)` override that
 /// matches nothing, offering `from(p0: String!)` as the potential signature.
 #[test]

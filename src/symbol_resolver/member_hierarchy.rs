@@ -129,6 +129,9 @@ pub(crate) fn function_input_shapes_match(
     inherited: &FunctionInfo,
     implementation: &FunctionInfo,
 ) -> bool {
+    if inherited.kind != implementation.kind {
+        return false;
+    }
     let inherited_params = inherited.semantic_params();
     let implementation_params = implementation.semantic_params();
     override_input_shapes_match(
@@ -225,9 +228,27 @@ fn specialize_declared_callables(
             .specialize(receiver.kotlin_class_internal(), property.ty);
         property.ty = specialize_member_type(source, property.ty, &bindings, TypePosition::Out);
         specialize_callable(source, &mut property.getter, &bindings);
+        // The applied property's slot identity includes its own formal bounds. Those bounds may
+        // mention the declaring classifier's formals (`Parent<X>.val <T : X> T.x`), so specialize
+        // only the applied copy while the declaration table retains the raw signature for
+        // diagnostics. Property-owned formals were removed from `bindings` above and stay open.
+        if let Some(signature) = &mut property.getter.generic_sig {
+            for bounds in &mut signature.formal_bounds {
+                for bound in bounds {
+                    *bound = ty_subst_keep_unbound(*bound, &bindings);
+                }
+            }
+        }
         property.getter.ret = property.ty;
         if let Some(setter) = &mut property.setter {
             specialize_callable(source, setter, &bindings);
+            if let Some(signature) = &mut setter.generic_sig {
+                for bounds in &mut signature.formal_bounds {
+                    for bound in bounds {
+                        *bound = ty_subst_keep_unbound(*bound, &bindings);
+                    }
+                }
+            }
         }
         if raw_owner_property {
             let erased = property.getter.physical_ret;
@@ -1637,6 +1658,19 @@ mod tests {
         );
 
         assert_eq!(functions.overloads[0].callable.semantic_role, None);
+    }
+
+    #[test]
+    fn callable_kind_is_part_of_an_override_input_shape() {
+        let source = crate::libraries::EmptySymbolSource;
+        let member = member("sample/Owner", 0, Vec::new(), None);
+        let mut top_level = member.clone();
+        top_level.kind = crate::libraries::FnKind::TopLevel;
+        top_level.receiver = None;
+
+        assert!(function_input_shapes_match(&source, &member, &member));
+        assert!(!function_input_shapes_match(&source, &member, &top_level));
+        assert!(!function_input_shapes_match(&source, &top_level, &member));
     }
 
     #[test]

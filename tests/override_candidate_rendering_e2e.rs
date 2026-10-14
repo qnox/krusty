@@ -740,6 +740,29 @@ fn implicit_generic_property_bound_matches_across_providers() {
     );
 }
 
+/// A property formal may be bounded by its declaring classifier's formal. Applied hierarchy
+/// specialization must substitute that owner parameter in the override-slot key while retaining
+/// the declaration-relative signature for diagnostics.
+#[test]
+fn generic_property_bound_uses_the_applied_owner_argument() {
+    let sources = [
+        (
+            "Base.kt",
+            "interface B\ninterface Parent<X> { val <T : X> T.x: Int }\nabstract class Base : Parent<B> { override val <U : B> U.x: Int get() = 1 }\n",
+        ),
+        ("Main.kt", "class Derived : Base()\n"),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    assert_eq!(
+        common::rendered_error_blocks(&result.reference_stderr, true),
+        [] as [&str; 0]
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        [] as [&str; 0]
+    );
+}
+
 /// Potential overrides list every same-named declaration kotlinc offers, including both ordinary
 /// and member-extension declarations and independently of extension-receiver applicability.
 #[test]

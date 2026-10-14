@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// Intern a metadata classifier's serialized identity while preserving its nested declaration
+/// boundaries. Kotlin metadata uses `/` through the package and `.` between classifier segments;
+/// each nested segment therefore enters the name tree through its semantic owner rather than as a
+/// flat spelling that a later phase would have to parse again.
+pub(super) fn metadata_classifier_name(internal: &str) -> TypeName {
+    let (package, classifiers) = internal.rsplit_once('/').unwrap_or(("", internal));
+    let mut classifiers = classifiers.split('.');
+    let first = classifiers.next().unwrap_or_default();
+    let top = if package.is_empty() {
+        crate::types::type_name(first)
+    } else {
+        crate::types::type_name(&format!("{package}/{first}"))
+    };
+    classifiers.fold(top, crate::types::type_name_nested_child)
+}
+
 pub(super) fn class_kind(flags: u64) -> TypeKind {
     match (flags >> 6) & 0x7 {
         1 => TypeKind::Interface,
@@ -73,4 +89,33 @@ pub(super) fn companion_name(ctx: &MetaCtx) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metadata_classifier_name;
+    use crate::types::Ty;
+
+    #[test]
+    fn nested_metadata_classifier_retains_each_semantic_owner() {
+        let deep = metadata_classifier_name("fixture/Outer.Inner.Deep");
+        let inner = deep.nested_owner().expect("Deep has its Inner owner");
+        let outer = inner.nested_owner().expect("Inner has its Outer owner");
+
+        assert_eq!(deep.nested_segment_ref(), "Deep");
+        assert_eq!(inner.nested_segment_ref(), "Inner");
+        assert!(outer.matches("fixture/Outer"));
+        assert_eq!(outer.nested_owner(), None);
+
+        let Ty::Obj(decoded, arguments) = super::super::gsig_from_kotlin_class(
+            "fixture/Outer.Inner.Deep",
+            vec![Ty::Int, Ty::String],
+            false,
+            0,
+        ) else {
+            panic!("ordinary metadata classifier decodes to an object type");
+        };
+        assert_eq!(decoded, deep);
+        assert_eq!(arguments, &[Ty::Int, Ty::String]);
+    }
 }

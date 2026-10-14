@@ -7,9 +7,9 @@
 //! inside its own class hierarchy.
 
 use super::{erased_type_key, Checker, ErasedTypeKey};
-use crate::libraries::{FnKind, FunctionInfo, LibraryType, Origin, PropertyInfo};
+use crate::libraries::{FnKind, FunctionInfo, LibraryType, PropertyInfo};
 use crate::symbol_source::SymbolSource;
-use crate::types::{SemanticCallableOwner, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -840,13 +840,7 @@ fn declared_property(
                 && crate::symbol_resolver::member_declarations_in_hierarchy(source, receiver, name)
                     .properties()
                     .iter()
-                    .any(|property| {
-                        abstract_property(property)
-                            && super::declaration_rendering::property_declares_obligation(
-                                property,
-                                exact_obligation,
-                            )
-                    })
+                    .any(|property| abstract_property(property) && same_slot_and_result(property))
         });
     UnimplementedMember {
         declaration: UnimplementedDeclaration::Property(Box::new(declaration)),
@@ -918,21 +912,10 @@ fn java_scope_implements(
     if implementation.kind != FnKind::Member || declaration.kind != FnKind::Member {
         return false;
     }
-    // Dependency providers publish exact semantic declaration ownership. Current-module ordinary
-    // members have not crossed that provider boundary yet, so their resolved member receiver is the
-    // declaration classifier. Extensions and provider-invalid dependency facts never use it as a
-    // fallback.
-    let declaring = |function: &FunctionInfo| match function.callable.declaration_owner {
-        Some(SemanticCallableOwner::Classifier(owner)) => Some(owner),
-        Some(SemanticCallableOwner::Package(_)) => None,
-        None if matches!(function.callable.origin, Origin::Module { .. }) => function
-            .receiver
-            .and_then(|receiver| receiver.kotlin_class_internal()),
-        None => None,
-    };
-    let (Some(implementation_owner), Some(declaration_owner)) =
-        (declaring(implementation), declaring(declaration))
-    else {
+    let (Some(implementation_owner), Some(declaration_owner)) = (
+        implementation.java_override_scope_owner,
+        declaration.java_override_scope_owner,
+    ) else {
         return false;
     };
     let inherits = |classifier: TypeName, owner: TypeName| {

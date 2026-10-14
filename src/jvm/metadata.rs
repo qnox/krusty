@@ -164,7 +164,7 @@ pub(super) fn gsig_from_kotlin_class(
     // materialization the way `Ty::Unit` does.
     match kotlin_canonical_ty(internal) {
         Some(t) => t,
-        None => Ty::obj_args(internal, &args),
+        None => Ty::obj_args_name(class_identity::metadata_classifier_name(internal), &args),
     }
 }
 
