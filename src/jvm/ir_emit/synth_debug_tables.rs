@@ -154,19 +154,26 @@ pub(super) fn attach_synth_debug_tables(
             f.ty
         };
         // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
-        // sit on its own `val`/`var` line.
-        let pline = ir
-            .prop_decl_lines
-            .get(&(c.fq_name_id(), f.name.clone()))
-            .copied()
-            .filter(|&l| l != 0)
+        // sit on its own `val`/`var` line. A written default accessor has no function of its own, but
+        // its source header still belongs to this exact declaration. Keep the backing-field join made
+        // above: property spelling is metadata payload, not identity.
+        let pline = declared_property
+            .map(|property| property.decl_line)
+            .filter(|&line| line != 0)
             .unwrap_or(line);
+        let accessor_line = |line: u32| if line == 0 { pline } else { line };
+        let getter_line = declared_property
+            .map(|property| accessor_line(property.accessor_lines.getter))
+            .unwrap_or(pline);
+        let setter_line = declared_property
+            .map(|property| accessor_line(property.accessor_lines.setter))
+            .unwrap_or(pline);
         let (g, s) = accessor_jvm_names(c, &f.name);
         if declared_property.is_none_or(|property| property.getter.is_none()) {
             cw.set_method_debug(
                 &g,
                 &format!("(){}", desc(getter_result)),
-                Some((0, pline)),
+                Some((0, getter_line)),
                 &this_only,
             );
         }
@@ -182,7 +189,7 @@ pub(super) fn attach_synth_debug_tables(
             cw.set_method_debug(
                 &s,
                 &format!("({pd})V"),
-                Some((set_pc, pline)),
+                Some((set_pc, setter_line)),
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
                     ("<set-?>".to_string(), pd, 1),
