@@ -110,6 +110,24 @@ enum CompleteImportedSelection {
 }
 
 impl Checker<'_> {
+    /// Recover the alias template carried by the exact provider declaration that selected a
+    /// classifier segment. Qualified expression walks retain this alongside the normalized target
+    /// classifier instead of rediscovering alias-ness from the segment's spelling.
+    pub(super) fn selected_provider_alias(
+        &self,
+        classifier: TypeName,
+        declaration: Option<&crate::libraries::ClassifierDeclaration>,
+    ) -> Result<Option<SelectedTypeAlias>, ()> {
+        match declaration {
+            None | Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) => Ok(None),
+            Some(crate::libraries::ClassifierDeclaration::TypeAlias(binding)) => {
+                selected_alias_from_expansion(binding.identity, classifier, Some(binding.clone()))
+                    .map(Some)
+                    .map_err(|_| ())
+            }
+        }
+    }
+
     /// Select the classifier root from the scope tower, then commit every remaining segment through
     /// the shared qualifier loop. The third result is the alias binding from the same winning root
     /// rung. There is no import/module/classpath retry after this returns.

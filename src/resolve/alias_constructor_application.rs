@@ -91,7 +91,7 @@ impl Checker<'_> {
             formals.to_vec(),
             expansion,
             name,
-            &arguments,
+            super::alias_projection::AliasArguments::Written(&arguments),
             self.call_callee_name_span(call),
         );
         self.report_alias_projection_conflicts(&applied.conflicts, applied.ty);
