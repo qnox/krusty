@@ -97,6 +97,7 @@ pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
+mod declaration_rendering;
 mod dependency_platform;
 mod destructuring;
 mod diagnostic_selection;
@@ -143,7 +144,10 @@ mod local_class_scope;
 mod local_extension_applicability;
 mod local_method_dependencies;
 mod loop_flow;
+mod member_extension_properties;
 mod member_extension_selection;
+pub use member_extension_properties::MemberExtPropSig;
+use member_extension_properties::{select as member_extension_property, MemberExtensionProperty};
 mod member_overload_clash;
 mod missing_dependency_supertypes;
 mod named_class_constructors;
@@ -1018,76 +1022,6 @@ fn extract_ctor_default(
     })
 }
 
-/// A member extension property's declaration-time semantic shape.
-#[derive(Clone, Debug)]
-pub struct MemberExtPropSig {
-    receiver: Ty,
-    ret: Ty,
-    context_params: Vec<Ty>,
-    type_params: Vec<String>,
-    type_param_bounds: Vec<Ty>,
-    is_var: bool,
-    visibility: Visibility,
-    /// Accessor visibility is independent from the property's visibility (`public var ... private
-    /// set`). Keep it on the semantic signature, as ordinary [`DeclaredPropertySig`] does, so every
-    /// implicit-dispatch use is checked before lowering and no backend/source-origin branch has to
-    /// reconstruct it from syntax.
-    setter_visibility: Option<Visibility>,
-    /// Resolved declaration annotation identities. A member extension property is a declared
-    /// property like any other, so it publishes its annotations into `ResolvedModuleIndex` through
-    /// the same stable declaration; it must not be the one property shape that drops them.
-    annotations: Vec<TypeName>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    source_member: Option<crate::libraries::SourceMember>,
-    getter: Option<crate::libraries::LibraryCallable>,
-    setter: Option<crate::libraries::LibraryCallable>,
-}
-
-impl MemberExtPropSig {
-    /// The DECLARED extension receiver (`Int` in `val Int.x: T`).
-    pub(crate) fn receiver_ty(&self) -> Ty {
-        self.receiver
-    }
-
-    /// The property's type (with getter-body inference already applied).
-    pub(crate) fn ret(&self) -> Ty {
-        self.ret
-    }
-
-    /// The property's own type parameters (`val <T> T.x`); empty for the supported shape.
-    pub(crate) fn type_params(&self) -> &[String] {
-        &self.type_params
-    }
-
-    pub(crate) fn type_param_bounds(&self) -> &[Ty] {
-        &self.type_param_bounds
-    }
-
-    pub(crate) fn context_params(&self) -> &[Ty] {
-        &self.context_params
-    }
-
-    pub(crate) fn is_var(&self) -> bool {
-        self.is_var
-    }
-
-    pub(crate) fn stable_declaration(&self) -> Option<crate::fir::DeclarationId> {
-        self.stable_declaration
-    }
-
-    pub(crate) fn source_member(&self) -> Option<crate::libraries::SourceMember> {
-        self.source_member
-    }
-
-    pub(crate) fn visibility(&self) -> Visibility {
-        self.visibility
-    }
-
-    pub(crate) fn setter_visibility(&self) -> Option<Visibility> {
-        self.setter_visibility
-    }
-}
-
 /// Everything a caller needs about a declared Kotlin class.
 #[derive(Clone, Debug)]
 pub struct MemberExtFunSig {
@@ -1394,6 +1328,8 @@ pub struct DeclaredPropertySig {
     /// a statically final receiver type because no runtime subclass can replace its getter.
     pub is_open: bool,
     pub context_params: Vec<Ty>,
+    pub context_param_names: Vec<String>,
+    pub context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     pub source_member: Option<crate::libraries::SourceMember>,
     pub stable_declaration: Option<crate::fir::DeclarationId>,
 }
@@ -2661,27 +2597,6 @@ enum TopLevelPropertySelection {
 type GenericMemberValueOperandShape = (Option<Ty>, Vec<Ty>, Vec<u32>);
 type GenericMemberValueOperandSlots =
     HashMap<TypeName, HashMap<String, Vec<GenericMemberValueOperandShape>>>;
-
-/// One member extension property selected for a concrete receiver and implicit dispatch scope.
-///
-/// This used to be a positional tuple. Naming the independently meaningful receiver, dispatch,
-/// property, and accessor fields prevents a later handoff from accidentally checking the public
-/// property visibility when it is the setter's narrower visibility that governs a write.
-#[derive(Clone)]
-struct MemberExtensionProperty {
-    ty: Ty,
-    is_var: bool,
-    visibility: Visibility,
-    setter_visibility: Option<Visibility>,
-    owner: TypeName,
-    dispatch_receiver: ImplicitReceiver,
-    declared_receiver: Ty,
-    context_params: Vec<Ty>,
-    context_args: Vec<ResolvedContextArgument>,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    getter: Option<crate::libraries::LibraryCallable>,
-    setter: Option<crate::libraries::LibraryCallable>,
-}
 
 enum PropertyReadSelection {
     Member(Box<PropertyReadMemberSelection>),
@@ -10924,7 +10839,7 @@ fn member_extension_function_shapes_in(
                     .and_then(|signature| signature.receiver)
                     .unwrap_or(function.receiver_ty);
                 let generic_receiver = ty_mentions_param(source_receiver, &method_type_params);
-                let receiver_domain = member_extension_receiver_domain(
+                let receiver_domain = member_extension_selection::receiver_domain(
                     source_receiver,
                     &method_type_params,
                     &method_type_param_bounds,
@@ -32795,241 +32710,6 @@ pub(crate) fn context_argument_types(
         .collect()
 }
 
-fn member_extension_receiver_domain(
-    receiver: Ty,
-    type_params: &[String],
-    type_param_bounds: &[Ty],
-    class_bindings: &HashMap<String, Ty>,
-) -> Ty {
-    let mut bindings = class_bindings.clone();
-    for parameter in type_params {
-        bindings.remove(parameter);
-    }
-    for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
-        bindings.insert(parameter.clone(), *bound);
-    }
-    for _ in 0..type_params.len() {
-        let previous = bindings.clone();
-        for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
-            bindings.insert(
-                parameter.clone(),
-                crate::symbol_resolver::ty_subst(*bound, &previous),
-            );
-        }
-    }
-    crate::symbol_resolver::ty_subst(receiver, &bindings)
-}
-
-/// Select a member-extension property against an explicit receiver tower. The tower and the
-/// context-argument resolver are the only things a scope was ever supplying here, so both are
-/// parameters: the checker passes its scope's, signature evaluation passes the declaration's.
-fn member_extension_property(
-    source: &dyn SymbolSource,
-    oracle: &dyn crate::assignable::TypeOracle,
-    implicit_receivers: &[ImplicitReceiver],
-    context_arguments: &dyn Fn(&[Ty]) -> Option<Vec<(ResolvedContextArgument, Ty)>>,
-    extension_receiver: Ty,
-    name: &str,
-) -> Result<Option<MemberExtensionProperty>, ()> {
-    let mut candidates = Vec::new();
-    for (dispatch_rank, dispatch_receiver) in implicit_receivers.iter().copied().enumerate() {
-        // Member extensions are inherited across module boundaries exactly like ordinary members.
-        // Keep the dispatch receiver's applied type while walking through the first classpath
-        // boundary (for example `Derived : Foo<String>`), otherwise a declaration such as
-        // `val T.prop` on `Foo<T>` is never reached or specialized for a downstream source class.
-        for (owner, owner_ty, dispatch_depth) in
-            applied_symbol_hierarchy(source, dispatch_receiver.ty)
-        {
-            let mut declarations = Vec::new();
-            if let Some(classifier) = source.classifier(owner) {
-                declarations.extend(
-                    classifier
-                        .declared_callables
-                        .get(name)
-                        .into_iter()
-                        .flat_map(crate::libraries::Callables::properties)
-                        .filter(|property| {
-                            property.kind == crate::libraries::PropKind::MemberExtension
-                                && (property.stable_declaration.is_some()
-                                    || property.getter.external_property_identity.is_some())
-                        })
-                        .filter_map(|property| {
-                            let receiver = property.receiver?;
-                            let generic = property.getter.generic_sig.as_deref();
-                            let type_params = generic
-                                .map(|signature| signature.formals.clone())
-                                .unwrap_or_else(|| property.formals.clone());
-                            let type_param_bounds = generic.map_or_else(Vec::new, |signature| {
-                                signature
-                                    .formal_bounds
-                                    .iter()
-                                    .map(|bounds| {
-                                        bounds
-                                            .first()
-                                            .copied()
-                                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                                    })
-                                    .collect()
-                            });
-                            Some(MemberExtPropSig {
-                                receiver,
-                                ret: property.ty,
-                                context_params: property
-                                    .getter
-                                    .params
-                                    .iter()
-                                    .take(property.context_count)
-                                    .copied()
-                                    .collect(),
-                                type_params,
-                                type_param_bounds,
-                                is_var: property.setter.is_some(),
-                                visibility: property.visibility,
-                                setter_visibility: property
-                                    .setter
-                                    .as_ref()
-                                    .map(|_| property.setter_visibility),
-                                // A provider-normalized property carries no annotation identities
-                                // yet: `PropertyInfo` has no annotation field. This selection list
-                                // is transient and never publishes a declaration's annotations —
-                                // `ClassSig::member_ext_props` does — so nothing reads these.
-                                annotations: Vec::new(),
-                                stable_declaration: property.stable_declaration,
-                                source_member: property.source_member,
-                                getter: Some(property.getter.clone()),
-                                setter: property.setter.clone(),
-                            })
-                        }),
-                );
-            }
-            let class_bindings = source
-                .classifier(owner)
-                .map_or_else(HashMap::default, |class| {
-                    class
-                        .type_params
-                        .iter()
-                        .cloned()
-                        .zip(owner_ty.type_args().iter().copied())
-                        .collect()
-                });
-            for sig in &declarations {
-                let mut applicability_bindings = class_bindings.clone();
-                crate::symbol_resolver::unify_ty(
-                    sig.receiver,
-                    extension_receiver,
-                    &mut applicability_bindings,
-                );
-                let bounds_satisfied =
-                    sig.type_params
-                        .iter()
-                        .zip(&sig.type_param_bounds)
-                        .all(|(parameter, bound)| {
-                            applicability_bindings.get(parameter).is_none_or(|actual| {
-                                crate::assignable::is_assignable(
-                                    &crate::assignable::TyCtx::new(),
-                                    oracle,
-                                    *actual,
-                                    crate::symbol_resolver::ty_subst(
-                                        *bound,
-                                        &applicability_bindings,
-                                    ),
-                                )
-                            })
-                        });
-                if !bounds_satisfied {
-                    continue;
-                }
-                for (parameter, bound) in sig.type_params.iter().zip(&sig.type_param_bounds) {
-                    applicability_bindings
-                        .entry(parameter.clone())
-                        .or_insert(*bound);
-                }
-                let declared_receiver =
-                    crate::symbol_resolver::ty_subst(sig.receiver, &applicability_bindings);
-                let applicable = declared_receiver == extension_receiver
-                    || declared_receiver.is_erased_top()
-                    || crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        oracle,
-                        extension_receiver,
-                        declared_receiver,
-                    );
-                if !applicable {
-                    continue;
-                }
-                let mut bindings = class_bindings.clone();
-                for parameter in &sig.type_params {
-                    bindings.remove(parameter);
-                }
-                crate::symbol_resolver::unify_ty(sig.receiver, extension_receiver, &mut bindings);
-                let context_params = sig
-                    .context_params
-                    .iter()
-                    .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &bindings))
-                    .collect::<Vec<_>>();
-                let Some(context_arguments) = context_arguments(&context_params) else {
-                    continue;
-                };
-                for (parameter, (_, actual)) in sig.context_params.iter().zip(&context_arguments) {
-                    crate::symbol_resolver::unify_ty(*parameter, *actual, &mut bindings);
-                }
-                for (parameter, bound) in sig.type_params.iter().zip(&sig.type_param_bounds) {
-                    bindings.entry(parameter.clone()).or_insert(*bound);
-                }
-                let ty = crate::symbol_resolver::ty_subst(sig.ret, &bindings);
-                let context_params = sig
-                    .context_params
-                    .iter()
-                    .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &bindings))
-                    .collect();
-                let context_args = context_arguments
-                    .into_iter()
-                    .map(|(argument, _)| argument)
-                    .collect();
-                let generic_receiver = ty_mentions_param(sig.receiver, &sig.type_params);
-                let receiver_domain = member_extension_receiver_domain(
-                    sig.receiver,
-                    &sig.type_params,
-                    &sig.type_param_bounds,
-                    &class_bindings,
-                );
-                candidates.push((
-                    MemberExtensionPriority {
-                        dispatch_rank,
-                        dispatch_depth,
-                        owner,
-                        declared_receiver,
-                        generic_receiver,
-                        receiver_domain,
-                    },
-                    MemberExtensionProperty {
-                        ty,
-                        is_var: sig.is_var,
-                        visibility: sig.visibility,
-                        setter_visibility: sig.setter_visibility,
-                        owner,
-                        dispatch_receiver,
-                        declared_receiver,
-                        context_params,
-                        context_args,
-                        stable_declaration: sig.stable_declaration,
-                        getter: sig.getter.clone(),
-                        setter: sig.setter.clone(),
-                    },
-                ));
-            }
-        }
-    }
-    let maximal =
-        member_extension_selection::maximal_member_extensions(oracle, &candidates, |candidate| {
-            candidate.0
-        });
-    match maximal.as_slice() {
-        [index] => Ok(Some(candidates[*index].1.clone())),
-        [] => Ok(None),
-        _ => Err(()),
-    }
-}
 impl<'a> Checker<'a> {
     fn member_extension_function_shapes(
         &self,
@@ -33782,6 +33462,8 @@ fn install_anonymous_object_captures(
                         is_abstract: false,
                         is_open: false,
                         context_params: Vec::new(),
+                        context_param_names: Vec::new(),
+                        context_parameter_identities: Vec::new(),
                         source_member: None,
                         stable_declaration: None,
                     },
@@ -50664,17 +50346,9 @@ impl<'a> Checker<'a> {
                             });
                     }
                     if !overrides_super {
-                        let expected_kind = if m.receiver.is_some() {
-                            crate::libraries::FnKind::Extension
-                        } else {
-                            crate::libraries::FnKind::Member
-                        };
                         let declarations = candidates
                             .iter()
-                            .filter(|candidate| {
-                                candidate.kind == expected_kind
-                                    && candidate.visibility != Visibility::Private
-                            })
+                            .filter(|candidate| candidate.visibility != Visibility::Private)
                             .collect::<Vec<_>>();
                         let final_owner = implementation.as_ref().and_then(|implementation| {
                             declarations
@@ -50695,16 +50369,16 @@ impl<'a> Checker<'a> {
                                 m.name,
                                 owner.segment().replace('$', ".")
                             )
-                        } else if declarations
-                            .iter()
-                            .any(|candidate| !candidate.flags.is_final)
-                        {
-                            format!(
-                                "'{}' overrides nothing. Potential signatures for overriding:",
-                                m.name
-                            )
                         } else {
-                            format!("'{}' overrides nothing.", m.name)
+                            let potential = declaration_rendering::potential_overrides(
+                                &source,
+                                self.resolved_index,
+                                declarations
+                                    .iter()
+                                    .copied()
+                                    .filter(|candidate| !candidate.flags.is_final),
+                            );
+                            format!("'{}' overrides nothing.{potential}", m.name)
                         };
                         self.diags.error(
                             m.override_span

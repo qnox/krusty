@@ -10509,6 +10509,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   exemption; a concrete or `open` class still has to implement every abstract member itself.
   Tests: `tests/classpath_abstract_subclass_e2e.rs` (repository-owned classpath superclass,
   source-declared members, concrete/open negatives, and kotlinc differentials).
+- **Platform override equivalence is provider-owned.** Common hierarchy checking compares only an
+  opaque provider slot plus semantic result covariance; it does not inspect JVM names, descriptors,
+  erasure, or declaration origin. The JVM provider normalizes only declarations entering from its
+  dependency boundary, including semantic function types and raw Java
+  `Function0`...`Function22`/high-arity `FunctionN` inputs. A current-module Kotlin declaration is
+  never reinterpreted through that JVM slot: a member extension stays distinct from an ordinary
+  member even when their emitted descriptors could coincide. Tests:
+  `tests/override_candidate_rendering_e2e.rs`.
+- **Override diagnostics list the declarations they are about, rendered as kotlinc renders them.**
+  `'f' overrides nothing.` gains ` Potential signatures for overriding:` and one line per open,
+  non-private same-name member, in declaration order. A class that does
+  not implement inherited abstract members gets kotlinc's `class 'C' is not abstract and does not
+  implement abstract base class member:` for members a class declares, then `... abstract
+  member:` for members an interface declares (`members:` when there are several), each member on
+  its own line: per supertype in hierarchy order, functions before properties. The renderer
+  (`src/resolve/declaration_rendering.rs`) keeps only `suspend`, `reified` and `vararg` (with the
+  element type), prints every return type (`: Unit`), a default as `= ...`, contexts as
+  `context(s: String)`, an unparenthesized declaration receiver (`fun Int?.f()`), folded
+  type-parameter bounds (`<A : CharSequence, Comparable<A>>`, a Java formal's implicit `Any!`),
+  short nested names (`Map.Entry`), and Java flexibility (`String!`, `(Mutable)List<T!>!`,
+  `Array<(out) String!>!`). An unnamed classfile parameter is `p0`, `p1`, …. A potential override
+  is the member substituted at the supertype (`fun u(c: Class<out Int>): Unit`); a generic
+  substitution carries no displayed defaults, while a direct declaration shows only defaults it
+  wrote, not inherited default availability. An abstract member is the declaration as its
+  classifier declares it (`fun u(c: Class<out T>): Unit`). Known gaps: krusty checks abstract
+  obligations only for a concrete class whose abstract superclass is emitted in another unit, so
+  an interface-only or same-module obligation is still silent; Java-source parameter names are not
+  retained (`p0` where kotlinc shows `r`); and a Java wildcard is not retained yet
+  (`Class<Any!>!` for `Class<*>!`). Tests:
+  `tests/override_candidate_rendering_e2e.rs`.
 - **A caller's type parameter in an extension receiver is a fixed type, not a wildcard.** Only the
   callee's own formals in its declared receiver bind at the call. In
   `fun <T> lowest(xs: Iterable<T>) where T : Comparable<T> = xs.minOrNull()`, the caller's `T` is a

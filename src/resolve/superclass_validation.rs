@@ -1,6 +1,7 @@
 //! Class-supertype validity after the frontend has selected the exact superclass identity.
 
-use super::Checker;
+use super::abstract_obligations::UnimplementedDeclaration;
+use super::{declaration_rendering, Checker};
 use crate::ast::{ClassDecl, DeclId};
 use crate::types::TypeName;
 
@@ -70,19 +71,49 @@ impl Checker<'_> {
             self.diags.error(span, message);
         }
 
-        let leaves_abstract_members = !class.is_enum()
+        let checks_abstract_members = !class.is_enum()
             && separate_emission
             && inheritance.is_some_and(|shape| shape.is_abstract)
             // `sealed` is abstract: its own subclasses discharge members the sealed class leaves
             // open, including members inherited from a superclass emitted in another unit.
-            && !class.modality.is_abstract()
-            && !self.has_no_unimplemented_abstract_members(owner);
-        if leaves_abstract_members {
+            && !class.modality.is_abstract();
+        if !checks_abstract_members {
+            return;
+        }
+        let unimplemented = self.unimplemented_abstract_members(owner);
+        let source = self.fed_source();
+        // kotlinc reports the members a class declares, then those an interface declares.
+        let rendered = [(false, "abstract base class "), (true, "abstract ")]
+            .into_iter()
+            .filter_map(|(in_interface, kind)| {
+                let members = unimplemented
+                    .iter()
+                    .filter(|member| member.in_interface == in_interface)
+                    .map(|member| match &member.declaration {
+                        UnimplementedDeclaration::Function(function) => {
+                            declaration_rendering::declared_function(&source, function)
+                        }
+                        UnimplementedDeclaration::Property(property) => {
+                            declaration_rendering::declared_property(&source, property)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (!members.is_empty()).then_some((kind, members))
+            })
+            .collect::<Vec<_>>();
+        drop(source);
+        for (kind, members) in rendered {
             self.diags.error(
                 class.span,
                 format!(
-                    "class '{}' is not abstract and does not implement all abstract members",
-                    class.name
+                    "class '{}' is not abstract and does not implement {kind}{}:\n{}",
+                    class.name,
+                    if members.len() == 1 {
+                        "member"
+                    } else {
+                        "members"
+                    },
+                    members.join("\n")
                 ),
             );
         }

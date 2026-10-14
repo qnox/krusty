@@ -264,6 +264,62 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
     }
 }
 
+/// Rebuild inline type-parameter bounds from a complete declaration-owned bound map, recursively
+/// hydrating references between formals. A declaration such as `T : U, U : A, B` therefore gives
+/// occurrences of `T` the full transitive proof. Cycles retain their first repeated occurrence and
+/// terminate without inventing a bound.
+pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
+    fn hydrate(ty: Ty, bounds: &HashMap<String, Ty>, visiting: &mut Vec<&'static str>) -> Ty {
+        match ty {
+            Ty::TyParam(name, current) => {
+                if visiting.contains(&name) {
+                    return ty;
+                }
+                visiting.push(name);
+                let declared = bounds.get(name).copied().unwrap_or(*current);
+                let hydrated = hydrate(declared, bounds, visiting);
+                visiting.pop();
+                Ty::ty_param(name, hydrated)
+            }
+            Ty::Fun(signature) => Ty::fun_with_shape(
+                signature
+                    .params
+                    .iter()
+                    .map(|parameter| hydrate(*parameter, bounds, visiting))
+                    .collect(),
+                hydrate(signature.ret, bounds, visiting),
+                signature.context_count,
+                signature.has_receiver,
+                signature.suspend,
+            ),
+            Ty::DefinitelyNotNull(inner) => {
+                Ty::DefinitelyNotNull(super::intern_ty(hydrate(*inner, bounds, visiting)))
+            }
+            Ty::Nullable(inner) => Ty::nullable(hydrate(*inner, bounds, visiting)),
+            Ty::PlatformNullable(inner) => Ty::platform_nullable(hydrate(*inner, bounds, visiting)),
+            Ty::InProjection(inner) => Ty::in_projection(hydrate(*inner, bounds, visiting)),
+            Ty::OutProjection(inner) => Ty::out_projection(hydrate(*inner, bounds, visiting)),
+            Ty::StarProjection(inner) => Ty::star_projection(hydrate(*inner, bounds, visiting)),
+            Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+                name,
+                &arguments
+                    .iter()
+                    .map(|argument| hydrate(*argument, bounds, visiting))
+                    .collect::<Vec<_>>(),
+            ),
+            Ty::Intersection(parts) => Ty::intersection(
+                &parts
+                    .iter()
+                    .map(|part| hydrate(*part, bounds, visiting))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => ty,
+        }
+    }
+
+    hydrate(ty, bounds, &mut Vec::new())
+}
+
 /// Replace declaration-local type-parameter identities throughout a semantic type, including the
 /// inline upper bounds carried by nested `TyParam` nodes. Renaming only the outer occurrence leaves
 /// chains such as `D : B, B : A` partly keyed by source spelling and breaks bound member lookup.
@@ -371,6 +427,27 @@ mod tests {
         let rebound_original = Ty::ty_param("owner:T", Ty::nullable(Ty::obj("demo/Payload")));
         assert_eq!(rebound, Ty::DefinitelyNotNull(intern_ty(rebound_original)));
         assert_eq!(Ty::nullable(rebound), Ty::nullable(rebound_original));
+    }
+
+    #[test]
+    fn transitive_bound_hydration_follows_formals_and_terminates_cycles() {
+        let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
+        let u = Ty::ty_param("U", implicit);
+        let complete_u = Ty::intersection(&[Ty::obj("demo/A"), Ty::obj("demo/B")]);
+        let bounds = HashMap::from_iter([("T".to_string(), u), ("U".to_string(), complete_u)]);
+        assert_eq!(
+            ty_with_transitive_param_bounds(Ty::ty_param("T", implicit), &bounds),
+            Ty::ty_param("T", Ty::ty_param("U", complete_u))
+        );
+
+        let cyclic = HashMap::from_iter([
+            ("T".to_string(), Ty::ty_param("U", implicit)),
+            ("U".to_string(), Ty::ty_param("T", implicit)),
+        ]);
+        assert_eq!(
+            ty_with_transitive_param_bounds(Ty::ty_param("T", implicit), &cyclic),
+            Ty::ty_param("T", Ty::ty_param("U", Ty::ty_param("T", implicit)))
+        );
     }
 
     #[test]

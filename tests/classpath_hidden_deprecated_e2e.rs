@@ -261,24 +261,17 @@ fn hidden_abstract_member_must_be_implemented() {
         class Impl : Base()\n";
     let result =
         common::compiler_diagnostics(&[("Impl.kt", consumer)], &[lib, common::stdlib_jar()]);
-    // Both streams are pinned completely; krusty's obligation wording does not name the member yet.
-    let error = |message: &str| common::CompilerError {
-        file: "Impl.kt".to_string(),
-        line: 2,
-        column: 1,
-        message: message.to_string(),
-    };
+    let expected = [
+        "Impl.kt:2:1: class 'Impl' is not abstract and does not implement abstract base class member:",
+        "| fun gone(): Int",
+    ];
     assert_eq!((result.krusty_code, result.reference_code), (1, 1));
     assert_eq!(
-        common::compiler_errors(&result.krusty_stderr),
-        [error(
-            "class 'Impl' is not abstract and does not implement all abstract members"
-        )]
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
     );
     assert_eq!(
-        common::compiler_errors(&result.reference_stderr),
-        [error(
-            "class 'Impl' is not abstract and does not implement abstract base class member:"
-        )]
+        common::rendered_error_blocks(&result.reference_stderr, true),
+        expected
     );
 }

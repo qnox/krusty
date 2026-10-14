@@ -38,6 +38,17 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
             // semantics derives `Array<out T>` as the upper bound of the surrounding platform type.
             Ty::obj_args_name(name, &arguments)
         }
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| java_type_argument_nullability(*parameter))
+                .collect(),
+            java_type_argument_nullability(signature.ret),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
         _ => ty,
     };
     // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.

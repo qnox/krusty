@@ -262,9 +262,12 @@ impl JvmLibraries {
         return_nullability: Option<JavaNullability>,
         constructor: Option<(Option<&str>, TypeName, &str)>,
     ) -> Option<GenericSig> {
-        let mut generic = signature
-            .and_then(parse_method_gsig)
-            .map(|signature| self.semanticize_jvm_generic_sig(signature))?;
+        let mut generic = signature.and_then(parse_method_gsig)?;
+        // A JVM generic signature still distinguishes a boxed Java reference from a Kotlin
+        // primitive at this point (`java.lang.Integer` versus `Int`). Apply Java's type-use
+        // flexibility while that declaration fact is available. Semanticizing a `FunctionN`
+        // first would unbox its argument/result slots and lose the evidence needed to publish
+        // `Int!` rather than rigid `Int`.
         for (index, parameter) in generic.params.iter_mut().enumerate() {
             *parameter = java_type_nullability(
                 java_collection_return_lower_bound(*parameter),
@@ -275,6 +278,7 @@ impl JvmLibraries {
             java_collection_return_lower_bound(generic.ret),
             return_nullability,
         );
+        generic = self.semanticize_jvm_generic_sig(generic);
         if let Some((class_signature, owner, descriptor)) = constructor {
             generic = self.semanticize_jvm_generic_sig(constructor_inference_signature(
                 class_signature,

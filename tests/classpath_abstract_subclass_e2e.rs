@@ -227,8 +227,7 @@ fn concrete_and_open_classes_must_discharge_both_abstract_obligation_sources() {
                 file: name.to_string(),
                 line: 2,
                 column,
-                message: "class 'Bad' is not abstract and does not implement all abstract members"
-                    .to_string(),
+                message: "class 'Bad' is not abstract and does not implement abstract base class member:\nfun write(p0: Int): Unit".to_string(),
             },
             CompilerError {
                 file: name.to_string(),

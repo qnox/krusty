@@ -816,8 +816,8 @@ impl<'a> ModuleSymbols<'a> {
             )
         }));
         properties.extend(class.member_ext_props(name).iter().map(|declaration| {
-            let mut getter_params = vec![declaration.receiver_ty()];
-            getter_params.extend_from_slice(declaration.context_params());
+            let mut getter_params = declaration.context_params().to_vec();
+            getter_params.push(declaration.receiver_ty());
             let mut getter = source_property_getter(
                 internal,
                 crate::names::property_getter_name(name),
@@ -827,7 +827,7 @@ impl<'a> ModuleSymbols<'a> {
             );
             getter.source_receiver = Some(declaration.receiver_ty());
             getter.context_count = declaration.context_params().len();
-            let setter = declaration.is_var().then(|| {
+            let mut setter = declaration.is_var().then(|| {
                 let mut params = getter_params;
                 params.push(stored_value_ty(declaration.ret()));
                 let mut setter = source_callable(
@@ -841,6 +841,15 @@ impl<'a> ModuleSymbols<'a> {
                 setter.context_count = declaration.context_params().len();
                 setter
             });
+            if let Some(generic) = declaration.generic_signature() {
+                getter.generic_sig = Some(Box::new(generic.clone()));
+                if let Some(setter) = &mut setter {
+                    let mut setter_generic = generic;
+                    setter_generic.params.push(declaration.ret());
+                    setter_generic.ret = Ty::Unit;
+                    setter.generic_sig = Some(Box::new(setter_generic));
+                }
+            }
             PropertyInfo {
                 return_value_status: None,
                 name: name.to_string(),
@@ -851,8 +860,8 @@ impl<'a> ModuleSymbols<'a> {
                 formals: declaration.type_params().to_vec(),
                 ty: declaration.ret(),
                 context_count: declaration.context_params().len(),
-                context_param_names: Vec::new(),
-                context_parameter_identities: Vec::new(),
+                context_param_names: declaration.context_param_names().to_vec(),
+                context_parameter_identities: declaration.context_parameter_identities().to_vec(),
                 getter,
                 setter,
                 setter_visibility: declaration
@@ -1208,8 +1217,8 @@ fn source_property(
         formals: Vec::new(),
         ty: property.ty,
         context_count: property.context_params.len(),
-        context_param_names: Vec::new(),
-        context_parameter_identities: Vec::new(),
+        context_param_names: property.context_param_names.clone(),
+        context_parameter_identities: property.context_parameter_identities.clone(),
         getter,
         setter,
         setter_visibility: property.setter_visibility.unwrap_or(property.visibility),
@@ -1860,6 +1869,8 @@ mod tests {
                 is_abstract: false,
                 is_open: false,
                 context_params: Vec::new(),
+                context_param_names: Vec::new(),
+                context_parameter_identities: Vec::new(),
                 source_member: None,
                 stable_declaration: None,
             },
@@ -2191,6 +2202,8 @@ mod tests {
                 is_abstract: false,
                 is_open: false,
                 context_params: Vec::new(),
+                context_param_names: Vec::new(),
+                context_parameter_identities: Vec::new(),
                 source_member: None,
                 stable_declaration: None,
             },
@@ -2265,6 +2278,8 @@ mod tests {
                 is_abstract: true,
                 is_open: false,
                 context_params: Vec::new(),
+                context_param_names: Vec::new(),
+                context_parameter_identities: Vec::new(),
                 source_member: None,
                 stable_declaration: None,
             },

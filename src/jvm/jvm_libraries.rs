@@ -18,6 +18,7 @@ mod inline_capability;
 mod java_nullability;
 mod mapped_builtin_member_status;
 mod object_methods;
+mod override_slots;
 mod parameter_plans;
 mod provider_normalization;
 #[cfg(test)]
@@ -4855,7 +4856,30 @@ impl JvmLibraries {
                         callable.physical_parameter_plan = m.physical_parameter_plan.clone();
                         callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
                         let inline_body_plan = callable.inline_body_plan.clone();
+                        // Java erasure governs raw Java declarations and Kotlin mapped-builtin
+                        // slots. An ordinary Kotlin metadata declaration keeps Kotlin override
+                        // identity even when its physical descriptor happens to erase like an
+                        // unrelated Java member (notably `Int` versus the mangled `UInt`).
+                        let provider_override_slot = (!t.is_kotlin
+                            || super::jvm_class_map::maps_to_distinct_jvm_internal(cn))
+                        .then(|| {
+                            override_slots::slot(
+                                self,
+                                // `physical_owner` remains the semantic classifier for most mapped
+                                // builtins so ordinary call emission can retain its selected Kotlin
+                                // declaration identity. Java override scope is different: its owner is
+                                // the mapped Java classifier whose erased member table defines the
+                                // slot (`AbstractMutableCollection` -> `AbstractCollection`).
+                                super::jvm_class_map::to_jvm_type_name(physical_owner),
+                                callable
+                                    .physical_name
+                                    .clone()
+                                    .unwrap_or_else(|| callable.name.clone()),
+                                callable.physical_params.iter().copied(),
+                            )
+                        });
                         overloads.push(FunctionInfo {
+                            provider_override_slot,
                             ret: ReturnInfo::new(
                                 m.ret_nullable()
                                     || builtin_ret_nullable
@@ -5127,6 +5151,15 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
 
     fn library_value_form_name(&self, internal: TypeName) -> TypeName {
         super::jvm_class_map::to_jvm_type_name(internal)
+    }
+
+    fn provider_override_result_refines(
+        &self,
+        source: &dyn crate::symbol_source::SymbolSource,
+        implementation: Ty,
+        declaration: Ty,
+    ) -> bool {
+        override_slots::result_refines(self, source, implementation, declaration)
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
@@ -6742,6 +6775,15 @@ mod tests {
             Ty::platform_nullable(Ty::obj_args("kotlin/Array", &[Ty::platform_nullable(base)],)),
             "the Java provider must retain the flexible reference-array lower bound",
         );
+
+        assert_eq!(
+            java_type_nullability(Ty::fun(vec![Ty::String, Ty::Int], Ty::String), None),
+            Ty::platform_nullable(Ty::fun(
+                vec![Ty::platform_nullable(Ty::String), Ty::Int],
+                Ty::platform_nullable(Ty::String),
+            )),
+            "Java publication makes function containers and reference positions flexible without boxing scalar positions",
+        );
     }
 
     #[test]
@@ -6857,6 +6899,35 @@ mod tests {
                 vec![Ty::String],
                 Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any"))),
             )]
+        );
+    }
+
+    #[test]
+    fn java_function_signature_keeps_boxed_slot_flexibility_when_semanticized() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = initialized_libraries(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib]),
+        ));
+        let signature = libraries
+            .publish_java_member_generic_signature(
+                Some(
+                    "()Lkotlin/jvm/functions/Function1<\
+                     Ljava/lang/String;Ljava/lang/Integer;>;",
+                ),
+                &[],
+                None,
+                None,
+            )
+            .expect("Java function-typed generic signature");
+        assert_eq!(
+            signature.ret,
+            Ty::platform_nullable(Ty::fun(
+                vec![Ty::platform_nullable(Ty::String)],
+                Ty::platform_nullable(Ty::Int),
+            )),
+            "Java reference flexibility must be recorded before Function1 slots are unboxed",
         );
     }
 
@@ -6991,7 +7062,7 @@ mod tests {
         .expect("valid generic field signature");
         assert_eq!(
             libraries.semanticize_jvm_type(valid),
-            Ty::fun(vec![Ty::Int, Ty::Long], Ty::String)
+            Ty::fun(vec![Ty::Int, Ty::Long], Ty::String),
         );
 
         for signature in [

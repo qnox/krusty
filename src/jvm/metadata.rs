@@ -164,7 +164,7 @@ pub(super) fn gsig_from_kotlin_class(
     // materialization the way `Ty::Unit` does.
     match kotlin_canonical_ty(internal) {
         Some(t) => t,
-        None => Ty::obj_args(internal, &args),
+        None => Ty::obj_args_name(class_identity::metadata_classifier_name(internal), &args),
     }
 }
 
@@ -1697,7 +1697,7 @@ fn decode_metadata_type(
         return None;
     }
     let node = parse_type_node(body)?;
-    let args = node
+    let mut args = node
         .arguments
         .into_iter()
         .map(|argument| match argument {
@@ -1731,6 +1731,38 @@ fn decode_metadata_type(
             }
         })
         .collect::<Option<Vec<_>>>()?;
+    let outer = match (node.outer_type, node.outer_type_id) {
+        (Some(body), _) => Some(decode_metadata_type(
+            body,
+            type_table,
+            records,
+            d2,
+            tparams,
+            bounds,
+            false,
+            depth + 1,
+        )?),
+        (None, Some(id)) => {
+            let (body, nullable) = type_table_entry(type_table?, id as usize)?;
+            Some(decode_metadata_type(
+                body,
+                type_table,
+                records,
+                d2,
+                tparams,
+                bounds,
+                nullable,
+                depth + 1,
+            )?)
+        }
+        (None, None) => None,
+    };
+    if let Some(outer) = outer {
+        let Ty::Obj(_, outer_arguments) = outer.non_null() else {
+            return None;
+        };
+        args.extend_from_slice(outer_arguments);
+    }
     let flexible_upper_bound = node.flexible_upper_bound;
     let flexible_upper_bound_id = node.flexible_upper_bound_id;
     let definitely_non_null = node.definitely_non_null;
@@ -3438,6 +3470,38 @@ mod module_reader_tests {
                 "sample/Box",
                 &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
             ))
+        );
+    }
+
+    #[test]
+    fn inner_metadata_type_appends_its_outer_type_arguments() {
+        // Type(class_name = Outer.Inner, argument = Int,
+        //      outer_type = Type(class_name = Outer, argument = String)).
+        let body = [
+            0x30, 0x00, 0x12, 0x04, 0x12, 0x02, 0x30, 0x01, 0x52, 0x08, 0x30, 0x02, 0x12, 0x04,
+            0x12, 0x02, 0x30, 0x03,
+        ];
+        let names = [
+            "fixture/Outer.Inner".to_string(),
+            "kotlin/Int".to_string(),
+            "fixture/Outer".to_string(),
+            "kotlin/String".to_string(),
+        ];
+        let inner =
+            crate::types::type_name_nested_child(crate::types::type_name("fixture/Outer"), "Inner");
+
+        assert_eq!(
+            decode_metadata_type(
+                &body,
+                None,
+                &[],
+                &names,
+                &HashMap::default(),
+                &HashMap::default(),
+                false,
+                0,
+            ),
+            Some(Ty::obj_args_name(inner, &[Ty::Int, Ty::String]))
         );
     }
 

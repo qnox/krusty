@@ -25,6 +25,7 @@ mod metadata_normalization;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
+mod provider_override;
 mod result_nullability;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
@@ -51,6 +52,7 @@ pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
 pub use property_producer::PropertyProducer;
+pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
@@ -487,6 +489,19 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             .unwrap_or(internal)
     }
 
+    /// Whether two results satisfy covariance in the provider's override model. Common checking
+    /// asks this only after ordinary semantic subtyping fails for declarations that already share
+    /// a provider override slot. The provider must compare the result carriers themselves; an input
+    /// key alone is never sufficient evidence for result compatibility.
+    fn provider_override_result_refines(
+        &self,
+        _source: &dyn crate::symbol_source::SymbolSource,
+        _implementation: Ty,
+        _declaration: Ty,
+    ) -> bool {
+        false
+    }
+
     /// Convert a platform classifier name to the identity used by source resolution.
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
         internal
@@ -693,6 +708,18 @@ impl LibraryMember {
     #[inline]
     pub fn is_member_extension(&self) -> bool {
         self.flags.has(LmFlags::IS_EXTENSION)
+    }
+    /// The semantic extension receiver published by this declaration. Generic signatures retain
+    /// the declaration-owned receiver; non-generic members carry it in the logical parameter list
+    /// after the context prefix. Physical parameters and descriptors are deliberately irrelevant.
+    pub fn semantic_extension_receiver(&self) -> Option<Ty> {
+        if !self.is_member_extension() {
+            return None;
+        }
+        self.generic_sig
+            .as_ref()
+            .and_then(|signature| signature.receiver)
+            .or_else(|| self.params.get(self.context_count).copied())
     }
     #[inline]
     pub fn is_primary_constructor(&self) -> bool {
@@ -1516,6 +1543,9 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Provider-owned override-slot identity for declarations whose platform compatibility differs
+    /// from their source-language signature. This is distinct from the physical emit handle.
+    pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
     /// Provider-normalized receiver-less declaration in a classifier's static namespace. The
     /// checker uses this only as source call shape; target realization remains on the callable.
     pub classifier_static: bool,
@@ -1780,6 +1810,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            provider_override_slot: None,
             classifier_static: false,
             associated_classifier: None,
             associated_access_owner: None,
