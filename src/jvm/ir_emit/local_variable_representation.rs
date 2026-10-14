@@ -144,6 +144,15 @@ impl Emitter<'_> {
                         self.declared_try = outer_try;
                         self.leave_declared_initializer(previous);
                         source
+                    } else if self.ir.destructuring_containers.contains(&declaration) {
+                        // kotlinc declares the `<destruct>` container as a variable, so a `try`
+                        // initializer's result reload returns to the declaration's line.
+                        let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
+                            .then_some(initializer);
+                        let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
+                        let source = self.emit_consumed_operand(initializer, code);
+                        self.declared_try = outer_try;
+                        source
                     } else {
                         self.emit_consumed_operand(initializer, code)
                     }
