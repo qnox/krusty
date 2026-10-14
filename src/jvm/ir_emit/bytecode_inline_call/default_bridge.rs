@@ -7,7 +7,6 @@
 //! bridge itself does not record.
 
 use super::*;
-use crate::jvm::default_call_operands::DefaultOperandOrigin;
 use crate::jvm::inliner::DefaultMasks;
 
 impl Emitter<'_> {
@@ -45,8 +44,41 @@ impl Emitter<'_> {
         if masks.is_empty() {
             return Err("a default call passes no mask");
         }
-        let start = physical[..suffix].iter().map(|&ty| slot_words(ty)).sum();
-        Ok(Some(DefaultMasks { start, masks }))
+        let mut start = 0u16;
+        let mut parameters = Vec::new();
+        let mut omitted = Vec::new();
+        for (operand, &ty) in plan[..suffix].iter().zip(&physical[..suffix]) {
+            if let Some(parameter) = operand.source_parameter {
+                parameters.push((parameter as usize, start));
+                if operand.origin
+                    == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
+                {
+                    omitted.push(parameter as usize);
+                }
+            }
+            start = start
+                .checked_add(slot_words(ty))
+                .ok_or("a default call's parameter slots overflow the JVM local range")?;
+        }
+        let mut expected = masks
+            .iter()
+            .enumerate()
+            .flat_map(|(word, &bits)| {
+                (0..32).filter_map(move |bit| {
+                    (bits & (1i32 << bit) != 0).then_some(word * 32 + bit as usize)
+                })
+            })
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        omitted.sort_unstable();
+        if omitted != expected {
+            return Err("a default call's omitted parameters do not match its mask bits");
+        }
+        Ok(Some(DefaultMasks {
+            start,
+            masks,
+            parameters,
+        }))
     }
 
     /// The callee's body as the inliner takes it, beside the body as the class file declares it,
@@ -107,7 +139,10 @@ impl Emitter<'_> {
         let operand = plan.get(index)?;
         if operand.is_abi_suffix() {
             Some(Supply::MaskOperand)
-        } else if operand.origin == DefaultOperandOrigin::Synthesized {
+        } else if operand.source_parameter.is_some()
+            && operand.origin
+                == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
+        {
             Some(Supply::Omitted)
         } else {
             None

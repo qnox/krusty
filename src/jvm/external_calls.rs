@@ -613,13 +613,32 @@ pub(super) fn realize(
                 &omitted_parameters,
                 target,
             )?;
+            let member_extension_receiver = if member_extension {
+                Some(extension_receiver.ok_or(target)?)
+            } else {
+                None
+            };
             let mut operand_plan = realized_arguments
                 .iter()
                 .copied()
                 .enumerate()
                 .map(|(parameter, argument)| {
-                    if omitted_parameters.contains(&(parameter as u32)) {
-                        DefaultCallOperand::synthesized(argument)
+                    let source_parameter = if let Some(receiver) = member_extension_receiver {
+                        match parameter.cmp(&receiver) {
+                            std::cmp::Ordering::Less => Some(parameter as u32),
+                            std::cmp::Ordering::Equal => None,
+                            std::cmp::Ordering::Greater => Some((parameter - 1) as u32),
+                        }
+                    } else {
+                        Some(parameter as u32)
+                    };
+                    if let Some(omitted) = omitted_parameters
+                        .iter()
+                        .position(|&physical| physical == parameter as u32)
+                    {
+                        DefaultCallOperand::synthesized_default(argument, defaults[omitted])
+                    } else if let Some(source_parameter) = source_parameter {
+                        DefaultCallOperand::supplied_parameter(argument, source_parameter)
                     } else {
                         DefaultCallOperand::supplied(argument)
                     }

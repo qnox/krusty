@@ -80,6 +80,21 @@ pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
 /// cannot splice the body around them.
 const VALUE_USED_LITERAL_UNSPLICED: &str =
     "an inline body that takes a literal lambda as a value cannot be spliced around it";
+pub(super) const DEFAULT_BRIDGE_REQUIRES_METHOD_INLINER: &str =
+    "a default bridge whose lambda requires the byte splice is not supported";
+
+/// The byte-splice routes still consume the class-file body. A default bridge has to use the
+/// expanded `MethodNode`; retaining its mask header after the mask operands have been removed would
+/// be a miscompile, never a legal fallback.
+pub(super) fn ensure_no_unexpanded_default_masks(
+    defaults: Option<&crate::jvm::inliner::DefaultMasks>,
+) -> Result<(), &'static str> {
+    if defaults.is_some() {
+        Err(DEFAULT_BRIDGE_REQUIRES_METHOD_INLINER)
+    } else {
+        Ok(())
+    }
+}
 
 /// How the call site supplies one parameter.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -399,6 +414,10 @@ impl Emitter<'_> {
                 self.run.set_inline_bail(reason);
                 return InlineCallOutcome::HandledWithError;
             }
+        }
+        if let Err(reason) = ensure_no_unexpanded_default_masks(inline_call.defaults) {
+            self.run.set_emit_error(reason.to_string());
+            return InlineCallOutcome::HandledWithError;
         }
         if let Err(reason) = check_byte_splice_body(
             inline_call.target.name,

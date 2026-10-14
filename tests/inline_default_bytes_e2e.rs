@@ -31,6 +31,12 @@ inline fun <reified T : Any> named(prefix: String = "<", block: () -> T): T {
     use(prefix + T::class.java.simpleName)
     return value
 }
+
+@kotlin.internal.InlineOnly
+inline fun wide(value: Long = 7L, block: () -> Unit): Long {
+    block()
+    return value
+}
 "#;
 
 const MAIN: &str = r#"
@@ -47,6 +53,8 @@ fun supplied(): Int = defaulted("s", 2) { }
 fun discarded() {
     named { "x" }
 }
+
+fun wideDefault(): Long = wide { use("wide") }
 "#;
 
 #[test]

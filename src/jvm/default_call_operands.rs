@@ -20,6 +20,10 @@ pub(super) enum DefaultOperandOrigin {
 pub(super) struct DefaultCallOperand {
     pub(super) expression: ExprId,
     pub(super) origin: DefaultOperandOrigin,
+    /// This operand's source-parameter ordinal in the default mask, or `None` for a dispatch or
+    /// extension receiver and for the ABI suffix. This frontend-owned association survives JVM
+    /// receiver insertion and wide-slot layout; emission must not reconstruct it from positions.
+    pub(super) source_parameter: Option<u32>,
     /// The first such operand begins the JVM-only `mask..., marker` suffix. Suspend lowering inserts
     /// the continuation immediately before it; carrying the boundary avoids rediscovering it from
     /// constant values, types, or descriptor spelling.
@@ -31,14 +35,25 @@ impl DefaultCallOperand {
         Self {
             expression,
             origin: DefaultOperandOrigin::Supplied,
+            source_parameter: None,
             abi_suffix: false,
         }
     }
 
-    pub(super) fn synthesized(expression: ExprId) -> Self {
+    pub(super) fn supplied_parameter(expression: ExprId, parameter: u32) -> Self {
+        Self {
+            expression,
+            origin: DefaultOperandOrigin::Supplied,
+            source_parameter: Some(parameter),
+            abi_suffix: false,
+        }
+    }
+
+    pub(super) fn synthesized_default(expression: ExprId, parameter: u32) -> Self {
         Self {
             expression,
             origin: DefaultOperandOrigin::Synthesized,
+            source_parameter: Some(parameter),
             abi_suffix: false,
         }
     }
@@ -47,6 +62,7 @@ impl DefaultCallOperand {
         Self {
             expression,
             origin: DefaultOperandOrigin::Synthesized,
+            source_parameter: None,
             abi_suffix: true,
         }
     }
@@ -266,7 +282,7 @@ mod tests {
             7,
             vec![
                 DefaultCallOperand::supplied(10),
-                DefaultCallOperand::synthesized(11),
+                DefaultCallOperand::synthesized_default(11, 1),
                 DefaultCallOperand::synthesized_abi(12),
                 DefaultCallOperand::synthesized_abi(13),
             ],
@@ -279,10 +295,16 @@ mod tests {
         assert!(plans.is_continuation(7, 2));
 
         assert!(plans.replace_operands(7, &[20, 21, 29, 22, 23]));
-        assert!(plans.matching(7, &[20, 21, 29, 22, 23]).is_some());
+        assert_eq!(
+            plans.matching(7, &[20, 21, 29, 22, 23]).unwrap()[1].source_parameter,
+            Some(1)
+        );
 
         assert!(plans.clone_call(7, 8, &[30, 31, 39, 32, 33]));
-        assert!(plans.matching(8, &[30, 31, 39, 32, 33]).is_some());
+        assert_eq!(
+            plans.matching(8, &[30, 31, 39, 32, 33]).unwrap()[1].source_parameter,
+            Some(1)
+        );
         assert!(plans.is_continuation(8, 2));
         assert!(!plans.replace_operands(8, &[30]));
     }

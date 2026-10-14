@@ -215,6 +215,11 @@ impl Emitter<'_> {
         base: u16,
         code: &mut CodeBuilder,
     ) -> InlineCallOutcome {
+        if let Err(reason) = bytecode_inline_call::ensure_no_unexpanded_default_masks(call.defaults)
+        {
+            self.run.set_emit_error(reason.to_string());
+            return InlineCallOutcome::HandledWithError;
+        }
         let (params, plan) = match self.plan_unified_splice(call, positions, base, code) {
             Ok((params, UnifiedSplice::Planned(plan))) => (params, plan),
             Ok((_, UnifiedSplice::UnsupportedHost))
@@ -596,6 +601,23 @@ mod tests {
             site_counts: sites,
             top_local: 7,
         }
+    }
+
+    #[test]
+    fn a_default_bridge_is_rejected_before_the_unexpanded_byte_splice() {
+        let masks = crate::jvm::inliner::DefaultMasks {
+            start: 2,
+            masks: vec![1],
+            parameters: vec![(0, 0)],
+        };
+        assert_eq!(
+            bytecode_inline_call::ensure_no_unexpanded_default_masks(None),
+            Ok(())
+        );
+        assert_eq!(
+            bytecode_inline_call::ensure_no_unexpanded_default_masks(Some(&masks)),
+            Err(bytecode_inline_call::DEFAULT_BRIDGE_REQUIRES_METHOD_INLINER)
+        );
     }
 
     /// The call `host(receiver, literal)`: one ordinary operand, then the literal.
