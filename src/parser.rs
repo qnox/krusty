@@ -2188,25 +2188,6 @@ impl<'a> Parser<'a> {
                     if !self.at(TokenKind::Ident) {
                         break;
                     }
-                    // An entry name is followed by its arguments, its body, the next entry, the
-                    // separator, or the closing brace. After a trailing comma the `;` that ends the
-                    // entry list is lexed as a newline, so the first MEMBER can arrive here:
-                    // `companion object { … }` read `companion` as an entry and then failed on
-                    // `object`, dropping the enum — and every file that named it — from a real
-                    // module.
-                    if !matches!(
-                        self.t.get(self.i + 1).map(|token| token.kind),
-                        None | Some(
-                            TokenKind::LParen
-                                | TokenKind::LBrace
-                                | TokenKind::Comma
-                                | TokenKind::Newline
-                                | TokenKind::RBrace
-                                | TokenKind::Eof
-                        )
-                    ) {
-                        break;
-                    }
                     let entry_span = self.tok().span;
                     let entry_name = self.text().to_string();
                     self.bump();
@@ -2346,7 +2327,16 @@ impl<'a> Parser<'a> {
                     if !self.eat(TokenKind::Comma) {
                         break;
                     }
-                    self.skip_newlines();
+                    // After a trailing comma, the `;` (lexed as a newline) still ends the entry
+                    // list: `A, ; constructor(…)` declares a member, not an entry `constructor`.
+                    let mut ends_entries = false;
+                    while self.at(TokenKind::Newline) {
+                        ends_entries |= self.text() == ";";
+                        self.bump();
+                    }
+                    if ends_entries {
+                        break;
+                    }
                 }
             }
             // Members follow a `;` separator (lexed as a newline): `enum class C { A, B; fun f() … }`.
