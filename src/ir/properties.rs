@@ -124,14 +124,15 @@ pub(crate) struct IrInlinePropertyAccess {
     pub(crate) splices: crate::fx_hash::HashMap<ExprId, IrInlinePropertySplice>,
 }
 
-/// Where a property's written accessor headers start, and where accessor bodies end, each a
-/// 1-based line. A visibility-only accessor retains its header with a zero body end.
+/// Where a property's written accessor headers start, where their bodies or bodyless headers end,
+/// and where the whole declaration ends, each a 1-based line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IrAccessorLines {
     pub getter: u32,
     pub setter: u32,
     pub getter_end: u32,
     pub setter_end: u32,
+    pub declaration_end: u32,
 }
 
 /// One source property declaration and the checked bodies that realize its language semantics.
@@ -157,7 +158,8 @@ pub struct IrCheckedProperty {
     /// included, else 0. Accepted like [`Self::decl_line`] and kept apart from it: the constructor's
     /// store of the property maps here, its accessors to `decl_line`.
     pub decl_start_line: u32,
-    /// Lines of the getter and setter written with a body, accepted like [`Self::decl_line`].
+    /// Lines of written accessors and of the property declaration's end, accepted like
+    /// [`Self::decl_line`].
     pub accessor_lines: IrAccessorLines,
     /// Exact semantic position among the owning class's property initializers and `init` blocks.
     /// This is copied from the stable FIR declaration header, never reconstructed from source.

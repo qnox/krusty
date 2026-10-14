@@ -199,6 +199,7 @@ pub(super) fn accept_active_debug_metadata(
                         setter: accessor_lines.setter,
                         getter_end: accessor_lines.getter_end,
                         setter_end: accessor_lines.setter_end,
+                        declaration_end: accessor_lines.declaration_end,
                     };
                     property.decl_start_line = constructor_parameter
                         .map(|parameter| parameter.decl_start_line)

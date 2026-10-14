@@ -90,6 +90,7 @@ pub(super) fn add_cached_descriptor(
         erased_declared_ty: None,
         accessors: crate::ir::IrStaticAccessors::ABSENT,
         line: 0,
+        accessor_lines: crate::ir::IrAccessorLines::default(),
         source_order: u32::MAX,
         property_delegate: false,
     });

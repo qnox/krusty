@@ -257,33 +257,63 @@ pub(super) fn attach(file: &mut File, src: &str) {
     }
 }
 
-/// The source header lines of written accessors, and the end lines of accessors with bodies.
-/// A bodiless visibility-only accessor still owns its header line: JVM synthesis can use that
-/// declaration boundary even though there is no source body to lower.
+/// The source header lines of written accessors, the lines their bodies or bodyless headers end on,
+/// and the last line of the whole property declaration.
 fn accessor_lines(
     property: &crate::ast::PropDecl,
     line_at: impl Fn(u32) -> u32,
     body_lines: impl Fn(&FunBody) -> crate::ast::FunBodyLines,
 ) -> crate::ast::AccessorLines {
-    let getter = property.getter_span.map_or(0, |span| line_at(span.lo));
+    let getter = property
+        .getter_span
+        .filter(|_| property.getter_declared)
+        .map_or(0, |span| {
+            line_at(
+                if property.getter.is_none() && property.getter_declaration_start != 0 {
+                    property.getter_declaration_start
+                } else {
+                    span.lo
+                },
+            )
+        });
     let setter = property
         .setter
         .as_ref()
-        .map_or(0, |setter| line_at(setter.span.lo));
+        .filter(|setter| setter.span.lo != 0 || setter.span.hi != 0)
+        .map_or(0, |setter| {
+            line_at(if setter.body.is_none() && setter.declaration_start != 0 {
+                setter.declaration_start
+            } else {
+                setter.span.lo
+            })
+        });
     let getter_end = property
         .getter
         .as_ref()
         .map_or(0, |body| body_lines(body).end);
-    let setter_end = property
-        .setter
-        .as_ref()
-        .and_then(|setter| setter.body.as_ref())
-        .map_or(0, |body| body_lines(body).end);
+    let setter_end = property.setter.as_ref().map_or(0, |setter| {
+        setter.body.as_ref().map_or_else(
+            || {
+                if setter.span.lo == 0 && setter.span.hi == 0 {
+                    0
+                } else {
+                    line_at(setter.span.hi.saturating_sub(1))
+                }
+            },
+            |body| body_lines(body).end,
+        )
+    });
+    let declaration_end = if property.span.lo == 0 && property.span.hi == 0 {
+        0
+    } else {
+        line_at(property.span.hi.saturating_sub(1))
+    };
     crate::ast::AccessorLines {
         getter,
         setter,
         getter_end,
         setter_end,
+        declaration_end,
     }
 }
 
@@ -371,6 +401,7 @@ mod tests {
             "Holder",
         );
         assert_eq!(class.body_props[0].accessor_lines.setter, 3);
-        assert_eq!(class.body_props[0].accessor_lines.setter_end, 0);
+        assert_eq!(class.body_props[0].accessor_lines.setter_end, 3);
+        assert_eq!(class.body_props[0].accessor_lines.declaration_end, 3);
     }
 }

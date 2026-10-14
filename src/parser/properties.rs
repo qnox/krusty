@@ -108,6 +108,7 @@ impl Parser<'_> {
         let mut getter: Option<FunBody> = None;
         let mut getter_declared = false;
         let mut getter_span: Option<Span> = None;
+        let mut getter_declaration_start = 0;
         let mut getter_inline = false;
         let mut getter_ty: Option<TypeRef> = None;
         let mut getter_annotations = Vec::new();
@@ -117,6 +118,7 @@ impl Parser<'_> {
         'accessors: loop {
             let save = self.i;
             self.skip_newlines();
+            let accessor_declaration_start = self.tok().span.lo;
             let mut visibility = None;
             let mut is_inline = false;
             let mut is_external = false;
@@ -211,6 +213,7 @@ impl Parser<'_> {
             accessor_external |= is_external;
             if is_get {
                 getter_declared = true;
+                getter_declaration_start = accessor_declaration_start;
                 getter_annotations = annotations;
                 getter_inline = is_inline;
                 // A custom getter is `get() = expr` / `get() { … }`. A bare `get` or a `get()` with
@@ -254,6 +257,7 @@ impl Parser<'_> {
                 setter = Some(PropAccessor {
                     param,
                     span: accessor_span,
+                    declaration_start: accessor_declaration_start,
                     body,
                     visibility,
                     is_inline,
@@ -303,6 +307,7 @@ impl Parser<'_> {
             getter,
             getter_declared,
             getter_span,
+            getter_declaration_start,
             getter_inline,
             getter_ty,
             getter_annotations,
