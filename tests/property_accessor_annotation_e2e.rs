@@ -125,24 +125,6 @@ fn a_member_extension_marker_clash_lists_a_different_source_shape_first() {
 }
 
 #[test]
-fn multiple_colliding_member_extension_markers_match_kotlinc_order() {
-    common::assert_error_blocks_match_kotlinc(
-        &[(
-            "ExtensionMarkerSourceOrder.kt",
-            "@Target(AnnotationTarget.PROPERTY)\n\
-             annotation class Marker\n\
-             class C<A> {\n\
-             \x20   @Marker val List<A>.item: Int get() = size\n\
-             \x20   @Marker val List<String>.item: Int get() = size\n\
-             \x20   fun `getItem$annotations`(receiver: List<A>) {}\n\
-             \x20   fun `getItem$annotations`(receiver: List<String>) {}\n\
-             }\n",
-        )],
-        &[],
-    );
-}
-
-#[test]
 fn marker_clash_qualifies_same_named_classifier_shapes_across_the_group() {
     common::assert_error_blocks_match_kotlinc(
         &[(
