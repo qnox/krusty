@@ -43,6 +43,7 @@ pub(super) fn error_class_decl(span: Span) -> ClassDecl {
         secondary_ctors: Vec::new(),
         type_aliases: Vec::new(),
         span,
+        ctor_open_line: 0,
         ctor_close_line: 0,
         companion_block_members: Vec::new(),
         decl_line: 0,

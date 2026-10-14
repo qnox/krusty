@@ -28,6 +28,7 @@ mod incdec;
 mod interface_delegation;
 mod lambda_literals;
 mod lexical_type_parameters;
+mod line_breaks;
 mod nesting;
 mod properties;
 mod return_labels;
@@ -985,72 +986,6 @@ impl<'a> Parser<'a> {
             self.parse_branch(false)
         }
     }
-    fn skip_newlines(&mut self) {
-        while self.at(TokenKind::Newline) {
-            self.bump();
-        }
-    }
-
-    /// Return the first token after physical line breaks at `index`, stopping at an explicit `;`.
-    ///
-    /// The lexer deliberately represents both forms as `Newline`, so grammar lookahead must use this
-    /// helper instead of open-coding a token-kind loop whenever a construct permits `NL*` but not a
-    /// semicolon. Keeping that distinction here prevents declaration callers from gradually acquiring
-    /// different continuation rules.
-    fn after_plain_newlines(&self, mut index: usize) -> usize {
-        while self
-            .t
-            .get(index)
-            .is_some_and(|token| token.kind == TokenKind::Newline && token.text(self.src) != ";")
-        {
-            index += 1;
-        }
-        index
-    }
-
-    /// Advance over physical line breaks while preserving an explicit semicolon as a declaration
-    /// boundary. Mutating callers share the same lexer distinction as lookahead callers through
-    /// `after_plain_newlines`; there must not be a second newline-scanning implementation here.
-    fn skip_plain_newlines(&mut self) {
-        self.i = self.after_plain_newlines(self.i);
-    }
-
-    /// Consume physical line breaks only when `expected` follows them. A failed lookahead leaves the
-    /// parser at the original newline so the enclosing declaration can terminate normally.
-    fn skip_plain_newlines_before(&mut self, expected: TokenKind) {
-        let next = self.after_plain_newlines(self.i);
-        if self.t.get(next).is_some_and(|token| token.kind == expected) {
-            self.i = next;
-        }
-    }
-
-    /// Kotlin treats a newline before `||`, `&&`, or `?:` as a line CONTINUATION, not a statement
-    /// terminator (`cond\n  && other`, `x\n  ?: default`): the operator cannot begin a statement, so
-    /// the expression keeps going. Peek past the newline(s); if such an operator follows, consume them
-    /// so the binary/elvis loop sees the operator on the same logical line. (`+`/`-`/`*` deliberately do
-    /// NOT continue — kotlinc parses a leading `-x` as a fresh unary-prefix statement, per the grammar
-    /// which allows `NL*` before `||`/`&&`/elvis but not before the additive/multiplicative operators.)
-    fn skip_newlines_before_continuation_op(&mut self) {
-        if !self.at(TokenKind::Newline) {
-            return;
-        }
-        let mut j = self.i;
-        while self.t.get(j).is_some_and(|t| t.kind == TokenKind::Newline) {
-            j += 1;
-        }
-        let continues = match self.t.get(j).map(|t| t.kind) {
-            Some(TokenKind::OrOr | TokenKind::AndAnd) => true,
-            Some(TokenKind::Question) => self
-                .t
-                .get(j + 1)
-                .is_some_and(|t| t.kind == TokenKind::Colon),
-            _ => false,
-        };
-        if continues {
-            self.skip_newlines();
-        }
-    }
-
     // ---- file / decls ----
     /// Publish a top-level classifier after its syntax-specific parser has filled in kind-specific
     /// facts. Declaration modifiers belong to the common classifier boundary: visibility and list
@@ -2118,6 +2053,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
+            ctor_open_line: 0,
             ctor_close_line: 0,
             companion_block_members: Vec::new(),
             decl_line: 0,
@@ -2145,10 +2081,21 @@ impl<'a> Parser<'a> {
         let name_span = self.declaration_name_span;
         // Optional explicit `constructor` keyword and primary constructor:
         // `enum class C constructor(val rgb: Int, …)`.
+        let mut ctor_open_offset = 0u32;
+        // `NL* primaryConstructor`: the `constructor` keyword may also start on a later line.
+        if self.primary_constructor_header_follows() {
+            self.skip_newlines();
+        }
         if self.at(TokenKind::Ident) && self.keyword_text("constructor") {
+            ctor_open_offset = self.tok().span.lo;
             self.bump();
         }
         let mut props = Vec::new();
+        // `NL* primaryConstructor`: the parameter list may start on a later line.
+        self.skip_plain_newlines_before(TokenKind::LParen);
+        if ctor_open_offset == 0 && self.at(TokenKind::LParen) {
+            ctor_open_offset = self.tok().span.lo;
+        }
         let has_primary_ctor = self.eat(TokenKind::LParen);
         if has_primary_ctor {
             self.skip_newlines();
@@ -2503,6 +2450,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: has_primary_ctor.then_some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
+            ctor_open_line: ctor_open_offset,
             ctor_close_line: 0,
             companion_block_members: companions.block_members,
             decl_line: 0,
@@ -2984,8 +2932,12 @@ impl<'a> Parser<'a> {
         let mut primary_constructor_annotation_args = Vec::new();
         // An explicit constructor prefix may continue across physical newlines.
         let mut primary_ctor_visibility = Visibility::Public;
+        // The primary constructor starts at its first modifier, annotation, `constructor` keyword,
+        // or `(`; a KDoc before it is not part of it.
+        let mut ctor_open_offset = 0u32;
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
+            ctor_open_offset = self.tok().span.lo;
             if self.at(TokenKind::At) || self.at_modifier() {
                 let ctor_mods = self.skip_decl_prefix();
                 // The declared constructor visibility survives into `@Metadata` (and, for
@@ -3001,7 +2953,13 @@ impl<'a> Parser<'a> {
         }
         let mut props = Vec::new();
         let mut ctor_close_lo = 0u32;
+        // `NL* primaryConstructor`: the parameter list may start on a later line, even after a
+        // KDoc comment between the class name and `(`.
+        self.skip_plain_newlines_before(TokenKind::LParen);
         let primary_ctor_open = self.tok().span.lo;
+        if ctor_open_offset == 0 && self.at(TokenKind::LParen) {
+            ctor_open_offset = primary_ctor_open;
+        }
         let has_primary_ctor_parens = self.eat(TokenKind::LParen);
         let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
@@ -3216,6 +3174,7 @@ impl<'a> Parser<'a> {
             secondary_ctors,
             type_aliases,
             span: Span::new(start.lo, end.hi),
+            ctor_open_line: ctor_open_offset,
             ctor_close_line: ctor_close_lo,
             companion_block_members: companions.block_members,
             decl_line: 0,
@@ -3579,6 +3538,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
+            ctor_open_line: 0,
             ctor_close_line: 0,
             companion_block_members: companions.block_members,
             decl_line: 0,
@@ -3694,6 +3654,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(span.lo, end.hi),
+            ctor_open_line: 0,
             ctor_close_line: 0,
             companion_block_members: Vec::new(),
             decl_line: 0,
@@ -3831,6 +3792,7 @@ impl<'a> Parser<'a> {
             primary_ctor_annotations: Some(Vec::new()),
             primary_ctor_annotation_args: Vec::new(),
             span: Span::new(start.lo, end.hi),
+            ctor_open_line: 0,
             ctor_close_line: 0,
             companion_block_members: Vec::new(),
             decl_line: 0,
