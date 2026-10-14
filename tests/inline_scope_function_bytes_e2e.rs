@@ -86,3 +86,35 @@ fun converted(value: Int, offset: Int): Int = value.let { it + offset }
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+/// A statement-position `with`/`run` whose lambda is a multi-line `Unit` body. After the lambda's
+/// closing-brace `nop`, while its locals are open, kotlinc's inliner returns to the call's line on
+/// a `nop` of its own once the lambda locals end. The redundant-`nop` sweep keeps it: nothing else
+/// is on that line before the next statement's.
+#[test]
+fn a_statement_unit_lambda_returns_to_the_call_line_like_the_reference_compiler() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "Statement.kt",
+        r#"
+var log = ""
+
+fun record(text: String) {
+    log += text
+}
+
+fun box(): String {
+    with("O") {
+        record(this)
+        record(length.toString())
+    }
+    run {
+        record("K")
+        record("!")
+    }
+    return log
+}
+"#,
+    )]);
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
