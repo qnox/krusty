@@ -57,6 +57,10 @@ pub(super) enum BuiltinOperator {
     Ieee754Equals {
         operand: Ty,
     },
+    /// `kotlin.isNaN()` on a floating-point extension receiver.
+    IsNan {
+        operand: Ty,
+    },
     /// `kotlin.Boolean.not(): Boolean`, Kotlin's `!`.
     Not,
 }
@@ -135,6 +139,32 @@ impl IrBuiltinOperators {
             native_interop_library: false,
         };
         declare(boolean, "not", Vec::new(), BuiltinOperator::Not);
+        let kotlin = DeclarationContainer::<KotlinType> {
+            package: &kotlin,
+            classes: &[],
+            native_interop_library: false,
+        };
+        for operand in FLOATING_POINT {
+            let declared = KotlinType::class(operand);
+            let shape = CallableShape {
+                name: "isNaN",
+                contexts: Vec::new(),
+                receiver: Some(&declared),
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            };
+            let signature = callable_signature(kotlin, &shape)
+                .expect("the floating-point extension names no type parameter");
+            operators.insert(
+                signature,
+                BuiltinOperator::IsNan {
+                    operand: semantic_ty(&declared, &HashMap::default()),
+                },
+            );
+        }
         Self { operators }
     }
 
@@ -211,7 +241,12 @@ mod tests {
         let mut signed = builtins
             .operators
             .iter()
-            .filter(|(_, operator)| !matches!(operator, BuiltinOperator::Relation(_)))
+            .filter(|(_, operator)| {
+                !matches!(
+                    operator,
+                    BuiltinOperator::Relation(_) | BuiltinOperator::IsNan { .. }
+                )
+            })
             .map(|(signature, operator)| {
                 assert_eq!(signature.mask(), 0);
                 (
@@ -259,5 +294,26 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn floating_is_nan_extensions_have_distinct_exact_signatures() {
+        let builtins = IrBuiltinOperators::new();
+        let signed = builtins
+            .operators
+            .iter()
+            .filter_map(|(signature, operator)| match operator {
+                BuiltinOperator::IsNan { operand } => Some((signature, *operand)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(signed.len(), 2);
+        assert_eq!(signed[0].0.package().segments(), ["kotlin"]);
+        assert_eq!(signed[0].0.declaration().segments(), ["isNaN"]);
+        assert_eq!(signed[1].0.package().segments(), ["kotlin"]);
+        assert_eq!(signed[1].0.declaration().segments(), ["isNaN"]);
+        assert!(signed.iter().any(|(_, operand)| *operand == Ty::Float));
+        assert!(signed.iter().any(|(_, operand)| *operand == Ty::Double));
+        assert_ne!(signed[0].0, signed[1].0);
     }
 }

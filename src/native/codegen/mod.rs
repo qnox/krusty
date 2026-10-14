@@ -25,6 +25,17 @@ use crate::diag::DiagSink;
 
 use super::target::NativeTarget;
 
+/// Target-owned realization of one exact dependency declaration.
+///
+/// The symbol and its exact unread extension receiver are published together so a later module
+/// can supply an inert ABI value only for a matching checked singleton receiver.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DependencyExport {
+    symbol: String,
+    singleton_member_receiver: Option<crate::backend::SingletonMemberReceiver>,
+    singleton_extension_receiver: Option<crate::backend::SingletonExtensionUnreadReceiver>,
+}
+
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
 
@@ -72,11 +83,52 @@ pub struct CodegenModule {
     /// Export spellings already claimed by earlier files. The C spelling is intentionally
     /// human-readable and therefore lossy; a collision is refused rather than emitted twice.
     abi_symbols: crate::fx_hash::HashSet<String>,
-    /// Exact declaring KLIB module plus declaration identity to its collision-free exported
-    /// target symbol. Entries survive source-module boundaries for one emission session; the
-    /// module component distinguishes legal same-signature internals in unrelated dependencies.
-    dependency_symbols: crate::fx_hash::HashMap<crate::backend::KlibDependencyCallable, String>,
+    /// Exact declaring KLIB module plus declaration identity to its collision-free target export.
+    /// Entries survive source-module boundaries for one emission session; the module component
+    /// distinguishes legal same-signature internals in unrelated dependencies.
+    dependency_symbols:
+        crate::fx_hash::HashMap<crate::backend::KlibDependencyCallable, DependencyExport>,
     next_dependency_symbol: usize,
+    next_dependency_support_object: usize,
+    next_disambiguated_source_object: usize,
+    used_object_stems: crate::fx_hash::HashSet<String>,
+}
+
+impl CodegenModule {
+    fn source_object_stem(&mut self, source_stem: String, source_stems: &[String]) -> String {
+        if self.used_object_stems.insert(source_stem.clone()) {
+            return source_stem;
+        }
+        loop {
+            let stem = format!(
+                "__krusty_source_object_{}",
+                self.next_disambiguated_source_object
+            );
+            self.next_disambiguated_source_object += 1;
+            if source_stems.iter().all(|source| source != &stem)
+                && self.used_object_stems.insert(stem.clone())
+            {
+                return stem;
+            }
+        }
+    }
+
+    /// Allocate a compiler-private object stem without colliding with this module's source names
+    /// or any object already emitted in the session.
+    fn dependency_support_stem(&mut self, source_stems: &[String]) -> String {
+        loop {
+            let stem = format!(
+                "__krusty_dependency_support_{}",
+                self.next_dependency_support_object
+            );
+            self.next_dependency_support_object += 1;
+            if source_stems.iter().all(|source| source != &stem)
+                && self.used_object_stems.insert(stem.clone())
+            {
+                return stem;
+            }
+        }
+    }
 }
 
 impl Backend for CraneliftBackend {
@@ -86,13 +138,29 @@ impl Backend for CraneliftBackend {
         CompilationTarget::Native
     }
 
+    fn emits_dependency_support(&self) -> bool {
+        true
+    }
+
+    fn realizes_bodyless_dependency_support(&self) -> bool {
+        true
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
-        let stem = file.stems[file.source.raw() as usize].clone();
+        let source_stem = file.stems[file.source.raw() as usize].clone();
+        let object_stem = match file.kind {
+            crate::backend::CheckedIrUnitKind::Source => {
+                state.source_object_stem(source_stem.clone(), file.stems)
+            }
+            crate::backend::CheckedIrUnitKind::DependencySupport => {
+                state.dependency_support_stem(file.stems)
+            }
+        };
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
@@ -154,9 +222,18 @@ impl Backend for CraneliftBackend {
         for (callable, identity) in exports {
             let symbol = format!("kt_klib_export_{}", state.next_dependency_symbol);
             state.next_dependency_symbol += 1;
+            let export = DependencyExport {
+                symbol: symbol.clone(),
+                singleton_member_receiver: file
+                    .dependency_exports
+                    .singleton_member_receiver(callable),
+                singleton_extension_receiver: file
+                    .dependency_exports
+                    .singleton_extension_unread_receiver(callable),
+            };
             if state
                 .dependency_symbols
-                .insert(identity.clone(), symbol.clone())
+                .insert(identity.clone(), export)
                 .is_some()
             {
                 diags.error(
@@ -178,11 +255,12 @@ impl Backend for CraneliftBackend {
                 value_classes: &value_classes,
                 source: file.source,
                 module_name: file.module_name,
+                unit_kind: file.kind,
                 dependency_exports: &dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
             },
             self.target,
-            &stem,
+            &object_stem,
             self.entry,
             self.verify,
         ) {
@@ -197,15 +275,15 @@ impl Backend for CraneliftBackend {
                 diags.error(
                     crate::diag::Span::new(0, 0),
                     format!(
-                        "krusty: this module declares the entry point in both {first} and {stem}"
+                        "krusty: this module declares the entry point in both {first} and {source_stem}"
                     ),
                 );
                 return Vec::new();
             }
-            state.entry_file = Some(stem.clone());
+            state.entry_file = Some(source_stem);
         }
         state.abi.extend(lowered.abi);
-        vec![(format!("{stem}.o"), lowered.object)]
+        vec![(format!("{object_stem}.o"), lowered.object)]
     }
 
     fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact> {
@@ -247,3 +325,37 @@ pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy
         inlining: crate::backend::counted_loops::HeaderInlining::None,
         until_steps: crate::backend::counted_loops::UntilSteps::Counted,
     };
+
+#[cfg(test)]
+mod tests {
+    use super::CodegenModule;
+
+    #[test]
+    fn dependency_support_object_stems_skip_source_collisions() {
+        let mut module = CodegenModule::default();
+        let first_module_stems = vec!["__krusty_dependency_support_0".to_string()];
+        assert_eq!(
+            module.source_object_stem(
+                "__krusty_dependency_support_0".to_string(),
+                &first_module_stems
+            ),
+            "__krusty_dependency_support_0"
+        );
+
+        assert_eq!(
+            module.dependency_support_stem(&["Main".to_string()]),
+            "__krusty_dependency_support_1"
+        );
+        assert_eq!(
+            module.dependency_support_stem(&["Other".to_string()]),
+            "__krusty_dependency_support_2"
+        );
+        assert_eq!(
+            module.source_object_stem(
+                "__krusty_dependency_support_2".to_string(),
+                &["__krusty_dependency_support_2".to_string()]
+            ),
+            "__krusty_source_object_0"
+        );
+    }
+}

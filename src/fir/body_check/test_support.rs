@@ -6,6 +6,58 @@ use crate::source::SourceInput;
 
 use super::*;
 
+struct SingletonExtensionSource {
+    callable: crate::libraries::FunctionInfo,
+}
+
+impl crate::symbol_source::SymbolSource for SingletonExtensionSource {
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let matches = namespace
+            == crate::symbol_source::SymbolNamespace::Package(crate::types::TypeName::ROOT)
+            && name == "read";
+        std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            builtin_classifier: false,
+            classifier_name: None,
+            classifier_declaration: None,
+            classifier: None,
+            callables: if matches {
+                crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
+                    overloads: vec![self.callable.clone()],
+                })
+            } else {
+                crate::libraries::Callables::None
+            },
+            importable_declaration: matches,
+        })
+    }
+}
+
+impl SemanticPlatform for SingletonExtensionSource {}
+
+pub(super) fn singleton_extension_source() -> Box<dyn SemanticPlatform> {
+    let singleton = Ty::obj("Token");
+    let mut callable = crate::libraries::LibraryCallable::library(
+        "dependency/ExtensionsKt",
+        "read",
+        vec![singleton],
+        Ty::Int,
+        Ty::Int,
+        "",
+    );
+    callable.external_identity = Some(crate::fir::ExternalCallableId::from_raw(702));
+    Box::new(SingletonExtensionSource {
+        callable: crate::libraries::FunctionInfo::plain(
+            crate::libraries::FnKind::Extension,
+            Some(singleton),
+            callable,
+        ),
+    })
+}
+
 pub(super) fn checked_function_body(
     source: &str,
     function_name: &str,

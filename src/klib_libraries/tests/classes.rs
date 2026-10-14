@@ -532,6 +532,15 @@ fn companion_block_members_and_companion_extensions_are_named_through_their_clas
         *realized.parameter_identities,
         [ResolvedParameterIdentity::Source("name".into())]
     );
+    let receiver = realized
+        .klib_body_companion_receiver
+        .as_ref()
+        .expect("the associated declaration retains its serialized receiver contract");
+    assert_eq!(receiver.classifier(), registry);
+    assert_eq!(
+        receiver.identity(),
+        &ResolvedParameterIdentity::ExtensionReceiver
+    );
 
     let capacity = libraries.symbols(namespace, "capacity");
     let [capacity] = capacity.callables.properties() else {
@@ -541,6 +550,15 @@ fn companion_block_members_and_companion_extensions_are_named_through_their_clas
     let getter = realization(&libraries, capacity.getter.external_identity);
     assert!(getter.parameter_identities.is_empty());
     assert_eq!(accessor_path(&getter), "capacity.<get-capacity>");
+    let receiver = getter
+        .klib_body_companion_receiver
+        .as_ref()
+        .expect("the companion extension getter retains its receiver contract");
+    assert_eq!(receiver.classifier(), registry);
+    assert_eq!(
+        receiver.identity(),
+        &ResolvedParameterIdentity::ExtensionReceiver
+    );
 }
 
 #[test]

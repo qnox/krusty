@@ -167,8 +167,8 @@ pub(super) fn published_function(
         enclosing,
     );
     function.default_values = signed.defaults.clone();
-    // A KLIB declaration's implementation is its serialized IR body, unless it is one of the
-    // language's builtins, whose compiler operation the shared rules name by exact declaration.
+    // A KLIB declaration's implementation is its serialized IR body unless provider normalization
+    // authenticated an exact shared builtin or target-stdlib intrinsic declaration.
     if let CallablePlacement::Package(package) = placement {
         builtin_realizations::realize_package_function(
             package,
@@ -176,6 +176,13 @@ pub(super) fn published_function(
             &signed.signature,
             &mut function,
         );
+    }
+    if let Some(intrinsic) = &signed.target_intrinsic {
+        function.callable.compiler_intrinsic = Some(intrinsic.operation);
+        if matches!(placement, CallablePlacement::Member { .. }) {
+            function.callable.member_realization =
+                crate::libraries::MemberRealization::Intrinsic(intrinsic.operation);
+        }
     }
     let kind = realization_kind(placement, function.kind == FnKind::Extension);
     identities.assign_function(signed, kind, &mut function);

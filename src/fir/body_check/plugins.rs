@@ -198,6 +198,11 @@ impl BodyFirChecker<'_> {
             })?;
             FirCallTarget::External {
                 declaration: external,
+                singleton_dispatch: selected
+                    .member
+                    .singleton_dispatch
+                    .as_deref()
+                    .map(|singleton| singleton.classifier),
                 default_provider: selected.member.external_default_provider,
                 receiver: Some(resolved(selected.receiver)?),
                 declared_receiver: None,

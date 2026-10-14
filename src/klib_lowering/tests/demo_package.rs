@@ -34,6 +34,7 @@ use crate::types::{Ty, Visibility};
 /// A type a `demo` declaration or body uses, by its Kotlin class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum T {
+    DemoBox,
     Int,
     Double,
     Boolean,
@@ -52,6 +53,7 @@ pub(super) enum T {
 impl T {
     pub(super) fn class(self) -> &'static str {
         match self {
+            T::DemoBox => "Box",
             T::Int => "Int",
             T::Double => "Double",
             T::Boolean => "Boolean",
@@ -76,7 +78,10 @@ impl T {
 
     pub(super) fn kotlin(self) -> KotlinType {
         KotlinType::Class {
-            internal: format!("kotlin/{}", self.class()),
+            internal: match self {
+                T::DemoBox => "demo/Box".to_owned(),
+                _ => format!("kotlin/{}", self.class()),
+            },
             args: Vec::new(),
             nullable: self.nullable(),
             shape: KotlinFunctionTypeShape::default(),
@@ -88,10 +93,13 @@ impl T {
     }
 
     pub(super) fn klib(self) -> KlibIrType {
-        let kotlin = ["kotlin".to_owned()];
+        let package = [match self {
+            T::DemoBox => "demo".to_owned(),
+            _ => "kotlin".to_owned(),
+        }];
         let signature = metadata_class_signature(
             MetadataContainer {
-                package: &kotlin,
+                package: &package,
                 classes: &[],
                 native_interop_library: false,
             },
@@ -146,6 +154,7 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        annotation_applications: Vec::new(),
         return_value_status: Default::default(),
         contract: None,
     }
@@ -753,6 +762,7 @@ pub(super) fn assert_unit_is_empty(unit: &DependencyBodyUnit) {
     assert!(ir.negations.is_empty());
     assert!(ir.fn_source_names.is_empty());
     assert!(ir.fn_params.is_empty());
+    assert!(ir.singleton_extension_unread_receivers.is_empty());
 }
 
 /// The rendered body checked FIR lowering produces for the one function of `source` named `name`

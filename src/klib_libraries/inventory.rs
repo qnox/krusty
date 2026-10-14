@@ -7,6 +7,7 @@ use super::declaration_signatures::{
     sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
 };
 use super::parameter_defaults::{DefaultSelection, ParameterDefaults};
+use super::target_intrinsics::{KlibIntrinsicFacts, TargetIntrinsicPlatform};
 use crate::libraries::{declared_type_alias, AliasExpansion};
 use crate::metadata::klib_ir::KlibIrSignature;
 use crate::metadata::semantic::KotlinPackage;
@@ -18,6 +19,17 @@ use crate::types::{existing_type_name_child, type_name, type_name_child, TypeNam
 pub(super) struct CompanionExtension<T> {
     pub(super) package: TypeName,
     pub(super) signed: T,
+}
+
+impl<T> CompanionExtension<T> {
+    /// The semantic placement shared by namespace publication and exact dependency linking.
+    pub(super) fn placement(&self, classifier: TypeName) -> crate::libraries::CallablePlacement {
+        crate::libraries::CallablePlacement::Associated {
+            classifier,
+            declaration_owner: crate::types::SemanticCallableOwner::Package(self.package),
+            access_owner: None,
+        }
+    }
 }
 
 /// Signed declarations by namespace, plus every package namespace a qualifier walk may pass
@@ -33,6 +45,7 @@ pub(super) struct PackageInventory {
     /// Each declared package and all of its enclosing packages. The root package is not listed:
     /// it is not a child of any namespace.
     namespaces: HashSet<TypeName>,
+    intrinsics: KlibIntrinsicFacts,
 }
 
 impl PackageInventory {
@@ -53,6 +66,27 @@ impl PackageInventory {
     pub(super) fn from_package_inputs(
         packages: Vec<(Vec<String>, KotlinPackage, bool, bool, Option<String>)>,
     ) -> Result<Self, KlibLibraryError> {
+        Self::from_target_package_inputs(
+            packages
+                .into_iter()
+                .map(|(segments, package, builtins, friend, module)| {
+                    (segments, package, builtins, friend, module, None)
+                })
+                .collect(),
+        )
+    }
+
+    /// Build an archive inventory, retaining target-stdlib authority beside each fragment.
+    pub(super) fn from_target_package_inputs(
+        packages: Vec<(
+            Vec<String>,
+            KotlinPackage,
+            bool,
+            bool,
+            Option<String>,
+            Option<TargetIntrinsicPlatform>,
+        )>,
+    ) -> Result<Self, KlibLibraryError> {
         let mut inventory = Self {
             functions: HashMap::default(),
             properties: HashMap::default(),
@@ -61,6 +95,7 @@ impl PackageInventory {
             companion_functions: HashMap::default(),
             companion_properties: HashMap::default(),
             namespaces: HashSet::default(),
+            intrinsics: KlibIntrinsicFacts::default(),
         };
         // A type alias's qualified identity omits its declaring archive. When an ordinary
         // dependency and an exact friend both publish the same identity, keep the friend-owned
@@ -71,7 +106,15 @@ impl PackageInventory {
         // package fragments from the same module must not become duplicate candidates, while two
         // modules' equal internal signatures remain distinct so exact friendship can select one.
         let mut declared_signatures = HashSet::default();
-        for (segments, package, compiler_builtin_owner, internal_friend, module) in packages {
+        for (
+            segments,
+            package,
+            compiler_builtin_owner,
+            internal_friend,
+            module,
+            intrinsic_platform,
+        ) in packages
+        {
             let identity = inventory.declare_package(&segments);
             for alias in package
                 .type_aliases
@@ -100,11 +143,17 @@ impl PackageInventory {
                     sign_package_function(&segments, function, internal_friend, module.as_deref())
                         .map(|mut signed| {
                             signed.compiler_builtin_owner = compiler_builtin_owner;
+                            signed.target_intrinsic = super::target_intrinsics::authenticate(
+                                intrinsic_platform,
+                                crate::libraries::CallablePlacement::Package(identity),
+                                &signed.declaration,
+                            );
                             signed
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for function in signed {
+                inventory.intrinsics.insert(&function);
                 if !declared_signatures.insert((module.clone(), function.signature.clone())) {
                     if function.compiler_builtin_owner {
                         inventory.insert_selected_function(identity, function);
@@ -147,13 +196,40 @@ impl PackageInventory {
                     .or_default()
                     .push(property);
             }
-            for (classifier, signed) in sign_package_classes(
+            for (classifier, mut signed) in sign_package_classes(
                 &segments,
                 package.classes,
                 &mut declared_signatures,
                 internal_friend,
+                compiler_builtin_owner,
                 module.as_deref(),
             )? {
+                let member = crate::libraries::CallablePlacement::Member {
+                    owner: classifier,
+                    owner_is_interface: signed.shape.is_interface(),
+                };
+                for function in &mut signed.functions {
+                    function.target_intrinsic = super::target_intrinsics::authenticate(
+                        intrinsic_platform,
+                        member,
+                        &function.declaration,
+                    );
+                    inventory.intrinsics.insert(function);
+                }
+                for function in &mut signed.associated_functions {
+                    function.target_intrinsic = super::target_intrinsics::authenticate(
+                        intrinsic_platform,
+                        crate::libraries::CallablePlacement::Associated {
+                            classifier,
+                            declaration_owner: crate::types::SemanticCallableOwner::Classifier(
+                                classifier,
+                            ),
+                            access_owner: Some(classifier),
+                        },
+                        &function.declaration,
+                    );
+                    inventory.intrinsics.insert(function);
+                }
                 let selected = inventory
                     .classifiers
                     .get(&classifier)
@@ -173,6 +249,21 @@ impl PackageInventory {
             }
         }
         Ok(inventory)
+    }
+
+    pub(super) fn intrinsic_facts(&self) -> &KlibIntrinsicFacts {
+        &self.intrinsics
+    }
+
+    pub(super) fn attach_ir_intrinsics(
+        &mut self,
+        module: &str,
+        platform: Option<TargetIntrinsicPlatform>,
+        trees: &crate::metadata::klib_ir::KlibIrModuleTrees,
+    ) {
+        for (arena, function) in trees.all_functions() {
+            self.intrinsics.insert_ir(module, platform, arena, function);
+        }
     }
 
     /// Publish a signed function in the namespace selected by its own metadata.
@@ -313,6 +404,90 @@ impl PackageInventory {
             .into_iter()
             .flatten()
             .filter(move |function| function.declaration.name == name)
+    }
+
+    /// The published function with this exact module-qualified serialized identity and its
+    /// authoritative namespace placement.
+    /// This is a reverse identity join for dependency-body linking, not a namespace/name lookup.
+    pub(super) fn dependency_function(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(crate::libraries::CallablePlacement, &SignedFunction)> {
+        let crate::libraries::KlibDeclarationSignature::Public(signature) = &identity.declaration
+        else {
+            return None;
+        };
+        self.functions
+            .iter()
+            .find_map(|(&package, functions)| {
+                functions
+                    .iter()
+                    .find(|function| {
+                        function.module.as_deref() == Some(identity.module.as_str())
+                            && &function.signature == signature
+                    })
+                    .map(|function| {
+                        (
+                            crate::libraries::CallablePlacement::Package(package),
+                            function,
+                        )
+                    })
+            })
+            .or_else(|| {
+                self.companion_functions
+                    .iter()
+                    .find_map(|(&classifier, extensions)| {
+                        extensions
+                            .iter()
+                            .find(|extension| {
+                                extension.signed.module.as_deref() == Some(identity.module.as_str())
+                                    && &extension.signed.signature == signature
+                            })
+                            .map(|extension| (extension.placement(classifier), &extension.signed))
+                    })
+            })
+            .or_else(|| {
+                self.classifiers.iter().find_map(|(&classifier, signed)| {
+                    signed
+                        .functions
+                        .iter()
+                        .find(|function| {
+                            function.module.as_deref() == Some(identity.module.as_str())
+                                && &function.signature == signature
+                        })
+                        .map(|function| {
+                            (
+                                crate::libraries::CallablePlacement::Member {
+                                    owner: classifier,
+                                    owner_is_interface: signed.shape.is_interface(),
+                                },
+                                function,
+                            )
+                        })
+                        .or_else(|| {
+                            signed
+                                .associated_functions
+                                .iter()
+                                .find(|function| {
+                                    function.module.as_deref() == Some(identity.module.as_str())
+                                        && &function.signature == signature
+                                })
+                                .map(|function| {
+                                    (
+                                        crate::libraries::CallablePlacement::Associated {
+                                            classifier,
+                                            declaration_owner:
+                                                crate::types::SemanticCallableOwner::Classifier(
+                                                    classifier,
+                                                ),
+                                            access_owner: Some(classifier),
+                                        },
+                                        function,
+                                    )
+                                })
+                        })
+                })
+            })
     }
 
     /// The top-level properties `package` declares under `name`, in library order.

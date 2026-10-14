@@ -16,6 +16,7 @@ mod compiler_intrinsic;
 mod core_builtins;
 mod default_value;
 mod dependency_access_policy;
+mod dependency_body_contract;
 mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
@@ -27,11 +28,13 @@ mod platform_contract;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
+mod singleton_dispatch;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
 };
+pub(crate) use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
     DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
@@ -46,6 +49,10 @@ pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
+pub use dependency_body_contract::DependencyBodyFacts;
+pub(crate) use dependency_body_contract::{
+    DependencyBodyProviderRole, DependencyBodyProviderSnapshot, DependencyBodySnapshot,
+};
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
@@ -54,6 +61,7 @@ pub use platform_contract::{
 pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
+pub use singleton_dispatch::SingletonDispatch;
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -369,21 +377,11 @@ pub struct PluginExpressionDeclaration {
     pub operation: &'static str,
 }
 
-/// Semantic singleton value used as an implicit dispatch receiver for an imported object member.
-/// Only the selected classifier crosses the provider boundary; each backend owns the target storage
-/// or accessor used to materialize that singleton.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SingletonDispatch {
-    pub classifier: TypeName,
-}
-
-impl SingletonDispatch {
-    pub fn ty(self) -> Ty {
-        Ty::obj_name(self.classifier)
-    }
-}
-
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
+    fn klib_dependency_body_facts(&self) -> Option<DependencyBodyFacts<'_>> {
+        None
+    }
+
     /// Provider-owned policy for exact friend-module access to compiled declarations.
     fn dependency_access_policy(&self) -> &dyn DependencyAccessPolicy {
         dependency_access_policy::closed_dependency_access()

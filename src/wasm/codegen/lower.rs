@@ -22,14 +22,14 @@ mod default_arguments;
 mod intrinsic_operations;
 mod objects;
 
-use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
+use crate::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{
     module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
     IrTypeOp,
 };
 use crate::types::{EqualityMode, Ty};
 
-use super::super::encode::{BlockType, Code, Function, Module, ValType};
+use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
@@ -100,6 +100,27 @@ pub(super) fn lower_file(
     let indices = callable_registry.declare_file(ir, module)?;
     let default_indices = callable_registry.declare_file_defaults(ir, module)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
+    let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
+        ir,
+        |expression| {
+            callables
+                .singleton_dispatch(expression)
+                .map(|dispatch| dispatch.classifier)
+        },
+        |target, classifier| {
+            call_targets
+                .singleton_member_receiver(target)
+                .is_some_and(|effect| {
+                    effect.classifier() == classifier && !effect.evaluate_source()
+                })
+                || call_targets
+                    .singleton_extension_unread_receiver(target)
+                    .is_some_and(|effect| {
+                        effect.semantic_type() == Ty::Obj(classifier, &[])
+                            && !effect.evaluate_source()
+                    })
+        },
+    );
     let classes = if ir.classes.is_empty() {
         None
     } else {
@@ -118,6 +139,8 @@ pub(super) fn lower_file(
         globals: &globals,
         classes: classes.as_ref(),
         calls: &call_targets,
+        callables,
+        inert_singleton_bindings: &inert_singleton_bindings,
         properties: property_registry,
     };
     for (id, function) in ir.functions.iter().enumerate() {
@@ -217,6 +240,10 @@ struct FileContext<'a> {
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
     calls: &'a FileCallTargets,
+    /// Provider facts frozen for exactly the dependency identities this file calls.
+    callables: &'a CheckedBackendCallables,
+    /// Staged bound singleton accesses proven inert by the exact checked call and export effect.
+    inert_singleton_bindings: &'a HashSet<crate::ir::ExprId>,
     /// Top-level property storage reserved or published by files of this source module.
     properties: &'a PropertyRegistry,
 }
@@ -272,6 +299,55 @@ fn describe(ty: Ty) -> String {
     }
 }
 
+/// The checked type carried into Wasm emission. A generated value block is a transparent
+/// sequencing node: when it has no checked type of its own, its final child retains the exact
+/// frontend type. This is the same common-IR contract used for physical block representation; it
+/// does not derive a type from a callable name or operation shape.
+fn expression_type(
+    ir: &IrFile,
+    declared: &HashMap<u32, Ty>,
+    id: u32,
+) -> Result<Option<Ty>, Unsupported> {
+    let ty = match ir.expr(id) {
+        IrExpr::Return(_)
+        | IrExpr::Break { .. }
+        | IrExpr::Continue { .. }
+        | IrExpr::Throw { .. } => return Ok(None),
+        IrExpr::Variable { .. }
+        | IrExpr::SetValue { .. }
+        | IrExpr::SetStatic { .. }
+        | IrExpr::SetField { .. }
+        | IrExpr::PropertyWrite { .. }
+        | IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite { .. })
+        | IrExpr::While { .. }
+        | IrExpr::InlineFrameMarker
+        | IrExpr::Block { value: None, .. } => Ty::Unit,
+        IrExpr::Block {
+            value: Some(value), ..
+        } if ir.checked_type(id).is_none() => return expression_type(ir, declared, *value),
+        IrExpr::GetValue(slot) => match ir.logical_types.get(&id) {
+            Some(ty) => *ty,
+            None => *declared
+                .get(slot)
+                .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
+        },
+        // A member access common lowering produced after checking has its declaration's type,
+        // which is what the instruction leaves on the stack; a use at a narrower type casts.
+        IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
+            ir.classes[*class as usize].fields[*index as usize].ty
+        }
+        IrExpr::MethodCall { class, index, .. } if ir.checked_type(id).is_none() => {
+            let function = ir.classes[*class as usize].methods[*index as usize];
+            ir.functions[function as usize].ret
+        }
+        IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        node => ir
+            .checked_type(id)
+            .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
+    };
+    Ok((ty != Ty::Nothing).then_some(ty))
+}
+
 /// The numeric carriers, ordered so that Kotlin's mixed arithmetic widens to the greater one:
 /// `Int + Long` is a `Long`, `Long + Float` a `Float`, `Float + Double` a `Double`.
 fn rank(value: ValType) -> Option<u8> {
@@ -325,6 +401,9 @@ struct Body<'a> {
     classes: Option<&'a FileClasses>,
     /// Exact source/dependency call targets registered before this body is emitted.
     calls: &'a FileCallTargets,
+    /// Provider facts frozen for exactly the dependency identities this file calls.
+    callables: &'a CheckedBackendCallables,
+    inert_singleton_bindings: &'a HashSet<crate::ir::ExprId>,
     properties: &'a PropertyRegistry,
     code: Code,
     /// Locals beyond the parameters, in index order.
@@ -393,6 +472,8 @@ impl<'a> Body<'a> {
             globals: context.globals,
             classes: context.classes,
             calls: context.calls,
+            callables: context.callables,
+            inert_singleton_bindings: context.inert_singleton_bindings,
             properties: context.properties,
             code: Code::default(),
             locals: Vec::new(),
@@ -459,43 +540,7 @@ impl<'a> Body<'a> {
     /// yields nothing. A read of a value slot has its declaration's type. Anything else without
     /// a checked type declines rather than have this generator infer one.
     fn type_of(&self, id: u32) -> Result<Option<Ty>, Unsupported> {
-        let ty = match self.ir.expr(id) {
-            IrExpr::Return(_)
-            | IrExpr::Break { .. }
-            | IrExpr::Continue { .. }
-            | IrExpr::Throw { .. } => return Ok(None),
-            IrExpr::Variable { .. }
-            | IrExpr::SetValue { .. }
-            | IrExpr::SetStatic { .. }
-            | IrExpr::SetField { .. }
-            | IrExpr::PropertyWrite { .. }
-            | IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite { .. })
-            | IrExpr::While { .. }
-            | IrExpr::InlineFrameMarker
-            | IrExpr::Block { value: None, .. } => Ty::Unit,
-            IrExpr::GetValue(slot) => match self.ir.logical_types.get(&id) {
-                Some(ty) => *ty,
-                None => *self
-                    .declared
-                    .get(slot)
-                    .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
-            },
-            // A member access common lowering produced after checking has its declaration's type,
-            // which is what the instruction leaves on the stack; a use at a narrower type casts.
-            IrExpr::GetField { class, index, .. } if self.ir.checked_type(id).is_none() => {
-                self.ir.classes[*class as usize].fields[*index as usize].ty
-            }
-            IrExpr::MethodCall { class, index, .. } if self.ir.checked_type(id).is_none() => {
-                let function = self.ir.classes[*class as usize].methods[*index as usize];
-                self.ir.functions[function as usize].ret
-            }
-            IrExpr::PropertyRead { ty, .. } if self.ir.checked_type(id).is_none() => *ty,
-            node => self
-                .ir
-                .checked_type(id)
-                .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
-        };
-        Ok((ty != Ty::Nothing).then_some(ty))
+        expression_type(self.ir, &self.declared, id)
     }
 
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
@@ -598,7 +643,11 @@ impl<'a> Body<'a> {
                 Some(value) => {
                     let local = self.local(value);
                     self.values.insert(index, (local, ty));
-                    if let Some(init) = init {
+                    if self.inert_singleton_bindings.contains(&id) {
+                        // The nullable reference local's Wasm default is sufficient: every read
+                        // is erased at an authenticated dependency call, and the exact singleton
+                        // access was proved to have no initialization effect.
+                    } else if let Some(init) = init {
                         self.value(init, ty)?;
                         self.code.local_set(local);
                     }
@@ -756,6 +805,7 @@ impl<'a> Body<'a> {
                         target,
                         params,
                         defaults,
+                        extension_receiver_parameter,
                         ..
                     },
                 dispatch_receiver: None,
@@ -765,7 +815,202 @@ impl<'a> Body<'a> {
                     .calls
                     .external(target)
                     .ok_or_else(|| "an unregistered dependency callable identity".to_string())?;
+                let callable = self.callables.callable(target).ok_or_else(|| {
+                    "a dependency callable without frozen callable facts".to_string()
+                })?;
+                if let Some(receiver_position) = callable.klib_body_companion_receiver_position() {
+                    let receiver_ty = self
+                        .calls
+                        .singleton_extension_unread_receiver(target)
+                        .ok_or_else(|| {
+                            "a classifier-associated dependency without its exported body effect"
+                                .to_string()
+                        })?
+                        .semantic_type();
+                    if extension_receiver_parameter.is_some() {
+                        // A call lowered from another support body already contains the retained
+                        // receiver at its serialized coordinate. Validate that exact shape and do
+                        // not synthesize a second ABI slot.
+                        if callable.serialized_companion_receiver_position(
+                            &params,
+                            extension_receiver_parameter,
+                            false,
+                            Some(receiver_ty),
+                        ) != Some(receiver_position)
+                        {
+                            return Err(
+                                "a serialized companion dependency receiver whose declaration disagrees"
+                                    .to_string(),
+                            );
+                        }
+                        self.direct_call(function, &params, &args)?;
+                    } else {
+                        // Source lookup exposes the declaration as a receiver-less top-level call.
+                        // The frozen contract authenticates the extra body slot; the emitted body
+                        // effect remains authoritative for that slot's ABI type.
+                        if !callable.is_top_level_function()
+                            || callable.params.as_slice() != params.as_slice()
+                            || params.len() != args.len()
+                            || receiver_position > params.len()
+                        {
+                            return Err(
+                                "a classifier-associated dependency receiver whose declaration disagrees"
+                                    .to_string(),
+                            );
+                        }
+                        self.direct_inert_extension_call(
+                            function,
+                            receiver_ty,
+                            receiver_position,
+                            None,
+                            &params,
+                            &args,
+                        )?;
+                    }
+                } else {
+                    self.direct_call(function, &params, &args)?;
+                }
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    },
+                dispatch_receiver: Some(receiver),
+                args,
+            } if defaults.is_empty()
+                && self
+                    .calls
+                    .singleton_extension_unread_receiver(target)
+                    .is_some_and(|effect| {
+                        crate::backend::authenticated_singleton_receiver(
+                            Some(receiver),
+                            self.callables
+                                .singleton_dispatch(id)
+                                .map(|dispatch| dispatch.classifier),
+                            effect.semantic_type(),
+                        )
+                    }) =>
+            {
+                // The exact emitted body does not read its extension receiver, and the checked
+                // source edge supplies a singleton of the same semantic type. The exact edge fact
+                // remains authoritative when inline staging turns the receiver into a local read.
+                // Keep the ABI slot without inventing a dependency object; every unauthenticated
+                // receiver follows the ordinary extension path below and remains evaluated.
+                let function = self
+                    .calls
+                    .external(target)
+                    .ok_or_else(|| "an unregistered dependency extension identity".to_string())?;
+                let callable = self.callables.callable(target).ok_or_else(|| {
+                    "a dependency extension without frozen callable facts".to_string()
+                })?;
+                let (function, receiver_ty, receiver_position) =
+                    Self::dependency_extension_call(function, callable, &params, &args)?;
+                let effect = self
+                    .calls
+                    .singleton_extension_unread_receiver(target)
+                    .ok_or_else(|| {
+                        "an unread singleton extension without its exported effect".to_string()
+                    })?;
+                if effect.semantic_type() != receiver_ty {
+                    return Err(
+                        "an unread singleton extension receiver whose declaration disagrees"
+                            .to_string(),
+                    );
+                }
+                self.direct_inert_extension_call(
+                    function,
+                    receiver_ty,
+                    receiver_position,
+                    effect.evaluate_source().then_some(receiver),
+                    &params,
+                    &args,
+                )?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    },
+                dispatch_receiver: Some(receiver),
+                args,
+            } if defaults.is_empty()
+                && super::callable_registry::authenticated_singleton_member_call(
+                    Some(receiver),
+                    self.callables.singleton_dispatch(id).is_some(),
+                    self.callables
+                        .callable(target)
+                        .is_some_and(|callable| callable.is_member_function()),
+                ) =>
+            {
+                // Common KLIB lowering proved this exact compiler-owned wrapper never reads its
+                // singleton receiver, so its support export has only the regular semantic
+                // parameters. The exported effect says whether the exact serialized singleton has
+                // observable first-access initialization; only the provider's narrow inert-object
+                // proof may erase evaluation of the source receiver expression.
+                let function = self
+                    .calls
+                    .external(target)
+                    .ok_or_else(|| "an unregistered dependency singleton member".to_string())?;
+                let selected = self
+                    .callables
+                    .singleton_dispatch(id)
+                    .expect("the guarded singleton call has its frozen per-expression fact");
+                let effect = self
+                    .calls
+                    .singleton_member_receiver(target)
+                    .ok_or_else(|| {
+                        "a receiver-erased dependency member without its singleton effect"
+                            .to_string()
+                    })?;
+                if effect.classifier() != selected.classifier {
+                    return Err(
+                        "a receiver-erased dependency member whose singleton effect disagrees"
+                            .to_string(),
+                    );
+                }
+                if effect.evaluate_source() {
+                    self.statement(receiver)?;
+                }
                 self.direct_call(function, &params, &args)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
+                        params,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    },
+                dispatch_receiver: Some(receiver),
+                args,
+            } if defaults.is_empty() => {
+                let function = self
+                    .calls
+                    .external(target)
+                    .ok_or_else(|| "an unregistered dependency extension identity".to_string())?;
+                let callable = self.callables.callable(target).ok_or_else(|| {
+                    "a dependency extension without frozen callable facts".to_string()
+                })?;
+                let (function, receiver_ty, receiver_position) =
+                    Self::dependency_extension_call(function, callable, &params, &args)?;
+                self.direct_extension_call(
+                    function,
+                    receiver_ty,
+                    receiver_position,
+                    receiver,
+                    &params,
+                    &args,
+                )?;
             }
             IrExpr::Call {
                 callee: Callee::Intrinsic { operation, .. },
@@ -919,6 +1164,103 @@ impl<'a> Body<'a> {
         }
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;
+        }
+        self.code.call(function);
+        Ok(())
+    }
+
+    /// Validate the exact serialized/source parameter join of an already-emitted dependency
+    /// extension and answer its target plus receiver slot.
+    fn dependency_extension_call(
+        function: u32,
+        callable: &BackendCallableFact,
+        params: &[Ty],
+        args: &[u32],
+    ) -> Result<(u32, Ty, usize), Unsupported> {
+        if !callable.is_extension() {
+            return Err("a dependency receiver which is not an extension receiver".to_string());
+        }
+        let receiver_ty = callable.source_receiver.ok_or_else(|| {
+            "a dependency extension without its recorded receiver type".to_string()
+        })?;
+        let receiver_position = callable.context_count;
+        if params.len() != args.len()
+            || receiver_position > params.len()
+            || callable.params.len() != params.len() + 1
+            || callable.params[..receiver_position] != params[..receiver_position]
+            || callable.params[receiver_position] != receiver_ty
+            || callable.params[receiver_position + 1..] != params[receiver_position..]
+        {
+            return Err(
+                "a dependency extension whose receiver coordinate disagrees with its call"
+                    .to_string(),
+            );
+        }
+        Ok((function, receiver_ty, receiver_position))
+    }
+
+    /// Call one already-emitted dependency extension in its serialized parameter order:
+    /// context parameters, extension receiver, then ordinary value parameters. The provider's
+    /// frozen kind, receiver type and coordinate are the authority; a member receiver or an
+    /// inconsistent declaration is declined rather than treated as a top-level extension.
+    fn direct_extension_call(
+        &mut self,
+        function: u32,
+        receiver_ty: Ty,
+        receiver_position: usize,
+        receiver: u32,
+        params: &[Ty],
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        for (&argument, &parameter) in args[..receiver_position]
+            .iter()
+            .zip(&params[..receiver_position])
+        {
+            self.value(argument, parameter)?;
+        }
+        self.value(receiver, receiver_ty)?;
+        for (&argument, &parameter) in args[receiver_position..]
+            .iter()
+            .zip(&params[receiver_position..])
+        {
+            self.value(argument, parameter)?;
+        }
+        self.code.call(function);
+        Ok(())
+    }
+
+    /// Call an emitted dependency extension whose exact serialized body does not read its
+    /// extension receiver. `source_receiver` is the exact matching singleton supplied by an
+    /// ordinary source extension call; evaluate it at its source-order coordinate before the inert
+    /// null substitutes only the unread ABI slot. A classifier-associated call has no source value
+    /// access and passes `None`.
+    fn direct_inert_extension_call(
+        &mut self,
+        function: u32,
+        receiver_ty: Ty,
+        receiver_position: usize,
+        source_receiver: Option<u32>,
+        params: &[Ty],
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        if !matches!(carrier(receiver_ty)?, Some(ValType::Ref { .. })) {
+            return Err("an inert extension receiver without a reference carrier".into());
+        }
+        for (&argument, &parameter) in args[..receiver_position]
+            .iter()
+            .zip(&params[..receiver_position])
+        {
+            self.value(argument, parameter)?;
+        }
+        if let Some(receiver) = source_receiver {
+            self.statement(receiver)?;
+        }
+        self.code.ref_null(HeapType::None);
+        for (&argument, &parameter) in args[receiver_position..]
+            .iter()
+            .zip(&params[receiver_position..])
+        {
+            self.value(argument, parameter)?;
         }
         self.code.call(function);
         Ok(())
@@ -1323,4 +1665,40 @@ fn describe_node(node: &IrExpr) -> String {
         .next()
         .unwrap_or("expression");
     format!("the expression `{variant}`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_untyped_sequencing_block_retains_its_final_child_type() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(IrExpr::GetValue(7));
+        let inner = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(value),
+        });
+        let outer = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(inner),
+        });
+        let declared = HashMap::from_iter([(7, Ty::Float)]);
+
+        assert_eq!(expression_type(&ir, &declared, outer), Ok(Some(Ty::Float)));
+    }
+
+    #[test]
+    fn a_block_checked_at_a_narrower_type_keeps_that_checked_type() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(IrExpr::GetValue(7));
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(value),
+        });
+        ir.logical_types.insert(block, Ty::Byte);
+        let declared = HashMap::from_iter([(7, Ty::Int)]);
+
+        assert_eq!(expression_type(&ir, &declared, block), Ok(Some(Ty::Byte)));
+    }
 }

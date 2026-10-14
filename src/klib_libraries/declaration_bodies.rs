@@ -13,17 +13,33 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::klib::KlibManifest;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
-use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrFunction};
-use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature};
+use crate::metadata::klib_ir::tree::{
+    KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrStatement,
+    KlibIrType,
+};
+use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
+use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
 pub struct KlibDeclarationBodies {
     libraries: Vec<KlibIrModuleTrees>,
+    modules: HashMap<String, usize>,
     /// Which library defines each linkable identity.
     owners: HashMap<(String, KlibIrSignature), usize>,
     /// The producer-declared module graph. These are manifest `depends` edges, not the roles the
     /// current compilation assigned its inputs.
     dependencies: HashMap<String, Vec<String>>,
+}
+
+impl Default for KlibDeclarationBodies {
+    fn default() -> Self {
+        Self {
+            libraries: Vec::new(),
+            modules: HashMap::default(),
+            owners: HashMap::default(),
+            dependencies: HashMap::default(),
+        }
+    }
 }
 
 /// One decoded KLIB together with the producer graph recorded in its manifest.
@@ -171,12 +187,63 @@ impl KlibDeclarationBodies {
         }
         Ok(Self {
             libraries: libraries.into_iter().map(|input| input.trees).collect(),
+            modules,
             owners,
             dependencies: dependencies
                 .into_iter()
                 .map(|(module, dependencies)| (module, dependencies.into_iter().collect()))
                 .collect(),
         })
+    }
+
+    /// Whether exactly one producer-reachable module serializes `classifier` with no
+    /// object-initialization work. The checked receiver separately proves that this exact classifier
+    /// is a singleton. This body-side proof admits only an `Any`-delegating empty constructor,
+    /// literal field initialization and an empty anonymous initializer. An absent, multiply owned,
+    /// inherited, or executable initializer grants no authority.
+    pub(crate) fn singleton_initialization_is_inert(
+        &self,
+        module: &str,
+        classifier: TypeName,
+    ) -> bool {
+        let mut found = None;
+        for module in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&module) else {
+                continue;
+            };
+            let mut in_module = None;
+            for tree in self.libraries[library].trees() {
+                find_class(&tree.arena, &tree.declaration, classifier, &mut in_module);
+                if in_module == Some(false) {
+                    return false;
+                }
+            }
+            if let Some(inert) = in_module {
+                if found.replace(inert).is_some() {
+                    return false;
+                }
+            }
+        }
+        found == Some(true)
+    }
+
+    /// Modules whose bodies the producer graph rooted at `module` can publish.
+    ///
+    /// This is the same manifest-edge closure used to resolve serialized calls. It deliberately
+    /// ignores unrelated current-compilation inputs: those archives cannot contribute a callee to
+    /// a body rooted in the selected platform stdlib.
+    pub(crate) fn body_provider_modules(&self, module: &str) -> HashSet<String> {
+        let mut pending = VecDeque::from([module.to_owned()]);
+        let mut reachable = HashSet::default();
+        while let Some(module) = pending.pop_front() {
+            if !reachable.insert(module.clone()) {
+                continue;
+            }
+            if let Some(dependencies) = self.dependencies.get(&module) {
+                pending.extend(dependencies.iter().cloned());
+            }
+        }
+        reachable
     }
 
     /// Resolve a call symbol in the graph of the KLIB body which serialized it.
@@ -245,6 +312,274 @@ impl KlibDeclarationBodies {
             .get(&(identity.module.clone(), signature.clone()))?;
         self.libraries[library].function(&signature)
     }
+
+    /// Whether the exact serialized declaration intentionally carries an executable body.
+    pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
+        self.function(identity)
+            .map(|(_, function)| function.body.is_some())
+    }
+
+    /// Exact producer-resolved callees named directly by this function body. Missing and
+    /// ambiguous origins stay absent here and are diagnosed by body lowering; consumers use this
+    /// inventory only to prepare capabilities for declarations which the same lowering reaches.
+    pub(crate) fn direct_callees(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Vec<KlibDependencyCallable> {
+        let Some((arena, function)) = self.function(identity) else {
+            return Vec::new();
+        };
+        arena
+            .call_symbols_in_body(function)
+            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(
+                |declaration| match self.callee_origin(&identity.module, &declaration) {
+                    KlibCalleeOrigin::Exact(callee) => Some(callee),
+                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Whether `identity` is an executable dependency-support root: its own serialized body has a
+    /// direct call edge to an intrinsic declaration authenticated from these same selected inputs,
+    /// or a direct call edge to one such declaration.
+    ///
+    /// The single wrapper layer admits a target stdlib's semantic wrapper around its instruction
+    /// wrapper, while deliberately not turning every transitive caller into support code. The
+    /// eligibility check does not recurse beyond that one edge: an ordinary caller of the semantic
+    /// wrapper is not a support root. Producer dependency edges resolve each call before the
+    /// intrinsic table is consulted, so an unrelated equal signature cannot grant the capability
+    /// and lowering never tries one body before falling back to another realization.
+    pub(crate) fn is_supported_intrinsic_root(
+        &self,
+        identity: &KlibDependencyCallable,
+        intrinsics: &super::KlibIntrinsicFacts,
+    ) -> bool {
+        if self.directly_calls_authenticated_intrinsic(identity, intrinsics) {
+            return true;
+        }
+        let Some((arena, function)) = self.function(identity) else {
+            return false;
+        };
+        arena.call_symbols_in_body(function).any(|symbol| {
+            let Some(declaration) = declaration_signature(&symbol.signature) else {
+                return false;
+            };
+            let KlibCalleeOrigin::Exact(callee) =
+                self.callee_origin(&identity.module, &declaration)
+            else {
+                return false;
+            };
+            self.directly_calls_authenticated_intrinsic(&callee, intrinsics)
+        })
+    }
+
+    fn directly_calls_authenticated_intrinsic(
+        &self,
+        identity: &KlibDependencyCallable,
+        intrinsics: &super::KlibIntrinsicFacts,
+    ) -> bool {
+        let Some((arena, function)) = self.function(identity) else {
+            return false;
+        };
+        arena.call_symbols_in_body(function).any(|symbol| {
+            let Some(declaration) = declaration_signature(&symbol.signature) else {
+                return false;
+            };
+            let KlibCalleeOrigin::Exact(callee) =
+                self.callee_origin(&identity.module, &declaration)
+            else {
+                return false;
+            };
+            intrinsics.get(&callee).is_some_and(|callable| {
+                callable.operation() == crate::libraries::CompilerIntrinsic::ReinterpretBits
+            })
+        })
+    }
+}
+
+fn find_class(
+    arena: &KlibIrArena,
+    member: &KlibIrMember,
+    classifier: TypeName,
+    found: &mut Option<bool>,
+) {
+    let KlibIrMember::Class(id) = member else {
+        return;
+    };
+    let class = arena.class(*id);
+    if class.base.symbol.kind == KlibIrSymbolKind::Class
+        && class_identity(&class.base.symbol.signature) == Some(classifier)
+    {
+        let mut constructors = class.members.iter().filter_map(|member| match member {
+            KlibIrMember::Function(function) if arena.function(*function).constructor => {
+                Some(arena.function(*function))
+            }
+            _ => None,
+        });
+        let inert = class.supertypes.len() == 1
+            && inert_any_supertype(arena, class.supertypes[0])
+            && constructors.next().is_some_and(|constructor| {
+                inert_constructor(arena, constructor, &class.base.symbol)
+            })
+            && constructors.next().is_none()
+            && class.members.iter().all(|member| match member {
+                KlibIrMember::AnonymousInitializer { statements, .. } => statements.is_empty(),
+                KlibIrMember::Field(field) => field
+                    .initializer
+                    .is_none_or(|initializer| inert_initializer(arena, initializer)),
+                KlibIrMember::Property(property) => {
+                    property.backing_field.as_ref().is_none_or(|field| {
+                        field
+                            .initializer
+                            .is_none_or(|initializer| inert_initializer(arena, initializer))
+                    })
+                }
+                KlibIrMember::Function(function) => arena.function(*function).constructor,
+                _ => true,
+            });
+        *found = Some(found.unwrap_or(true) && inert);
+    }
+    for member in &class.members {
+        find_class(arena, member, classifier, found);
+    }
+}
+
+fn inert_any_supertype(
+    arena: &KlibIrArena,
+    ty: crate::metadata::klib_ir::tree::KlibIrTypeId,
+) -> bool {
+    matches!(
+        arena.ty(ty),
+        KlibIrType::Simple {
+            classifier,
+            nullability: crate::metadata::klib_ir::tree::KlibIrNullability::DefinitelyNotNull,
+            arguments,
+            abbreviation: None,
+            ..
+        } if arguments.is_empty()
+            && classifier.kind == KlibIrSymbolKind::Class
+            && class_identity(&classifier.signature) == Some(crate::types::wk::any())
+    )
+}
+
+fn inert_constructor(
+    arena: &KlibIrArena,
+    constructor: &KlibIrFunction,
+    class: &crate::metadata::klib_ir::KlibIrSymbol,
+) -> bool {
+    if !constructor.type_parameters.is_empty()
+        || constructor.dispatch_receiver.is_some()
+        || !constructor.context_parameters.is_empty()
+        || constructor.extension_receiver.is_some()
+        || !constructor.regular_parameters.is_empty()
+    {
+        return false;
+    }
+    let Some(KlibIrBody::Block(statements)) = constructor.body.as_ref() else {
+        return false;
+    };
+    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize)] =
+        statements.as_slice()
+    else {
+        return false;
+    };
+    let KlibIrExprKind::DelegatingConstructorCall(access) = &arena.expr(*delegate).kind else {
+        return false;
+    };
+    if access.symbol.kind != KlibIrSymbolKind::Constructor
+        || declaration_owner(&access.symbol.signature) != Some(crate::types::wk::any())
+        || !arguments_are_absent(&access.arguments)
+    {
+        return false;
+    }
+    matches!(
+        &arena.expr(*initialize).kind,
+        KlibIrExprKind::InstanceInitializerCall(initialized) if initialized == class
+    )
+}
+
+fn arguments_are_absent(arguments: &crate::metadata::klib_ir::tree::KlibIrArguments) -> bool {
+    match arguments {
+        crate::metadata::klib_ir::tree::KlibIrArguments::Flat(arguments) => {
+            arguments.iter().all(Option::is_none)
+        }
+        crate::metadata::klib_ir::tree::KlibIrArguments::Split {
+            dispatch_receiver,
+            extension_receiver,
+            values,
+        } => {
+            dispatch_receiver.is_none()
+                && extension_receiver.is_none()
+                && values.iter().all(Option::is_none)
+        }
+    }
+}
+
+fn inert_initializer(
+    arena: &KlibIrArena,
+    initializer: crate::metadata::klib_ir::tree::KlibIrExprId,
+) -> bool {
+    matches!(
+        arena.expr(initializer).kind,
+        crate::metadata::klib_ir::tree::KlibIrExprKind::Const(_)
+    )
+}
+
+fn class_identity(signature: &KlibIrSignature) -> Option<TypeName> {
+    let KlibIrSignature::Public(signature) = signature else {
+        return None;
+    };
+    if signature.member_id().is_some() || signature.declaration().is_empty() {
+        return None;
+    }
+    let valid = |segment: &String| !segment.is_empty() && !segment.contains('/');
+    if !signature.package().segments().iter().all(valid)
+        || !signature.declaration().segments().iter().all(valid)
+    {
+        return None;
+    }
+    let mut identity = signature
+        .package()
+        .segments()
+        .iter()
+        .fold(TypeName::ROOT, |parent, segment| {
+            type_name_child(parent, segment)
+        });
+    let mut declarations = signature.declaration().segments().iter();
+    identity = type_name_child(identity, declarations.next()?);
+    for nested in declarations {
+        identity = identity.nested_child(nested);
+    }
+    Some(identity)
+}
+
+fn declaration_owner(signature: &KlibIrSignature) -> Option<TypeName> {
+    let KlibIrSignature::Public(signature) = signature else {
+        return None;
+    };
+    let (_, declaration) = signature.declaration().segments().split_last()?;
+    if declaration.is_empty() {
+        return None;
+    }
+    let valid = |segment: &String| !segment.is_empty() && !segment.contains('/');
+    if !signature.package().segments().iter().all(valid) || !declaration.iter().all(valid) {
+        return None;
+    }
+    let mut identity = signature
+        .package()
+        .segments()
+        .iter()
+        .fold(TypeName::ROOT, |parent, segment| {
+            type_name_child(parent, segment)
+        });
+    let mut declarations = declaration.iter();
+    identity = type_name_child(identity, declarations.next()?);
+    for nested in declarations {
+        identity = identity.nested_child(nested);
+    }
+    Some(identity)
 }
 
 fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
@@ -253,5 +588,212 @@ fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
         KlibDeclarationSignature::Accessor(signature) => {
             KlibIrSignature::Accessor(signature.clone())
         }
+    }
+}
+
+fn declaration_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationSignature> {
+    match signature {
+        KlibIrSignature::Public(signature) => {
+            Some(KlibDeclarationSignature::Public(signature.clone()))
+        }
+        KlibIrSignature::Accessor(signature) => {
+            Some(KlibDeclarationSignature::Accessor(signature.clone()))
+        }
+        KlibIrSignature::FileLocal { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::id_signature::{
+        callable_signature, class_signature, CallableShape, ClassScope, DeclarationContainer,
+        Placement,
+    };
+    use crate::metadata::klib_ir::tree::{
+        KlibIrArguments, KlibIrDeclarationBase, KlibIrMemberAccess, KlibIrNullability,
+    };
+    use crate::metadata::klib_ir::KlibIrSymbol;
+    use crate::metadata::semantic::KotlinType;
+
+    fn class_symbol(package: &str, name: &str) -> KlibIrSymbol {
+        let package = [package.to_owned()];
+        let class = ClassScope::<KotlinType> {
+            name,
+            type_parameters: Vec::new(),
+            expect: false,
+        };
+        KlibIrSymbol {
+            kind: KlibIrSymbolKind::Class,
+            signature: KlibIrSignature::Public(class_signature(
+                DeclarationContainer {
+                    package: &package,
+                    classes: &[],
+                    native_interop_library: false,
+                },
+                &class,
+            )),
+        }
+    }
+
+    fn constructor_symbol(package: &str, owner: &str) -> KlibIrSymbol {
+        let package = [package.to_owned()];
+        let classes = [ClassScope::<KotlinType> {
+            name: owner,
+            type_parameters: Vec::new(),
+            expect: false,
+        }];
+        let signature = callable_signature(
+            DeclarationContainer {
+                package: &package,
+                classes: &classes,
+                native_interop_library: false,
+            },
+            &CallableShape {
+                name: "<init>",
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("an empty constructor is signable");
+        KlibIrSymbol {
+            kind: KlibIrSymbolKind::Constructor,
+            signature: KlibIrSignature::Public(signature),
+        }
+    }
+
+    fn empty_constructor(
+        arena: &mut KlibIrArena,
+        class: KlibIrSymbol,
+        delegate: KlibIrSymbol,
+    ) -> KlibIrFunction {
+        let ty = arena.push_type(KlibIrType::Error {
+            annotations: Vec::new(),
+        });
+        let delegate = arena.push_expr(
+            None,
+            KlibIrExprKind::DelegatingConstructorCall(KlibIrMemberAccess {
+                symbol: delegate,
+                arguments: KlibIrArguments::Flat(Vec::new()),
+                type_arguments: Vec::new(),
+                origin: None,
+            }),
+        );
+        let initialize = arena.push_expr(None, KlibIrExprKind::InstanceInitializerCall(class));
+        KlibIrFunction {
+            base: KlibIrDeclarationBase {
+                symbol: KlibIrSymbol {
+                    kind: KlibIrSymbolKind::Constructor,
+                    signature: KlibIrSignature::FileLocal { file: 0, slot: 0 },
+                },
+                origin: "DEFINED".to_owned(),
+                flags: 0,
+                annotations: Vec::new(),
+            },
+            name: "<init>".to_owned(),
+            constructor: true,
+            type_parameters: Vec::new(),
+            dispatch_receiver: None,
+            context_parameters: Vec::new(),
+            extension_receiver: None,
+            regular_parameters: Vec::new(),
+            return_type: ty,
+            overridden: Vec::new(),
+            companion_extension_class: None,
+            prepared_inline_file: None,
+            body: Some(KlibIrBody::Block(vec![
+                KlibIrStatement::Expression(delegate),
+                KlibIrStatement::Expression(initialize),
+            ])),
+        }
+    }
+
+    #[test]
+    fn body_provider_modules_follow_only_the_producer_manifest_closure() {
+        let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+            KlibBodyLibrary::new(
+                "stdlib".to_owned(),
+                ["middle".to_owned()],
+                KlibIrModuleTrees::default(),
+            ),
+            KlibBodyLibrary::new(
+                "middle".to_owned(),
+                ["leaf".to_owned()],
+                KlibIrModuleTrees::default(),
+            ),
+            KlibBodyLibrary::new(
+                "leaf".to_owned(),
+                Vec::<String>::new(),
+                KlibIrModuleTrees::default(),
+            ),
+            KlibBodyLibrary::new(
+                "unrelated".to_owned(),
+                Vec::<String>::new(),
+                KlibIrModuleTrees::default(),
+            ),
+        ])
+        .expect("the fixture has unique modules");
+
+        let reachable = bodies.body_provider_modules("stdlib");
+        assert_eq!(reachable.len(), 3);
+        assert!(reachable.contains("stdlib"));
+        assert!(reachable.contains("middle"));
+        assert!(reachable.contains("leaf"));
+        assert!(!reachable.contains("unrelated"));
+    }
+
+    #[test]
+    fn inert_singleton_proof_rejects_superclass_and_constructor_effects() {
+        let mut arena = KlibIrArena::default();
+        let any = class_symbol("kotlin", "Any");
+        let side_effect_base = class_symbol("fixture", "SideEffectBase");
+        let class = class_symbol("fixture", "PlatformCompanion");
+        let any_type = arena.push_type(KlibIrType::Simple {
+            classifier: any.clone(),
+            nullability: KlibIrNullability::DefinitelyNotNull,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        let base_type = arena.push_type(KlibIrType::Simple {
+            classifier: side_effect_base,
+            nullability: KlibIrNullability::DefinitelyNotNull,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        assert!(inert_any_supertype(&arena, any_type));
+        assert!(!inert_any_supertype(&arena, base_type));
+
+        let constructor = empty_constructor(
+            &mut arena,
+            class.clone(),
+            constructor_symbol("kotlin", "Any"),
+        );
+        assert!(inert_constructor(&arena, &constructor, &class));
+
+        let inherited = empty_constructor(
+            &mut arena,
+            class.clone(),
+            constructor_symbol("fixture", "SideEffectBase"),
+        );
+        assert!(!inert_constructor(&arena, &inherited, &class));
+
+        let mut executable = empty_constructor(
+            &mut arena,
+            class.clone(),
+            constructor_symbol("kotlin", "Any"),
+        );
+        let effect = arena.push_expr(None, KlibIrExprKind::GetObject(class.clone()));
+        let Some(KlibIrBody::Block(statements)) = executable.body.as_mut() else {
+            unreachable!()
+        };
+        statements.push(KlibIrStatement::Expression(effect));
+        assert!(!inert_constructor(&arena, &executable, &class));
     }
 }

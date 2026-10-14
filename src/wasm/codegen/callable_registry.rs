@@ -7,12 +7,28 @@
 
 use crate::fx_hash::HashMap;
 
-use crate::backend::{CheckedBackendCallables, DependencyExportSignatures, KlibDependencyCallable};
+use crate::backend::{
+    CheckedBackendCallables, DependencyExportSignatures, KlibDependencyCallable,
+    SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
+};
 use crate::fir::{CallableId, ExternalCallableId};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 
 use super::super::encode::Module;
 use super::lower::Unsupported;
+
+/// Whether checked common IR authenticated a singleton *member* call edge. The receiver
+/// expression's syntax is deliberately irrelevant: generated dependency support may forward the
+/// singleton through a parameter or local while retaining the exact per-expression fact. The
+/// frozen callable kind prevents a receiver-reading extension with the same edge fact from being
+/// routed through the member ABI after its unread-extension optimization does not apply.
+pub(super) fn authenticated_singleton_member_call(
+    dispatch_receiver: Option<ExprId>,
+    has_dispatch_fact: bool,
+    member: bool,
+) -> bool {
+    member && dispatch_receiver.is_some() && has_dispatch_fact
+}
 
 #[derive(Default)]
 pub(super) struct CallableRegistry {
@@ -20,12 +36,18 @@ pub(super) struct CallableRegistry {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     dependencies: HashMap<KlibDependencyCallable, u32>,
+    singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
+    singleton_extension_unread_receivers:
+        HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
 }
 
 pub(super) struct FileCallTargets {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
+    singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
+    singleton_extension_unread_receivers:
+        HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
 }
 
 impl CallableRegistry {
@@ -144,6 +166,8 @@ impl CallableRegistry {
             module: HashMap::default(),
             module_defaults: HashMap::default(),
             external: HashMap::default(),
+            singleton_member_receivers: HashMap::default(),
+            singleton_extension_unread_receivers: HashMap::default(),
         };
         for expression in emitted_call_roots(ir)
             .into_iter()
@@ -183,19 +207,71 @@ impl CallableRegistry {
                         .insert(*provider, self.module_default_index(*provider, wasm));
                 }
                 Callee::External {
-                    target, defaults, ..
-                } if dispatch_receiver.is_none() && defaults.is_empty() => {
-                    let identity = callables
-                        .callable(*target)
-                        .and_then(|callable| callable.dependency_callable.as_ref())
-                        .ok_or_else(|| {
-                            "a dependency callable without an exact module-qualified KLIB identity"
-                                .to_string()
-                        })?;
+                    target,
+                    params,
+                    defaults,
+                    extension_receiver_parameter,
+                    ..
+                } if defaults.is_empty() => {
+                    let callable = callables.callable(*target).ok_or_else(|| {
+                        "a dependency call without frozen callable facts".to_string()
+                    })?;
+                    let supported_shape = callable.matches_dependency_body_call(
+                        params,
+                        *extension_receiver_parameter,
+                        dispatch_receiver.is_some(),
+                    );
+                    let serialized_companion_candidate = dispatch_receiver.is_none()
+                        && callable.is_top_level_function()
+                        && extension_receiver_parameter
+                            .and_then(|position| usize::try_from(position).ok())
+                            .is_some_and(|position| {
+                                callable.klib_body_companion_receiver_position() == Some(position)
+                            });
+                    if !supported_shape && !serialized_companion_candidate {
+                        continue;
+                    }
+                    if callable.is_member_function()
+                        && !authenticated_singleton_member_call(
+                            *dispatch_receiver,
+                            callables.singleton_dispatch(expression).is_some(),
+                            true,
+                        )
+                    {
+                        continue;
+                    }
+                    let identity = callable.dependency_callable.as_ref().ok_or_else(|| {
+                        "a dependency callable without an exact module-qualified KLIB identity"
+                            .to_string()
+                    })?;
+                    let unread_receiver = self
+                        .singleton_extension_unread_receivers
+                        .get(identity)
+                        .copied();
+                    if !supported_shape
+                        && callable
+                            .serialized_companion_receiver_position(
+                                params,
+                                *extension_receiver_parameter,
+                                dispatch_receiver.is_some(),
+                                unread_receiver.map(|receiver| receiver.semantic_type()),
+                            )
+                            .is_none()
+                    {
+                        continue;
+                    }
                     let index = self.dependencies.get(identity).copied().ok_or_else(|| {
                         "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
+                    if let Some(receiver) = self.singleton_member_receivers.get(identity).copied() {
+                        targets.singleton_member_receivers.insert(*target, receiver);
+                    }
+                    if let Some(receiver) = unread_receiver {
+                        targets
+                            .singleton_extension_unread_receivers
+                            .insert(*target, receiver);
+                    }
                 }
                 _ => {}
             }
@@ -222,6 +298,32 @@ impl CallableRegistry {
                     return Err("two functions exported one KLIB declaration identity".to_string())
                 }
                 _ => {}
+            }
+            if let Some(receiver) = exports.singleton_extension_unread_receiver(function) {
+                match self
+                    .singleton_extension_unread_receivers
+                    .insert(identity.clone(), receiver)
+                {
+                    Some(previous) if previous != receiver => return Err(
+                        "two functions exported incompatible singleton-extension receiver effects"
+                            .to_string(),
+                    ),
+                    _ => {}
+                }
+            }
+            if let Some(receiver) = exports.singleton_member_receiver(function) {
+                match self
+                    .singleton_member_receivers
+                    .insert(identity.clone(), receiver)
+                {
+                    Some(previous) if previous != receiver => {
+                        return Err(
+                            "two functions exported incompatible singleton-member receiver effects"
+                                .to_string(),
+                        )
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -319,6 +421,22 @@ impl FileCallTargets {
         self.external.get(&target).copied()
     }
 
+    pub(super) fn singleton_extension_unread_receiver(
+        &self,
+        target: ExternalCallableId,
+    ) -> Option<SingletonExtensionUnreadReceiver> {
+        self.singleton_extension_unread_receivers
+            .get(&target)
+            .copied()
+    }
+
+    pub(super) fn singleton_member_receiver(
+        &self,
+        target: ExternalCallableId,
+    ) -> Option<SingletonMemberReceiver> {
+        self.singleton_member_receivers.get(&target).copied()
+    }
+
     pub(super) fn module_default(&self, target: CallableId) -> Option<u32> {
         self.module_defaults.get(&target).copied()
     }
@@ -327,14 +445,46 @@ impl FileCallTargets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BackendCallableFact;
     use crate::ir::IrFunction;
-    use crate::libraries::KlibDeclarationSignature;
+    use crate::libraries::{
+        ExternalCallableKind, InlineKind, KlibBodyCompanionReceiver, KlibDeclarationSignature,
+        MemberRealization,
+    };
     use crate::metadata::id_signature::{
         callable_signature, CallableShape, DeclarationContainer, Placement,
     };
     use crate::metadata::semantic::KotlinType;
-    use crate::types::Ty;
+    use crate::types::{type_name, Ty};
     use crate::wasm::encode::{Code, Function};
+
+    #[test]
+    fn a_recorded_singleton_member_edge_does_not_require_literal_receiver_syntax() {
+        let forwarded_local = Some(7);
+
+        assert!(authenticated_singleton_member_call(
+            forwarded_local,
+            true,
+            true
+        ));
+        assert!(!authenticated_singleton_member_call(
+            forwarded_local,
+            false,
+            true
+        ));
+        assert!(!authenticated_singleton_member_call(None, true, true));
+    }
+
+    #[test]
+    fn a_singleton_bound_receiver_reading_extension_is_not_a_member_call() {
+        let forwarded_local = Some(7);
+
+        assert!(!authenticated_singleton_member_call(
+            forwarded_local,
+            true,
+            false,
+        ));
+    }
 
     fn function(name: &str, body: Option<crate::ir::ExprId>) -> IrFunction {
         IrFunction {
@@ -373,6 +523,90 @@ mod tests {
         )
     }
 
+    fn companion_callable() -> BackendCallableFact {
+        BackendCallableFact {
+            name: "fromBits".to_string(),
+            physical_name: None,
+            reflection_name: None,
+            physical_owner: type_name("kotlin/Float"),
+            visibility: crate::types::Visibility::Public,
+            declaration_owner: None,
+            singleton_dispatch: None,
+            kind: ExternalCallableKind::TopLevel,
+            owner_is_interface: false,
+            compiler_intrinsic: None,
+            semantic_role: None,
+            overridden_declarations: Box::new([]),
+            member_realization: MemberRealization::Dispatch,
+            params: vec![Ty::String, Ty::Int],
+            physical_params: Vec::new(),
+            parameter_identities: Box::new([]),
+            physical_parameter_plan: None,
+            ret: Ty::Float,
+            physical_ret: Ty::Float,
+            descriptor: String::new(),
+            inline: InlineKind::None,
+            source_receiver: None,
+            context_count: 1,
+            declared_params: None,
+            declared_ret: None,
+            inline_modifiers: Box::new([]),
+            default_realization: None,
+            nonvirtual_realization: None,
+            overridden_call_realizations: Box::new([]),
+            generic_sig: None,
+            declaration_signature: None,
+            dependency_callable: None,
+            klib_body_companion_receiver: Some(KlibBodyCompanionReceiver::new(type_name(
+                "kotlin/Float",
+            ))),
+        }
+    }
+
+    #[test]
+    fn a_serialized_companion_call_keeps_exactly_its_authenticated_receiver_slot() {
+        let callable = companion_callable();
+        let receiver = Ty::Obj(type_name("kotlin/Float"), &[]);
+        let params = [Ty::String, receiver, Ty::Int];
+
+        assert_eq!(
+            callable.serialized_companion_receiver_position(
+                &params,
+                Some(1),
+                false,
+                Some(receiver),
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            callable.serialized_companion_receiver_position(
+                &params,
+                Some(0),
+                false,
+                Some(receiver)
+            ),
+            None
+        );
+        assert_eq!(
+            callable.serialized_companion_receiver_position(&params, Some(1), false, None),
+            None
+        );
+        assert_eq!(
+            callable.serialized_companion_receiver_position(
+                &[Ty::String, Ty::Int, Ty::Int],
+                Some(1),
+                false,
+                Some(receiver),
+            ),
+            None
+        );
+        assert_eq!(
+            callable
+                .serialized_companion_receiver_position(&params, Some(1), true, Some(receiver),),
+            None
+        );
+    }
+
     #[test]
     fn source_identities_reset_between_modules_but_exact_exports_remain() {
         let mut registry = CallableRegistry::default();
@@ -388,9 +622,25 @@ mod tests {
         };
         let mut exports = DependencyExportSignatures::default();
         exports.record_callable(0, identity.clone());
+        exports.record_singleton_member_receiver(0, type_name("demo/Companion"), false);
+        exports.record_singleton_extension_unread_receiver(
+            0,
+            Ty::Obj(type_name("demo/Companion"), &[]),
+            true,
+        );
         registry
             .publish(&exports, &[Some(library_index)])
             .expect("the library export is valid");
+        assert_eq!(
+            registry.singleton_extension_unread_receivers[&identity].semantic_type(),
+            Ty::Obj(type_name("demo/Companion"), &[])
+        );
+        assert!(registry.singleton_extension_unread_receivers[&identity].evaluate_source());
+        assert_eq!(
+            registry.singleton_member_receivers[&identity].classifier(),
+            type_name("demo/Companion")
+        );
+        assert!(!registry.singleton_member_receivers[&identity].evaluate_source());
 
         registry.enter_source_module("app");
         let application_index = registry.module_index(local, &mut wasm);

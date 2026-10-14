@@ -7,6 +7,7 @@
 
 use crate::backend::{
     BackendModuleFacts, CheckedBackendCallables, CheckedBackendClassifiers, CheckedIrFile,
+    CheckedIrUnitKind,
 };
 use crate::diag::{DiagSink, Span};
 use crate::fir::SourceFileId;
@@ -51,6 +52,7 @@ pub(super) fn checked_ir_file<'a>(
     crate::metadata::class_declarations::record_all(&mut ir);
     Some(CheckedIrFile {
         ir,
+        kind: CheckedIrUnitKind::Source,
         source,
         classifiers: CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform()),
         callables,

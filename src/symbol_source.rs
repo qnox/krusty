@@ -109,6 +109,31 @@ pub trait SymbolSource {
         None
     }
 
+    /// Normalize the declaration named by one exact module-qualified KLIB identity.
+    ///
+    /// Dependency support lowering uses this only after its producer graph resolved a serialized
+    /// call to `identity`. It is not a source lookup: providers without that exact serialized
+    /// declaration answer nothing, and no package or callable spelling is consulted.
+    fn external_callable_by_dependency(
+        &self,
+        _identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        crate::fir::ExternalCallableId,
+        crate::libraries::ExternalCallableRealization,
+    )> {
+        None
+    }
+
+    /// Whether this exact serialized declaration belongs to the compilation-selected platform
+    /// stdlib. Dependency-body support may realize stdlib wrappers, but never re-emit an ordinary
+    /// dependency module's source implementation merely because its body reaches an intrinsic.
+    fn is_platform_stdlib_dependency(
+        &self,
+        _identity: &crate::libraries::KlibDependencyCallable,
+    ) -> bool {
+        false
+    }
+
     /// The same, for a dependency PROPERTY: its semantic name and the physical accessors this
     /// provider interned for it.
     fn external_property(
@@ -218,6 +243,27 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.external_callable(identity))
+    }
+
+    fn external_callable_by_dependency(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        crate::fir::ExternalCallableId,
+        crate::libraries::ExternalCallableRealization,
+    )> {
+        self.children
+            .iter()
+            .find_map(|child| child.external_callable_by_dependency(identity))
+    }
+
+    fn is_platform_stdlib_dependency(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> bool {
+        self.children
+            .iter()
+            .any(|child| child.is_platform_stdlib_dependency(identity))
     }
 
     /// As for callables, only the child that assigned the opaque identity answers for it.

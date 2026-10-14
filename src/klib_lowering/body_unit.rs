@@ -14,19 +14,62 @@ use std::collections::VecDeque;
 use super::body_lowering::{BodyLowering, LinkedCallee, LoweredFunction};
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
-use super::function_lowering::{declare_function, function_header, FunctionHeader};
+use super::function_lowering::{
+    declare_function, function_header, function_header_with_emitted_dispatch, FunctionHeader,
+};
 use super::ir_builtins::IrBuiltinOperators;
-use crate::ir::{ExprId, FunId, IrFile};
-use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
+use crate::fir::ExternalCallableId;
+use crate::ir::{Callee, ExprId, FunId, IrFile, IrIntrinsic};
+use crate::klib_libraries::{
+    KlibCalleeOrigin, KlibDeclarationBodies, KlibIntrinsicCallable, KlibIntrinsicFacts,
+};
 use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrBody, KlibIrFunction, KlibIrStatement};
 use crate::metadata::klib_ir::KlibIrSymbol;
+use crate::types::{Ty, TypeName};
+
+/// A dependency declaration emitted by an earlier support unit, rebound to this compilation's
+/// opaque provider handle while retaining the semantic receiver contract frozen at emission.
+#[derive(Clone, Copy)]
+pub(crate) struct EmittedDependencyCallable {
+    target: ExternalCallableId,
+    singleton_dispatch: Option<Ty>,
+    singleton_classifier: Option<TypeName>,
+}
+
+impl EmittedDependencyCallable {
+    pub(crate) fn new(
+        target: ExternalCallableId,
+        singleton_dispatch: Option<Ty>,
+        singleton_classifier: Option<TypeName>,
+    ) -> Self {
+        Self {
+            target,
+            singleton_dispatch,
+            singleton_classifier,
+        }
+    }
+
+    pub(crate) fn target(self) -> ExternalCallableId {
+        self.target
+    }
+
+    pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
+        self.singleton_dispatch
+    }
+
+    pub(crate) fn singleton_classifier(self) -> Option<TypeName> {
+        self.singleton_classifier
+    }
+}
 
 /// Lowered dependency bodies in one common-IR file, one function per declaration signature.
 pub struct DependencyBodyUnit {
     ir: IrFile,
     functions: HashMap<KlibDependencyCallable, FunId>,
+    authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
+    authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     builtins: IrBuiltinOperators,
 }
 
@@ -35,6 +78,8 @@ impl Default for DependencyBodyUnit {
         Self {
             ir: IrFile::default(),
             functions: HashMap::default(),
+            authenticated_singleton_dispatches: HashMap::default(),
+            authenticated_singleton_classifiers: HashMap::default(),
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -46,6 +91,8 @@ impl Default for DependencyBodyUnit {
 struct Sources<'a> {
     bodies: &'a KlibDeclarationBodies,
     callees: &'a KlibCalleeFacts<'a>,
+    intrinsics: &'a KlibIntrinsicFacts,
+    externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
 }
 
 /// A declared function whose body is still to be lowered.
@@ -59,17 +106,92 @@ struct PendingBody<'a> {
 }
 
 impl DependencyBodyUnit {
+    /// Whether this selected declaration has the exact scalar boundary of a reinterpret wrapper.
+    /// This is a semantic type/receiver contract, not a declaration-name allowlist. It prevents an
+    /// arbitrary stdlib caller which happens to reach a reinterpret instruction (for example a
+    /// collection hash operation) from becoming executable support code.
+    pub(crate) fn is_reinterpret_root_candidate(
+        callable: KlibBodyCallable<'_>,
+        bodies: &KlibDeclarationBodies,
+    ) -> bool {
+        if callable.is_member() {
+            return false;
+        }
+        let Some((arena, declaration)) = bodies.function(callable.identity()) else {
+            return false;
+        };
+        let Ok(header) = function_header(Some(callable), arena, declaration) else {
+            return false;
+        };
+        let (params, ret, context_count, extension_receiver, dispatch_receiver) =
+            header.linked_signature();
+        if dispatch_receiver.is_some() {
+            return false;
+        }
+        let mut operands = params.to_vec();
+        if extension_receiver && header.singleton_extension_unread_receiver().is_some() {
+            if context_count >= operands.len() {
+                return false;
+            }
+            operands.remove(context_count);
+        }
+        matches!(
+            (operands.as_slice(), ret),
+            ([Ty::Float], Ty::Int)
+                | ([Ty::Int], Ty::Float)
+                | ([Ty::Double], Ty::Long)
+                | ([Ty::Long], Ty::Double)
+        )
+    }
+
     /// The function holding `callable`'s body, lowering it, and every body it reaches through
     /// calls, the first time its module-qualified identity is seen. A declined body leaves the
     /// unit as it was.
     ///
     /// `callees` holds the provider records of the callees a checked call selected; a callee it
     /// does not hold is described by its serialized header alone.
-    pub fn lower_function<'a>(
+    #[cfg(test)]
+    pub(crate) fn lower_function<'a>(
         &mut self,
         callable: KlibBodyCallable<'a>,
         bodies: &'a KlibDeclarationBodies,
         callees: &'a KlibCalleeFacts<'a>,
+    ) -> Result<FunId, KlibBodyDecline> {
+        self.lower_function_with_intrinsics(callable, bodies, callees, KlibIntrinsicFacts::empty())
+    }
+
+    /// Lower with target-stdlib intrinsic declarations authenticated by the KLIB provider. A
+    /// production caller supplies the table explicitly so an authenticated intrinsic declaration
+    /// can never silently fall through to ordinary body lookup.
+    pub fn lower_function_with_intrinsics<'a>(
+        &mut self,
+        callable: KlibBodyCallable<'a>,
+        bodies: &'a KlibDeclarationBodies,
+        callees: &'a KlibCalleeFacts<'a>,
+        intrinsics: &'a KlibIntrinsicFacts,
+    ) -> Result<FunId, KlibBodyDecline> {
+        static EMPTY: std::sync::OnceLock<
+            HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+        > = std::sync::OnceLock::new();
+        self.lower_function_with_intrinsics_and_externals(
+            callable,
+            bodies,
+            callees,
+            intrinsics,
+            EMPTY.get_or_init(HashMap::default),
+        )
+    }
+
+    /// Lower while linking a callee already emitted by an earlier streaming support unit through
+    /// its provider identity. The exact KLIB identity remains the join key; the opaque external
+    /// identity is only the checked IR handle for the ordinary backend dependency registry.
+    pub(crate) fn lower_function_with_intrinsics_and_externals<'a>(
+        &mut self,
+        callable: KlibBodyCallable<'a>,
+        bodies: &'a KlibDeclarationBodies,
+        callees: &'a KlibCalleeFacts<'a>,
+        intrinsics: &'a KlibIntrinsicFacts,
+        externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     ) -> Result<FunId, KlibBodyDecline> {
         if let Some(function) = self.functions.get(callable.identity()).copied() {
             // Declared before, perhaps from its header alone as another body's callee: the
@@ -82,10 +204,19 @@ impl DependencyBodyUnit {
             })?;
             function_header(Some(callable), arena, declaration)
                 .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
+            self.record_authenticated_singleton(callable);
             return Ok(function);
         }
         let checkpoint = UnitCheckpoint::of(self);
-        let lowered = self.lower_reachable(callable, Sources { bodies, callees });
+        let lowered = self.lower_reachable(
+            callable,
+            Sources {
+                bodies,
+                callees,
+                intrinsics,
+                externals,
+            },
+        );
         lowered.map_err(|decline| {
             checkpoint.restore(self);
             if decline.declaration() == callable.signature() {
@@ -99,8 +230,99 @@ impl DependencyBodyUnit {
         })
     }
 
+    /// Authenticate the complete checked callee-fact bucket for one root against its serialized
+    /// header and lower the unique matching variant. Input order cannot decide target emission.
+    pub(crate) fn lower_root_with_intrinsics_and_externals<'a>(
+        &mut self,
+        root: KlibBodyCallable<'a>,
+        bodies: &'a KlibDeclarationBodies,
+        callees: &'a KlibCalleeFacts<'a>,
+        intrinsics: &'a KlibIntrinsicFacts,
+        externals: &'a HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
+    ) -> Result<FunId, KlibBodyDecline> {
+        let callables = match callees.get(root.identity()) {
+            Some(KlibCalleeFact::Selected(callables)) => callables,
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDecline::new(
+                    root.signature().clone(),
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "checked root variants disagree on their declaration contract".to_owned(),
+                    ),
+                ))
+            }
+            None => {
+                return Err(KlibBodyDecline::new(
+                    root.signature().clone(),
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "a selected KLIB root has no checked callee-fact bucket".to_owned(),
+                    ),
+                ))
+            }
+        };
+        let (arena, declaration) = bodies.function(root.identity()).ok_or_else(|| {
+            KlibBodyDecline::new(root.signature().clone(), KlibBodyDeclineReason::Unjoined)
+        })?;
+        let callable = selected_callable_for_header(
+            Some(SelectedKlibCallables::Variants(callables)),
+            None,
+            arena,
+            declaration,
+        )
+        .map_err(|reason| KlibBodyDecline::new(root.signature().clone(), reason))?
+        .expect("a selected root bucket contains a callable");
+        self.lower_function_with_intrinsics_and_externals(
+            callable, bodies, callees, intrinsics, externals,
+        )
+    }
+
     pub fn ir(&self) -> &IrFile {
         &self.ir
+    }
+
+    /// Singleton receiver of the exact call-edge variant which authenticated this emitted body.
+    pub(crate) fn authenticated_singleton_dispatch(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<Ty> {
+        self.authenticated_singleton_dispatches
+            .get(identity)
+            .copied()
+    }
+
+    pub(crate) fn authenticated_singleton_classifier(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<TypeName> {
+        self.authenticated_singleton_classifiers
+            .get(identity)
+            .copied()
+    }
+
+    fn record_authenticated_singleton(&mut self, callable: KlibBodyCallable<'_>) {
+        if let Some(singleton) = callable.singleton_dispatch() {
+            self.authenticated_singleton_dispatches
+                .insert(callable.identity().clone(), singleton);
+        }
+        if let Some(classifier) = callable.singleton_classifier() {
+            self.authenticated_singleton_classifiers
+                .insert(callable.identity().clone(), classifier);
+        }
+    }
+
+    /// Consume the closed dependency-body unit after its roots and all reachable callees have
+    /// lowered successfully.
+    pub fn into_ir(self) -> IrFile {
+        self.ir
+    }
+
+    /// Every exact dependency identity realized by this closed unit, including functions reached
+    /// transitively from its selected root.
+    pub fn callable_functions(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, FunId)> + '_ {
+        self.functions
+            .iter()
+            .map(|(identity, &function)| (identity, function))
     }
 
     fn lower_reachable<'a>(
@@ -111,6 +333,8 @@ impl DependencyBodyUnit {
         let mut pending = VecDeque::new();
         let mut linker = Linker {
             functions: &mut self.functions,
+            authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
+            authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             pending: &mut pending,
             root: callable,
             active_module: callable.identity().module.clone(),
@@ -159,6 +383,8 @@ impl DependencyBodyUnit {
 /// reached for the first time and queueing its body.
 pub(super) struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
+    authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
+    authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select.
     root: KlibBodyCallable<'s>,
@@ -169,12 +395,13 @@ pub(super) struct Linker<'u, 's> {
 }
 
 impl<'s> Linker<'_, 's> {
-    /// The function a call of the public declaration `callee` invokes.
-    pub(super) fn link(
-        &mut self,
-        ir: &mut IrFile,
+    /// Whether a checked source edge selected this exact producer-resolved declaration. A body
+    /// call of such a declaration must remain a callable edge so the closed unit exports code for
+    /// the source call; an otherwise identical unselected compiler builtin may be folded.
+    pub(super) fn is_selected(
+        &self,
         callee: &KlibPublicIdSignature,
-    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+    ) -> Result<bool, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Public(callee.clone());
         let identity = match self
             .sources
@@ -182,6 +409,153 @@ impl<'s> Linker<'_, 's> {
             .callee_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
+            // Compiler builtins such as `ieee754equals` deliberately have no KLIB declaration.
+            // Absence therefore proves that no checked source edge selected this body callee.
+            KlibCalleeOrigin::Missing => return Ok(false),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )))
+            }
+        };
+        if &identity == self.root.identity() {
+            return Ok(true);
+        }
+        let selection = self.sources.callees.get(&identity);
+        match selection {
+            None => Ok(false),
+            Some(KlibCalleeFact::Selected(_)) => Ok(true),
+            Some(KlibCalleeFact::Ambiguous) => Err(KlibBodyDeclineReason::AmbiguousCallee(
+                Box::new(callee.clone()),
+            )),
+        }
+    }
+
+    /// The function a call of the public declaration `callee` invokes.
+    pub(super) fn link(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let identity = self.callee_identity(callee)?;
+        // The active selection decides every call, including one of a function an earlier
+        // lowering already put in the unit.
+        let selected = if &identity == self.root.identity() {
+            Some(SelectedKlibCallables::One(self.root))
+        } else {
+            match self.sources.callees.get(&identity) {
+                None => None,
+                Some(KlibCalleeFact::Ambiguous) => {
+                    return Err(KlibBodyDeclineReason::AmbiguousCallee(Box::new(
+                        callee.clone(),
+                    )))
+                }
+                Some(KlibCalleeFact::Selected(callables)) => {
+                    Some(SelectedKlibCallables::Variants(callables))
+                }
+            }
+        };
+        let callee_declined = |reason| {
+            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
+                signature.clone(),
+                reason,
+            )))
+        };
+        let (arena, declaration) = self
+            .sources
+            .bodies
+            .function(&identity)
+            .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
+        if let Some(intrinsic) = self.sources.intrinsics.get(&identity) {
+            let selected = selected_callable_for_header(selected, None, arena, declaration)
+                .map_err(&callee_declined)?;
+            self.cross_check_intrinsic(callee, selected, intrinsic)?;
+            return linked_intrinsic(intrinsic);
+        }
+        if let Some(&emitted) = self.sources.externals.get(&identity) {
+            let selected = selected_callable_for_header(
+                selected,
+                emitted.singleton_dispatch(),
+                arena,
+                declaration,
+            )
+            .map_err(&callee_declined)?;
+            let header = function_header_with_emitted_dispatch(
+                selected,
+                emitted.singleton_dispatch(),
+                arena,
+                declaration,
+            )
+            .map_err(callee_declined)?;
+            let (params, ret, context_count, extension_receiver, receiver) =
+                header.linked_signature();
+            return Ok(LinkedCallee {
+                callee: Callee::External {
+                    target: emitted.target(),
+                    default_provider: None,
+                    params: params.to_vec(),
+                    ret,
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: extension_receiver
+                        .then_some(context_count as u32),
+                },
+                receiver,
+                params: params.to_vec(),
+                ret,
+                context_count,
+                singleton_dispatch: emitted.singleton_classifier(),
+            });
+        }
+        if declaration.dispatch_receiver.is_some() {
+            // A member call passes its dispatch receiver apart from its arguments and dispatches
+            // virtually unless the member is final; lowering models neither yet.
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of a member function",
+            ));
+        }
+        let function = match self.functions.get(&identity) {
+            Some(function) => {
+                // The function was declared under another lowering's selection, or from its
+                // header alone; this lowering's selection must describe it too.
+                if let Some(selected) =
+                    selected_callable_for_header(selected, None, arena, declaration)
+                        .map_err(&callee_declined)?
+                {
+                    function_header(Some(selected), arena, declaration).map_err(callee_declined)?;
+                }
+                *function
+            }
+            None => {
+                let selected = selected_callable_for_header(selected, None, arena, declaration)
+                    .map_err(&callee_declined)?;
+                self.declare(ir, &identity, selected, arena, declaration)
+                    .map_err(callee_declined)?
+            }
+        };
+        let declaration = &ir.functions[function as usize];
+        Ok(LinkedCallee {
+            callee: Callee::Local(function),
+            receiver: None,
+            params: declaration.params.clone(),
+            ret: declaration.ret,
+            context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
+            singleton_dispatch: None,
+        })
+    }
+
+    fn callee_identity(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => Ok(identity),
             KlibCalleeOrigin::Ambiguous => {
                 return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
                     callee.clone(),
@@ -200,61 +574,34 @@ impl<'s> Linker<'_, 's> {
                     callee.clone(),
                 )))
             }
-        };
-        // The active selection decides every call, including one of a function an earlier
-        // lowering already put in the unit.
-        let selection = if &identity == self.root.identity() {
-            Some(KlibCalleeFact::Selected(self.root))
-        } else {
-            self.sources.callees.get(&identity)
-        };
-        let selected = match selection {
-            None => None,
-            Some(KlibCalleeFact::Ambiguous) => {
-                return Err(KlibBodyDeclineReason::AmbiguousCallee(Box::new(
-                    callee.clone(),
-                )))
-            }
-            Some(KlibCalleeFact::Selected(callable)) => Some(callable),
-        };
-        let callee_declined = |reason| {
-            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
-                signature.clone(),
-                reason,
-            )))
-        };
-        let (arena, declaration) = self
-            .sources
-            .bodies
-            .function(&identity)
-            .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
-        if declaration.dispatch_receiver.is_some() {
-            // A member call passes its dispatch receiver apart from its arguments and dispatches
-            // virtually unless the member is final; lowering models neither yet.
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call of a member function",
-            ));
         }
-        let function = match self.functions.get(&identity) {
-            Some(function) => {
-                // The function was declared under another lowering's selection, or from its
-                // header alone; this lowering's selection must describe it too.
-                if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration).map_err(callee_declined)?;
-                }
-                *function
-            }
-            None => self
-                .declare(ir, &identity, selected, arena, declaration)
-                .map_err(callee_declined)?,
+    }
+
+    fn cross_check_intrinsic(
+        &self,
+        callee: &KlibPublicIdSignature,
+        selected: Option<KlibBodyCallable<'s>>,
+        intrinsic: &KlibIntrinsicCallable,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let Some(selected) = selected else {
+            return Ok(());
         };
-        let declaration = &ir.functions[function as usize];
-        Ok(LinkedCallee {
-            function,
-            params: declaration.params.clone(),
-            ret: declaration.ret,
-            context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
-        })
+        if selected.compiler_intrinsic() != Some(intrinsic.operation())
+            || selected.kind() != intrinsic.kind()
+            || selected.params() != intrinsic.params()
+            || selected.ret() != intrinsic.ret()
+        {
+            return Err(KlibBodyDeclineReason::CalleeDeclined(Box::new(
+                KlibBodyDecline::new(
+                    KlibDeclarationSignature::Public(callee.clone()),
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "an authenticated intrinsic disagrees with its selected provider record"
+                            .to_owned(),
+                    ),
+                ),
+            )));
+        }
+        Ok(())
     }
 
     /// Declare serialized `function`, carrying `identity` and described also by the
@@ -275,6 +622,14 @@ impl<'s> Linker<'_, 's> {
         let header = function_header(selected, arena, function)?;
         let declared = declare_function(ir, &header);
         self.functions.insert(identity.clone(), declared);
+        if let Some(singleton) = selected.and_then(KlibBodyCallable::singleton_dispatch) {
+            self.authenticated_singleton_dispatches
+                .insert(identity.clone(), singleton);
+        }
+        if let Some(classifier) = selected.and_then(KlibBodyCallable::singleton_classifier) {
+            self.authenticated_singleton_classifiers
+                .insert(identity.clone(), classifier);
+        }
         self.pending.push_back(PendingBody {
             identity: identity.clone(),
             arena,
@@ -285,6 +640,115 @@ impl<'s> Linker<'_, 's> {
         });
         Ok(declared)
     }
+}
+
+/// Select the exact checked edge variant that agrees with one serialized declaration. Several
+/// singleton objects may inherit the same declaration identity, but only the variant whose
+/// semantic receiver matches this body (and an already-emitted contract, when present) can
+/// authenticate the call. Declaration-shape conflicts remain ambiguous in `KlibCalleeFacts`.
+enum SelectedKlibCallables<'callable, 'facts> {
+    One(KlibBodyCallable<'callable>),
+    Variants(&'facts [KlibBodyCallable<'callable>]),
+}
+
+fn selected_callable_for_header<'callable>(
+    candidates: Option<SelectedKlibCallables<'callable, '_>>,
+    emitted_singleton_dispatch: Option<Ty>,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<Option<KlibBodyCallable<'callable>>, KlibBodyDeclineReason> {
+    let Some(candidates) = candidates else {
+        return Ok(None);
+    };
+    let mut selected = None;
+    let mut first_mismatch = None;
+    let mut consider = |candidate| {
+        match function_header_with_emitted_dispatch(
+            Some(candidate),
+            emitted_singleton_dispatch,
+            arena,
+            function,
+        ) {
+            Ok(_) if selected.is_none() => selected = Some(candidate),
+            Ok(_) => return Some(KlibBodyDeclineReason::SignatureMismatch(
+                "more than one checked call-edge variant agrees with the serialized declaration"
+                    .to_owned(),
+            )),
+            Err(reason) if first_mismatch.is_none() => first_mismatch = Some(reason),
+            Err(_) => {}
+        }
+        None
+    };
+    match candidates {
+        SelectedKlibCallables::One(candidate) => {
+            if let Some(reason) = consider(candidate) {
+                return Err(reason);
+            }
+        }
+        SelectedKlibCallables::Variants(candidates) => {
+            for &candidate in candidates {
+                if let Some(reason) = consider(candidate) {
+                    return Err(reason);
+                }
+            }
+        }
+    }
+    selected.map(Some).ok_or_else(|| {
+        first_mismatch.unwrap_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "a selected KLIB declaration has no checked call-edge variant".to_owned(),
+            )
+        })
+    })
+}
+
+fn linked_intrinsic(
+    intrinsic: &KlibIntrinsicCallable,
+) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+    linked_intrinsic_parts(
+        intrinsic.operation(),
+        intrinsic.receiver(),
+        intrinsic.params(),
+        intrinsic.ret(),
+    )
+}
+
+fn linked_intrinsic_parts(
+    operation: crate::libraries::CompilerIntrinsic,
+    receiver: Option<crate::types::Ty>,
+    params: &[crate::types::Ty],
+    ret: crate::types::Ty,
+) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+    Ok(LinkedCallee {
+        callee: Callee::Intrinsic {
+            operation: match operation {
+                crate::libraries::CompilerIntrinsic::ReinterpretBits => {
+                    let from = match (receiver, params) {
+                        (Some(receiver), []) => receiver,
+                        (None, [parameter]) => *parameter,
+                        _ => {
+                            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                                "an intrinsic reinterpretation does not have exactly one receiver or parameter"
+                                    .to_owned(),
+                            ))
+                        }
+                    };
+                    IrIntrinsic::ReinterpretBits { from, to: ret }
+                }
+                _ => {
+                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                        "an authenticated KLIB intrinsic operation not lowered yet",
+                    ))
+                }
+            },
+            ret,
+        },
+        receiver,
+        params: params.to_vec(),
+        ret,
+        context_count: 0,
+        singleton_dispatch: None,
+    })
 }
 
 /// What a unit held before a lowering began. Lowering appends functions and expressions and
@@ -326,6 +790,13 @@ impl UnitCheckpoint {
         ir.extension_receiver_fns
             .retain(|function| *function < first);
         ir.fn_context_counts.retain(|function, _| *function < first);
+        ir.singleton_extension_unread_receivers
+            .retain(|function, _| *function < first);
         unit.functions.retain(|_, function| *function < first);
+        let functions = &unit.functions;
+        unit.authenticated_singleton_dispatches
+            .retain(|identity, _| functions.contains_key(identity));
+        unit.authenticated_singleton_classifiers
+            .retain(|identity, _| functions.contains_key(identity));
     }
 }

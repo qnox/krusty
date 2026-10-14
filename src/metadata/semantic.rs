@@ -166,6 +166,9 @@ pub struct KotlinMember {
     pub vararg: Option<usize>,
     /// Qualified identities of annotations declared on this member.
     pub annotations: Vec<crate::types::TypeName>,
+    /// The same annotations with declaration arguments retained. Providers use these only while
+    /// normalizing declaration-owned semantic facts; later phases keep the qualified identities.
+    pub annotation_applications: Vec<AnnotationApplication>,
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
@@ -200,6 +203,8 @@ pub struct KotlinFunction {
     pub context_kinds: Vec<crate::types::ContextParameterKind>,
     /// Qualified identities of annotations declared on this function.
     pub annotations: Vec<crate::types::TypeName>,
+    /// The same annotations with declaration arguments retained for provider normalization.
+    pub annotation_applications: Vec<AnnotationApplication>,
     pub return_value_status: crate::types::ReturnValueStatus,
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
@@ -327,10 +332,11 @@ pub struct AnnotationApplication {
     pub arguments: Vec<(String, AnnotationArgument)>,
 }
 
-/// A recorded annotation argument. Only the enum shape (and arrays of it) is decoded: that is what
-/// `kotlin.annotation.Retention` and `kotlin.annotation.Target` carry.
+/// A recorded annotation argument. Declaration providers currently consume strings and enum
+/// values (and arrays of enum values); every other valid metadata value remains [`Self::Other`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnotationArgument {
+    String(String),
     Enum {
         class: crate::types::TypeName,
         entry: String,

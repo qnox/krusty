@@ -177,7 +177,7 @@ pub(super) fn associated_callables(
         );
     }
     for extension in inventory.companion_functions(classifier, name) {
-        let placement = companion_extension_placement(classifier, extension.package);
+        let placement = extension.placement(classifier);
         functions.push(published_function(
             identities,
             &extension.signed,
@@ -186,7 +186,7 @@ pub(super) fn associated_callables(
         ));
     }
     for extension in inventory.companion_properties(classifier, name) {
-        let placement = companion_extension_placement(classifier, extension.package);
+        let placement = extension.placement(classifier);
         properties.push(published_property(
             identities,
             &extension.signed,
@@ -195,16 +195,6 @@ pub(super) fn associated_callables(
         ));
     }
     (functions, properties)
-}
-
-/// The placement of a companion extension of `classifier` that `package` declares: named through
-/// the classifier, with no private access tied to its body.
-fn companion_extension_placement(classifier: TypeName, package: TypeName) -> CallablePlacement {
-    CallablePlacement::Associated {
-        classifier,
-        declaration_owner: SemanticCallableOwner::Package(package),
-        access_owner: None,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

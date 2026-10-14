@@ -331,6 +331,23 @@ impl SymbolSource for DependencyPlatform {
         self.platform.external_callable(identity)
     }
 
+    fn external_callable_by_dependency(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        crate::fir::ExternalCallableId,
+        crate::libraries::ExternalCallableRealization,
+    )> {
+        self.platform.external_callable_by_dependency(identity)
+    }
+
+    fn is_platform_stdlib_dependency(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> bool {
+        self.platform.is_platform_stdlib_dependency(identity)
+    }
+
     /// Dependency properties, like dependency callables, retain identities assigned by the
     /// compiled platform underneath this source-declaration federation.
     fn external_property(
@@ -470,6 +487,10 @@ impl SymbolSource for DependencyPlatform {
 }
 
 impl SemanticPlatform for DependencyPlatform {
+    fn klib_dependency_body_facts(&self) -> Option<crate::libraries::DependencyBodyFacts<'_>> {
+        self.platform.klib_dependency_body_facts()
+    }
+
     fn dependency_access_policy(&self) -> &dyn crate::libraries::DependencyAccessPolicy {
         self.platform.dependency_access_policy()
     }

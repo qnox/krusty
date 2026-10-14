@@ -1,8 +1,8 @@
 //! Provider-normalized physical call targets carried with a selected semantic declaration.
 
 use super::{
-    physical_parameter_plan, InlineKind, LibraryCallable, LibraryConst, LibraryMember,
-    MemberRealization, Origin,
+    physical_parameter_plan, CompilerIntrinsic, InlineKind, LibraryCallable, LibraryConst,
+    LibraryMember, MemberRealization, Origin, SingletonDispatch,
 };
 use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
@@ -19,6 +19,36 @@ pub use crate::metadata::id_signature::KlibDeclarationSignature;
 pub struct KlibDependencyCallable {
     pub module: String,
     pub declaration: KlibDeclarationSignature,
+}
+
+/// A receiver slot retained only by a classifier-associated companion extension's serialized
+/// KLIB body.
+///
+/// Source lookup exposes such a declaration as an associated function with no value receiver, so
+/// this is deliberately separate from [`LibraryCallable::params`]. The serialized IR remains
+/// authoritative for the slot's physical type; this contract authenticates only its classifier
+/// marker and stable parameter identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct KlibBodyCompanionReceiver {
+    classifier: TypeName,
+    identity: crate::fir::ResolvedParameterIdentity,
+}
+
+impl KlibBodyCompanionReceiver {
+    pub(crate) fn new(classifier: TypeName) -> Self {
+        Self {
+            classifier,
+            identity: crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+        }
+    }
+
+    pub(crate) fn classifier(&self) -> TypeName {
+        self.classifier
+    }
+
+    pub(crate) fn identity(&self) -> &crate::fir::ResolvedParameterIdentity {
+        &self.identity
+    }
 }
 
 /// How a provider realizes one already-selected dependency callable.
@@ -57,6 +87,15 @@ pub struct KlibBodyCallable<'a> {
     ret: Ty,
     parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     context_count: usize,
+    compiler_intrinsic: Option<CompilerIntrinsic>,
+    /// Exact singleton dispatch receiver selected for this call edge. Common KLIB body lowering
+    /// uses its semantic type to validate and consume the serialized receiver; target storage
+    /// remains outside this target-free contract.
+    singleton_dispatch: Option<Ty>,
+    /// Exact singleton classifier selected for this call edge. Its semantic type can be a mapped
+    /// primitive, so later phases cannot reconstruct the classifier from the type.
+    singleton_classifier: Option<TypeName>,
+    companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
     identity: &'a KlibDependencyCallable,
 }
 
@@ -68,6 +107,10 @@ impl<'a> KlibBodyCallable<'a> {
         ret: Ty,
         parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
         context_count: usize,
+        compiler_intrinsic: Option<CompilerIntrinsic>,
+        singleton_dispatch: Option<Ty>,
+        singleton_classifier: Option<TypeName>,
+        companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
         identity: Option<&'a KlibDependencyCallable>,
     ) -> Option<Self> {
         Some(Self {
@@ -77,6 +120,10 @@ impl<'a> KlibBodyCallable<'a> {
             ret,
             parameter_identities,
             context_count,
+            compiler_intrinsic,
+            singleton_dispatch,
+            singleton_classifier,
+            companion_receiver,
             identity: identity?,
         })
     }
@@ -90,6 +137,14 @@ impl<'a> KlibBodyCallable<'a> {
             self.kind,
             ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
         )
+    }
+
+    pub(crate) fn is_member(self) -> bool {
+        self.kind == ExternalCallableKind::Member
+    }
+
+    pub(crate) fn kind(self) -> ExternalCallableKind {
+        self.kind
     }
 
     pub(crate) fn params(self) -> &'a [Ty] {
@@ -106,6 +161,37 @@ impl<'a> KlibBodyCallable<'a> {
 
     pub(crate) fn context_count(self) -> usize {
         self.context_count
+    }
+
+    pub(crate) fn compiler_intrinsic(self) -> Option<CompilerIntrinsic> {
+        self.compiler_intrinsic
+    }
+
+    pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
+        self.singleton_dispatch
+    }
+
+    pub(crate) fn singleton_classifier(self) -> Option<TypeName> {
+        self.singleton_classifier
+    }
+
+    /// Whether two selected edges describe the same dependency declaration before their
+    /// call-site singleton dispatch is applied. A KLIB identity names one declaration, while
+    /// inherited object selections may legitimately contribute several receiver variants.
+    pub(crate) fn same_declaration_contract(self, other: Self) -> bool {
+        self.name == other.name
+            && self.kind == other.kind
+            && self.params == other.params
+            && self.ret == other.ret
+            && self.parameter_identities == other.parameter_identities
+            && self.context_count == other.context_count
+            && self.compiler_intrinsic == other.compiler_intrinsic
+            && self.companion_receiver == other.companion_receiver
+            && self.identity == other.identity
+    }
+
+    pub(crate) fn companion_receiver(self) -> Option<&'a KlibBodyCompanionReceiver> {
+        self.companion_receiver
     }
 
     pub(crate) fn signature(self) -> &'a KlibDeclarationSignature {
@@ -136,6 +222,10 @@ pub struct ExternalCallableRealization {
     /// Exact KLIB module plus declaration identity used to join a selected dependency call to
     /// target code emitted earlier in the same program. This is absent for non-KLIB providers.
     pub dependency_callable: Option<KlibDependencyCallable>,
+    /// KLIB-only serialized receiver contract for a classifier-associated companion extension.
+    /// It is separate from source parameters because source lookup names the declaration through
+    /// the classifier without a value receiver.
+    pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
 }
 
 impl ExternalCallableRealization {
@@ -143,6 +233,7 @@ impl ExternalCallableRealization {
     /// identity. Consumers lower through this view instead of importing physical realization
     /// facts into common lowering.
     pub fn klib_body_callable(&self) -> Option<KlibBodyCallable<'_>> {
+        let singleton = self.callable.singleton_dispatch.as_deref().copied();
         KlibBodyCallable::new(
             &self.callable.name,
             self.kind,
@@ -150,6 +241,10 @@ impl ExternalCallableRealization {
             self.callable.ret,
             &self.parameter_identities,
             self.callable.context_count,
+            self.callable.compiler_intrinsic,
+            singleton.map(SingletonDispatch::ty),
+            singleton.map(|dispatch| dispatch.classifier),
+            self.klib_body_companion_receiver.as_ref(),
             self.dependency_callable.as_ref(),
         )
     }

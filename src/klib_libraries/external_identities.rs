@@ -7,8 +7,8 @@ use super::declaration_signatures::{SignedFunction, SignedProperty};
 use crate::fir::{ExternalCallableId, ExternalPropertyId, ResolvedParameterIdentity};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization, FnKind,
-    FunctionInfo, KlibDeclarationSignature, KlibDependencyCallable, LibraryCallable, LibraryMember,
-    PropertyInfo,
+    FunctionInfo, KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable,
+    LibraryCallable, LibraryMember, PropertyInfo,
 };
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::types::{SemanticCallableOwner, TypeName};
@@ -35,12 +35,17 @@ impl ExternalIdentities {
         kind: ExternalCallableKind,
         function: &mut FunctionInfo,
     ) {
+        let companion_receiver = function
+            .associated_classifier
+            .filter(|_| signed.declaration.receiver.is_some())
+            .map(KlibBodyCompanionReceiver::new);
         self.assign_callable(
             KlibDeclarationSignature::Public(signed.signature.clone()),
             kind,
             &signed.parameters.physical,
             signed.internal_friend,
             signed.module.as_deref(),
+            companion_receiver,
             &mut function.callable,
         );
     }
@@ -54,12 +59,17 @@ impl ExternalIdentities {
         kind: ExternalCallableKind,
         property: &mut PropertyInfo,
     ) {
+        let companion_receiver = property
+            .associated_classifier
+            .filter(|_| signed.declaration.receiver.is_some())
+            .map(KlibBodyCompanionReceiver::new);
         self.assign_callable(
             KlibDeclarationSignature::Accessor(signed.getter.clone()),
             kind,
             &signed.parameters.getter,
             signed.internal_friend,
             signed.module.as_deref(),
+            companion_receiver.clone(),
             &mut property.getter,
         );
         if let Some(setter) = &mut property.setter {
@@ -78,6 +88,7 @@ impl ExternalIdentities {
                 parameters,
                 signed.internal_friend,
                 signed.module.as_deref(),
+                companion_receiver,
                 setter,
             );
         }
@@ -106,6 +117,7 @@ impl ExternalIdentities {
             parameters,
             internal_friend,
             module,
+            None,
             &mut callable,
         );
         constructor.external_identity = callable.external_identity;
@@ -132,6 +144,7 @@ impl ExternalIdentities {
             parameters,
             internal_friend,
             module,
+            None,
             &mut callable,
         );
         member.external_identity = callable.external_identity;
@@ -181,6 +194,7 @@ impl ExternalIdentities {
         parameters: &[ResolvedParameterIdentity],
         internal_friend: bool,
         module: Option<&str>,
+        klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
         callable: &mut LibraryCallable,
     ) {
         let key = (module.map(str::to_owned), signature.clone());
@@ -214,6 +228,7 @@ impl ExternalIdentities {
                 module: module.to_owned(),
                 declaration: signature,
             }),
+            klib_body_companion_receiver,
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

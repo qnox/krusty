@@ -102,6 +102,58 @@ pub const NATIVE_ABI_SYMBOLS: Case = Case {
              // MODULE: main(left, right)\nfun box() = \"OK\"\n",
 };
 
+pub const FLOATING_BITS: Case = Case {
+    stem: "multimoduleFloatingBits",
+    source: "// MODULE: bits\n\
+             fun floatBits(value: Float) = value.toRawBits()\n\
+             fun floatCanonicalBits(value: Float) = value.toBits()\n\
+             fun floatFromBits(value: Int) = Float.fromBits(value)\n\
+             fun doubleBits(value: Double) = value.toRawBits()\n\
+             fun doubleCanonicalBits(value: Double) = value.toBits()\n\
+             fun doubleFromBits(value: Long) = Double.fromBits(value)\n\
+             // MODULE: main(bits)\n\
+             fun box(): String {\n\
+             \x20   if (floatBits(1.0f) != 1065353216) return \"float\"\n\
+             \x20   if (doubleFromBits(4607182418800017408L) != 1.0) return \"double\"\n\
+             \x20   val floatNan = floatFromBits(2139095041)\n\
+             \x20   if (floatBits(floatNan) != 2139095041) return \"float raw nan\"\n\
+             \x20   if (floatCanonicalBits(floatNan) != 2143289344) return \"float canonical nan\"\n\
+             \x20   val doubleNan = doubleFromBits(9218868437227405313L)\n\
+             \x20   if (doubleBits(doubleNan) != 9218868437227405313L) return \"double raw nan\"\n\
+             \x20   if (doubleCanonicalBits(doubleNan) != 9221120237041090560L) return \"double canonical nan\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
+pub const FLOATING_BIT_REFERENCES: Case = Case {
+    stem: "multimoduleFloatingBitReferences",
+    source: "// MODULE: bits\n\
+             @Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+             @kotlin.internal.InlineOnly\n\
+             inline fun <T, R> T.throughReference(block: (T) -> R): R = block(this)\n\
+             fun floatFromBitsReference(value: Int): Float = value.throughReference(Float::fromBits)\n\
+             fun doubleFromBitsReference(value: Long): Double = value.throughReference(Double::fromBits)\n\
+             // MODULE: main(bits)\n\
+             fun box(): String {\n\
+             \x20   if (floatFromBitsReference(1065353216) != 1.0f) return \"float reference\"\n\
+             \x20   if (doubleFromBitsReference(4607182418800017408L) != 1.0) return \"double reference\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
+pub const OVERLAPPING_BITS: Case = Case {
+    stem: "multimoduleOverlappingBits",
+    source: "// MODULE: bits\n\
+             fun raw(value: Float): Int = value.toRawBits()\n\
+             // MODULE: main(bits)\n\
+             fun canonical(value: Float): Int = value.toBits()\n\
+             fun box(): String {\n\
+             \x20   if (raw(1.0f) != 1065353216) return \"raw\"\n\
+             \x20   if (canonical(1.0f) != 1065353216) return \"canonical\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
 /// Every portable multimodule claim. Each backend adapter iterates this table in full.
 pub const ALL: &[Case] = &[
     TOP_LEVEL_DEPENDENCY,
@@ -115,6 +167,9 @@ pub const ALL: &[Case] = &[
     FORWARD_PROPERTY_IDS,
     LOCAL_FUNCTION_SYMBOLS,
     NATIVE_ABI_SYMBOLS,
+    FLOATING_BITS,
+    FLOATING_BIT_REFERENCES,
+    OVERLAPPING_BITS,
 ];
 
 #[test]

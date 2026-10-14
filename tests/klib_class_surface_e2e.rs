@@ -80,6 +80,46 @@ fn written_packages(sources: &[(&str, &str)]) -> Option<(Vec<String>, Vec<Kotlin
     Some((messages, packages))
 }
 
+/// Write sources analyzed against the actual Native stdlib KLIB, including its selected bodies.
+fn written_packages_with_native_stdlib(
+    sources: &[(&str, &str)],
+) -> Option<(Vec<String>, Vec<KotlinPackage>)> {
+    let stdlib = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::Native,
+    )?;
+    let libraries = krusty::klib_libraries::KlibLibraries::open(&[
+        krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            krusty::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+    ])
+    .expect("open the Native stdlib KLIB");
+    let stems = sources
+        .iter()
+        .map(|(stem, _)| (*stem).to_string())
+        .collect::<Vec<_>>();
+    let inputs = sources
+        .iter()
+        .map(|(stem, source)| krusty::source::SourceInput::kotlin(source).with_file_stem(stem))
+        .collect::<Vec<_>>();
+    let mut diags = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(
+            krusty::compilation_target::CompilationTarget::Native,
+            Box::new(libraries.for_compilation()),
+        ),
+        &krusty::features::LangFeatures::new(),
+        &mut diags,
+    );
+    let (messages, fragments) = written_fragments(analysis, &stems, diags);
+    let packages = fragments
+        .iter()
+        .map(|bytes| parse_package_fragment_checked(bytes).expect("decode a fragment"))
+        .collect();
+    Some((messages, packages))
+}
+
 /// The diagnostics of writing `analysis` as a library and, when there are none, the bytes of each
 /// package fragment the ordinary reader finds in it, in the archive's order.
 fn written_fragments(
@@ -237,6 +277,22 @@ fn every_supported_class_shape_reads_back_in_declaration_order() {
     assert_eq!(messages, Vec::<String>::new());
     assert_eq!(packages.len(), 1);
     assert_eq!(surface(&packages[0]), EXPECTED_SURFACE);
+}
+
+#[test]
+fn executable_dependency_support_does_not_become_a_klib_fragment() {
+    let Some((messages, packages)) = written_packages_with_native_stdlib(&[(
+        "Bits",
+        "package bits\nfun bits(value: Float): Int = value.toBits()\n",
+    )]) else {
+        return;
+    };
+    assert_eq!(messages, Vec::<String>::new());
+    assert_eq!(
+        packages.len(),
+        1,
+        "the KLIB contains only the source module's package fragment"
+    );
 }
 
 /// A `@Serializable` class's library declarations are what kotlinx.serialization's frontend

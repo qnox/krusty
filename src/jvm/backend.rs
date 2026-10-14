@@ -903,6 +903,7 @@ impl JvmBackend {
     ) -> Vec<Artifact> {
         let crate::backend::CheckedIrFile {
             mut ir,
+            kind: _,
             source,
             classifiers,
             mut callables,

@@ -1362,6 +1362,12 @@ impl<'a> CommonIrBodySink<'a> {
                 .has(crate::fir::DeclarationFlags::INLINE)
             {
                 self.ir.inline_fns.insert(function);
+                if index
+                    .declaration_annotations(declaration)
+                    .contains(&crate::types::type_name("kotlin/internal/InlineOnly"))
+                {
+                    self.ir.inline_only_fns.insert(function);
+                }
             }
             if declaration_header
                 .flags

@@ -144,16 +144,20 @@ mod repository_owned {
         }
         std::fs::write(&path, &bytes).expect("write the corrupted fixture");
 
-        let archive = KlibArchive::open(&path).expect("the archive still opens");
         let entry = "default/linkdata/package_fixture.core/01_core.knm";
-        assert!(
-            archive.entries().iter().any(|listed| listed == entry),
-            "the archive still lists the fragment: {:?}",
-            archive.entries()
-        );
-        assert!(
-            archive.read(entry).is_err(),
-            "and reading it is a failure, not an empty fragment"
-        );
+        match KlibArchive::open(&path) {
+            Err(KlibError::Io {
+                operation,
+                path: failed,
+                source,
+            }) => {
+                assert_eq!(operation, "read");
+                assert_eq!(failed, path.join(entry));
+                assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+                assert_eq!(source.to_string(), "corrupt deflate stream");
+            }
+            Err(error) => panic!("unexpected corrupt-entry error: {error}"),
+            Ok(_) => panic!("an archive with a corrupt semantic entry opened"),
+        }
     }
 }

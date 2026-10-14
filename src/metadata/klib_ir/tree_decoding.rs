@@ -77,6 +77,19 @@ impl KlibIrModuleTrees {
         self.functions.keys()
     }
 
+    /// Every function declaration together with the arena that owns its types and annotations.
+    ///
+    /// Unlike [`Self::function`], this includes file-local declarations. Consumers must retain the
+    /// declaration's serialized signature rather than attempting to publish it by source name.
+    pub(crate) fn all_functions(&self) -> impl Iterator<Item = (&KlibIrArena, &KlibIrFunction)> {
+        self.trees.iter().flat_map(|tree| {
+            tree.arena
+                .functions
+                .iter()
+                .map(move |function| (&tree.arena, function))
+        })
+    }
+
     /// Index trees built by hand, as decoding indexes the trees it reads.
     #[cfg(test)]
     pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {

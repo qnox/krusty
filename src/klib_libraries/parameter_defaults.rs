@@ -49,23 +49,6 @@ impl DefaultSelection {
         }
     }
 
-    /// Whether the top-level declaration serialized under `signature` is one of these. A
-    /// file-local identity is never one: metadata publishes no declaration under it.
-    pub(super) fn contains(&self, module: &str, signature: &KlibIrSignature) -> bool {
-        let public = match signature {
-            KlibIrSignature::Public(public) => public,
-            KlibIrSignature::Accessor(accessor) => accessor.property(),
-            KlibIrSignature::FileLocal { .. } => return false,
-        };
-        let Some(top_level) = public.declaration().segments().first() else {
-            return false;
-        };
-        self.by_module
-            .get(module)
-            .and_then(|packages| packages.get(public.package().segments()))
-            .is_some_and(|names| names.contains(top_level))
-    }
-
     fn selected_authoritative_function(&self, module: &str, signature: &KlibIrSignature) -> bool {
         matches!(
             signature,
@@ -294,6 +277,7 @@ mod tests {
             context_count: 0,
             context_kinds: Vec::new(),
             annotations: Vec::new(),
+            annotation_applications: Vec::new(),
             return_value_status: Default::default(),
             contract: None,
         }

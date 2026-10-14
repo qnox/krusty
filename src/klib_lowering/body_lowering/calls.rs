@@ -4,8 +4,8 @@
 //! call of it; a dependency function lowers as a call of its function in the same unit.
 
 use super::super::ir_builtins::{BuiltinOperator, BuiltinRelation};
-use super::{mismatch, unsupported, BodyLowering, Lowered};
-use crate::ir::{Callee, ExprId, IrBinOp, IrExpr};
+use super::{mismatch, unsupported, BodyLowering, LinkedCallee, Lowered};
+use crate::ir::{ExprId, IrBinOp, IrExpr};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess,
@@ -23,10 +23,26 @@ impl BodyLowering<'_, '_, '_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let KlibIrSignature::Public(callee) = &access.symbol.signature else {
-            return unsupported("a call of a file-private declaration");
+        let callee = match &access.symbol.signature {
+            KlibIrSignature::Public(callee) => callee,
+            KlibIrSignature::FileLocal { .. } => {
+                return unsupported("a call of a file-private declaration")
+            }
+            KlibIrSignature::Accessor(_) => {
+                return unsupported("a call through a property accessor signature")
+            }
         };
-        let Some(operator) = self.builtins.operator(callee) else {
+        let operator = self.builtins.operator(callee);
+        // A checked source call may select the same exact declaration that this support body
+        // calls. Materialize that declaration into the closed unit so the source edge has target
+        // code. Only an unselected compiler builtin is folded into its common-IR operation.
+        if operator.is_some() && self.linker.is_selected(callee)? {
+            if !access.type_arguments.is_empty() {
+                return unsupported("a call of a generic declaration");
+            }
+            return self.dependency_call(callee, access, ty);
+        }
+        let Some(operator) = operator else {
             if !access.type_arguments.is_empty() {
                 // Only a generic declaration takes type arguments, and lowering declines those.
                 return unsupported("a call of a generic declaration");
@@ -41,8 +57,37 @@ impl BodyLowering<'_, '_, '_> {
         match operator {
             BuiltinOperator::Relation(relation) => self.relation(access, relation, ty),
             BuiltinOperator::Not => self.negation(access, ty),
+            BuiltinOperator::IsNan { operand } => self.is_nan(access, operand, ty),
             equality => self.equality(access, equality, ty, false),
         }
+    }
+
+    /// `Float.isNaN()` / `Double.isNaN()` as the IEEE fact `value != value`. The dependency body
+    /// form admitted here reads a value parameter, so sharing that lowered read between both sides
+    /// preserves single evaluation while keeping the operation in common semantic IR.
+    fn is_nan(&mut self, access: &KlibIrMemberAccess, operand: Ty, ty: Ty) -> Lowered<ExprId> {
+        let &[Some(receiver)] = arguments(access).as_slice() else {
+            return Err(mismatch(
+                "`isNaN` is called with another shape than its declaration's",
+            ));
+        };
+        if ty != Ty::Boolean
+            || !matches!(
+                self.arena.expr(receiver).kind,
+                KlibIrExprKind::GetValue { .. }
+            )
+        {
+            return Err(mismatch(
+                "`isNaN` has another result or receiver form than the realized dependency body",
+            ));
+        }
+        let receiver = self.operand(receiver, operand)?;
+        Ok(self.ir.add_expr(IrExpr::Equality {
+            op: IrBinOp::Ne,
+            mode: EqualityMode::Ieee754,
+            lhs: receiver,
+            rhs: receiver,
+        }))
     }
 
     /// A primitive relation over two operands of one primitive type. On `Float` and `Double` that
@@ -106,7 +151,10 @@ impl BodyLowering<'_, '_, '_> {
             (BuiltinOperator::Equals | BuiltinOperator::Ieee754Equals { .. }, mode) => {
                 Ok(self.ir.add_expr(IrExpr::Equality { op, mode, lhs, rhs }))
             }
-            (BuiltinOperator::Relation(_) | BuiltinOperator::Not, _) => {
+            (
+                BuiltinOperator::Relation(_) | BuiltinOperator::Not | BuiltinOperator::IsNan { .. },
+                _,
+            ) => {
                 unreachable!("only an equality operator is lowered as an equality")
             }
         }
@@ -165,6 +213,15 @@ impl BodyLowering<'_, '_, '_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         let linked = self.linker.link(self.ir, callee)?;
+        self.linked_call(linked, access, ty)
+    }
+
+    fn linked_call(
+        &mut self,
+        linked: LinkedCallee,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
         if linked.context_count != 0 && matches!(access.arguments, KlibIrArguments::Split { .. }) {
             return unsupported("a context argument in the pre-2.4 argument layout");
         }
@@ -172,23 +229,43 @@ impl BodyLowering<'_, '_, '_> {
             return Err(mismatch("a call is typed apart from its callee's result"));
         }
         let arguments = arguments(access);
-        if arguments.len() != linked.params.len() {
+        if arguments.len() != linked.params.len() + usize::from(linked.receiver.is_some()) {
             return Err(mismatch(
                 "a call passes another number of arguments than its callee declares",
             ));
         }
-        let mut args = Vec::with_capacity(arguments.len());
-        for (argument, parameter) in arguments.into_iter().zip(linked.params) {
+        let mut arguments = arguments.into_iter();
+        let dispatch_receiver = linked
+            .receiver
+            .map(|expected| {
+                let argument = arguments.next().flatten().ok_or(
+                    KlibBodyDeclineReason::UnsupportedOperation(
+                        "a call that omits its dispatch receiver",
+                    ),
+                )?;
+                self.operand(argument, expected).map(Some)
+            })
+            .transpose()?
+            .flatten();
+        let mut args = Vec::with_capacity(linked.params.len());
+        for (argument, parameter) in arguments.zip(linked.params) {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a call that leaves a parameter to its default",
             ))?;
             args.push(self.operand(argument, parameter)?);
         }
-        Ok(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(linked.function),
-            dispatch_receiver: None,
+        let singleton_dispatch = linked.singleton_dispatch;
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: linked.callee,
+            dispatch_receiver,
             args,
-        }))
+        });
+        if let Some(classifier) = singleton_dispatch {
+            self.ir
+                .external_singleton_dispatches
+                .insert(call, classifier);
+        }
+        Ok(call)
     }
 }
 

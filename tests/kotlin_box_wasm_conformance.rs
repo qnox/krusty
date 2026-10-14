@@ -298,6 +298,22 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_reinterpretation_runs_through_emitted_stdlib_extension_bodies() {
+    expect_wasm_box(
+        r#"
+fun box(): String {
+    if (0.0f.toRawBits() != 0 || (-0.0f).toRawBits() != Int.MIN_VALUE) return "float bits"
+    if (Float.fromBits(Int.MIN_VALUE).toRawBits() != Int.MIN_VALUE) return "float value"
+    if (0.0.toRawBits() != 0L || (-0.0).toRawBits() != Long.MIN_VALUE) return "double bits"
+    if (Double.fromBits(Long.MIN_VALUE).toRawBits() != Long.MIN_VALUE) return "double value"
+    return "OK"
+}
+"#,
+        "wasmReinterpretationThroughStdlibBodies",
+    );
+}
+
+#[test]
 fn kotlin_codegen_box_wasm_js_conformance() {
     box_lane::run(&WasmLane {
         target: WasmTarget::Js,

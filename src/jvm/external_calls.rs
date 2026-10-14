@@ -862,8 +862,13 @@ pub(super) fn realize(
                     ty: argument.ok_or(target)?,
                 })
             }
+            Some(crate::libraries::CompilerIntrinsic::ReinterpretBits) => {
+                unreachable!("target KLIB reinterpretation cannot reach JVM call realization")
+            }
             Some(
                 crate::libraries::CompilerIntrinsic::ArraySize
+                | crate::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
+                | crate::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
                 | crate::libraries::CompilerIntrinsic::ArrayGet
                 | crate::libraries::CompilerIntrinsic::ArraySet
                 | crate::libraries::CompilerIntrinsic::ArrayFactory(_)

@@ -4648,7 +4648,10 @@ code is the one the code generator already names: provider-owned bodies through 
 - **Builtin operations (done).** A KLIB builtin gets its compiler operation from the shared rules
   the JVM provider uses (`builtin_member_realization`, `builtin_top_level_realization`,
   `add_core_builtin_declarations`), by exact declaration, whether or not it has an IR body. A
-  target's own intrinsic annotation (`@TypedIntrinsic`, `@WasmOp`) is never read. The Native
+  target stdlib's own intrinsic annotation (`@TypedIntrinsic`, `@WasmOp`) is authenticated at its
+  archive boundary. A private Wasm operation's file-local identity carries no declaring-package
+  evidence, so it is rejected rather than gaining intrinsic authority or falling back to source
+  lookup. The Native
   corpus passes 3542 of 7089 against the stdlib KLIB (from 2007). Every `external` function of
   each target's stdlib KLIB must carry an operation: `klib_libraries::tests::external_coverage`
   checks Native, JS, wasm-js and wasm-wasi against `tests/klib_uncovered_externals/<target>/`,

@@ -30,6 +30,7 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let FirCallableReferenceTarget::External {
             declaration,
+            singleton_dispatch,
             default_provider,
             receiver,
             declared_receiver,
@@ -184,6 +185,7 @@ impl BodyLowering<'_> {
             .expect("too many external callable-reference adapter parameters");
         let call = self.external_call(super::source_calls::ExternalCallRequest {
             target: declaration,
+            singleton_dispatch,
             default_provider,
             receiver_ty: receiver,
             declared_receiver,

@@ -877,6 +877,7 @@ impl BodyLowering<'_> {
             .collect::<Option<Vec<_>>>()?;
         self.external_call(super::source_calls::ExternalCallRequest {
             target: call.declaration,
+            singleton_dispatch: None,
             default_provider: None,
             receiver_ty: Some(call.receiver),
             declared_receiver: None,

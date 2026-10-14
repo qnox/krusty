@@ -2106,6 +2106,11 @@ pub struct IrFile {
     /// edge itself, recorded while argument mapping still owns the decision; backends must not
     /// rediscover consumption by scanning expression parents or adapter bodies.
     pub(crate) inline_callable_reference_arguments: crate::fx_hash::HashSet<ExprId>,
+    /// Operand declarations which stage a bound callable-reference receiver before its inline
+    /// adapter is spliced. The declaration remains the source-evaluation point; a target may omit
+    /// its initializer only when every read is an authenticated receiver-erased dependency call
+    /// whose exported effect proves the exact singleton access inert.
+    pub(crate) inline_callable_reference_receiver_bindings: crate::fx_hash::HashSet<ExprId>,
     /// Adapter body root -> the exact value returned by that adapter. Callable-reference lowering
     /// records this while constructing the body, before wrapping it in `return`/`block`; consumers
     /// never inspect the generated body shape to recover the invocation template.
@@ -2503,6 +2508,15 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: crate::fx_hash::HashMap<u32, Ty>,
+    /// Dependency call expression to the exact singleton receiver selected by checked FIR.
+    /// Declaration providers publish an undecorated base record; the backend handoff freezes this
+    /// per-edge decision instead of collapsing inherited selections by declaration identity or
+    /// recovering it from an IR receiver/declaration spelling.
+    pub(crate) external_singleton_dispatches: crate::fx_hash::HashMap<ExprId, TypeName>,
+    /// Dependency-support function -> the exact extension receiver its serialized body does not
+    /// read. A target may pass an inert carrier only when the checked call supplies a singleton of
+    /// this exact type; every ordinary receiver expression remains evaluated.
+    pub(crate) singleton_extension_unread_receivers: crate::fx_hash::HashMap<FunId, Ty>,
     /// JVM call expression → exact physical realization inherited through its checked override
     /// target. A JVM planning pass selects this from provider-published candidates and stable
     /// function/property override identities; emission never scans source/member spellings.

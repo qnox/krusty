@@ -47,6 +47,12 @@ const IR_PREFIX: &str = "default/ir/";
 /// Guard against a symlink cycle in an unpacked klib. A klib's own tree is three levels deep.
 const MAX_DIRECTORY_DEPTH: usize = 8;
 
+fn semantic_entry(entry: &str) -> bool {
+    entry == "default/manifest"
+        || entry.starts_with("default/linkdata/")
+        || entry.starts_with("default/ir/")
+}
+
 /// One `.knm` metadata fragment, resolved to the package it declares into.
 ///
 /// A package's declarations are split across numbered fragments by the serializer, so several
@@ -67,6 +73,10 @@ pub struct KlibArchive {
     /// a zip klib records them and an unpacked one does not, and no caller distinguishes a library
     /// by which shape it came from.
     entries: Vec<String>,
+    /// Immutable bytes of every declaration/body channel this compiler consumes. The fingerprint
+    /// and every decoder read this same snapshot, so replacing an unpacked KLIB in place cannot
+    /// authenticate one generation while publishing declarations from another.
+    semantic_entries: BTreeMap<String, Vec<u8>>,
 }
 
 enum Source {
@@ -282,11 +292,14 @@ impl KlibArchive {
             collect_directory_entries(path, path, String::new(), 0, &mut entries)?;
             entries.sort();
             reject_duplicate_entries(path, &entries)?;
-            return Ok(Self {
+            let mut archive = Self {
                 root: path.to_path_buf(),
                 source: Source::Directory { canonical_root },
                 entries,
-            });
+                semantic_entries: BTreeMap::new(),
+            };
+            archive.freeze_semantic_entries()?;
+            return Ok(archive);
         }
         if !metadata.is_file() {
             return Err(KlibError::UnsupportedEntry {
@@ -358,11 +371,14 @@ impl KlibArchive {
                 path: path.to_path_buf(),
             });
         }
-        Ok(Self {
+        let mut archive = Self {
             root: path.to_path_buf(),
             source: Source::Zip(Mutex::new(archive)),
             entries,
-        })
+            semantic_entries: BTreeMap::new(),
+        };
+        archive.freeze_semantic_entries()?;
+        Ok(archive)
     }
 
     /// Where this klib was opened from, for diagnostics.
@@ -373,6 +389,27 @@ impl KlibArchive {
     /// Every file entry, archive-relative and sorted.
     pub fn entries(&self) -> &[String] {
         &self.entries
+    }
+
+    /// A shape-independent digest of every semantic/body entry in this opened KLIB.
+    ///
+    /// Provider snapshots use this to distinguish an archive rebuilt in place from the archive an
+    /// earlier independently analyzed module selected. Length-delimited fields make the encoding
+    /// injective before SHA-256 is applied, and sorted entry names make zip and directory KLIBs
+    /// with the same contents agree. Target binaries and resources are deliberately excluded: they
+    /// cannot change declaration/body selection and can be substantially larger than the semantic
+    /// channels this compiler consumes.
+    pub(crate) fn content_fingerprint(&self) -> Result<[u8; 32], KlibError> {
+        use sha2::{Digest as _, Sha256};
+
+        let mut digest = Sha256::new();
+        for (entry, bytes) in &self.semantic_entries {
+            digest.update((entry.len() as u64).to_le_bytes());
+            digest.update(entry.as_bytes());
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(&bytes);
+        }
+        Ok(digest.finalize().into())
     }
 
     /// Read one entry's bytes. Missing or unreadable entries are corruption, never an empty symbol
@@ -389,6 +426,27 @@ impl KlibArchive {
                 entry: entry.to_string(),
             });
         }
+        if let Some(bytes) = self.semantic_entries.get(entry) {
+            return Ok(bytes.clone());
+        }
+        self.read_source(entry)
+    }
+
+    fn freeze_semantic_entries(&mut self) -> Result<(), KlibError> {
+        let entries = self
+            .entries
+            .iter()
+            .filter(|entry| semantic_entry(entry))
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in entries {
+            self.semantic_entries
+                .insert(entry.clone(), self.read_source(&entry)?);
+        }
+        Ok(())
+    }
+
+    fn read_source(&self, entry: &str) -> Result<Vec<u8>, KlibError> {
         match &self.source {
             Source::Zip(archive) => {
                 let mut archive = archive.lock().map_err(|_| KlibError::PoisonedArchive {
@@ -1115,6 +1173,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -1169,6 +1228,26 @@ mod tests {
     fn write_raw_zip_bytes(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = root.join(name);
         std::fs::write(&path, bytes).expect("write raw ZIP fixture");
+        path
+    }
+
+    fn write_stored_zip(root: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+        let path = root.join(name);
+        let file = std::fs::File::create(&path).expect("create ZIP fixture");
+        let mut archive = zip::ZipWriter::new(file);
+        for (entry, contents) in entries {
+            archive
+                .start_file(
+                    *entry,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .expect("start ZIP fixture entry");
+            archive
+                .write_all(contents)
+                .expect("write ZIP fixture entry");
+        }
+        archive.finish().expect("finish ZIP fixture");
         path
     }
 
@@ -1332,6 +1411,37 @@ mod tests {
     }
 
     #[test]
+    fn opened_archive_reads_the_fingerprinted_semantic_snapshot() {
+        let root = temp_dir("klib-semantic-snapshot");
+        write(&root, "default/manifest", b"unique_name=fixture\n");
+        write(&root, "default/linkdata/module", b"module-header");
+        let archive = KlibArchive::open(&root).expect("open the initial KLIB generation");
+        let initial = archive
+            .content_fingerprint()
+            .expect("fingerprint the opened generation");
+
+        write(&root, "default/linkdata/module", b"replacement-header");
+        write(&root, "default/ir/new-body.knb", b"new serialized body");
+
+        assert_eq!(
+            archive
+                .content_fingerprint()
+                .expect("fingerprint the frozen KLIB generation"),
+            initial,
+            "the provider identity and decoded bytes come from one immutable snapshot"
+        );
+        assert_eq!(
+            archive
+                .module_header()
+                .expect("read the frozen module header"),
+            b"module-header",
+            "a replacement at the selected path cannot alter decoded snapshot bytes"
+        );
+        assert!(archive.ir_entries().is_empty());
+        std::fs::remove_dir_all(root).expect("remove semantic-snapshot fixture");
+    }
+
+    #[test]
     fn repository_owned_zip_klib_reads_the_same_container_contract() {
         let root = temp_dir("klib-zip");
         let path = write_raw_zip(&root, "fixture.klib", VALID_ZIP);
@@ -1380,8 +1490,7 @@ mod tests {
         }
 
         let corrupt_crc = write_raw_zip(&root, "corrupt-crc.klib", CORRUPT_CRC_ZIP);
-        let archive = KlibArchive::open(&corrupt_crc).expect("CRC is checked while reading entry");
-        match archive.manifest() {
+        match KlibArchive::open(&corrupt_crc) {
             Err(KlibError::Io {
                 operation,
                 path,
@@ -1393,7 +1502,7 @@ mod tests {
                 assert_eq!(source.to_string(), "Invalid checksum");
             }
             Err(error) => panic!("unexpected corrupt-CRC error: {error}"),
-            Ok(_) => panic!("corrupt-CRC manifest read successfully"),
+            Ok(_) => panic!("corrupt-CRC archive opened"),
         }
 
         let corrupt_central =
@@ -1412,10 +1521,14 @@ mod tests {
     fn eocd_count_bounds_and_truncation_are_authoritative() {
         let root = temp_dir("klib-eocd-errors");
 
-        let mut payload_signature = raw_zip(VALID_ZIP);
-        payload_signature[46..50].copy_from_slice(&0x0706_4b50u32.to_le_bytes());
-        let payload_signature =
-            write_raw_zip_bytes(&root, "zip64-signature-in-payload.klib", &payload_signature);
+        let payload_signature = write_stored_zip(
+            &root,
+            "zip64-signature-in-payload.klib",
+            &[(
+                "default/manifest",
+                b"unique_name=payload-PK\x06\x07-signature\n",
+            )],
+        );
         KlibArchive::open(&payload_signature)
             .expect("a ZIP64 signature in entry data is not a ZIP64 locator");
 
@@ -1558,7 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_manifest_and_disappearing_entry_do_not_become_empty_data() {
+    fn missing_manifest_and_frozen_entry_do_not_become_empty_data() {
         let root = temp_dir("klib-entry-errors");
         write(&root, "default/linkdata/module", b"module");
         let archive = KlibArchive::open(&root).expect("open container without manifest");
@@ -1569,18 +1682,11 @@ mod tests {
 
         let module = root.join("default/linkdata/module");
         std::fs::remove_file(&module).expect("remove inventoried entry");
-        match archive.module_header().unwrap_err() {
-            KlibError::Io {
-                operation,
-                path,
-                source,
-            } => {
-                assert_eq!(operation, "inspect");
-                assert_eq!(path, module);
-                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
-            }
-            error => panic!("unexpected unreadable-entry error: {error}"),
-        }
+        assert_eq!(
+            archive.module_header().expect("read the opened snapshot"),
+            b"module",
+            "a selected semantic entry is immutable after the archive opens"
+        );
     }
 
     #[cfg(unix)]
