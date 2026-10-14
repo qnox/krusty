@@ -256,9 +256,15 @@ impl Checker<'_> {
                 Ty::Obj(..) => {
                     let hidden_deprecated = self
                         .resolver()
-                        .receiver_has_hidden_deprecated_member(rt, name);
-                    self.diags
-                        .error(span, unresolved_member_message(name, rt, hidden_deprecated))
+                        .receiver_has_hidden_deprecated_property_accessor(
+                            rt,
+                            name,
+                            crate::symbol_resolver::PropertyAccess::Write,
+                        );
+                    self.diags.error(
+                        self.assignment_member_name_span(s, name),
+                        unresolved_member_message(name, rt, hidden_deprecated),
+                    )
                 }
                 _ => self.diags.error(
                     span,

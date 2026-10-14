@@ -12596,7 +12596,7 @@ impl<'a> Checker<'a> {
                 Expr::Member { receiver, .. } => Some(*receiver),
                 _ => None,
             });
-            let message = self.unresolved_member_diagnostic(scope, receiver, name, rt);
+            let message = self.unresolved_property_read_diagnostic(scope, receiver, name, rt);
             self.diags.error(diagnostic_span, message);
         }
         Ty::Error
