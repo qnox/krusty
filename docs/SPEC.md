@@ -624,8 +624,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same rule. A value-class argument handed over as its box by a resumed generic call (`Outer(
   resumed())`) is unboxed once, at that call: the value-class constructor boundary unboxes each
   value tail of its argument, as every other parameter boundary does, rather than the coercion
-  block over it as well (`jvm/value_classes.rs`). Tests: `tests/suspend_argument_operands_e2e.rs`,
-  `tests/suspend_arg_order_e2e.rs`,
+  block over it as well (`jvm/value_classes.rs`). A string concatenation's parts follow it too:
+  for `head + tail()`, kotlinc creates the `StringBuilder` and appends `head` before the call, and
+  the transformer saves the builder. Tests: `tests/suspend_argument_operands_e2e.rs`,
+  `tests/suspending_concat_operands_e2e.rs`, `tests/suspend_arg_order_e2e.rs`,
   `fir_lower/tests.rs::suspending_call_operand_stays_a_direct_constructor_argument`.
 - **A suspend lambda that writes a captured `var`.** The cell is a `Ref$ObjectRef<T>`, and the
   lambda's field carries that generic `Signature`, as its constructor does. A suspension result
