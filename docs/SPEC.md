@@ -16277,6 +16277,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     secondary selected by such an entry uses the same package-private synthetic accessibility
     bridge as a selected primary constructor; leaving the source constructor physically private
     makes the subclass fail with `IllegalAccessError`.
+  - A semicolon after an enum entry's trailing comma ends the entry list even when it is on its own
+    line. The lexer represents semicolons and physical line breaks with the same token kind, so the
+    parser retains the separator's source spelling while consuming that run instead of treating the
+    following soft keyword as another entry. The runtime result is compared with kotlinc in
+    `tests/enum_secondary_constructor_e2e.rs`.
 
   Still failing, recorded rather than guessed at: an enum with ZERO entries loses every synthesized
   member because the JVM IR carries no `is_enum` flag — enum-ness is read as
