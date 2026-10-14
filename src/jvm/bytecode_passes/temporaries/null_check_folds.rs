@@ -15,7 +15,9 @@
 //! predecessor of the `pop` at all: it lands after the `pop`, and so do the line number, the local
 //! ranges and anything else that describes the instruction the label stood at, as kotlinc's
 //! `L: pop; E:` has them. Those late labels are pinned: the `goto` and jump passes that run later
-//! leave jumps to them alone, where kotlinc would have a line number in between.
+//! leave jumps to them alone, where kotlinc would have a line number in between. A line number
+//! starting at a label that stands right beside the jump's own, which kotlinc's label
+//! normalization merged into it, describes the `pop` itself.
 //!
 //! A throwing selector is the other way that rule loses. Constant-condition elimination runs first
 //! and can delete the unreachable continuation after `athrow` while retaining the label that stood
@@ -372,7 +374,8 @@ fn generated_receiver_temporary(body: &Body, jump: NodeId, slot: u16) -> bool {
 
 /// Stand what describes each `ifnull` target's instruction after the `pop` put in front of it:
 /// the labels after the folded jumps' own, and the line numbers and local-range bounds standing
-/// there, under a new label. Returns the labels now after a `pop`, which the later passes pin.
+/// there, under a new label. A line starting at a label the `pop` stands at keeps that label.
+/// Returns the labels now after a `pop`, which the later passes pin.
 pub(super) fn place_after_pops(
     body: &mut Body,
     method: &mut MethodNode,
@@ -385,11 +388,19 @@ pub(super) fn place_after_pops(
             .iter()
             .position(|&at| *body.list.node(at) == Node::Label(target.label))
             .expect("the folded jumps' label stands in front of its pop");
+        let held = held_at_pop(body, &run, own);
+        // A line starting at a label the `pop` stands at still follows the `pop` in the list, as
+        // kotlinc's line node follows the label it inserted the `pop` after.
         let mut late: Vec<Node> = Vec::new();
         let mut lines = Vec::new();
         let mut standing = Vec::new();
         for (k, &at) in run.iter().enumerate() {
             match body.list.node(at).clone() {
+                Node::Label(label) if held.contains(&label) => {}
+                line @ Node::Line { start, .. } if held.contains(&start) => {
+                    late.push(line);
+                    body.list.remove(at);
+                }
                 Node::Label(label) => {
                     standing.push(label);
                     if k > own {
@@ -430,4 +441,51 @@ pub(super) fn place_after_pops(
         body.list.insert_after(Some(target.pop), late);
     }
     pinned
+}
+
+/// The labels the `pop` itself stands at, with the line numbers they start. kotlinc normalizes a
+/// label directly following another into it before its optimizations run, and inserts the `pop`
+/// right after the jump's label node: a line that follows the labels adjacent to the jump's own,
+/// and starts at one of them, then describes the `pop`. That is how a safe call's null path
+/// re-marks the call's line after an inlined selector moved it elsewhere.
+///
+/// A label some branch reaches is not merged here: a jump to a label after the jump's own skips
+/// the `pop`, so that label still lands after it.
+fn held_at_pop(body: &Body, run: &[NodeId], own: usize) -> BTreeSet<LabelId> {
+    let reached: BTreeSet<LabelId> = body
+        .instructions()
+        .into_iter()
+        .flat_map(|id| body.insn(id).jump_targets())
+        .collect();
+    let Node::Label(own_label) = *body.list.node(run[own]) else {
+        unreachable!("the folded jumps' label stands at `own`");
+    };
+    let is_label = |at: &NodeId| matches!(body.list.node(*at), Node::Label(_));
+    let first = run[..own]
+        .iter()
+        .rposition(|at| !is_label(at))
+        .map_or(0, |k| k + 1);
+    let after = run[own..]
+        .iter()
+        .position(|at| !is_label(at))
+        .map_or(run.len(), |k| own + k);
+    let adjacent: BTreeSet<LabelId> = run[first..after]
+        .iter()
+        .filter_map(|&at| match body.list.node(at) {
+            Node::Label(label) => Some(*label),
+            _ => None,
+        })
+        .collect();
+    run[after..]
+        .iter()
+        .filter_map(|&at| match body.list.node(at) {
+            Node::Line { start, .. }
+                if adjacent.contains(start)
+                    && (*start == own_label || !reached.contains(start)) =>
+            {
+                Some(*start)
+            }
+            _ => None,
+        })
+        .collect()
 }

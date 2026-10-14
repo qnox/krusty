@@ -1182,6 +1182,130 @@ fn a_line_and_a_local_bound_at_the_null_target_move_after_its_pop() {
     assert_eq!(folded.method.local_variables[0].end, debug);
 }
 
+/// kotlinc normalizes a label directly following another into it, and puts the `pop` right after
+/// the jump's label: a line starting at a label adjacent to the null target's, re-marked there
+/// after an inlined selector, describes the `pop`. Its node still follows the `pop`, so the `nop`
+/// that is that line's only other instruction stays.
+#[test]
+fn a_line_at_a_label_adjacent_to_the_null_target_describes_its_pop() {
+    let mut code = Code::new(&[
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 7),
+        aload(1),
+        call("touch"),
+        jump(GOTO, 8),
+        op(NOP),
+        op(RETURN),
+    ]);
+    let marked = code.labels[7];
+    let null_target = code.method.new_label();
+    let at = code.position(marked);
+    code.method.nodes.splice(
+        at + 1..at + 1,
+        [
+            Node::Label(null_target),
+            Node::Line {
+                line: 3,
+                start: marked,
+            },
+        ],
+    );
+    for node in &mut code.method.nodes {
+        if let Node::Insn(Insn::Jump { op: IFNULL, target }) = node {
+            *target = null_target;
+        }
+    }
+    let outcome = eliminate(&mut code.method, &BTreeSet::new(), false);
+    assert_eq!(
+        outcome,
+        Some(Elimination {
+            pinned: BTreeSet::new()
+        })
+    );
+    let goto = code
+        .method
+        .nodes
+        .iter()
+        .position(|node| matches!(node, Node::Insn(Insn::Jump { op: GOTO, .. })))
+        .expect("the goto");
+    assert_eq!(
+        code.method.nodes[goto + 1..goto + 6].to_vec(),
+        vec![
+            Node::Label(marked),
+            Node::Label(null_target),
+            Node::Insn(Insn::Op(POP)),
+            Node::Line {
+                line: 3,
+                start: marked
+            },
+            Node::Insn(Insn::Op(NOP)),
+        ]
+    );
+}
+
+/// A label after the null target's that another branch reaches is no part of the `pop`: that branch
+/// arrives without the checked value, so the label and the line it starts still land after the
+/// `pop`.
+#[test]
+fn a_line_at_a_reached_label_after_the_null_target_stays_after_its_pop() {
+    let mut code = Code::new(&[
+        aload(0),
+        astore(1),
+        aload(1),
+        jump(IFNULL, 7),
+        aload(1),
+        call("touch"),
+        jump(GOTO, 7),
+        op(NOP),
+        op(RETURN),
+    ]);
+    let reached = code.labels[7];
+    let null_target = code.method.new_label();
+    let at = code.position(reached);
+    code.method.nodes.insert(at, Node::Label(null_target));
+    code.method.nodes.insert(
+        at + 2,
+        Node::Line {
+            line: 3,
+            start: reached,
+        },
+    );
+    for node in &mut code.method.nodes {
+        if let Node::Insn(Insn::Jump { op: IFNULL, target }) = node {
+            *target = null_target;
+        }
+    }
+    let outcome = eliminate(&mut code.method, &BTreeSet::new(), false);
+    let pinned = outcome.expect("folds").pinned;
+    let goto = code
+        .method
+        .nodes
+        .iter()
+        .position(|node| matches!(node, Node::Insn(Insn::Jump { op: GOTO, .. })))
+        .expect("the goto");
+    assert_eq!(
+        code.method.nodes[goto + 1..goto + 4].to_vec(),
+        vec![
+            Node::Label(null_target),
+            Node::Insn(Insn::Op(POP)),
+            Node::Label(reached),
+        ]
+    );
+    let line = code.method.nodes[goto + 4..]
+        .iter()
+        .position(|node| matches!(node, Node::Line { .. }))
+        .map(|k| goto + 4 + k)
+        .expect("the line");
+    let Node::Line { line: 3, start } = code.method.nodes[line] else {
+        panic!("line 3");
+    };
+    assert_ne!(start, reached, "the line moved to a label of its own");
+    assert_eq!(code.method.nodes[line - 1], Node::Label(start));
+    assert!(pinned.contains(&reached) && pinned.contains(&start));
+}
+
 #[test]
 fn an_instruction_is_stepped_again_only_when_its_incoming_state_changed() {
     let analyze = |code: &Code| {
