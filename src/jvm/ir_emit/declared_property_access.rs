@@ -6,6 +6,35 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// Select the JVM access for an active-source property by the exact declaration coordinate
+    /// retained from checked FIR. Companion storage may already have been moved to the outer class;
+    /// consume that backend table directly instead of recovering the property from its spelling.
+    pub(super) fn local_property_read_access(
+        &self,
+        target: crate::fir::PropertyId,
+        selected_accessor: Option<&str>,
+        selected_interface: bool,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        let crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            owner,
+            name,
+            property,
+            ..
+        } = self.ir.local_property_layouts.get(&target)?
+        else {
+            return None;
+        };
+        debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
+        self.declared_property_read_access(
+            *owner,
+            name,
+            Some(*property as usize),
+            selected_accessor,
+            selected_interface,
+        )
+    }
+
     /// Whether a property of `owner` may be reached as its raw backing FIELD from the class currently
     /// being emitted. Only inside the declaring class (the field is private everywhere else) — and only
     /// for a FINAL property. An `open`/`override` property is redeclared by subclasses, which replace its
@@ -64,16 +93,19 @@ impl Emitter<'_> {
         &self,
         owner: TypeName,
         name: &str,
+        selected_property: Option<usize>,
         selected_accessor: Option<&str>,
         selected_interface: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
-        if let Some(index) = class
-            .properties
-            .iter()
-            .position(|property| property.name == name)
-        {
+        let declared_index = selected_property.or_else(|| {
+            class
+                .properties
+                .iter()
+                .position(|property| property.name == name)
+        });
+        if let Some(index) = declared_index {
             if let Some(access) =
                 self.hoisted_companion_property_access(class.fq_name, index as u32, false)
             {
@@ -84,7 +116,6 @@ impl Emitter<'_> {
         // A property that DECLARES an accessor (computed, delegated, or `field`-using) is always read
         // through it — the accessor is user code, and a direct field load would skip it. Only a plain
         // backing-field property may be read directly, and only from inside the declaring class.
-        let declared_index = class.properties.iter().position(|p| p.name == name);
         let declared = declared_index.map(|index| &class.properties[index]);
         // A scalar getter result over a reference-returning overridden getter is the wrapper;
         // the read unboxes it (see `jvm::override_results`).
@@ -141,16 +172,21 @@ impl Emitter<'_> {
         // A value-class-typed property's accessor is `@JvmName`-mangled (`getId-<hash>`), so match the
         // mangled spelling too — the alternative is falling through to a private backing field, which is
         // an `IllegalAccessError` from anywhere but the declaring class.
-        let accessor = class.methods.iter().copied().find(|&fid| {
-            let f = &self.ir.functions[fid as usize];
-            let named = f.name == accessor_name
-                || f.name
-                    .strip_prefix(&accessor_name)
-                    .is_some_and(|rest| rest.starts_with('-'));
-            let getter_shape = f.params.is_empty()
-                || (f.is_static && f.name.ends_with("-impl") && f.params.len() == 1);
-            named && getter_shape
-        });
+        let accessor = declared
+            .is_none()
+            .then(|| {
+                class.methods.iter().copied().find(|&fid| {
+                    let f = &self.ir.functions[fid as usize];
+                    let named = f.name == accessor_name
+                        || f.name
+                            .strip_prefix(&accessor_name)
+                            .is_some_and(|rest| rest.starts_with('-'));
+                    let getter_shape = f.params.is_empty()
+                        || (f.is_static && f.name.ends_with("-impl") && f.params.len() == 1);
+                    named && getter_shape
+                })
+            })
+            .flatten();
         if let Some(function) = accessor.filter(|_| !direct_field || field.is_none()) {
             let accessor = &self.ir.functions[function as usize];
             return Some(PropertyAccess::Accessor {

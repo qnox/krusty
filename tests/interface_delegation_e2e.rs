@@ -177,12 +177,50 @@ class C(impl: Boxed) : Boxed by impl { val value: Int = 2 }\n\
 fun box(): String {\n\
     val c = C(Impl())\n\
     val base: Base<Int> = c\n\
-    return if (c.getValue() == 1 && base.getValue() == 1 && c.value == 2) \"OK\" else \"fail\"\n\
+    if (c.getValue() != 1) return \"direct\"\n\
+    if (base.getValue() != 1) return \"base\"\n\
+    if (c.value == 0) return \"property-zero\"\n\
+    if (c.value == 1) return \"property-one\"\n\
+    if (c.value != 2) return \"property-other\"\n\
+    return \"OK\"\n\
 }\n";
     assert_eq!(
         run(SRC).expect("all distinct physical getters are emitted"),
         "OK"
     );
+}
+
+#[test]
+fn primitive_property_and_boxed_delegation_getters_match_kotlinc_descriptors() {
+    const SRC: &str = "interface Base<T> { fun getValue(): T }\n\
+interface Boxed : Base<Int> { override fun getValue(): Int }\n\
+class Impl : Boxed { override fun getValue(): Int = 1 }\n\
+class C(impl: Boxed) : Boxed by impl { val value: Int = 2 }\n";
+    let classes = common::expect_classes_with_stdlib(SRC, "DistinctDelegatedGetters");
+    let Some(reference) = common::kotlinc_library(SRC) else {
+        return;
+    };
+    let (_, emitted) = classes
+        .iter()
+        .find(|(name, _)| name == "C")
+        .expect("krusty emits C");
+    let reference = std::fs::read(reference.join("C.class")).expect("kotlinc emits C");
+    let getters = |bytes: &[u8]| {
+        declared_methods(bytes)
+            .into_iter()
+            .filter(|method| method.starts_with("getValue "))
+            .fold(std::collections::BTreeMap::new(), |mut counts, method| {
+                *counts.entry(method).or_insert(0usize) += 1;
+                counts
+            })
+    };
+    let expected = std::collections::BTreeMap::from([
+        ("getValue ()I".to_string(), 1),
+        ("getValue ()Ljava/lang/Integer;".to_string(), 1),
+        ("getValue ()Ljava/lang/Object;".to_string(), 1),
+    ]);
+    assert_eq!(getters(emitted), expected);
+    assert_eq!(getters(emitted), getters(&reference));
 }
 
 /// Generic forwarders retain their declaration type parameters and non-default bounds in the

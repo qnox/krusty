@@ -6094,6 +6094,7 @@ impl<'a> Emitter<'a> {
         if let Some(mut access) = self.declared_property_read_access(
             operation.owner,
             operation.name,
+            None,
             selected.map(|(name, _)| name.as_str()),
             operation.interface,
         ) {
@@ -6368,25 +6369,6 @@ impl<'a> Emitter<'a> {
                 code.invokestatic(m, words, 0);
             }
         }
-    }
-
-    /// Select the JVM access for an active-source property by the exact declaration coordinate
-    /// retained from checked FIR. Companion storage may already have been moved to the outer class;
-    /// consume that backend table directly instead of recovering the property from its spelling.
-    fn local_property_read_access(
-        &self,
-        target: crate::fir::PropertyId,
-        selected_accessor: Option<&str>,
-        selected_interface: bool,
-    ) -> Option<crate::jvm::inline::PropertyAccess> {
-        let crate::ir::IrLocalPropertyLayout::Member {
-            class, owner, name, ..
-        } = self.ir.local_property_layouts.get(&target)?
-        else {
-            return None;
-        };
-        debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
-        self.declared_property_read_access(*owner, name, selected_accessor, selected_interface)
     }
 
     fn local_property_write_access(

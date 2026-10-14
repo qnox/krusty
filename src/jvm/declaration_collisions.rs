@@ -7,6 +7,8 @@
 use crate::diag::{DiagSink, Span};
 use crate::ir::{FunId, IrFile};
 
+mod property_marker_diagnostics;
+
 pub(super) fn validate(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
@@ -617,7 +619,7 @@ fn report_platform_declaration_clashes(
             {
                 let owner = class.fq_name.render().replace(['/', '$'], ".");
                 let mut listed = declarations.clone();
-                listed.sort_by_key(|declaration| match declaration {
+                let kind_order = |declaration: &MemberMethodDeclaration| match declaration {
                     MemberMethodDeclaration::GeneratedDataMember { .. } => 0,
                     MemberMethodDeclaration::GeneratedMethod { .. } => 0,
                     MemberMethodDeclaration::DelegationForwarder { .. } => 1,
@@ -628,11 +630,26 @@ fn report_platform_declaration_clashes(
                     MemberMethodDeclaration::PropertyAccessor { .. } => 0,
                     MemberMethodDeclaration::PropertyAnnotationMarker { .. } => 1,
                     MemberMethodDeclaration::Source { .. } => 2,
-                });
+                };
+                listed.sort_by_key(kind_order);
+                let type_context = listed
+                    .iter()
+                    .flat_map(|declaration| {
+                        property_marker_diagnostics::declaration_types(ir, class, *declaration)
+                    })
+                    .collect::<Vec<_>>();
+                property_marker_diagnostics::order_marker_sources(ir, &mut listed);
                 let listed = listed
                     .into_iter()
                     .map(|declaration| {
-                        render_member_method_declaration(ir, class, declaration, &name, &owner)
+                        render_member_method_declaration(
+                            ir,
+                            class,
+                            declaration,
+                            &name,
+                            &owner,
+                            &type_context,
+                        )
                     })
                     .collect::<Vec<_>>();
                 clash_message(&name, &descriptor, &listed)
@@ -740,19 +757,20 @@ fn render_member_method_declaration(
     declaration: MemberMethodDeclaration,
     name: &str,
     owner: &str,
+    type_context: &[crate::types::Ty],
 ) -> String {
     let (function, parameters) = match declaration {
         MemberMethodDeclaration::Source { function, .. } => {
-            return render_source_member_method(ir, function, name, owner);
+            return render_source_member_method(ir, function, name, owner, type_context);
         }
         MemberMethodDeclaration::GeneratedDataMember { function, .. } => {
-            return render_source_member_method(ir, function, name, owner);
+            return render_source_member_method(ir, function, name, owner, type_context);
         }
         MemberMethodDeclaration::GeneratedMethod { .. } => {
             unreachable!("generated methods use the generic platform-clash diagnostic")
         }
         MemberMethodDeclaration::DelegationForwarder { function, .. } => {
-            return render_source_member_method(ir, function, name, owner);
+            return render_source_member_method(ir, function, name, owner, type_context);
         }
         MemberMethodDeclaration::PropertyAccessor {
             function,
@@ -768,6 +786,7 @@ fn render_member_method_declaration(
                         function,
                         setter,
                         owner,
+                        type_context,
                     )
                 }
                 PropertyAccessorDeclaration::MemberExtension(property) => {
@@ -782,6 +801,7 @@ fn render_member_method_declaration(
                         function.expect("a source member-extension accessor has a function"),
                         &callable,
                         owner,
+                        type_context,
                     )
                 }
                 PropertyAccessorDeclaration::CompanionBlock(source_order) => {
@@ -800,17 +820,14 @@ fn render_member_method_declaration(
                         function.expect("a source companion-block accessor has a function"),
                         &callable,
                         owner,
+                        type_context,
                     )
                 }
             };
         }
-        MemberMethodDeclaration::PropertyAnnotationMarker {
+        MemberMethodDeclaration::PropertyAnnotationMarker { function, .. } => (
             function,
-            source_order,
-            ..
-        } => (
-            function,
-            property_marker_semantic_parameters(ir, class, source_order),
+            property_marker_diagnostics::marker_parameters(ir, function),
         ),
     };
     let identities = ir
@@ -836,7 +853,7 @@ fn render_member_method_declaration(
         rendered.push_str(&rendered_callable_name(parameter));
         rendered.push_str(": ");
         rendered.push_str(
-            &source_member_type_name(ty)
+            &source_member_type_name_in(ty, type_context)
                 .expect("a reported member clash has determined source types"),
         );
     }
@@ -847,7 +864,7 @@ fn render_member_method_declaration(
         .map(|(_, _, ret)| *ret)
         .unwrap_or(ir.functions[function as usize].ret);
     rendered.push_str(
-        &source_member_type_name(ret)
+        &source_member_type_name_in(ret, type_context)
             .expect("a reported member clash has a determined return type"),
     );
     rendered.push_str(" defined in ");
@@ -861,6 +878,7 @@ fn render_property_accessor_declaration(
     function: Option<FunId>,
     setter: bool,
     owner: &str,
+    type_context: &[crate::types::Ty],
 ) -> String {
     let callable = if setter {
         format!("<set-{}>", property.name)
@@ -868,7 +886,7 @@ fn render_property_accessor_declaration(
         format!("<get-{}>", property.name)
     };
     if let Some(function) = function {
-        return render_source_member_method(ir, function, &callable, owner);
+        return render_source_member_method(ir, function, &callable, owner, type_context);
     }
     let mut parameters = property
         .context_params
@@ -885,7 +903,7 @@ fn render_property_accessor_declaration(
             format!(
                 "{}: {}",
                 rendered_callable_name(name),
-                source_member_type_name(*ty)
+                source_member_type_name_in(*ty, type_context)
                     .expect("a reported property-accessor clash has determined source types")
             )
         })
@@ -894,7 +912,7 @@ fn render_property_accessor_declaration(
         parameters.push(format!(
             "{}: {}",
             rendered_callable_name("<set-?>"),
-            source_member_type_name(property.ty)
+            source_member_type_name_in(property.ty, type_context)
                 .expect("a reported property-accessor clash has a determined property type")
         ));
     }
@@ -907,12 +925,18 @@ fn render_property_accessor_declaration(
         "fun {}({}): {} defined in {owner}",
         rendered_callable_name(&callable),
         parameters.join(", "),
-        source_member_type_name(ret)
+        source_member_type_name_in(ret, type_context)
             .expect("a reported property-accessor clash has a determined return type")
     )
 }
 
-fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: &str) -> String {
+fn render_source_member_method(
+    ir: &IrFile,
+    function: FunId,
+    name: &str,
+    owner: &str,
+    type_context: &[crate::types::Ty],
+) -> String {
     let parameters = semantic_function_parameters(ir, function);
     let defaults = ir.declared_param_defaults(function);
     let identities = ir
@@ -928,7 +952,7 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
     let mut values = Vec::new();
     let mut value_index = 0;
     for (identity, &ty) in identities.iter().zip(parameters) {
-        let ty = source_member_type_name(ty)
+        let ty = source_member_type_name_in(ty, type_context)
             .expect("a reported member clash has determined source types");
         match identity.role {
             crate::ir::IrParameterRole::ContextValue => {
@@ -968,12 +992,14 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
                 value_index += 1;
             }
             crate::ir::IrParameterRole::Generated(
-                crate::ir::IrGeneratedParameterRole::InterfaceDelegationValue { ordinal },
+                crate::ir::IrGeneratedParameterRole::InterfaceDelegationValue { .. },
             ) => {
-                values.push(format!(
-                    "{}: {ty}",
-                    rendered_callable_name(&format!("p{ordinal}"))
-                ));
+                let name = crate::jvm::parameter_names::local_variable(
+                    identity,
+                    &ir.functions[function as usize].name,
+                )
+                .expect("an interface-delegation parameter has a JVM diagnostic spelling");
+                values.push(format!("{}: {ty}", rendered_callable_name(&name)));
                 value_index += 1;
             }
             role => panic!("a source member clash contains non-source parameter role {role:?}"),
@@ -990,7 +1016,7 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
         .signatures
         .get(&function)
         .map_or_else(Vec::new, |signature| {
-            render_member_type_parameters(&mut rendered, &signature.type_params)
+            render_member_type_parameters(&mut rendered, &signature.type_params, type_context)
         });
     if let Some(receiver) = receiver {
         rendered.push_str(&receiver);
@@ -1011,10 +1037,10 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
         })
         .unwrap_or(ir.functions[function as usize].ret);
     rendered.push_str(
-        &source_member_type_name(ret)
+        &source_member_type_name_in(ret, type_context)
             .expect("a reported member clash has a determined return type"),
     );
-    render_member_where_clause(&mut rendered, &trailing_bounds);
+    render_member_where_clause(&mut rendered, &trailing_bounds, type_context);
     rendered.push_str(" defined in ");
     rendered.push_str(owner);
     rendered
@@ -1023,6 +1049,7 @@ fn render_source_member_method(ir: &IrFile, function: FunId, name: &str, owner: 
 fn render_member_type_parameters<'a>(
     rendered: &mut String,
     parameters: &'a [crate::ir::IrTypeParameter],
+    type_context: &[crate::types::Ty],
 ) -> Vec<(&'a str, crate::types::Ty)> {
     if parameters.is_empty() {
         return Vec::new();
@@ -1043,7 +1070,7 @@ fn render_member_type_parameters<'a>(
         if let Some((&first, remaining)) = bounds.split_first() {
             rendered.push_str(" : ");
             rendered.push_str(
-                &source_member_type_name(first)
+                &source_member_type_name_in(first, type_context)
                     .expect("a reported member clash has determined type-parameter bounds"),
             );
             for &bound in remaining {
@@ -1055,7 +1082,11 @@ fn render_member_type_parameters<'a>(
     trailing_bounds
 }
 
-fn render_member_where_clause(rendered: &mut String, trailing_bounds: &[(&str, crate::types::Ty)]) {
+fn render_member_where_clause(
+    rendered: &mut String,
+    trailing_bounds: &[(&str, crate::types::Ty)],
+    type_context: &[crate::types::Ty],
+) {
     if trailing_bounds.is_empty() {
         return;
     }
@@ -1067,17 +1098,22 @@ fn render_member_where_clause(rendered: &mut String, trailing_bounds: &[(&str, c
         rendered.push_str(&rendered_callable_name(parameter));
         rendered.push_str(" : ");
         rendered.push_str(
-            &source_member_type_name(*bound)
+            &source_member_type_name_in(*bound, type_context)
                 .expect("a reported member clash has determined type-parameter bounds"),
         );
     }
 }
 
-fn source_member_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagnosticType> {
+fn source_member_type_name_in(
+    ty: crate::types::Ty,
+    type_context: &[crate::types::Ty],
+) -> Result<String, UndeterminedDiagnosticType> {
     ensure_determined_type(ty)?;
-    Ok(ty.source_name_with_type_parameter(&|name| {
-        rendered_callable_name(crate::types::type_parameter_source_name(name))
-    }))
+    Ok(
+        ty.source_name_with_type_parameter_in(type_context, &|name| {
+            rendered_callable_name(crate::types::type_parameter_source_name(name))
+        }),
+    )
 }
 
 fn semantic_function_parameters(ir: &IrFile, function: FunId) -> &[crate::types::Ty] {
@@ -1090,51 +1126,6 @@ fn semantic_function_parameters(ir: &IrFile, function: FunId) -> &[crate::types:
                 .map(|signature| signature.params.as_slice())
         })
         .unwrap_or(&ir.functions[function as usize].params)
-}
-
-fn property_marker_semantic_parameters(
-    ir: &IrFile,
-    class: &crate::ir::IrClass,
-    source_order: u32,
-) -> Vec<crate::types::Ty> {
-    if let Some(property) = class
-        .properties
-        .iter()
-        .find(|property| property.source_order == source_order)
-    {
-        return property.getter.map_or_else(
-            || {
-                property
-                    .context_params
-                    .iter()
-                    .map(|(_, _, ty)| *ty)
-                    .collect()
-            },
-            |getter| semantic_function_parameters(ir, getter).to_vec(),
-        );
-    }
-    if let Some(property) = ir
-        .member_ext_props
-        .get(&class.fq_name_id())
-        .and_then(|properties| {
-            properties
-                .iter()
-                .find(|property| property.source_order == source_order)
-        })
-    {
-        return semantic_function_parameters(ir, property.getter).to_vec();
-    }
-    if let Some(property) = ir
-        .companion_blocks
-        .properties_of(class.fq_name_id())
-        .find(|property| property.source_order == source_order)
-    {
-        return property
-            .getter
-            .map(|getter| semantic_function_parameters(ir, getter).to_vec())
-            .unwrap_or_default();
-    }
-    Vec::new()
 }
 
 fn reject_duplicate_constructors(class: &crate::ir::IrClass) -> Result<(), String> {
@@ -1459,8 +1450,8 @@ fn rendered_callable_name(name: &str) -> String {
     let mut characters = name.chars();
     let ordinary = characters
         .next()
-        .is_some_and(crate::lexer::is_kotlin_identifier_start)
-        && characters.all(crate::lexer::is_kotlin_identifier_continue)
+        .is_some_and(crate::names::is_identifier_start)
+        && characters.all(crate::names::is_identifier_continue)
         && name != "_"
         && !matches!(
             name,
@@ -1824,7 +1815,13 @@ mod tests {
             },
         ));
         assert_eq!(
-            render_source_member_method(&ir, delegated, "value", "fixtures.Owner"),
+            render_source_member_method(
+                &ir,
+                delegated,
+                "value",
+                "fixtures.Owner",
+                &[crate::types::Ty::Int, parameter, bound, comparable],
+            ),
             "fun <`T value` : CharSequence> value(p0: Int): `T value` where `T value` : Comparable<`T value`> defined in fixtures.Owner"
         );
     }

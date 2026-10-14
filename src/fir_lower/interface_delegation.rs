@@ -650,7 +650,11 @@ fn delegated_call(
                         result.get(),
                     )),
                     interface: *interface,
-                    module_target: None,
+                    module_target: match *target {
+                        ResolvedDelegatedModuleTarget::Function(callable) => Some(callable),
+                        ResolvedDelegatedModuleTarget::PropertyGetter(_)
+                        | ResolvedDelegatedModuleTarget::PropertySetter(_) => None,
+                    },
                     target: Some(match *target {
                         ResolvedDelegatedModuleTarget::Function(callable) => {
                             IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(

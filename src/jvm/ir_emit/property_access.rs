@@ -131,7 +131,7 @@ impl Emitter<'_> {
         owner: TypeName,
         name: &str,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
-        self.declared_property_read_access(owner, name, None, false)
+        self.declared_property_read_access(owner, name, None, None, false)
     }
 
     /// Is this exact physical field a `lateinit` backing field of a declaration THIS compilation is

@@ -108,6 +108,125 @@ fn a_member_extension_marker_clash_escapes_its_generic_receiver_parameter() {
 }
 
 #[test]
+fn a_member_extension_marker_clash_lists_a_different_source_shape_first() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "GenericExtensionMarkerOrder.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<A> {\n\
+             \x20   @Marker val A.item: Int get() = 1\n\
+             \x20   fun `getItem$annotations`(receiver: Any?) {}\n\
+             \x20   fun `getItem$annotations`(receiver: A) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn multiple_colliding_member_extension_markers_match_kotlinc_order() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "ExtensionMarkerSourceOrder.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<A> {\n\
+             \x20   @Marker val List<A>.item: Int get() = size\n\
+             \x20   @Marker val List<String>.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: List<A>) {}\n\
+             \x20   fun `getItem$annotations`(receiver: List<String>) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn marker_clash_qualifies_same_named_classifier_shapes_across_the_group() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "QualifiedExtensionMarkerClash.kt",
+            "class A { class Foo }\n\
+             class B { class Foo }\n\
+             @Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val List<A.Foo>.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: List<B.Foo>) {}\n\
+             \x20   fun `getItem$annotations`(receiver: List<A.Foo>) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_replaces_only_nested_type_parameters() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "NestedGenericExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T> {\n\
+             \x20   @Marker val List<T>.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: List<T>) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_star_projects_a_generic_bound() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "BoundedGenericExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T : List<String>> {\n\
+             \x20   @Marker val T.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_marker_bound_and_star_projection_with_the_same_diagnostic_shape_have_stable_order() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "SameDiagnosticShapeExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T : List<String>> {\n\
+             \x20   @Marker val T.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: List<*>) {}\n\
+             \x20   fun `getItem$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_erases_a_function_bound() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FunctionBoundExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T : (String) -> Int> {\n\
+             \x20   @Marker val T.item: Int get() = 1\n\
+             \x20   fun `getItem$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
 fn a_member_extension_function_marker_clash_renders_its_receiver() {
     common::assert_error_blocks_match_kotlinc(
         &[(
