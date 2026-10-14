@@ -487,6 +487,18 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             .unwrap_or(internal)
     }
 
+    /// Publish the provider-normalized override slot, if any, for a current-module declaration.
+    /// The provider owns target-language compatibility and representation rules; common hierarchy
+    /// code consumes only the returned semantic slot and never reconstructs one from physical
+    /// names, descriptors, or declaration origin.
+    fn source_override_slot(
+        &self,
+        _source: &dyn crate::symbol_source::SymbolSource,
+        _function: &FunctionInfo,
+    ) -> Option<ProviderOverrideSlot> {
+        None
+    }
+
     /// Convert a platform classifier name to the identity used by source resolution.
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
         internal
@@ -1510,17 +1522,60 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
     }
 }
 
+/// One input in a provider-normalized override slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OverrideSlotInput {
+    Type(Ty),
+    Function(usize),
+}
+
+/// Provider-normalized identity of one platform override slot. The common hierarchy may compare
+/// this typed contract, but it never reconstructs the slot from target representation facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderOverrideSlot {
+    owner: TypeName,
+    key: ProviderOverrideKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProviderOverrideKey {
+    effective_name: String,
+    inputs: Box<[OverrideSlotInput]>,
+}
+
+impl ProviderOverrideSlot {
+    pub(crate) fn new(
+        owner: TypeName,
+        effective_name: String,
+        inputs: Box<[OverrideSlotInput]>,
+    ) -> Self {
+        Self {
+            owner,
+            key: ProviderOverrideKey {
+                effective_name,
+                inputs,
+            },
+        }
+    }
+
+    pub(crate) fn owner(&self) -> TypeName {
+        self.owner
+    }
+
+    pub(crate) fn same_key(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
 /// One overload in a [`FunctionSet`]: the full platform-neutral shape of a single function the front end
 /// needs, in ONE place — no follow-up metadata calls. `callable` is the opaque emit handle (the platform
 /// emitter consumes it; the front end never inspects it).
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
-    /// Provider-normalized classifier whose language override scope declares this member. JVM
-    /// providers use the mapped Java classifier here when Java erasure governs the slot (for
-    /// example `kotlin.collections.MutableList.addAll` is declared in `java.util.List`'s Java
-    /// scope). This is a semantic override fact, distinct from the callable's physical emit owner.
-    pub java_override_scope_owner: Option<TypeName>,
+    /// Provider-owned override-slot identity for declarations whose platform compatibility differs
+    /// from their source-language signature. This is distinct from the physical emit handle.
+    pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
     /// Provider-normalized receiver-less declaration in a classifier's static namespace. The
     /// checker uses this only as source call shape; target realization remains on the callable.
     pub classifier_static: bool,
@@ -1785,7 +1840,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
-            java_override_scope_owner: None,
+            provider_override_slot: None,
             classifier_static: false,
             associated_classifier: None,
             associated_access_owner: None,

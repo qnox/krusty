@@ -222,6 +222,27 @@ fn a_java_join_does_not_merge_ordinary_kotlin_members_by_erasure() {
     );
 }
 
+/// A Java subclass can deliberately re-abstract a concrete superclass method. The reverse owner
+/// relation must not let that older concrete declaration discharge the nearer abstract slot.
+#[test]
+fn a_java_subclass_can_reabstract_a_concrete_superclass_method() {
+    let base = "public class ConcreteBase { public int f(int value) { return value; } }";
+    let reabstract = "public abstract class Reabstract extends ConcreteBase {\n\
+        @Override public abstract int f(int value);\n\
+    }";
+    let main = "class Derived : Reabstract()\n";
+    assert_eq!(
+        java_diagnostics(
+            &[("ConcreteBase.java", base), ("Reabstract.java", reabstract),],
+            main,
+        ),
+        [
+            "class 'Derived' is not abstract and does not implement abstract base class member:\n\
+          fun f(p0: Int): Int"
+        ]
+    );
+}
+
 /// kotlinc 2.4.20 reports both the unimplemented `from(String!)` and the `from(Int)` override that
 /// matches nothing, offering `from(p0: String!)` as the potential signature.
 #[test]

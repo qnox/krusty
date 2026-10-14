@@ -240,10 +240,41 @@ fn members_of_classfile_supertypes_match_kotlinc() {
     );
 }
 
-/// A member extension and an ordinary Java member can erase to the same JVM parameter list, but
-/// they remain different Kotlin callable kinds. The extension must not discharge the Java method.
+/// A member extension whose complete input shape erases to a raw Java method supplies that JVM
+/// obligation, even though the Kotlin declaration remains an extension for source lookup.
 #[test]
-fn a_member_extension_does_not_implement_an_ordinary_java_method() {
+fn a_member_extension_implements_the_matching_raw_java_method() {
+    let (library, _) = common::javac_compile(
+        &[(
+            "J.java".to_string(),
+            "package fixture; public abstract class J { public abstract void f(J value); }"
+                .to_string(),
+        )],
+        &[],
+    )
+    .expect("javac must build the ordinary-member fixture");
+    let source = "abstract class Base : fixture.J() { fun fixture.J.f() {} }\n\
+        class Derived : Base()\n\
+        fun box(): String { val value: fixture.J = Derived(); value.f(value); return \"OK\" }\n";
+    let classpath = [library, common::stdlib_jar()];
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &classpath);
+    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
+    assert_eq!(expected, [] as [&str; 0]);
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+    assert_eq!(
+        common::compile_and_run_box(source, "Main", &classpath, None).as_deref(),
+        Some("OK"),
+        "the Java-typed virtual call must reach the source member extension"
+    );
+}
+
+/// A source member extension does not satisfy a raw Java slot merely by sharing its source name;
+/// the complete physical input shape must match.
+#[test]
+fn a_differently_typed_member_extension_does_not_implement_a_raw_java_method() {
     let (library, _) = common::javac_compile(
         &[(
             "J.java".to_string(),
@@ -254,7 +285,7 @@ fn a_member_extension_does_not_implement_an_ordinary_java_method() {
     )
     .expect("javac must build the ordinary-member fixture");
     let source =
-        "abstract class Base : fixture.J() { fun fixture.J.f() {} }\nclass Derived : Base()\n";
+        "abstract class Base : fixture.J() { fun String.f() {} }\nclass Derived : Base()\n";
     let result =
         common::compiler_diagnostics(&[("Main.kt", source)], &[library, common::stdlib_jar()]);
     let expected = common::rendered_error_blocks(&result.reference_stderr, true);
@@ -263,6 +294,36 @@ fn a_member_extension_does_not_implement_an_ordinary_java_method() {
         [
             "Main.kt:2:1: class 'Derived' is not abstract and does not implement abstract base class member:",
             "| fun f(p0: J!): Unit",
+        ]
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+}
+
+/// Unsigned and other value-class inputs may share a JVM carrier with a Java parameter, but their
+/// source declarations are name-mangled and therefore do not implement that raw Java method.
+#[test]
+fn a_value_class_member_extension_does_not_implement_a_raw_java_method() {
+    let (library, _) = common::javac_compile(
+        &[(
+            "J.java".to_string(),
+            "package fixture; public abstract class J { public abstract void f(int value); }"
+                .to_string(),
+        )],
+        &[],
+    )
+    .expect("javac must build the primitive ordinary-member fixture");
+    let source = "abstract class Base : fixture.J() { fun UInt.f() {} }\nclass Derived : Base()\n";
+    let result =
+        common::compiler_diagnostics(&[("Main.kt", source)], &[library, common::stdlib_jar()]);
+    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
+    assert_eq!(
+        expected,
+        [
+            "Main.kt:2:1: class 'Derived' is not abstract and does not implement abstract base class member:",
+            "| fun f(p0: Int): Unit",
         ]
     );
     assert_eq!(
@@ -461,8 +522,8 @@ fn generic_shape_abstract_overloads_from_classpath_are_all_reported() {
     );
 }
 
-/// Captured enclosing arguments of an `inner` classifier belong on their declaring source segment,
-/// not flattened beside the innermost classifier's own arguments.
+/// In these diagnostics kotlinc renders metadata-retained inner-class arguments as one flattened
+/// classifier application, with the inner argument before the captured outer argument.
 #[test]
 fn nested_generic_classifier_segments_match_kotlinc() {
     let library = common::kotlinc_lib_out(&[(
@@ -478,14 +539,33 @@ fn nested_generic_classifier_segments_match_kotlinc() {
         expected,
         [
             "Main.kt:4:5: 'nested' overrides nothing. Potential signatures for overriding:",
-            "| fun nested(value: Outer<String>.Inner<Int>): Unit",
+            "| fun nested(value: Outer.Inner<Int, String>): Unit",
             "Main.kt:6:1: class 'Derived' is not abstract and does not implement abstract base class member:",
-            "| fun deep(value: Outer<String>.Inner<Int>): Unit",
+            "| fun deep(value: Outer.Inner<Int, String>): Unit",
         ]
     );
     assert_eq!(
         common::rendered_error_blocks(&result.krusty_stderr, false),
         expected
+    );
+}
+
+/// Flattening is a Kotlin diagnostic convention, not a classpath-origin distinction.
+#[test]
+fn source_nested_generic_classifier_segments_match_kotlinc() {
+    assert_complete_errors(
+        &[(
+            "Main.kt",
+            "class Outer<A> { inner class Inner<B> }\n\
+             interface Shapes { fun nested(value: Outer<String>.Inner<Int>) }\n\
+             abstract class Bad : Shapes {\n\
+                 override fun nested(value: Int) {}\n\
+             }\n",
+        )],
+        &[
+            "Main.kt:4:5: 'nested' overrides nothing. Potential signatures for overriding:",
+            "| fun nested(value: Outer.Inner<Int, String>): Unit",
+        ],
     );
 }
 
@@ -541,10 +621,10 @@ fn covariant_abstract_property_reports_most_specific_result() {
     );
 }
 
-/// Recovering the declaration selected for a covariant fake override must retain its result type;
-/// the input-only property slot deliberately treats these declarations as one override family.
+/// Recovering a covariant fake override must retain its most-specific result without attributing
+/// the interface obligation to the abstract source class that merely inherits it.
 #[test]
-fn source_covariant_property_recovery_keeps_the_selected_result() {
+fn source_covariant_property_recovery_keeps_interface_provenance() {
     assert_complete_errors(
         &[
             (
@@ -554,7 +634,7 @@ fn source_covariant_property_recovery_keeps_the_selected_result() {
             ("Main.kt", "class Derived : fixture.Base()\n"),
         ],
         &[
-            "Main.kt:1:1: class 'Derived' is not abstract and does not implement abstract base class member:",
+            "Main.kt:1:1: class 'Derived' is not abstract and does not implement abstract member:",
             "| val owner: String",
         ],
     );
@@ -596,7 +676,7 @@ fn mutable_abstract_property_wins_over_an_equally_specific_val() {
     assert_eq!(
         expected,
         [
-            "Main.kt:1:1: class 'Derived' is not abstract and does not implement abstract base class member:",
+            "Main.kt:1:1: class 'Derived' is not abstract and does not implement abstract member:",
             "| var value: String",
         ]
     );

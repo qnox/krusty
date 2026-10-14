@@ -18,6 +18,7 @@ mod inline_capability;
 mod java_nullability;
 mod mapped_builtin_member_status;
 mod object_methods;
+mod override_slots;
 mod parameter_plans;
 mod provider_normalization;
 #[cfg(test)]
@@ -4859,11 +4860,30 @@ impl JvmLibraries {
                         // slots. An ordinary Kotlin metadata declaration keeps Kotlin override
                         // identity even when its physical descriptor happens to erase like an
                         // unrelated Java member (notably `Int` versus the mangled `UInt`).
-                        let java_override_scope_owner = (!t.is_kotlin
+                        let provider_override_slot = (!t.is_kotlin
                             || super::jvm_class_map::maps_to_distinct_jvm_internal(cn))
-                        .then_some(physical_owner);
+                        .then(|| {
+                            crate::libraries::ProviderOverrideSlot::new(
+                                // `physical_owner` remains the semantic classifier for most mapped
+                                // builtins so ordinary call emission can retain its selected Kotlin
+                                // declaration identity. Java override scope is different: its owner is
+                                // the mapped Java classifier whose erased member table defines the
+                                // slot (`AbstractMutableCollection` -> `AbstractCollection`).
+                                super::jvm_class_map::to_jvm_type_name(physical_owner),
+                                callable
+                                    .physical_name
+                                    .clone()
+                                    .unwrap_or_else(|| callable.name.clone()),
+                                callable
+                                    .physical_params
+                                    .iter()
+                                    .copied()
+                                    .map(|input| override_slots::normalized_input(self, input))
+                                    .collect(),
+                            )
+                        });
                         overloads.push(FunctionInfo {
-                            java_override_scope_owner,
+                            provider_override_slot,
                             ret: ReturnInfo::new(
                                 m.ret_nullable()
                                     || builtin_ret_nullable
@@ -5135,6 +5155,14 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
 
     fn library_value_form_name(&self, internal: TypeName) -> TypeName {
         super::jvm_class_map::to_jvm_type_name(internal)
+    }
+
+    fn source_override_slot(
+        &self,
+        source: &dyn crate::symbol_source::SymbolSource,
+        function: &crate::libraries::FunctionInfo,
+    ) -> Option<crate::libraries::ProviderOverrideSlot> {
+        override_slots::source_slot(self, source, function)
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {

@@ -507,10 +507,26 @@ fn classifier_display(
     {
         return classifier_segment_display(source, collection, arguments, false);
     }
+    let classifier = source.classifier(name);
+    // FIR's diagnostic renderer keeps a Kotlin classifier's nested path as one classifier
+    // application. Its arguments are likewise one innermost-first list:
+    // `Outer<A>.Inner<B>` is shown as `Outer.Inner<B, A>`. Preserve the exact nested TypeName for
+    // semantics and flatten only at this diagnostic boundary. Java nested classifiers continue to
+    // use their declaration-owned segment arities below.
     if name.nested_owner().is_some()
-        || source
-            .classifier(name)
-            .is_some_and(|classifier| classifier.outer_instance.is_some())
+        && classifier
+            .as_ref()
+            .is_some_and(|classifier| classifier.is_kotlin)
+    {
+        return classifier_segment_display(
+            source,
+            &name.segment_ref().replace('$', "."),
+            arguments,
+            false,
+        );
+    }
+    if name.nested_owner().is_some()
+        || classifier.is_some_and(|classifier| classifier.outer_instance.is_some())
     {
         return nested_classifier_display(source, name, arguments);
     }

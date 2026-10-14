@@ -2,12 +2,11 @@
 //!
 //! A class that is not `abstract` must implement every abstract member it inherits. An obligation
 //! is discharged by a concrete member of the complete applied hierarchy that overrides it, matched
-//! the way kotlinc's override checkers match: a Kotlin declaration by its substituted signature,
-//! with a Java platform type equal to either of its bounds, and a Java declaration by erasure
-//! inside its own class hierarchy.
+//! the way kotlinc's override checkers match: ordinary declarations by their substituted semantic
+//! signatures, with platform-specific override equivalence supplied as a normalized provider slot.
 
-use super::{erased_type_key, Checker, ErasedTypeKey};
-use crate::libraries::{FnKind, FunctionInfo, LibraryType, PropertyInfo};
+use super::Checker;
+use crate::libraries::{FunctionInfo, LibraryType, PropertyInfo};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 use std::hash::{Hash, Hasher};
@@ -355,31 +354,20 @@ impl Checker<'_> {
         );
         let source = self.fed_source();
         let hierarchy = crate::symbol_resolver::applied_hierarchy(&source, root);
-        let java_classifiers = hierarchy
+        let hierarchy_classifiers = hierarchy
             .iter()
-            .filter(|(owner, _, _)| {
-                source
-                    .classifier(*owner)
-                    .is_some_and(|classifier| !classifier.is_kotlin)
-            })
             .map(|(owner, _, _)| *owner)
             .collect::<Vec<_>>();
         // Nearest first, and at each depth the class chain before interfaces: the classifier
         // that declares an unimplemented member is the first of these that declares it.
         let mut classifiers = hierarchy
             .iter()
-            .filter_map(|(owner, receiver, depth)| {
-                Some((*depth, *receiver, source.classifier(*owner)?))
-            })
+            .filter_map(|(owner, _, depth)| Some((*depth, source.classifier(*owner)?)))
             .collect::<Vec<_>>();
-        classifiers.sort_by_key(|(depth, _, classifier)| (*depth, classifier.is_interface()));
-        let classifier_receivers = classifiers
-            .iter()
-            .map(|(_, receiver, _)| *receiver)
-            .collect::<Vec<_>>();
+        classifiers.sort_by_key(|(depth, classifier)| (*depth, classifier.is_interface()));
         let classifiers = classifiers
             .into_iter()
-            .map(|(_, _, classifier)| classifier)
+            .map(|(_, classifier)| classifier)
             .collect::<Vec<_>>();
         let names = classifiers
             .iter()
@@ -477,7 +465,8 @@ impl Checker<'_> {
                     !implementation.flags.is_abstract
                         && implements_abstract_function(
                             &source,
-                            &java_classifiers,
+                            self.libraries,
+                            &hierarchy_classifiers,
                             implementation,
                             function,
                         )
@@ -492,9 +481,10 @@ impl Checker<'_> {
                                 && existing.flags.suspend == function.flags.suspend
                                 && existing.context_count == function.context_count
                                 && existing.is_extension() == function.is_extension()
-                                && java_scope_implements(
+                                && provider_slot_implements(
                                     &source,
-                                    &java_classifiers,
+                                    self.libraries,
+                                    &hierarchy_classifiers,
                                     existing,
                                     function,
                                 ))
@@ -595,8 +585,6 @@ impl Checker<'_> {
                 };
                 if let Some(obligation) = obligation {
                     unresolved.push(declared_property(
-                        &source,
-                        &classifier_receivers,
                         &classifiers,
                         &normalized_functions,
                         &normalized_properties,
@@ -683,8 +671,6 @@ fn declaration_order(classifier: &LibraryType, name: &str) -> usize {
 /// (`AbstractCollection.size()` is `Collection.size`), so that method places the obligation on
 /// its class, while the property itself renders from the nearest classifier that declares it.
 fn declared_property(
-    source: &dyn SymbolSource,
-    classifier_receivers: &[Ty],
     classifiers: &[Arc<LibraryType>],
     normalized_functions: &[&FunctionInfo],
     normalized_properties: &[&PropertyInfo],
@@ -823,31 +809,11 @@ fn declared_property(
         ),
         None => (classifiers.len(), false, 0, 0),
     };
-    // Source FIR can retain a missing accessor through a class fake override even when only an
-    // interface contributes the declaration used for readable rendering. Dependency metadata does
-    // not publish that source-only presentation. Attribute the diagnostic to the source class only
-    // when its applied hierarchy presents the exact abstract accessor; a shape-equivalent concrete
-    // `val` must not claim an unrelated interface's missing setter.
-    let abstract_class_presents_accessor = classifier_receivers
-        .iter()
-        .copied()
-        .zip(classifiers)
-        .take(place.saturating_add(1))
-        .any(|(receiver, classifier)| {
-            !classifier.is_interface()
-                && classifier.inheritance.is_abstract
-                && classifier.source_file.is_some()
-                && crate::symbol_resolver::member_declarations_in_hierarchy(source, receiver, name)
-                    .properties()
-                    .iter()
-                    .any(|property| abstract_property(property) && same_slot_and_result(property))
-        });
     UnimplementedMember {
         declaration: UnimplementedDeclaration::Property(Box::new(declaration)),
-        // The nearest declaration/accessor decides the ordinary owner. An earlier abstract class
-        // with the exact missing accessor claims a recovered interface declaration as its fake
-        // override; unrelated abstract classes do not.
-        in_interface: declaring_interface && !abstract_class_presents_accessor,
+        // A fake override does not redeclare its interface accessor in the abstract class that
+        // merely inherits it. The nearest direct declaration/accessor remains the diagnostic owner.
+        in_interface: declaring_interface,
         order: (place, true, position, overload),
     }
 }
@@ -857,19 +823,29 @@ fn declared_property(
 /// being checked.
 fn implements_abstract_function(
     source: &dyn SymbolSource,
-    java_classifiers: &[TypeName],
+    platform: &dyn crate::libraries::SemanticPlatform,
+    hierarchy_classifiers: &[TypeName],
     implementation: &FunctionInfo,
     declaration: &FunctionInfo,
 ) -> bool {
     if implementation.flags.suspend != declaration.flags.suspend
         || implementation.context_count != declaration.context_count
-        || implementation.kind != declaration.kind
     {
         return false;
     }
-    (crate::symbol_resolver::function_input_shapes_match(source, declaration, implementation)
-        || flexible_function_keys_match(implementation, declaration))
-        || java_scope_implements(source, java_classifiers, implementation, declaration)
+    (implementation.kind == declaration.kind
+        && (crate::symbol_resolver::function_input_shapes_match(
+            source,
+            declaration,
+            implementation,
+        ) || flexible_function_keys_match(implementation, declaration)))
+        || provider_slot_implements(
+            source,
+            platform,
+            hierarchy_classifiers,
+            implementation,
+            declaration,
+        )
 }
 
 /// Kotlin override slots admit either bound of a Java platform type. Keep declaration-owned
@@ -898,26 +874,21 @@ fn flexible_function_keys_match(left: &FunctionInfo, right: &FunctionInfo) -> bo
             .all(|(&left, &right)| crate::assignable::same_flexible_type(left, right))
 }
 
-/// Java members override by erasure (JLS §8.4.2), and kotlinc's Java class scope merges inherited
-/// members with its Java override checker: in `java.util.AbstractList<E>`, the inherited
-/// `AbstractCollection.contains(Object)` implements `List<E>.contains(E)`, although the substituted
-/// Kotlin signatures differ. The two members meet in such a scope only when one Java classifier of
-/// the hierarchy inherits both of their declaring classifiers; elsewhere the Kotlin rule applies.
-fn java_scope_implements(
+/// A platform provider may publish an override slot whose normalized inputs differ from the
+/// declarations' source-language signatures. The common hierarchy compares that explicit fact and
+/// ordinary owner relationships; it does not reconstruct target erasure or inspect declaration
+/// origin.
+fn provider_slot_implements(
     source: &dyn SymbolSource,
-    java_classifiers: &[TypeName],
+    platform: &dyn crate::libraries::SemanticPlatform,
+    hierarchy_classifiers: &[TypeName],
     implementation: &FunctionInfo,
     declaration: &FunctionInfo,
 ) -> bool {
-    if implementation.kind != FnKind::Member || declaration.kind != FnKind::Member {
-        return false;
-    }
-    let (Some(implementation_owner), Some(declaration_owner)) = (
-        implementation.java_override_scope_owner,
-        declaration.java_override_scope_owner,
-    ) else {
+    let Some(declaration_scope) = declaration.provider_override_slot.as_ref() else {
         return false;
     };
+    let declaration_owner = declaration_scope.owner();
     let inherits = |classifier: TypeName, owner: TypeName| {
         classifier == owner
             || crate::symbol_resolver::resolution_subtype(
@@ -926,23 +897,29 @@ fn java_scope_implements(
                 Ty::obj_name(owner),
             )
     };
-    implementation.callable.physical_params.len() == declaration.callable.physical_params.len()
-        && implementation
-            .callable
-            .physical_params
-            .iter()
-            .zip(&declaration.callable.physical_params)
-            .all(|(&left, &right)| java_erasure(left) == java_erasure(right))
-        && java_classifiers.iter().any(|&classifier| {
-            inherits(classifier, implementation_owner) && inherits(classifier, declaration_owner)
-        })
-}
-
-/// Erasure of a declared parameter type. A Java platform type erases like its nullable bound, so a
-/// wrapper class stays boxed while a primitive stays primitive.
-fn java_erasure(ty: Ty) -> ErasedTypeKey {
-    match ty {
-        Ty::PlatformNullable(inner) => erased_type_key(Ty::nullable(*inner)),
-        _ => erased_type_key(ty),
+    let source_slot;
+    let implementation_scope = if let Some(scope) = implementation.provider_override_slot.as_ref() {
+        scope
+    } else {
+        source_slot = platform.source_override_slot(source, implementation);
+        let Some(scope) = source_slot.as_ref() else {
+            return false;
+        };
+        scope
+    };
+    let implementation_owner = implementation_scope.owner();
+    // One provider scope can itself be the join. A mapped semantic hierarchy can expose a
+    // concrete declaration whose provider owner already inherits the abstract slot owner; no
+    // origin-specific parallel hierarchy is needed to rediscover that relation. Conversely, a
+    // nearer abstract declaration can re-abstract a concrete superclass member.
+    if implementation_owner != declaration_owner
+        && inherits(declaration_owner, implementation_owner)
+    {
+        return false;
     }
+    let shares_provider_scope = inherits(implementation_owner, declaration_owner)
+        || hierarchy_classifiers.iter().any(|&classifier| {
+            inherits(classifier, implementation_owner) && inherits(classifier, declaration_owner)
+        });
+    implementation_scope.same_key(declaration_scope) && shares_provider_scope
 }

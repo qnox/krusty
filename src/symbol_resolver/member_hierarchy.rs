@@ -1353,6 +1353,38 @@ fn retain_covariant_inherited_overrides(
         let mut candidate_is_shadowed = false;
         let mut shadowed = Vec::new();
         for (index, existing) in retained.iter().enumerate() {
+            let same_provider_slot = existing
+                .provider_override_slot
+                .as_ref()
+                .zip(candidate.provider_override_slot.as_ref())
+                .is_some_and(|(existing, candidate)| existing.same_key(candidate));
+            let owner_is_interface = |function: &FunctionInfo| {
+                source
+                    .classifier(function.callable.owner)
+                    .is_some_and(|owner| owner.is_interface())
+            };
+            // A provider-normalized concrete class slot implements the matching abstract interface
+            // slot even when the interface is reached at a shallower receiver depth. Keep the
+            // ordinary rank rule for two classes so a nearer abstract class can still re-abstract
+            // a concrete superclass member.
+            let candidate_class_implements_interface = same_provider_slot
+                && !candidate.flags.is_abstract
+                && existing.flags.is_abstract
+                && !owner_is_interface(&candidate)
+                && owner_is_interface(existing);
+            let existing_class_implements_interface = same_provider_slot
+                && !existing.flags.is_abstract
+                && candidate.flags.is_abstract
+                && !owner_is_interface(existing)
+                && owner_is_interface(&candidate);
+            if candidate_class_implements_interface {
+                shadowed.push(index);
+                continue;
+            }
+            if existing_class_implements_interface {
+                candidate_is_shadowed = true;
+                break;
+            }
             if !function_input_shapes_match(source, existing, &candidate) {
                 continue;
             }
