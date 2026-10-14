@@ -6862,6 +6862,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the
   boxed class even when an inlined call substitutes a primitive for it (`ldc Integer`), so the IR
   literal records that it names a type parameter. Test: `tests/class_literal_e2e.rs`.
+- **`@MustBeDocumented` mirrors as `@java.lang.annotation.Documented`.** An annotation class
+  carrying it gets the Java `Documented` meta-annotation after its source annotations and before
+  the `Retention` and `Target` mirrors, as kotlinc's `AdditionalClassAnnotationLowering` adds them.
+  None of the three mirrors is added when the class already declares that Java meta-annotation.
+  Test: `tests/annotation_documented_mirror_e2e.rs`.
 - **A function reference is owned by its declaring file's facade.** `::target` names the facade of
   the file that declares `target` as its reflection owner (`ldc DeclarationsKt`), even when another
   file of the module references it. Test:
