@@ -52,6 +52,7 @@ mod constants;
 mod constructors;
 mod default_arguments;
 pub(crate) use default_arguments::module_override_callable;
+mod enums;
 mod expression_provenance;
 mod field_flags;
 mod fields;
@@ -124,6 +125,7 @@ pub use constructors::{
     IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction,
     IrCustomSerializerConstructorTarget,
 };
+pub use enums::{EnumSwitchRegistration, IrCheckedEnumEntryBody, IrEnumEntry};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
@@ -228,15 +230,6 @@ pub struct IrCheckedClassInitializer {
     pub initialization_order: u32,
     pub class: ClassId,
     pub body: ExprId,
-}
-
-#[derive(Clone, Debug)]
-pub struct IrCheckedEnumEntryBody {
-    pub declaration: crate::fir::DeclarationId,
-    pub class: ClassId,
-    pub ordinal: u32,
-    pub name: String,
-    pub construction: ExprId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -892,53 +885,6 @@ pub struct IrFunction {
     /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
     /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.
     pub param_checks: Vec<Option<IrParameterCheck>>,
-}
-
-/// One claim on the emitting class's `$WhenMappings`: the `$EnumSwitchMapping$N` table for
-/// `classifier`, and, with `entry`, that entry's key in it. A table is numbered by the first claim
-/// on its enum and a key by the first claim on its entry, so claims are replayed in order.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnumSwitchRegistration {
-    pub classifier: TypeName,
-    pub entry: Option<Box<str>>,
-}
-
-/// One entry of an `enum class` in [`IrClass`]. Groups what were parallel `Vec`s keyed by entry index
-/// (the `(name, args)` tuple plus the separate `subclass` vec), so an entry's name / constructor args /
-/// synthesized-subclass marker can't desync.
-#[derive(Clone, Debug)]
-pub struct IrEnumEntry {
-    /// Entry name (`RED`).
-    pub name: String,
-    /// Exact source span of the entry declaration for diagnostics about its physical JVM surface.
-    /// Dependency and synthesized entries have no source location.
-    pub diagnostic_span: Option<crate::diag::Span>,
-    /// Checked source-order evaluation that must run before the physical constructor is entered.
-    /// Argument mapping spills operands here so named/reordered arguments preserve Kotlin evaluation
-    /// order without asking a backend to reconstruct the source call.
-    pub argument_prelude: Vec<ExprId>,
-    /// Lowered constructor-argument value ids (`RED(0xFF0000)`); empty for an arg-less entry. Filled in a
-    /// later lowering pass — built empty when the entry list is first created.
-    pub args: Vec<ExprId>,
-    /// Semantic parameter list of the constructor selected for this entry. Enum entries may target
-    /// secondary constructors whose parameters differ from the primary constructor; a backend
-    /// prepends its own enum ABI operands to this already-resolved call shape.
-    pub constructor_parameter_types: Vec<Ty>,
-    /// Exact constructor selected by checked FIR. A backend consumes this declaration ordinal;
-    /// it must not repeat overload selection from the parameter list.
-    pub constructor: IrConstructorTarget,
-    /// Selected constructor parameters whose values come from declaration defaults. This is the
-    /// frontend's final argument-mapping decision; a backend only realizes its default-argument ABI.
-    pub default_parameters: Vec<u32>,
-    /// `Some(subclass_internal)` when the entry has a body and is constructed as an instance of a synthesized
-    /// anonymous subclass (`new Enum$ENTRY(name, ordinal, args)`); `None` when constructed as the enum
-    /// itself.
-    /// 1-based source line of the entry's declaration, for the `<clinit>` `LineNumberTable`.
-    pub decl_line: u32,
-    /// The entry declaration's stable source position, in the key space of the class's other
-    /// members, so metadata can visit it in declaration order.
-    pub source_order: u32,
-    pub subclass: Option<TypeName>,
 }
 
 /// One primary-constructor parameter of an [`IrClass`], in declaration order: its type, storage,

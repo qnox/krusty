@@ -26,7 +26,11 @@ const SOURCE: &str = "package store\n\
     class K {\n\
     \x20   fun m(f: F) = when (f) { F.Y -> \"y\"; F.X -> \"x\" }\n\
     \x20   fun n(e: E) = when (e) { E.A -> \"x\"; E.B -> \"y\"; E.C -> \"z\" }\n\
-    }\n";
+    }\n\
+    \n\
+    fun objectOwned(e: E): String = object {\n\
+    \x20   fun select(value: E) = when (value) { E.B -> \"object\"; else -> \"other\" }\n\
+    }.select(e)\n";
 
 fn assert_identical(class: &str) {
     common::byte_diff_against_kotlinc_cp(
@@ -60,6 +64,16 @@ fn class_when_mappings_class_is_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn object_expression_when_reads_its_own_mappings_like_kotlinc() {
+    assert_identical("store/EnumWhenMappingsKt$objectOwned$1");
+}
+
+#[test]
+fn object_expression_when_mappings_class_is_byte_identical_to_kotlinc() {
+    assert_identical("store/EnumWhenMappingsKt$objectOwned$1$WhenMappings");
+}
+
+#[test]
 fn enum_when_mappings_execute() {
     let out = common::compile_and_run_with_stdlib(
         &format!(
@@ -67,10 +81,10 @@ fn enum_when_mappings_execute() {
              \x20   stmt(E.B)\n\
              \x20   return listOf(one(E.A), one(E.B), two(null), two(E.A), two(E.C)).toString() +\n\
              \x20       listOf(nested(E.A, F.X), nested(E.A, F.Y), nested(E.C, F.X)) +\n\
-             \x20       K().m(F.X) + K().n(E.C)\n\
+             \x20       K().m(F.X) + K().n(E.C) + objectOwned(E.B)\n\
              }}\n"
         ),
         "EnumWhenMappingsRun",
     );
-    assert_eq!(out.as_deref(), Some("[2, 1, 3, 4, 1][6, 5, 7]xz"));
+    assert_eq!(out.as_deref(), Some("[2, 1, 3, 4, 1][6, 5, 7]xzobject"));
 }

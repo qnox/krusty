@@ -8,15 +8,14 @@
 //! and therefore owns the table, is a JVM placement fact, so the table and its keys are realized at
 //! emission; this pass records which entries each `when` claims, in kotlinc's visiting order.
 
-use std::collections::HashMap;
-
 use crate::backend::coroutines::max_value_index;
+use crate::fx_hash::HashMap;
 use crate::ir::{EnumSwitchRegistration, ExprId, IrBinOp, IrConst, IrExpr, IrFile};
 use crate::types::{Ty, TypeName};
 
 pub(crate) fn lower(ir: &mut IrFile) {
     let mut lowering = EnumWhenLowering {
-        claims: HashMap::new(),
+        claims: HashMap::default(),
         next_value: max_value_index(ir) + 1,
     };
     for expression in 0..ir.exprs.len() as ExprId {
