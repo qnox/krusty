@@ -187,6 +187,7 @@ mod unified_lambda_splice;
 mod value_emission;
 mod vararg;
 mod when;
+mod when_mappings;
 use declared_property_accessor::{
     declared_property_accessor_jvm, emit_backing_field_read_adaptation,
     emit_backing_field_write_adaptation,
@@ -379,6 +380,8 @@ pub(crate) struct EmitRun {
     transformed_coroutines: transformed_suspensions::TransformedCoroutines,
     /// The names of the anonymous objects regenerated for inline calls, by calling class.
     regenerated_object_names: bytecode_inline_call::RegeneratedObjectNames,
+    /// The `$WhenMappings` tables of the classes this pass emits enum switches in.
+    when_mappings: std::cell::RefCell<when_mappings::WhenMappingTables>,
 }
 
 impl EmitRun {
@@ -1456,6 +1459,7 @@ fn emit_pass(
     env.run.lambda_classes_written.borrow_mut().clear();
     env.run.machine_classes.borrow_mut().clear();
     env.run.regenerated_object_names.clear();
+    env.run.when_mappings.borrow_mut().clear();
     if !jvm_can_emit(ir) {
         crate::trace_compiler!(
             "lower",
@@ -1684,6 +1688,7 @@ fn emit_pass(
     }
     out.extend(drain_lambda_classes(env, opts));
     out.extend(env.run.machine_classes.borrow_mut().drain(..));
+    out.extend(env.run.when_mappings.borrow().write_classes(env, opts));
     if env.run.emission_failed() {
         return None; // malformed backend input — discard every class from this pass
     }
@@ -6953,6 +6958,7 @@ impl<'a> Emitter<'a> {
             IrExpr::RefGet { elem, .. } => ir_ty_to_jvm(elem),
             IrExpr::RefSet { .. } => Ty::Unit,
             IrExpr::EnumValues { classifier } => Ty::array(Ty::obj_name(*classifier)),
+            IrExpr::EnumSwitchOrdinal { .. } | IrExpr::EnumSwitchKey { .. } => Ty::Int,
             IrExpr::EnumEntries { classifier } => Ty::obj_args_name(
                 crate::types::type_name("kotlin/enums/EnumEntries"),
                 &[Ty::obj_name(*classifier)],

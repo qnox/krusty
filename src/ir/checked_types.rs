@@ -105,6 +105,7 @@ impl IrFile {
             IrExpr::EnumEntries { classifier } => {
                 Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::Obj(*classifier, &[])])
             }
+            IrExpr::EnumSwitchOrdinal { .. } | IrExpr::EnumSwitchKey { .. } => Ty::Int,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::CallableReference(reference) => reference.function_type,
             IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
@@ -214,5 +215,24 @@ mod tests {
                 (8, Ty::Long),
             ])
         );
+    }
+
+    #[test]
+    fn enum_switch_nodes_name_their_checked_int_type() {
+        let mut file = IrFile::default();
+        let subject = file.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let classifier = crate::types::type_name("sample/Choice");
+        let ordinal = file.add_expr(IrExpr::EnumSwitchOrdinal {
+            classifier,
+            subject,
+            registrations: Box::new([]),
+        });
+        let key = file.add_expr(IrExpr::EnumSwitchKey {
+            classifier,
+            name: "First".into(),
+        });
+
+        assert_eq!(file.checked_type(ordinal), Some(Ty::Int));
+        assert_eq!(file.checked_type(key), Some(Ty::Int));
     }
 }

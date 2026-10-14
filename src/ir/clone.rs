@@ -224,6 +224,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::EnumSwitchOrdinal { subject: arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
         | IrExpr::NewArray { size: arg, .. }
@@ -330,6 +331,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::ExternalStaticInstance { .. }
         | IrExpr::StaticInstance { .. }
         | IrExpr::EnumValues { .. }
+        | IrExpr::EnumSwitchKey { .. }
         | IrExpr::EnumEntries { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance

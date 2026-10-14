@@ -534,7 +534,18 @@ fn remap_expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>
         | IrExpr::EnumEntry { classifier, .. }
         | IrExpr::EnumValues { classifier }
         | IrExpr::EnumValueOf { classifier, .. }
-        | IrExpr::EnumEntries { classifier } => name(classifier, names),
+        | IrExpr::EnumEntries { classifier }
+        | IrExpr::EnumSwitchKey { classifier, .. } => name(classifier, names),
+        IrExpr::EnumSwitchOrdinal {
+            classifier,
+            registrations,
+            ..
+        } => {
+            name(classifier, names);
+            for registration in registrations.iter_mut() {
+                name(&mut registration.classifier, names);
+            }
+        }
         IrExpr::LocalPropertyReference(reference) => {
             name(&mut reference.source.package, names);
             if let Some(class) = &mut reference.class {
