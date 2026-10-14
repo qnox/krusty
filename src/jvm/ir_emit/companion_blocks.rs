@@ -89,6 +89,7 @@ pub(super) fn property_signature(
             }),
         }),
         synthetic_method: property_marker_signature(ir, class, property.source_order),
+        delegate_method: None,
         moved_from_interface_companion: false,
     }
 }

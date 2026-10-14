@@ -20,6 +20,11 @@ pub(super) fn member_method_group_source_order(
                 function,
             ),
             MemberMethodDeclaration::GeneratedMethod { offset } => (offset, 1, 0),
+            MemberMethodDeclaration::InPlaceDelegate {
+                function,
+                source_order,
+                ..
+            } => (source_order, 1, function),
             MemberMethodDeclaration::PropertyAnnotationMarker {
                 function,
                 source_order,
@@ -148,6 +153,7 @@ pub(super) fn declaration_types(
     let function = match declaration {
         MemberMethodDeclaration::Source { function, .. }
         | MemberMethodDeclaration::GeneratedDataMember { function, .. }
+        | MemberMethodDeclaration::InPlaceDelegate { function, .. }
         | MemberMethodDeclaration::DelegationForwarder { function, .. } => Some(function),
         MemberMethodDeclaration::PropertyAnnotationMarker { function, .. } => {
             let mut types = marker_parameters(ir, function);

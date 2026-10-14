@@ -12,8 +12,9 @@ use crate::ir::referenced_classifiers::{collect_classifier_names, referenced_cla
 use crate::ir::IrFile;
 use crate::types::TypeName;
 
-/// Publish the value classes this file references into its value-class facts, ahead of the
-/// passes that ask about them before the value-class pass runs (bridge derivation).
+/// Publish the value classes this file references into its value-class facts, ahead of JVM passes
+/// that need the declaration kind before the value-class representation pass runs (delegate-method
+/// shape and bridge derivation).
 pub(crate) fn record_referenced(
     ir: &mut IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,

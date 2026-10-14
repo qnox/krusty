@@ -158,6 +158,7 @@ mod tests {
             accessor_annotations: Default::default(),
             field_name: None,
             field_desc: None,
+            delegate_method: None,
             decl_order: 1,
         }
     }

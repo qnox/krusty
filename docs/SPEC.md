@@ -10712,9 +10712,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is ABSTRACT, an interface member with a getter is OPEN. A getter written in source, a setter
   body, a `private set` and a delegated property's accessors are not the default accessor, which
   the accessor flag word records; a bodiless `set` is. A non-default setter records its value
-  parameter (the written name, else `value`, or `<set-?>` when delegated), and a delegated property
-  records its `x$delegate` field; `lateinit` and delegation are property flags. Measured against kotlinc
-  2.4.20; see `docs/METADATA_NOTES.md`. Test: `tests/metadata_property_flags_e2e.rs`.
+  parameter (the written name, else `value`, or `<set-?>` when delegated), and an ordinary
+  delegated property records its `x$delegate` field; a singleton or constant delegate instead
+  records the in-place delegate method described below. `lateinit` and delegation are property
+  flags. Measured against kotlinc 2.4.20; see `docs/METADATA_NOTES.md`. Test:
+  `tests/metadata_property_flags_e2e.rs`.
 - **Status an override inherits.** An override records the return-value status of the first
   declaration it overrides that has one (Java declarations have none and are skipped) and is
   `operator`/`infix` when any declaration it overrides is. Kotlin's `Any` is the implicit supertype
@@ -12424,10 +12426,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operands a same-module expansion never reads; the JVM realization elides them, and for a
   dependency's operator reads its bytecode. A dependency operator that is not `@InlineOnly` or
   reified must then be spliced: falling back to a real call is refused, since the call would check
-  the `null`. A top-level delegated property's metadata sets `IS_DELEGATED`, marks both accessors
-  not default (`<set-?>` for the setter's value) and names its `x$delegate` field explicitly. A
-  delegated getter states its operator call at the property's line, which an inlined operator's
-  lines map against. (`tests/delegated_properties_array_e2e.rs`.)
+  the `null`. An ordinary top-level delegated property's metadata sets `IS_DELEGATED`, marks both
+  accessors not default (`<set-?>` for the setter's value) and names its `x$delegate` field
+  explicitly. A singleton or constant delegate instead names its in-place delegate method and has
+  no storage field, as described below. A delegated getter states its operator call at the
+  property's line, which an inlined operator's lines map against.
+  (`tests/delegated_properties_array_e2e.rs`.)
   Delegated properties that share a name on one owner — extension properties for different
   receivers — cannot share that field. The first keeps `name$delegate` and each later one takes
   the next suffix, `name$delegate$1`, `name$delegate$2`, in declaration order, including when the
@@ -13103,6 +13107,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The accessors follow the enum's members and bridges in the order the constants first select them;
    every `$default` constructor overload interns its descriptor before its body's constants.
    Tests: `tests/enum_entry_constructor_e2e.rs`.
+- **A singleton or constant delegate is evaluated in place, without a `$delegate` field.**
+  kotlinc's `SingletonOrConstantDelegationLowering` applies when a delegated property's delegate is
+  `Unit`, an object, an enum entry or a (signed) literal, and the property has no context
+  parameters. The JVM then declares no `x$delegate` field. Each accessor reads the delegate again
+  where it would have read the field. A `private static Object get<X>$delegate([owner])` method
+  follows the property's accessors and returns the delegate, with its line on its first
+  instruction and a `<this>` local for the member form. `JvmPropertySignature.delegate_method`
+  (field 5) names that method, interned before the getter, and the signature records no field.
+  A singleton is still evaluated where the field was initialized. An object or enum entry is
+  `getstatic; pop` there, because reading it may initialize its class. `Unit` leaves only its
+  property's line in a constructor, which gives it a `nop`. A constant leaves nothing at the
+  initialization site. The JVM pass reads the checked delegate's IR shape and the storage identity
+  common lowering recorded. It records which statics it retired and which methods it generated,
+  and emission and `@Metadata` consume that record. The generated method joins the same final
+  owner/name/descriptor collision inventory as source functions, property accessors, annotation
+  markers and other generated delegate methods; diagnostics are not produced by a second partial
+  scan. A delegated property's reflected signature is finalized from its recorded getter identity,
+  and a missing local accessor is an invalid backend state rather than a reason to reconstruct a
+  conventional getter name from the property's spelling. Root cause of the reported "cannot
+  compute JVM frames for getUnit1": the delegate's storage took the delegate's type, `Unit`, which
+  the JVM spells `void`, so the field read pushed no receiver for `getValue`. Related fixes:
+  - A `Unit`-typed value parameter (`operator fun Unit.getValue(…)`) is `Lkotlin/Unit;` in the
+    generic `Signature` and gets `@NotNull`. Its descriptor makes metadata record the function's
+    JVM signature, because a reader would map `Unit` to `V`.
+  - A delegated property never records `HAS_CONSTANT`, even when its delegate is a literal.
+
+  Not yet in place: local delegated properties keep their storage, and a non-singleton `Unit`
+  delegate stored in a facade static (`by run { Unit }`) still has `void` storage. Byte-identical
+  to kotlinc 2.4.20 for package, member, member-extension, companion and object shapes, including
+  generic extension receivers (whose generated delegate-method slots use their JVM erasure).
+  Tests: `tests/in_place_delegate_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 

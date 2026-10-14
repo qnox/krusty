@@ -147,6 +147,7 @@ pub(crate) fn package_property(
             .unwrap_or_default(),
         field_name: None,
         field_desc: None,
+        delegate_method: None,
     }
 }
 

@@ -221,6 +221,8 @@ pub struct MemberExtProp {
     /// Declaration-owned generic parameters. Source names are metadata payload; semantic names are
     /// the stable identities used by `receiver` and `ty`.
     pub type_params: Vec<IrTypeParameter>,
+    /// Annotations written on this property's accessor declarations.
+    pub accessor_annotations: super::AccessorAnnotations,
 }
 
 /// How a member property is declared, as Kotlin metadata records it; no JVM shape encodes these.
