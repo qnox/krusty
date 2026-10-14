@@ -1064,7 +1064,7 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::SafeCall { receiver, selector } => {
-                self.safe_call_expression(receiver, *selector, expression.ty.get())?
+                self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?
             }
             FirExprKind::Elvis { lhs, rhs } => {
                 let lhs_value = self.expression(*lhs)?;
@@ -1987,6 +1987,7 @@ impl BodyLowering<'_> {
 
     fn safe_call_expression(
         &mut self,
+        safe_call: FirExprId,
         receiver: &FirReceiver,
         selector: FirExprId,
         result_type: Ty,
@@ -2031,7 +2032,13 @@ impl BodyLowering<'_> {
         let null_result = if result_type == Ty::Unit {
             self.ir.add_expr(IrExpr::UnitInstance)
         } else {
-            self.ir.add_expr(IrExpr::Const(IrConst::Null))
+            // kotlinc's `null` result sits at the safe call's own position.
+            let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+            let line = self.body.expression_debug_lines(safe_call).source;
+            if line != 0 {
+                self.ir.expr_source_lines.insert(null, line);
+            }
+            null
         };
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],

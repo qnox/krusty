@@ -1637,6 +1637,8 @@ mod public_inline_property_access_e2e;
 mod reference_carrier_cast_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
+#[path = "safe_call_null_line_e2e.rs"]
+mod safe_call_null_line_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
 #[path = "serialization_explicit_companion_e2e.rs"]
