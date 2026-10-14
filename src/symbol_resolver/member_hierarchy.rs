@@ -129,6 +129,9 @@ pub(crate) fn function_input_shapes_match(
     inherited: &FunctionInfo,
     implementation: &FunctionInfo,
 ) -> bool {
+    if inherited.kind != implementation.kind {
+        return false;
+    }
     let inherited_params = inherited.semantic_params();
     let implementation_params = implementation.semantic_params();
     override_input_shapes_match(
@@ -136,6 +139,26 @@ pub(crate) fn function_input_shapes_match(
         function_override_input_shape(inherited, &inherited_params),
         function_override_input_shape(implementation, &implementation_params),
     )
+}
+
+/// Whether two declarations occupy the same semantic or provider-normalized override input slot.
+///
+/// Dependency providers may publish an opaque slot when their source-language view cannot express
+/// the declaration relation directly (for example, a Java collection class method whose erased
+/// input implements an applied Kotlin collection interface method). Common hierarchy code may
+/// compare those identities, but cannot inspect or reconstruct their target representation.
+pub(crate) fn function_override_input_slots_match(
+    source: &dyn SymbolSource,
+    inherited: &FunctionInfo,
+    implementation: &FunctionInfo,
+) -> bool {
+    inherited.kind == implementation.kind
+        && (function_input_shapes_match(source, inherited, implementation)
+            || inherited
+                .provider_override_slot
+                .as_ref()
+                .zip(implementation.provider_override_slot.as_ref())
+                .is_some_and(|(inherited, implementation)| inherited.same_key(implementation)))
 }
 
 /// A declaration overrides only one whose type parameters carry the same upper bounds, compared
@@ -225,9 +248,27 @@ fn specialize_declared_callables(
             .specialize(receiver.kotlin_class_internal(), property.ty);
         property.ty = specialize_member_type(source, property.ty, &bindings, TypePosition::Out);
         specialize_callable(source, &mut property.getter, &bindings);
+        // The applied property's slot identity includes its own formal bounds. Those bounds may
+        // mention the declaring classifier's formals (`Parent<X>.val <T : X> T.x`), so specialize
+        // only the applied copy while the declaration table retains the raw signature for
+        // diagnostics. Property-owned formals were removed from `bindings` above and stay open.
+        if let Some(signature) = &mut property.getter.generic_sig {
+            for bounds in &mut signature.formal_bounds {
+                for bound in bounds {
+                    *bound = ty_subst_keep_unbound(*bound, &bindings);
+                }
+            }
+        }
         property.getter.ret = property.ty;
         if let Some(setter) = &mut property.setter {
             specialize_callable(source, setter, &bindings);
+            if let Some(signature) = &mut setter.generic_sig {
+                for bounds in &mut signature.formal_bounds {
+                    for bound in bounds {
+                        *bound = ty_subst_keep_unbound(*bound, &bindings);
+                    }
+                }
+            }
         }
         if raw_owner_property {
             let erased = property.getter.physical_ret;
@@ -488,6 +529,54 @@ fn members_in_hierarchy_for(
         };
         let (mut current_functions, mut current_properties) =
             declared_callables(source, &classifier, current, name).into_parts();
+        if view == HierarchyMemberView::Declarations {
+            // A member extension is absent from ordinary dispatch lookup: it has an implicit
+            // dispatch receiver and a separate extension receiver, so `host.ext()` must not make
+            // it look like an ordinary member of `host`. It is nevertheless a declaration of the
+            // classifier and participates in override/abstract-member validation. Providers keep
+            // that exact declaration in their semantic member table; project it into the
+            // declaration-only hierarchy view and specialize the declaring classifier's type
+            // parameters through this applied rung.
+            let declared_extensions = classifier
+                .members
+                .iter()
+                .filter(|member| member.name == name && member.is_member_extension())
+                .cloned()
+                .map(|member| {
+                    let extension_receiver = member
+                        .semantic_extension_receiver()
+                        .expect("a member-extension declaration publishes its semantic receiver");
+                    let mut function =
+                        FunctionInfo::classifier_member(FnKind::Extension, internal, member);
+                    function.receiver = Some(extension_receiver);
+                    function
+                })
+                .collect::<Vec<_>>();
+            if !declared_extensions.is_empty() {
+                let specialized = specialize_declared_callables(
+                    source,
+                    &classifier,
+                    current,
+                    Callables::Functions(FunctionSet {
+                        overloads: declared_extensions,
+                    }),
+                )
+                .into_parts()
+                .0;
+                for declaration in specialized.overloads {
+                    let already_published = current_functions.overloads.iter().any(|published| {
+                        published.stable_declaration.is_some()
+                            && published.stable_declaration == declaration.stable_declaration
+                            || published.callable.external_identity.is_some()
+                                && published.callable.external_identity
+                                    == declaration.callable.external_identity
+                    });
+                    if !already_published {
+                        current_functions.overloads.push(declaration);
+                    }
+                }
+            }
+        }
         if view == HierarchyMemberView::CallCandidates {
             current_functions
                 .overloads
@@ -535,6 +624,7 @@ fn members_in_hierarchy_for(
     }
 
     normalize_inherited_member_functions_with_family(source, &mut functions, intersection_parts);
+    record_overridden_property_declarations(source, &mut properties, intersection_parts);
     if intersection_parts.is_some() {
         // Component order is not a hierarchy distance. A member inherited by the earliest
         // component and a member declared on a later component are one slot; flattening the
@@ -651,12 +741,57 @@ fn overrides_in_family(
                 inherited.callable.owner,
             )
         })
-        && function_input_shapes_match(source, inherited, implementation)
-        && resolution_subtype(
-            source,
-            implementation.ret.apply(implementation.callable.ret),
-            inherited.ret.apply(inherited.callable.ret),
-        )
+        && function_override_input_slots_match(source, inherited, implementation)
+        && function_result_refines(source, implementation, inherited)
+}
+
+/// Whether `implementation` has a result that may override `inherited`'s result. Input-slot
+/// equivalence and result covariance are separate semantic facts: a provider-normalized input key
+/// must never by itself discharge a declaration with a narrower result.
+pub(crate) fn function_result_refines(
+    source: &dyn SymbolSource,
+    implementation: &FunctionInfo,
+    inherited: &FunctionInfo,
+) -> bool {
+    resolution_subtype(
+        source,
+        normalized_function_result(implementation),
+        normalized_function_result(inherited),
+    )
+}
+
+/// A result under alpha-normalized declaration variables and their complete declared bounds.
+/// Override input matching has already established that the declarations have the same generic
+/// shape; result covariance must therefore compare their variables by ordinal, not by source or
+/// metadata spelling (`fun <T> f(): T` and `fun <U> f(): U` are the same contract).
+fn normalized_function_result(function: &FunctionInfo) -> Ty {
+    let result = function.ret.apply(function.callable.ret);
+    let Some(signature) = function.generic_sig.as_ref() else {
+        return result;
+    };
+    let default_bound = Ty::nullable(Ty::obj("kotlin/Any"));
+    let bounds = signature
+        .formals
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            let declared = signature
+                .formal_bounds
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let bound = match declared {
+                [] => default_bound,
+                [bound] => *bound,
+                bounds => Ty::intersection(bounds),
+            };
+            (formal.clone(), bound)
+        })
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+    crate::types::ty_canonicalize_params(
+        crate::types::ty_with_transitive_param_bounds(result, &bounds),
+        &signature.formals,
+    )
 }
 
 /// Freeze on each dependency declaration the exact identities of the declarations it overrides.
@@ -718,6 +853,129 @@ fn declaration_identity(declaration: &FunctionInfo) -> crate::types::OverriddenD
             .map(|signature| signature.ret)
             .or(callable.declared_ret)
             .unwrap_or(callable.ret),
+    }
+}
+
+/// The exact semantic identity of one property declaration. Ordinary dispatch receivers are not
+/// override inputs; a member-extension receiver is. Accessor context parameters remain inputs,
+/// while a setter value is part of the property's mutability rather than its getter identity.
+pub(crate) fn property_declaration_identity(
+    property: &crate::libraries::PropertyInfo,
+) -> crate::types::OverriddenDeclaration {
+    let getter = &property.getter;
+    let owner = match getter.declaration_owner {
+        Some(crate::types::SemanticCallableOwner::Classifier(owner)) => owner,
+        _ => property.owner,
+    };
+    let generic = getter.generic_sig.as_ref();
+    let declared_params = getter
+        .declared_params
+        .as_deref()
+        .or_else(|| generic.map(|signature| signature.params.as_slice()))
+        .unwrap_or(&getter.params);
+    crate::types::OverriddenDeclaration {
+        owner,
+        name: property.name.as_str().into(),
+        receiver: (property.kind == PropKind::MemberExtension)
+            .then(|| {
+                generic
+                    .and_then(|signature| signature.receiver)
+                    .or(property.receiver)
+            })
+            .flatten(),
+        params: declared_params
+            .iter()
+            .take(property.context_count)
+            .copied()
+            .collect(),
+        ret: generic
+            .map(|signature| signature.ret)
+            .or(getter.declared_ret)
+            .unwrap_or(property.ty),
+    }
+}
+
+fn property_override_input_shape<'a>(
+    property: &'a crate::libraries::PropertyInfo,
+) -> OverrideInputShape<'a> {
+    let (formals, formal_bounds) = match property.getter.generic_sig.as_ref() {
+        Some(signature) => (
+            property.formals.as_slice(),
+            signature.formal_bounds.as_slice(),
+        ),
+        None => (property.formals.as_slice(), &[][..]),
+    };
+    let context_count = property.context_count.min(property.getter.params.len());
+    OverrideInputShape {
+        params: &property.getter.params[..context_count],
+        receiver: (property.kind == PropKind::MemberExtension)
+            .then_some(property.receiver)
+            .flatten(),
+        formals,
+        formal_bounds,
+        context_count: property.context_count,
+        suspend: false,
+    }
+}
+
+fn property_overrides_in_family(
+    source: &dyn SymbolSource,
+    inherited: &crate::libraries::PropertyInfo,
+    implementation: &crate::libraries::PropertyInfo,
+    intersection_parts: Option<&[Ty]>,
+) -> bool {
+    inherited.receiver_rank > implementation.receiver_rank
+        && intersection_parts.is_none_or(|parts| {
+            owners_share_intersection_component(
+                source,
+                parts,
+                implementation.owner,
+                inherited.owner,
+            )
+        })
+        && override_input_shapes_match(
+            source,
+            property_override_input_shape(inherited),
+            property_override_input_shape(implementation),
+        )
+        && resolution_subtype(source, implementation.ty, inherited.ty)
+}
+
+/// Freeze exact property override edges while the complete applied hierarchy is available.
+/// Provider-normalized realizations may have distinct identities for the same semantic property;
+/// downstream diagnostics consume this edge instead of comparing spellings or target shapes.
+fn record_overridden_property_declarations(
+    source: &dyn SymbolSource,
+    properties: &mut PropertySet,
+    intersection_parts: Option<&[Ty]>,
+) {
+    let declarations = &properties.overloads;
+    let recorded = declarations
+        .iter()
+        .map(|implementation| {
+            let mut overridden = implementation.getter.overridden_declarations.to_vec();
+            if implementation.getter.external_identity.is_none() {
+                return overridden.into_boxed_slice();
+            }
+            for inherited in declarations {
+                if !property_overrides_in_family(
+                    source,
+                    inherited,
+                    implementation,
+                    intersection_parts,
+                ) {
+                    continue;
+                }
+                let identity = property_declaration_identity(inherited);
+                if !overridden.contains(&identity) {
+                    overridden.push(identity);
+                }
+            }
+            overridden.into_boxed_slice()
+        })
+        .collect::<Vec<_>>();
+    for (implementation, overridden) in properties.overloads.iter_mut().zip(recorded) {
+        implementation.getter.overridden_declarations = overridden;
     }
 }
 
@@ -1046,16 +1304,14 @@ pub(crate) fn imported_object_member_symbols(
             .cloned()
             .map(|member| {
                 let receiver = member
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|signature| signature.receiver)
-                    .or_else(|| member.params.get(member.context_count).copied());
+                    .semantic_extension_receiver()
+                    .expect("an imported member extension publishes its semantic receiver");
                 let mut function = crate::libraries::FunctionInfo::classifier_member(
                     FnKind::Extension,
                     current_owner,
                     member,
                 );
-                function.receiver = receiver;
+                function.receiver = Some(receiver);
                 function.receiver_rank = depth;
                 function.callable.singleton_dispatch = Some(Box::new(singleton));
                 function
@@ -1147,18 +1403,52 @@ fn retain_covariant_inherited_overrides(
 ) {
     let mut retained: Vec<FunctionInfo> = Vec::with_capacity(functions.overloads.len());
     for candidate in functions.overloads.drain(..) {
-        let candidate_ret = candidate.ret.apply(candidate.callable.ret);
         let mut candidate_is_shadowed = false;
         let mut shadowed = Vec::new();
         for (index, existing) in retained.iter().enumerate() {
-            if existing.context_count != candidate.context_count
-                || !same_slot_parameters(&existing.semantic_params(), &candidate.semantic_params())
-            {
+            let same_provider_slot = existing
+                .provider_override_slot
+                .as_ref()
+                .zip(candidate.provider_override_slot.as_ref())
+                .is_some_and(|(existing, candidate)| existing.same_key(candidate));
+            let owner_is_interface = |function: &FunctionInfo| {
+                source
+                    .classifier(function.callable.owner)
+                    .is_some_and(|owner| owner.is_interface())
+            };
+            let candidate_result_refines_existing =
+                function_result_refines(source, &candidate, existing);
+            let existing_result_refines_candidate =
+                function_result_refines(source, existing, &candidate);
+            // A provider-normalized concrete class slot implements the matching abstract interface
+            // slot even when the interface is reached at a shallower receiver depth. Keep the
+            // ordinary rank rule for two classes so a nearer abstract class can still re-abstract
+            // a concrete superclass member.
+            let candidate_class_implements_interface = same_provider_slot
+                && candidate_result_refines_existing
+                && !candidate.flags.is_abstract
+                && existing.flags.is_abstract
+                && !owner_is_interface(&candidate)
+                && owner_is_interface(existing);
+            let existing_class_implements_interface = same_provider_slot
+                && existing_result_refines_candidate
+                && !existing.flags.is_abstract
+                && candidate.flags.is_abstract
+                && !owner_is_interface(existing)
+                && owner_is_interface(&candidate);
+            if candidate_class_implements_interface {
+                shadowed.push(index);
                 continue;
             }
-            let existing_ret = existing.ret.apply(existing.callable.ret);
-            let candidate_is_subtype = resolution_subtype(source, candidate_ret, existing_ret);
-            let existing_is_subtype = resolution_subtype(source, existing_ret, candidate_ret);
+            if existing_class_implements_interface {
+                candidate_is_shadowed = true;
+                break;
+            }
+            if !function_input_shapes_match(source, existing, &candidate) {
+                continue;
+            }
+            let candidate_is_subtype = candidate_result_refines_existing;
+            let existing_is_subtype = existing_result_refines_candidate;
             let candidate_owner_overrides = candidate.callable.owner != existing.callable.owner
                 && resolution_subtype(
                     source,
@@ -1251,17 +1541,6 @@ fn owners_share_intersection_component(
         hierarchy.iter().any(|(owner, _, _)| *owner == left)
             && hierarchy.iter().any(|(owner, _, _)| *owner == right)
     })
-}
-
-/// Parameter lists occupying one override slot. A Java platform type is flexible, so an override
-/// of `J.from(String!)` declared as `from(String)` or `from(String?)` is the same slot, as in
-/// kotlinc's override checker.
-fn same_slot_parameters(left: &[Ty], right: &[Ty]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(&left, &right)| crate::assignable::same_flexible_type(left, right))
 }
 
 /// Result of inherited nested-classifier lookup.
@@ -1469,6 +1748,79 @@ mod tests {
         );
 
         assert_eq!(functions.overloads[0].callable.semantic_role, None);
+    }
+
+    #[test]
+    fn callable_kind_is_part_of_an_override_input_shape() {
+        let source = crate::libraries::EmptySymbolSource;
+        let member = member("sample/Owner", 0, Vec::new(), None);
+        let mut top_level = member.clone();
+        top_level.kind = crate::libraries::FnKind::TopLevel;
+        top_level.receiver = None;
+
+        assert!(function_input_shapes_match(&source, &member, &member));
+        assert!(!function_input_shapes_match(&source, &member, &top_level));
+        assert!(!function_input_shapes_match(&source, &top_level, &member));
+    }
+
+    #[test]
+    fn provider_override_slot_matches_opaque_inputs_but_not_callable_kind() {
+        let source = crate::libraries::EmptySymbolSource;
+        let slot = |owner| crate::libraries::ProviderOverrideSlot::new(owner, 17_u8);
+        let mut inherited = member("sample/Interface", 1, vec![Ty::String], None);
+        inherited.provider_override_slot = Some(slot(inherited.callable.owner));
+        let mut implementation = member(
+            "sample/Implementation",
+            0,
+            vec![Ty::obj("kotlin/Any")],
+            None,
+        );
+        implementation.provider_override_slot = Some(slot(implementation.callable.owner));
+
+        assert!(function_override_input_slots_match(
+            &source,
+            &inherited,
+            &implementation,
+        ));
+
+        implementation.kind = crate::libraries::FnKind::TopLevel;
+        assert!(!function_override_input_slots_match(
+            &source,
+            &inherited,
+            &implementation,
+        ));
+    }
+
+    #[test]
+    fn generic_result_covariance_compares_declaration_variables_by_ordinal() {
+        let generic = |formal: &str| {
+            let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+            let result = Ty::ty_param(formal, bound);
+            let mut function = member("sample/Owner", 0, vec![result], None);
+            function.callable.ret = result;
+            function.generic_sig = Some(crate::libraries::GenericSig {
+                formals: vec![formal.to_string()],
+                formal_bounds: vec![Vec::new()],
+                receiver: None,
+                params: vec![result],
+                ret: result,
+                return_policy: crate::libraries::GenericReturnPolicy::Exact,
+            });
+            function
+        };
+        let inherited = generic("T");
+        let implementation = generic("U");
+
+        assert!(function_result_refines(
+            &crate::libraries::EmptySymbolSource,
+            &implementation,
+            &inherited,
+        ));
+        assert!(function_result_refines(
+            &crate::libraries::EmptySymbolSource,
+            &inherited,
+            &implementation,
+        ));
     }
 
     #[test]

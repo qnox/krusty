@@ -105,6 +105,34 @@ pub(super) fn concrete_receiver_is_more_specific(left_generic: bool, right_gener
     !left_generic && right_generic
 }
 
+/// The declared receiver domain used to compare otherwise-applicable member extensions. Method
+/// parameters use their recursively substituted upper bounds, while enclosing-class parameters
+/// retain the applied dispatch bindings supplied by the caller.
+pub(super) fn receiver_domain(
+    receiver: Ty,
+    type_params: &[String],
+    type_param_bounds: &[Ty],
+    class_bindings: &HashMap<String, Ty>,
+) -> Ty {
+    let mut bindings = class_bindings.clone();
+    for parameter in type_params {
+        bindings.remove(parameter);
+    }
+    for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
+        bindings.insert(parameter.clone(), *bound);
+    }
+    for _ in 0..type_params.len() {
+        let previous = bindings.clone();
+        for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
+            bindings.insert(
+                parameter.clone(),
+                crate::symbol_resolver::ty_subst(*bound, &previous),
+            );
+        }
+    }
+    crate::symbol_resolver::ty_subst(receiver, &bindings)
+}
+
 pub(super) fn maximal_member_extensions<T>(
     oracle: &dyn crate::assignable::TypeOracle,
     candidates: &[T],

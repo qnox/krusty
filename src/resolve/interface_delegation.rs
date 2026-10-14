@@ -495,6 +495,7 @@ fn delegated_function_declaration(
         semantic_role: function.callable.semantic_role,
         collection_barrier: function.callable.collection_barrier,
         parameter_identities,
+        context_count: function.context_count,
         parameters: resolved_types(parameters.iter().copied())?,
         result: ResolvedTy::new(result).ok()?,
         applied_parameters: resolved_types(applied_parameters)?,

@@ -20,8 +20,14 @@ use super::common::{
 fn run_boxed(src: &str) {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let output =
-        common::compile_and_run_box(src, "Main", &[stdlib, jdk.clone()], Some(jdk.as_path()));
+    let classpath = [stdlib, jdk.clone()];
+    let diagnostics = common::front_end_diagnostics(src, &classpath, Some(jdk.as_path()));
+    assert_eq!(
+        diagnostics,
+        Vec::<String>::new(),
+        "fixture must remain checker-clean before backend emission"
+    );
+    let output = common::compile_and_run_box(src, "Main", &classpath, Some(jdk.as_path()));
     assert_eq!(output.as_deref(), Some("OK"), "fixture runs");
 }
 

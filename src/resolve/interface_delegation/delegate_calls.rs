@@ -158,7 +158,11 @@ fn delegate_function_call(
     let available = crate::symbol_resolver::members_in_hierarchy(source, delegate, &forwarded.name);
     let candidates = available.functions().iter().filter(|function| {
         function.kind == FnKind::Member
-            && crate::symbol_resolver::function_input_shapes_match(source, &declaration, function)
+            && crate::symbol_resolver::function_override_input_slots_match(
+                source,
+                &declaration,
+                function,
+            )
     });
     let selected = effective_function(source, index, delegate, candidates)?;
     let call = function_call(source, index, delegate, selected)?;
