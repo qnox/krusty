@@ -1240,7 +1240,7 @@ impl Backend for JvmBackend {
                 return Vec::new();
             }
         };
-        let mut property_reference_realizations = match crate::jvm::property_references::realize(
+        let property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,
             &file.callables,

@@ -1208,10 +1208,6 @@ pub(crate) fn class_message(
     class.canonical()
 }
 
-/// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):
-/// kotlinc's record is `Class { flags = LOCAL visibility (10), fq_name = <raw internal, marked
-/// localName in the string table>, supertype* }` — no members, no constructor record.
-
 /// A member list in the order its records were built, which is the order kotlinc serializes it.
 fn in_build_order(slots: Vec<Option<(usize, Pb)>>, kind: &str) -> Vec<Pb> {
     let mut built: Vec<(usize, Pb)> = slots
