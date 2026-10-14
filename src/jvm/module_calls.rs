@@ -235,13 +235,14 @@ pub(super) fn realize_default_arguments(
         .collect::<Vec<_>>();
     for (parameter, ty) in parameters.iter().copied().enumerate() {
         let parameter = u32::try_from(parameter).ok()?;
+        let logical = match extension_receiver_parameter {
+            Some(receiver) if parameter > receiver => Some(parameter - 1),
+            Some(receiver) if parameter == receiver => None,
+            _ => Some(parameter),
+        };
         if defaults.contains(&parameter) {
-            let logical = match extension_receiver_parameter {
-                Some(receiver) if parameter > receiver => parameter - 1,
-                Some(receiver) if parameter == receiver => return None,
-                _ => parameter,
-            } as usize;
-            masks[logical / 32] |= 1i32 << (logical % 32);
+            let logical = logical?;
+            masks[logical as usize / 32] |= 1i32 << (logical % 32);
             // A defaulted non-null type parameter bounded by a JVM primitive is that primitive on
             // the real method and the JDK wrapper on `$default`. The omitted slot is the primitive
             // zero; emission boxes it with `valueOf`, which is what kotlinc writes even though the
@@ -253,11 +254,17 @@ pub(super) fn realize_default_arguments(
                 produced,
             )));
             physical.push(placeholder);
-            plan.push(DefaultCallOperand::synthesized(placeholder));
+            plan.push(DefaultCallOperand::synthesized_default(
+                placeholder,
+                logical,
+            ));
         } else {
             let argument = supplied.next()?;
             physical.push(argument);
-            plan.push(DefaultCallOperand::supplied(argument));
+            plan.push(match logical {
+                Some(parameter) => DefaultCallOperand::supplied_parameter(argument, parameter),
+                None => DefaultCallOperand::supplied(argument),
+            });
         }
     }
     for &(parameter, boxed) in stub_boxed {

@@ -56,11 +56,9 @@ impl Emitter<'_> {
             target,
             args,
             leading_non_argument_operands,
-            body,
             ..
         } = *call;
-        let callee = MethodNode::read(ACC_STATIC, target.name, target.splice_desc, body)
-            .map_err(|_| UNREADABLE_INLINE_BODY)?;
+        let (declared, callee) = self.inline_callee_nodes(call)?;
         // Only the MethodNode inliner specializes reified type parameters, so a reified body in a
         // shape the port does not own yet fails cleanly instead of taking the splice.
         let reified_body = inliner::has_reified_markers(&callee);
@@ -93,14 +91,7 @@ impl Emitter<'_> {
             return splice(SpliceReason::CalleeShape(shape));
         }
         let supplies = self
-            .parameter_supplies(
-                call_expression,
-                target,
-                args,
-                leading_non_argument_operands,
-                &physical,
-                &callee,
-            )
+            .parameter_supplies(call, &physical, &callee, &declared)
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
         // Argument stores run before the body. A duplicated safe-call receiver is one of those
         // arguments, already on the stack, so the body still starts empty and the MethodInliner

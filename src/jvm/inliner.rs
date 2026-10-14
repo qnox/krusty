@@ -15,13 +15,15 @@
 //! `afterInlineCall`, for the caller's FixStack (when its class is written) to save the operand stack
 //! around it.
 //!
-//! Lambda arguments, anonymous-object regeneration, `$default` masks and `finally` rewriting are
-//! later stages of the port (see "JVM unified inliner" in `docs/IMPLEMENTATION_PLAN.md`). Bodies on
+//! A `$default` bridge's mask header is expanded for the call's constant masks before the body is
+//! inlined ([`expand_default_masks`]). Default lambdas and `finally` rewriting are later stages of
+//! the port (see "JVM unified inliner" in `docs/IMPLEMENTATION_PLAN.md`). Bodies on
 //! this route do not fall back to the legacy byte splicer.
 
 mod anonymous_object;
 mod callee_shape;
 mod class_roles;
+mod default_masks;
 mod finally_markers;
 mod functional_arguments;
 mod lambda_expansion;
@@ -50,6 +52,7 @@ pub(crate) use callee_shape::{
     requires_empty_stack_on_entry, unsupported_shape, UnsupportedShape,
 };
 pub(crate) use class_roles::ClassRoles;
+pub(crate) use default_masks::{expand as expand_default_masks, DefaultMasks};
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
 pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};

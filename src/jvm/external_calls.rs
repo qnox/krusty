@@ -613,13 +613,32 @@ pub(super) fn realize(
                 &omitted_parameters,
                 target,
             )?;
+            let member_extension_receiver = if member_extension {
+                Some(extension_receiver.ok_or(target)?)
+            } else {
+                None
+            };
             let mut operand_plan = realized_arguments
                 .iter()
                 .copied()
                 .enumerate()
                 .map(|(parameter, argument)| {
-                    if omitted_parameters.contains(&(parameter as u32)) {
-                        DefaultCallOperand::synthesized(argument)
+                    let source_parameter = if let Some(receiver) = member_extension_receiver {
+                        match parameter.cmp(&receiver) {
+                            std::cmp::Ordering::Less => Some(parameter as u32),
+                            std::cmp::Ordering::Equal => None,
+                            std::cmp::Ordering::Greater => Some((parameter - 1) as u32),
+                        }
+                    } else {
+                        Some(parameter as u32)
+                    };
+                    if let Some(omitted) = omitted_parameters
+                        .iter()
+                        .position(|&physical| physical == parameter as u32)
+                    {
+                        DefaultCallOperand::synthesized_default(argument, defaults[omitted])
+                    } else if let Some(source_parameter) = source_parameter {
+                        DefaultCallOperand::supplied_parameter(argument, source_parameter)
                     } else {
                         DefaultCallOperand::supplied(argument)
                     }
@@ -719,6 +738,21 @@ pub(super) fn realize(
             let physical_call =
                 bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
             default_call_operands.record(physical_call, operand_plan);
+            default_call_operands.record_declaration(
+                physical_call,
+                crate::jvm::default_call_operands::DefaultedDeclaration {
+                    owner: callable.physical_owner,
+                    name: physical_name.clone(),
+                    descriptor: if callable.descriptor.is_empty() {
+                        crate::jvm::names::method_descriptor(
+                            &callable.physical_params,
+                            callable.physical_ret,
+                        )
+                    } else {
+                        callable.descriptor.clone()
+                    },
+                },
+            );
             continue;
         }
         let supplied = match &ir.exprs[index] {

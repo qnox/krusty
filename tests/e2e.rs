@@ -1127,6 +1127,8 @@ mod inline_constructor_reference_e2e;
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
 mod inline_deep_coverage_e2e;
+#[path = "inline_default_bytes_e2e.rs"]
+mod inline_default_bytes_e2e;
 #[path = "inline_default_stub_e2e.rs"]
 mod inline_default_stub_e2e;
 #[path = "inline_early_return_cleanup_e2e.rs"]
