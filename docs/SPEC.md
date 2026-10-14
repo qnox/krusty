@@ -857,6 +857,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   therefore carries the `try`'s closing line and stays inside the lambda's locals. A `return@`
   from an earlier statement bypasses it, while a returned name has no result-end mark. Test:
   `tests/inline_try_close_line_e2e.rs`.
+- **A call that omits arguments of an inline dependency function inlines its `$default` bridge
+  with the masks resolved.** kotlinc's `IrInlineCodegen` passes neither the mask words nor the
+  method handle (`DEFAULT_MASK`, `METHOD_HANDLE_IN_DEFAULT`), and an omitted parameter only
+  reserves its temporary (`DEFAULT_PARAMETER`): the bridge's own default code stores it.
+  `expandMaskConditionsAndUpdateVariableNodes` then resolves the bridge's header against the
+  constant masks: a set bit drops the `iload mask; bit; iand; ifeq` test and keeps the default
+  store, whose parameter is described from the test's end on; a clear bit drops the test and the
+  store; the handler's `aload; ifnull; new` guard always goes. `prepareNode` removes the masks and
+  the handler from the descriptor, so their slots become ordinary body locals. Whether the call is
+  `@InlineOnly` is the declaration's, never the bridge's (`jvm/inliner/default_masks.rs`,
+  `jvm/ir_emit/bytecode_inline_call/default_bridge.rs`). A header that is not kotlinc's shape is
+  an inline error. Test: `tests/inline_default_bytes_e2e.rs`.
+- **An inlined `Unit` lambda ends with its closing-brace `nop` before `Unit.INSTANCE`.** kotlinc's
+  lambda method returns `void` with the closing brace's line on that return, and the inliner loads
+  `Unit.INSTANCE` after it. The lambda's node returns `void` when every return is preceded by a
+  `Unit.INSTANCE` load, looking past a line label no instruction jumps to
+  (`jvm/ir_emit/bytecode_inline_call/lambda_node.rs`). Test: `tests/inline_default_bytes_e2e.rs`.
+- **A discarded generic dependency call pops its erased result.** The realization of a dependency
+  call records the provider's result on the call and the checked result as the coercion's target;
+  discarding the coercion pops the provider's value with no `checkcast` or unboxing, as kotlinc
+  does for a declaration's generic result (`jvm/ir_emit/discarding.rs`). Test:
+  `tests/inline_default_bytes_e2e.rs::a_discarded_generic_dependency_result_is_popped_like_the_reference_compiler`.
 - **An `@InlineOnly` call reads a local through a representation-preserving coercion.**
   `println(message)` widens a non-null `String` to `Any?`. That coercion emits no bytecode, so
   kotlinc's `genOrGetLocal` still loads the caller's local after `getstatic System.out`. A
