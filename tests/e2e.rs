@@ -1191,6 +1191,8 @@ mod inline_reified_property_e2e;
 mod inline_repeat_local_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]
 mod inline_return_bound_context_e2e;
+#[path = "inline_scope_function_bytes_e2e.rs"]
+mod inline_scope_function_bytes_e2e;
 #[path = "inline_splice_e2e.rs"]
 mod inline_splice_e2e;
 #[path = "inline_splice_ldc_wide_e2e.rs"]
