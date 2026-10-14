@@ -42,9 +42,18 @@ impl Emitter<'_> {
         let field = self.cw.fieldref(class, "element", descriptor);
         let slot = ty_from_field_descriptor(descriptor);
         code.getfield(field, slot_words(slot) as i32);
+        if materialize {
+            self.narrow_shared_cell_element(elem, code)
+        } else {
+            slot
+        }
+    }
+
+    /// Narrow a shared cell's `element`, read in its holder field's slot, to the checked element
+    /// type, answering the resulting stack type.
+    pub(super) fn narrow_shared_cell_element(&mut self, elem: Ty, code: &mut CodeBuilder) -> Ty {
         let value = ir_ty_to_jvm(&elem);
-        if materialize
-            && value.is_reference()
+        if value.is_reference()
             && crate::jvm::names::instanceof_internal_name(value) != "java/lang/Object"
         {
             let target = self
@@ -52,11 +61,7 @@ impl Emitter<'_> {
                 .class_ref(&crate::jvm::names::instanceof_internal_name(value));
             code.checkcast(target);
         }
-        if materialize {
-            value
-        } else {
-            slot
-        }
+        value
     }
 
     /// Emit `expression` and materialize it at the consumer's declared type.
