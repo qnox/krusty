@@ -164,6 +164,8 @@ impl ReferencedDependencies {
             | IrExpr::EnumValues { .. }
             | IrExpr::EnumValueOf { .. }
             | IrExpr::EnumEntries { .. }
+            | IrExpr::EnumSwitchOrdinal { .. }
+            | IrExpr::EnumSwitchKey { .. }
             | IrExpr::ReifiedClassMarker { .. }
             | IrExpr::ReifiedTypeOp { .. }
             // Debug-frame provenance names no dependency declaration.

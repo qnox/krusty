@@ -1616,6 +1616,8 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumSwitchOrdinal { .. }
+        | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::ReifiedTypeOp { .. }
         | IrExpr::Lambda { sam: None, .. }

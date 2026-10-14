@@ -364,6 +364,8 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumValueOf { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumSwitchOrdinal { .. }
+        | IrExpr::EnumSwitchKey { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::ReifiedTypeOp { .. }
         | IrExpr::UnitInstance

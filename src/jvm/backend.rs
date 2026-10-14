@@ -351,6 +351,9 @@ fn run_backend_passes_after_plugins(
         )
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
+    // kotlinc's `MappedEnumWhenLowering` runs before its coroutine lowering, which then sees only
+    // the integer `when` it leaves.
+    crate::jvm::enum_when_mappings::lower(ir);
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
     // An inline expansion rewrites a type-parameter cell to the call-site element. A lambda that
     // still uses the shared erased implementation takes the erased holder, and suspension spilling
