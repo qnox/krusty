@@ -287,6 +287,8 @@ struct WireDiagnostic {
     lo: u32,
     hi: u32,
     severity: u8,
+    #[serde(default)]
+    warning_name: Option<String>,
     kind: u8,
     message: String,
 }
@@ -324,6 +326,9 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                         Severity::Error => 1,
                         Severity::Warning => 2,
                     },
+                    warning_name: diagnostic
+                        .warning_name
+                        .map(|name| name.as_str().to_string()),
                     kind: match diagnostic.kind {
                         DiagnosticKind::Compiler => 0,
                         DiagnosticKind::IncompatibleEquality => 1,
@@ -360,6 +365,10 @@ impl AnalysisResponse {
                     span: Span::new(diagnostic.lo, diagnostic.hi),
                     editor_span: None,
                     identity: None,
+                    warning_name: diagnostic
+                        .warning_name
+                        .as_deref()
+                        .and_then(krusty::diag::CompilerWarningName::parse),
                     severity: if diagnostic.severity == 2 {
                         Severity::Warning
                     } else {
@@ -1484,6 +1493,27 @@ mod tests {
     use super::java_stub_memo::{java_stub_generations, reset_java_stub_generations};
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    #[test]
+    fn compiler_warning_name_survives_the_worker_wire_boundary() {
+        let analysis = DocumentAnalysis::with_diagnostics(vec![Diagnostic {
+            span: Span::new(1, 2),
+            editor_span: None,
+            severity: Severity::Warning,
+            warning_name: Some(krusty::diag::CompilerWarningName::Deprecation),
+            kind: DiagnosticKind::Compiler,
+            msg: "deprecated".to_string(),
+            identity: None,
+            file: 0,
+        }]);
+
+        let decoded = AnalysisResponse::from(analysis).into_document_analysis();
+
+        assert_eq!(
+            decoded.diagnostics[0].warning_name,
+            Some(krusty::diag::CompilerWarningName::Deprecation)
+        );
+    }
 
     #[test]
     fn a_parked_worker_blocks_fresh_analysis_worker_creation() {

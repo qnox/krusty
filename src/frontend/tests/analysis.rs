@@ -1925,6 +1925,7 @@ fn preexisting_warning_does_not_mark_a_source_as_unparseable() {
         span: Span::new(0, 0),
         editor_span: None,
         severity: Severity::Warning,
+        warning_name: None,
         kind: crate::diag::DiagnosticKind::Compiler,
         msg: "existing warning".to_string(),
         identity: None,

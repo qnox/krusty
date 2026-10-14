@@ -156,6 +156,103 @@ fun suppressed() = f(3)
     );
 }
 
+/// A source warning retains its diagnostic identity through the frontend so the CLI can apply
+/// kotlinc's named policy independently of global `-Werror` and `-nowarn`.
+#[test]
+fn named_warning_policy_controls_deprecation() {
+    const SOURCE: &str = "@Deprecated(\"old\")\n\
+                          fun old() {}\n\
+                          fun use() {\n\
+                          \x20   old()\n\
+                          }\n";
+    struct Case {
+        level: &'static str,
+        arguments: &'static [&'static str],
+        code: i32,
+        errors: &'static [&'static str],
+        warnings: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            level: "disabled",
+            arguments: &["-Xwarning-level=DEPRECATION:disabled"],
+            code: 0,
+            errors: &[],
+            warnings: &[],
+        },
+        Case {
+            level: "error",
+            arguments: &["-Xwarning-level=DEPRECATION:error"],
+            code: 1,
+            errors: &["4:5: 'fun old(): Unit' is deprecated. old."],
+            warnings: &[],
+        },
+        Case {
+            level: "warning-over-werror",
+            arguments: &["-Werror", "-Xwarning-level=DEPRECATION:warning"],
+            code: 0,
+            errors: &[],
+            warnings: &["4:5: 'fun old(): Unit' is deprecated. old."],
+        },
+        Case {
+            level: "warning-over-nowarn",
+            arguments: &["-nowarn", "-Xwarning-level=DEPRECATION:warning"],
+            code: 0,
+            errors: &[],
+            warnings: &["4:5: 'fun old(): Unit' is deprecated. old."],
+        },
+    ];
+    let render = |diagnostics: &[common::CompilerError]| {
+        diagnostics
+            .iter()
+            .map(|diagnostic| {
+                format!(
+                    "{}:{}: {}",
+                    diagnostic.line, diagnostic.column, diagnostic.message
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for case in cases {
+        let arguments = case
+            .arguments
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect::<Vec<_>>();
+        let result = common::compiler_diagnostics_with_shared_args(
+            &[("DeprecationPolicy.kt", SOURCE)],
+            &[common::stdlib_jar()],
+            &arguments,
+        );
+        let krusty_errors = render(&common::compiler_errors(&result.krusty_stderr));
+        let reference_errors = render(&common::compiler_errors(&result.reference_stderr));
+        let krusty_warnings = render(&common::compiler_warnings(&result.krusty_stderr));
+        let reference_warnings = render(&common::compiler_warnings(&result.reference_stderr));
+
+        assert_eq!(result.reference_code, case.code, "{} reference", case.level);
+        assert_eq!(result.krusty_code, case.code, "{} krusty", case.level);
+        assert_eq!(reference_errors, case.errors, "{} reference", case.level);
+        assert_eq!(krusty_errors, reference_errors, "{} errors", case.level);
+        assert_eq!(
+            reference_warnings, case.warnings,
+            "{} reference",
+            case.level
+        );
+        assert_eq!(
+            krusty_warnings, reference_warnings,
+            "{} warnings",
+            case.level
+        );
+        assert_eq!(
+            result.krusty_stdout.is_empty(),
+            case.code != 0,
+            "{} stdout",
+            case.level
+        );
+    }
+}
+
 /// `DeprecationLevel.ERROR` reports at the same positions, as errors.
 #[test]
 fn error_level_uses_are_errors() {

@@ -12967,8 +12967,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   leaves `REDUNDANT_CLI_ARG` in place
   (`suppress_version_warnings_drops_only_version_status_warnings` in
   `crates/krusty-cli/src/cli.rs`). The registry contains only
-  diagnostics the compiler can actually emit: deprecated and experimental language-version
-  warnings and `REDUNDANT_CLI_ARG`. Language-feature arguments are replayed from the selected
+  diagnostics the compiler can actually emit: source `DEPRECATION`, deprecated and experimental
+  language-version warnings, and `REDUNDANT_CLI_ARG`. A located compiler warning carries that
+  typed name separately from its duplicate-report identity; the CLI applies its named disposition
+  before deciding whether frontend diagnostics fail the compilation. Language-feature arguments
+  are replayed from the selected
   language/API baseline; an argument that makes no semantic change emits `REDUNDANT_CLI_ARG` with
   kotlinc's wording. The configured severity is applied before compilation: `error` fails the
   invocation, `warning` reports it, and `disabled` omits it. The Bazel worker normalizes
@@ -12982,6 +12985,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same policy. `compilerVersion` must equal the applied Kotlin Gradle plugin version, which must be
   an exact supported release; a pre-release or RC suffix is rejected.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
+  `named_warning_policy_controls_deprecation` in `tests/deprecation_usage_e2e.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
 - **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each

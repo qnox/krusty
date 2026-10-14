@@ -328,7 +328,11 @@ impl Checker<'_> {
         match deprecation.level {
             DeprecationLevel::Warning => {
                 if !self.suppresses_diagnostic("DEPRECATION") {
-                    self.diags.warning(span, message);
+                    self.diags.warning_named(
+                        span,
+                        crate::diag::CompilerWarningName::Deprecation,
+                        message,
+                    );
                 }
             }
             DeprecationLevel::Error | DeprecationLevel::Hidden => {

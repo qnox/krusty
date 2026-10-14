@@ -1621,7 +1621,7 @@ mod tests {
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert_eq!(
-            parsed.warning_policy.compiler_disposition(),
+            parsed.warning_policy.compiler_disposition(None),
             WarningDisposition::WarningAndFail
         );
         assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
@@ -1630,7 +1630,7 @@ mod tests {
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert_eq!(
-            parsed.warning_policy.compiler_disposition(),
+            parsed.warning_policy.compiler_disposition(None),
             WarningDisposition::Disabled
         );
 
@@ -1642,7 +1642,7 @@ mod tests {
             assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
             assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
             assert_eq!(
-                parsed.warning_policy.compiler_disposition(),
+                parsed.warning_policy.compiler_disposition(None),
                 WarningDisposition::WarningAndFail,
                 "{arguments:?}"
             );
