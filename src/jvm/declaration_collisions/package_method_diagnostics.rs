@@ -1,0 +1,407 @@
+//! Physical JVM method collisions on one package facade.
+
+use crate::diag::Span;
+use crate::ir::{FunId, IrFile};
+
+use super::UndeterminedDiagnosticType;
+
+type ClashRows = Vec<(Span, String)>;
+
+#[derive(Clone, Copy)]
+enum Declaration {
+    Function(usize),
+    PropertyAccessor {
+        property: usize,
+        function: FunId,
+        setter: bool,
+    },
+    PropertyAnnotationMarker(FunId),
+    InPlaceDelegate {
+        function: FunId,
+        source_order: u32,
+    },
+}
+
+pub(super) fn report(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+) -> Result<ClashRows, ClashRows> {
+    let mut groups: Vec<((String, String), Vec<Declaration>)> = Vec::new();
+    for (index, declaration) in ir.package_functions.iter().enumerate() {
+        if declaration.companion {
+            continue;
+        }
+        let Some(function) = ir.functions.get(declaration.function as usize) else {
+            return Err(vec![(
+                declaration.signature_span,
+                "internal error: package function platform-clash validation has no IR function"
+                    .to_string(),
+            )]);
+        };
+        if let Err(kind) = super::determined_function_signature(function) {
+            return Err(vec![(
+                declaration.signature_span,
+                super::undetermined_type_message(kind),
+            )]);
+        }
+        push(
+            &mut groups,
+            (
+                function.name.clone(),
+                crate::jvm::ir_emit::function_descriptor(
+                    ir,
+                    override_results,
+                    declaration.function,
+                ),
+            ),
+            Declaration::Function(index),
+        );
+    }
+    for (index, property) in ir.package_properties.iter().enumerate() {
+        let Some(layout) = ir.local_property_layouts.get(&property.property) else {
+            continue;
+        };
+        let (getter, setter) = match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. } => {
+                (*getter, *setter)
+            }
+            crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
+                (Some(*getter), *setter)
+            }
+            _ => continue,
+        };
+        for (setter, function) in [(false, getter), (true, setter)] {
+            let Some(function) = function else { continue };
+            let Some(declaration) = ir.functions.get(function as usize) else {
+                return Err(vec![(
+                    property_accessor_span(ir, index, setter),
+                    "internal error: package property accessor has no IR function".to_string(),
+                )]);
+            };
+            if let Err(kind) = super::determined_function_signature(declaration) {
+                return Err(vec![(
+                    property_accessor_span(ir, index, setter),
+                    super::undetermined_type_message(kind),
+                )]);
+            }
+            push(
+                &mut groups,
+                (
+                    declaration.name.clone(),
+                    crate::jvm::ir_emit::function_descriptor(ir, override_results, function),
+                ),
+                Declaration::PropertyAccessor {
+                    property: index,
+                    function,
+                    setter,
+                },
+            );
+        }
+    }
+    for property in &ir.package_properties {
+        let Some(marker) = ir.jvm_package_property_annotation_marker(property.property) else {
+            continue;
+        };
+        let Some(function) = ir.functions.get(marker as usize) else {
+            return Err(vec![(
+                Span::new(0, 0),
+                "internal error: package property annotation marker has no IR function".to_string(),
+            )]);
+        };
+        if let Err(kind) = super::determined_function_signature(function) {
+            return Err(vec![(
+                Span::new(0, 0),
+                super::undetermined_type_message(kind),
+            )]);
+        }
+        push(
+            &mut groups,
+            (
+                function.name.clone(),
+                crate::jvm::ir_emit::function_descriptor(ir, override_results, marker),
+            ),
+            Declaration::PropertyAnnotationMarker(marker),
+        );
+    }
+    for property in &ir.package_properties {
+        let Some(function) = ir.jvm_package_delegate_method(property.property) else {
+            continue;
+        };
+        let Some(declaration) = ir.functions.get(function as usize) else {
+            return Err(vec![(
+                Span::new(0, 0),
+                "internal error: package in-place delegate has no IR function".to_string(),
+            )]);
+        };
+        if let Err(kind) = super::determined_function_signature(declaration) {
+            return Err(vec![(
+                Span::new(0, 0),
+                super::undetermined_type_message(kind),
+            )]);
+        }
+        push(
+            &mut groups,
+            (
+                declaration.name.clone(),
+                crate::jvm::ir_emit::function_descriptor(ir, override_results, function),
+            ),
+            Declaration::InPlaceDelegate {
+                function,
+                source_order: property.source_order,
+            },
+        );
+    }
+
+    let mut clashes = Vec::new();
+    let mut reported_delegate_header = false;
+    for ((name, descriptor), members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        let mut rendered = Vec::with_capacity(members.len());
+        for &declaration in &members {
+            let key = declaration_order(ir, declaration).map_err(|kind| {
+                vec![(
+                    declaration_span(ir, declaration),
+                    super::undetermined_type_message(kind),
+                )]
+            })?;
+            rendered.push((declaration, key));
+        }
+        if members
+            .iter()
+            .any(|declaration| matches!(declaration, Declaration::InPlaceDelegate { .. }))
+        {
+            rendered.sort_by_key(|(declaration, _)| delegate_group_order(ir, *declaration));
+        } else {
+            rendered.sort_by(|(_, left), (_, right)| left.cmp(right));
+        }
+        let listed = rendered
+            .iter()
+            .map(|(declaration, _)| render(ir, *declaration))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|kind| {
+                vec![(
+                    declaration_span(ir, rendered[0].0),
+                    super::undetermined_type_message(kind),
+                )]
+            })?;
+        let message = super::clash_message(&name, &descriptor, &listed);
+        let mut located = Vec::new();
+        for declaration in members {
+            if matches!(declaration, Declaration::InPlaceDelegate { .. }) {
+                if reported_delegate_header {
+                    continue;
+                }
+                reported_delegate_header = true;
+            }
+            located.push((declaration_span(ir, declaration), message.clone()));
+        }
+        located.sort_by_key(|(span, _)| span.lo);
+        clashes.extend(located);
+    }
+    clashes.sort_by_key(|(span, _)| span.lo);
+    Ok(clashes)
+}
+
+fn push(
+    groups: &mut Vec<((String, String), Vec<Declaration>)>,
+    signature: (String, String),
+    declaration: Declaration,
+) {
+    if let Some((_, members)) = groups.iter_mut().find(|(key, _)| *key == signature) {
+        members.push(declaration);
+    } else {
+        groups.push((signature, vec![declaration]));
+    }
+}
+
+fn declaration_span(ir: &IrFile, declaration: Declaration) -> Span {
+    match declaration {
+        Declaration::Function(index) => ir.package_functions[index].signature_span,
+        Declaration::PropertyAccessor {
+            property, setter, ..
+        } => property_accessor_span(ir, property, setter),
+        Declaration::PropertyAnnotationMarker(_) | Declaration::InPlaceDelegate { .. } => {
+            Span::new(0, 0)
+        }
+    }
+}
+
+fn property_accessor_span(ir: &IrFile, property: usize, setter: bool) -> Span {
+    let declaration = &ir.package_properties[property];
+    let checked = ir
+        .checked_properties
+        .get(&declaration.property)
+        .expect("a package property accessor retains its checked declaration");
+    (if setter {
+        checked.setter_diagnostic_span
+    } else {
+        checked.getter_diagnostic_span
+    })
+    .or(checked.diagnostic_span)
+    .expect("a source package property retains its diagnostic span")
+}
+
+fn delegate_group_order(ir: &IrFile, declaration: Declaration) -> (u8, u32, FunId) {
+    match declaration {
+        Declaration::InPlaceDelegate {
+            function,
+            source_order,
+        } => (0, source_order, function),
+        Declaration::Function(index) => {
+            let declaration = &ir.package_functions[index];
+            (1, declaration.source_order, declaration.function)
+        }
+        Declaration::PropertyAccessor {
+            property,
+            function,
+            setter,
+        } => (
+            1 + u8::from(setter),
+            ir.package_properties[property].source_order,
+            function,
+        ),
+        Declaration::PropertyAnnotationMarker(function) => (3, u32::MAX, function),
+    }
+}
+
+fn declaration_order(
+    ir: &IrFile,
+    declaration: Declaration,
+) -> Result<(String, String, Vec<String>, usize), UndeterminedDiagnosticType> {
+    match declaration {
+        Declaration::Function(index) => function_order(&ir.package_functions[index]),
+        Declaration::PropertyAccessor { function, .. }
+        | Declaration::InPlaceDelegate { function, .. }
+        | Declaration::PropertyAnnotationMarker(function) => {
+            let function = &ir.functions[function as usize];
+            Ok((function.name.clone(), String::new(), Vec::new(), 0))
+        }
+    }
+}
+
+fn render(ir: &IrFile, declaration: Declaration) -> Result<String, UndeterminedDiagnosticType> {
+    match declaration {
+        Declaration::Function(index) => render_function(&ir.package_functions[index], ir),
+        Declaration::PropertyAccessor {
+            property,
+            function,
+            setter,
+        } => {
+            let property = &ir.package_properties[property];
+            let callable = if setter {
+                format!("<set-{}>", property.name)
+            } else {
+                format!("<get-{}>", property.name)
+            };
+            let mut type_context = super::semantic_function_parameters(ir, function).to_vec();
+            type_context.push(ir.functions[function as usize].ret);
+            Ok(super::render_source_member_method(
+                ir,
+                function,
+                &callable,
+                owner(ir),
+                &type_context,
+            ))
+        }
+        Declaration::PropertyAnnotationMarker(function) => {
+            let function = &ir.functions[function as usize];
+            Ok(format!(
+                "fun {}(): Unit defined in {}",
+                super::rendered_callable_name(&function.name),
+                owner(ir)
+            ))
+        }
+        Declaration::InPlaceDelegate { function, .. } => super::render_physical_function(
+            &ir.functions[function as usize],
+            (0..ir.functions[function as usize].params.len()).map(|_| "<this>"),
+            owner(ir),
+        ),
+    }
+}
+
+fn render_function(
+    function: &crate::ir::IrPackageFunction,
+    ir: &IrFile,
+) -> Result<String, UndeterminedDiagnosticType> {
+    let mut rendered = String::from("fun ");
+    if !function.type_params.is_empty() {
+        rendered.push('<');
+        for (index, parameter) in function.type_params.iter().enumerate() {
+            if index > 0 {
+                rendered.push_str(", ");
+            }
+            rendered.push_str(&parameter.name);
+            let bounds = parameter
+                .bounds
+                .iter()
+                .copied()
+                .filter(|bound| !super::is_default_bound(*bound))
+                .collect::<Vec<_>>();
+            if !bounds.is_empty() {
+                rendered.push_str(" : ");
+                for (bound_index, bound) in bounds.iter().enumerate() {
+                    if bound_index > 0 {
+                        rendered.push_str(" & ");
+                    }
+                    rendered.push_str(&super::source_type_name(*bound)?);
+                }
+            }
+        }
+        rendered.push_str("> ");
+    }
+    if let Some(receiver) = function.receiver {
+        rendered.push_str(&super::source_type_name(receiver)?);
+        rendered.push('.');
+    }
+    rendered.push_str(&super::rendered_callable_name(&function.name));
+    rendered.push('(');
+    for (index, (name, ty)) in value_parameters(function)?.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        rendered.push_str(name);
+        rendered.push_str(": ");
+        rendered.push_str(&super::source_type_name(*ty)?);
+    }
+    rendered.push_str("): ");
+    rendered.push_str(&super::source_type_name(function.ret)?);
+    rendered.push_str(" defined in ");
+    rendered.push_str(owner(ir));
+    Ok(rendered)
+}
+
+fn function_order(
+    function: &crate::ir::IrPackageFunction,
+) -> Result<(String, String, Vec<String>, usize), UndeterminedDiagnosticType> {
+    Ok((
+        function.name.clone(),
+        function
+            .receiver
+            .map(super::qualified_type_name)
+            .transpose()?
+            .unwrap_or_default(),
+        value_parameters(function)?
+            .iter()
+            .map(|(_, ty)| super::qualified_type_name(*ty))
+            .collect::<Result<Vec<_>, _>>()?,
+        function.type_params.len(),
+    ))
+}
+
+fn value_parameters(
+    function: &crate::ir::IrPackageFunction,
+) -> Result<&[(String, crate::types::Ty)], UndeterminedDiagnosticType> {
+    function
+        .params
+        .get(function.context_count..)
+        .ok_or(UndeterminedDiagnosticType::InvalidContextParameterCount)
+}
+
+fn owner(ir: &IrFile) -> &str {
+    ir.package
+        .as_deref()
+        .filter(|package| !package.is_empty())
+        .unwrap_or("root package")
+}

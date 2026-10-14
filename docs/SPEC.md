@@ -13120,9 +13120,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property's line in a constructor, which gives it a `nop`. A constant leaves nothing at the
   initialization site. The JVM pass reads the checked delegate's IR shape and the storage identity
   common lowering recorded. It records which statics it retired and which methods it generated,
-  and emission and `@Metadata` consume that record. Root cause of the reported "cannot compute JVM
-  frames for getUnit1": the delegate's storage took the delegate's type, `Unit`, which the JVM
-  spells `void`, so the field read pushed no receiver for `getValue`. Related fixes:
+  and emission and `@Metadata` consume that record. The generated method joins the same final
+  owner/name/descriptor collision inventory as source functions, property accessors, annotation
+  markers and other generated delegate methods; diagnostics are not produced by a second partial
+  scan. A delegated property's reflected signature is finalized from its recorded getter identity,
+  and a missing local accessor is an invalid backend state rather than a reason to reconstruct a
+  conventional getter name from the property's spelling. Root cause of the reported "cannot
+  compute JVM frames for getUnit1": the delegate's storage took the delegate's type, `Unit`, which
+  the JVM spells `void`, so the field read pushed no receiver for `getValue`. Related fixes:
   - A `Unit`-typed value parameter (`operator fun Unit.getValue(…)`) is `Lkotlin/Unit;` in the
     generic `Signature` and gets `@NotNull`. Its descriptor makes metadata record the function's
     JVM signature, because a reader would map `Unit` to `V`.

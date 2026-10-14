@@ -289,6 +289,23 @@ fn package_delegate_method_clash_matches_kotlinc_exactly() {
     common::expect_identical_rejection(&result, "package generated delegate-method clash");
 }
 
+#[test]
+fn package_delegate_method_clashes_with_a_computed_property_accessor() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
+        \n\
+        val x: Int by Unit\n\
+        val `x$delegate`: Any? get() = null\n";
+    let result = common::compiler_diagnostics(
+        &[("PackageDelegatePropertyAccessorClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "package delegate-method/property-accessor clash");
+}
+
 /// Generated methods live in an internal map, but platform-clash diagnostics follow their
 /// properties' stable source order when several generated declarations share the file-start span.
 #[test]
@@ -328,6 +345,44 @@ fn member_delegate_method_clash_matches_kotlinc_exactly() {
         &[common::stdlib_jar()],
     );
     common::expect_identical_rejection(&result, "member generated delegate-method clash");
+}
+
+#[test]
+fn package_generated_delegate_methods_clash_with_each_other() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.jvm.JvmName\n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun <T> Unit.getValue(thisRef: Any?, property: KProperty<*>): T = error(\"unused\")\n\
+        \n\
+        @get:JvmName(\"read\") val first: Int by Unit\n\
+        @get:JvmName(\"read\") val second: String by Unit\n";
+    let result = common::compiler_diagnostics(
+        &[("PackageDelegatePeerClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "package generated delegate-method peer clash");
+}
+
+#[test]
+fn member_generated_delegate_methods_clash_with_each_other() {
+    const SOURCE: &str = "package store\n\
+        \n\
+        import kotlin.jvm.JvmName\n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun <T> Unit.getValue(thisRef: Any?, property: KProperty<*>): T = error(\"unused\")\n\
+        \n\
+        class Host {\n\
+        \x20   @get:JvmName(\"read\") val first: Int by Unit\n\
+        \x20   @get:JvmName(\"read\") val second: String by Unit\n\
+        }\n";
+    let result = common::compiler_diagnostics(
+        &[("MemberDelegatePeerClash.kt", SOURCE)],
+        &[common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "member generated delegate-method peer clash");
 }
 
 /// The reported shape runs, and the JVM declares the `get<X>$delegate` methods in place of the

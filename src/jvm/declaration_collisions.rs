@@ -7,6 +7,7 @@
 use crate::diag::{DiagSink, Span};
 use crate::ir::{FunId, IrFile};
 
+mod package_method_diagnostics;
 mod property_marker_diagnostics;
 
 pub(super) fn validate(
@@ -16,7 +17,6 @@ pub(super) fn validate(
     diags: &mut DiagSink,
 ) -> Result<(), ()> {
     let platform_clash = report_platform_declaration_clashes(ir, override_results, diags)
-        | report_in_place_delegate_method_clashes(ir, override_results, diags)
         | report_jvm_field_companion_alias_clashes(ir, diags)
         | report_jvm_field_enum_entry_clashes(ir, diags)
         | report_jvm_field_companion_block_const_clashes(ir, diags)
@@ -27,7 +27,7 @@ pub(super) fn validate(
             return Err(());
         }
     }
-    let package_clashes = match package_function_signature_clashes(ir) {
+    let package_clashes = match package_method_diagnostics::report(ir, override_results) {
         Ok(clashes) => clashes,
         Err(errors) => {
             for (span, message) in errors {
@@ -104,135 +104,6 @@ fn report_delegated_property_array_clashes(
     let found = !clashes.is_empty();
     for (offset, message) in clashes {
         diags.error(Span::new(offset, offset), message);
-    }
-    found
-}
-
-/// An in-place delegated property publishes a generated `get<X>$delegate` method. It is not a
-/// source function and therefore deliberately has no `fn_signature_offsets` entry, but it still
-/// occupies the owner's JVM method namespace. Validate its recorded function identity against the
-/// source declarations after every representation pass has fixed names and descriptors.
-fn report_in_place_delegate_method_clashes(
-    ir: &IrFile,
-    override_results: &crate::jvm::override_results::OverrideResults,
-    diags: &mut DiagSink,
-) -> bool {
-    let mut clashes = Vec::new();
-    let mut generated_methods = ir.jvm_delegate_methods_with_getters().collect::<Vec<_>>();
-    generated_methods.sort_by_key(|&(generated, getter)| {
-        (
-            ir.fn_source_order.get(&getter).copied().unwrap_or(u32::MAX),
-            getter,
-            generated,
-        )
-    });
-    // A package facade is one generated declaration owner. kotlinc attaches only its first
-    // synthetic-method clash to the file start; every colliding source declaration still receives
-    // its own diagnostic below.
-    let mut reported_package_owner = false;
-    for (generated, _) in generated_methods {
-        let Some(function) = ir.functions.get(generated as usize) else {
-            continue;
-        };
-        let descriptor = crate::jvm::ir_emit::function_descriptor(ir, override_results, generated);
-        let owner = ir.classes.iter().enumerate().find(|(_, class)| {
-            class
-                .methods
-                .iter()
-                .any(|&candidate| candidate == generated)
-        });
-        if let Some((class_index, class)) = owner {
-            let declarations = class
-                .methods
-                .iter()
-                .copied()
-                .filter(|&candidate| candidate != generated)
-                .filter_map(|candidate| {
-                    let &offset = ir.fn_signature_offsets.get(&candidate)?;
-                    let candidate_function = ir.functions.get(candidate as usize)?;
-                    (candidate_function.name == function.name
-                        && crate::jvm::ir_emit::function_descriptor(
-                            ir,
-                            override_results,
-                            candidate,
-                        ) == descriptor)
-                        .then_some((candidate, Span::new(offset, offset)))
-                })
-                .collect::<Vec<_>>();
-            if declarations.is_empty() {
-                continue;
-            }
-            let Ok(generated_declaration) =
-                render_generated_member_delegate(function, class.fq_name)
-            else {
-                continue;
-            };
-            let mut rendered = vec![generated_declaration];
-            let mut located = vec![(
-                ir.class_diagnostic_span(class_index as u32)
-                    .unwrap_or_else(|| Span::new(0, 0)),
-                rendered[0].clone(),
-            )];
-            for (declaration, span) in declarations {
-                let Ok(source) = render_member_function(ir, declaration, class.fq_name) else {
-                    continue;
-                };
-                rendered.push(source.clone());
-                located.push((span, source));
-            }
-            if located.len() < 2 {
-                continue;
-            }
-            let message = clash_message(&function.name, &descriptor, &rendered);
-            clashes.extend(located.into_iter().map(|(span, _)| (span, message.clone())));
-        } else {
-            let declarations = ir
-                .package_functions
-                .iter()
-                .filter(|declaration| {
-                    let candidate = &ir.functions[declaration.function as usize];
-                    candidate.name == function.name
-                        && crate::jvm::ir_emit::function_descriptor(
-                            ir,
-                            override_results,
-                            declaration.function,
-                        ) == descriptor
-                })
-                .collect::<Vec<_>>();
-            if declarations.is_empty() {
-                continue;
-            }
-            let Ok(generated_declaration) =
-                render_generated_package_delegate(function, ir.package.as_deref())
-            else {
-                continue;
-            };
-            let mut rendered = vec![generated_declaration];
-            for declaration in &declarations {
-                let Ok(source) = render_declaration(declaration, ir.package.as_deref()) else {
-                    continue;
-                };
-                rendered.push(source);
-            }
-            if rendered.len() < 2 {
-                continue;
-            }
-            let message = clash_message(&function.name, &descriptor, &rendered);
-            if !reported_package_owner {
-                clashes.push((Span::new(0, 0), message.clone()));
-                reported_package_owner = true;
-            }
-            clashes.extend(
-                declarations
-                    .into_iter()
-                    .map(|declaration| (declaration.signature_span, message.clone())),
-            );
-        }
-    }
-    clashes.sort_by_key(|(span, _)| span.lo);
-    let found = !clashes.is_empty();
-    for (span, message) in clashes {
-        diags.error(span, message);
     }
     found
 }
@@ -444,6 +315,11 @@ enum MemberMethodDeclaration {
     GeneratedMethod {
         offset: u32,
     },
+    InPlaceDelegate {
+        offset: u32,
+        function: FunId,
+        source_order: u32,
+    },
     DelegationForwarder {
         offset: u32,
         function: FunId,
@@ -516,6 +392,9 @@ fn report_platform_declaration_clashes(
     diags: &mut DiagSink,
 ) -> bool {
     let mut clashes = Vec::new();
+    let delegate_getters = ir
+        .jvm_delegate_methods_with_getters()
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     for (class_id, class) in ir.classes.iter().enumerate() {
         let mut groups: crate::fx_hash::HashMap<(String, String), Vec<MemberMethodDeclaration>> =
             crate::fx_hash::HashMap::default();
@@ -538,6 +417,14 @@ fn report_platform_declaration_clashes(
                 MemberMethodDeclaration::GeneratedDataMember {
                     offset,
                     function: method,
+                }
+            } else if let Some(&getter) = delegate_getters.get(&method) {
+                MemberMethodDeclaration::InPlaceDelegate {
+                    offset: ir
+                        .class_diagnostic_span(class_id as u32)
+                        .map_or(0, |span| span.lo),
+                    function: method,
+                    source_order: ir.fn_source_order.get(&getter).copied().unwrap_or(u32::MAX),
                 }
             } else if member_method_is_inventoried(ir, class_id as u32, class, method) {
                 // A property accessor or annotation marker is inserted below with its semantic
@@ -724,6 +611,7 @@ fn report_platform_declaration_clashes(
                 .then_with(|| left_signature.cmp(right_signature))
         });
         let mut reported_marker_header = false;
+        let mut reported_delegate_header = false;
         for ((name, descriptor), declarations) in groups {
             let includes_marker = declarations.iter().any(|declaration| {
                 matches!(
@@ -739,6 +627,9 @@ fn report_platform_declaration_clashes(
             });
             let includes_generated_method = declarations.iter().any(|declaration| {
                 matches!(declaration, MemberMethodDeclaration::GeneratedMethod { .. })
+            });
+            let includes_delegate = declarations.iter().any(|declaration| {
+                matches!(declaration, MemberMethodDeclaration::InPlaceDelegate { .. })
             });
             let includes_delegation_forwarder =
                 declarations.iter().any(|declaration| match declaration {
@@ -756,6 +647,7 @@ fn report_platform_declaration_clashes(
                 && declarations_are_renderable
                 && (includes_marker
                     || includes_generated_data_member
+                    || includes_delegate
                     || includes_delegation_forwarder)
             {
                 let owner = class.fq_name.render().replace(['/', '$'], ".");
@@ -763,6 +655,7 @@ fn report_platform_declaration_clashes(
                 let kind_order = |declaration: &MemberMethodDeclaration| match declaration {
                     MemberMethodDeclaration::GeneratedDataMember { .. } => 0,
                     MemberMethodDeclaration::GeneratedMethod { .. } => 0,
+                    MemberMethodDeclaration::InPlaceDelegate { .. } => 0,
                     MemberMethodDeclaration::DelegationForwarder { .. } => 1,
                     MemberMethodDeclaration::PropertyAccessor {
                         property: PropertyAccessorDeclaration::MemberExtension(_),
@@ -806,6 +699,13 @@ fn report_platform_declaration_clashes(
                     | MemberMethodDeclaration::GeneratedMethod { offset, .. }
                     | MemberMethodDeclaration::DelegationForwarder { offset, .. }
                     | MemberMethodDeclaration::PropertyAccessor { offset, .. } => offset,
+                    MemberMethodDeclaration::InPlaceDelegate { offset, .. } => {
+                        if reported_delegate_header {
+                            continue;
+                        }
+                        reported_delegate_header = true;
+                        offset
+                    }
                     MemberMethodDeclaration::PropertyAnnotationMarker { offset, .. } => {
                         if reported_marker_header {
                             continue;
@@ -835,6 +735,9 @@ fn member_method_declaration_is_renderable(
         MemberMethodDeclaration::Source { function, .. }
         | MemberMethodDeclaration::GeneratedDataMember { function, .. }
         | MemberMethodDeclaration::DelegationForwarder { function, .. } => Some(function),
+        MemberMethodDeclaration::InPlaceDelegate { function, .. } => {
+            return determined_function_signature(&ir.functions[function as usize]).is_ok();
+        }
         MemberMethodDeclaration::PropertyAccessor {
             function: Some(function),
             property: PropertyAccessorDeclaration::Member(_),
@@ -912,6 +815,13 @@ fn render_member_method_declaration(
         }
         MemberMethodDeclaration::GeneratedDataMember { function, .. } => {
             return render_source_member_method(ir, function, name, owner, type_context);
+        }
+        MemberMethodDeclaration::InPlaceDelegate { function, .. } => {
+            return render_generated_member_delegate(
+                &ir.functions[function as usize],
+                class.fq_name,
+            )
+            .expect("a renderable in-place delegate has determined JVM types");
         }
         MemberMethodDeclaration::GeneratedMethod { .. } => {
             unreachable!("generated methods use the generic platform-clash diagnostic")
@@ -1366,160 +1276,6 @@ fn member_method_is_inventoried(
             .any(|(&(owner, _), &marker)| owner == class.fq_name_id() && marker == function)
 }
 
-/// Source package functions and generated property-annotation markers whose representation passes
-/// selected the same facade method.
-///
-/// Different Kotlin shapes (`fun <T> id(): Int` and `fun id(): Int`, or `List<T>` and
-/// `List<String>`) stay distinct in the resolver. They collide only once the physical name and
-/// descriptor are known, and only inside one file facade.
-///
-/// Both variants carry `(span, message)` rows: `Ok` the clashes to report, `Err` the failure to
-/// report instead.
-type ClashRows = Vec<(crate::diag::Span, String)>;
-
-#[derive(Clone, Copy)]
-enum PackageMethodDeclaration {
-    Function(usize),
-    PropertyAnnotationMarker(FunId),
-}
-
-fn package_function_signature_clashes(ir: &IrFile) -> Result<ClashRows, ClashRows> {
-    let mut groups: Vec<((String, String), Vec<PackageMethodDeclaration>)> = Vec::new();
-    for (index, declaration) in ir.package_functions.iter().enumerate() {
-        if declaration.companion {
-            continue;
-        }
-        let Some(function) = ir.functions.get(declaration.function as usize) else {
-            return Err(vec![(
-                declaration.signature_span,
-                "internal error: package function platform-clash validation has no IR function"
-                    .to_string(),
-            )]);
-        };
-        if let Err(kind) = determined_function_signature(function) {
-            return Err(vec![(
-                declaration.signature_span,
-                undetermined_type_message(kind),
-            )]);
-        }
-        let signature = (
-            function.name.clone(),
-            crate::jvm::names::method_descriptor(&function.params, function.ret),
-        );
-        if let Some((_, members)) = groups.iter_mut().find(|(key, _)| *key == signature) {
-            members.push(PackageMethodDeclaration::Function(index));
-        } else {
-            groups.push((signature, vec![PackageMethodDeclaration::Function(index)]));
-        }
-    }
-    for property in &ir.package_properties {
-        let Some(marker) = ir.jvm_package_property_annotation_marker(property.property) else {
-            continue;
-        };
-        let Some(function) = ir.functions.get(marker as usize) else {
-            return Err(vec![(
-                Span::new(0, 0),
-                "internal error: package property annotation marker has no IR function".to_string(),
-            )]);
-        };
-        if let Err(kind) = determined_function_signature(function) {
-            return Err(vec![(Span::new(0, 0), undetermined_type_message(kind))]);
-        }
-        let signature = (
-            function.name.clone(),
-            crate::jvm::names::method_descriptor(&function.params, function.ret),
-        );
-        let declaration = PackageMethodDeclaration::PropertyAnnotationMarker(marker);
-        if let Some((_, members)) = groups.iter_mut().find(|(key, _)| *key == signature) {
-            members.push(declaration);
-        } else {
-            groups.push((signature, vec![declaration]));
-        }
-    }
-    let mut clashes = Vec::new();
-    for ((name, descriptor), members) in groups {
-        if members.len() < 2 {
-            continue;
-        }
-        let mut rendered = Vec::with_capacity(members.len());
-        for &declaration in &members {
-            let key = package_declaration_order(ir, declaration).map_err(|kind| {
-                vec![(
-                    package_declaration_span(ir, declaration),
-                    undetermined_type_message(kind),
-                )]
-            })?;
-            rendered.push((declaration, key));
-        }
-        rendered.sort_by(|(_, left), (_, right)| left.cmp(right));
-        let listed = rendered
-            .iter()
-            .map(|(declaration, _)| render_package_declaration(ir, *declaration))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|kind| {
-                vec![(
-                    package_declaration_span(ir, rendered[0].0),
-                    undetermined_type_message(kind),
-                )]
-            })?;
-        let message = clash_message(&name, &descriptor, &listed);
-        let mut located = members
-            .into_iter()
-            .map(|declaration| (package_declaration_span(ir, declaration), message.clone()))
-            .collect::<Vec<_>>();
-        located.sort_by_key(|(span, _)| span.lo);
-        clashes.extend(located);
-    }
-    clashes.sort_by_key(|(span, _)| span.lo);
-    Ok(clashes)
-}
-
-fn package_declaration_span(ir: &IrFile, declaration: PackageMethodDeclaration) -> Span {
-    match declaration {
-        PackageMethodDeclaration::Function(index) => ir.package_functions[index].signature_span,
-        // kotlinc locates a generated package-property annotation marker at the file header.
-        PackageMethodDeclaration::PropertyAnnotationMarker(_) => Span::new(0, 0),
-    }
-}
-
-fn package_declaration_order(
-    ir: &IrFile,
-    declaration: PackageMethodDeclaration,
-) -> Result<(String, String, Vec<String>, usize), UndeterminedDiagnosticType> {
-    match declaration {
-        PackageMethodDeclaration::Function(index) => {
-            declaration_order(&ir.package_functions[index])
-        }
-        PackageMethodDeclaration::PropertyAnnotationMarker(function) => {
-            let function = &ir.functions[function as usize];
-            Ok((function.name.clone(), String::new(), Vec::new(), 0))
-        }
-    }
-}
-
-fn render_package_declaration(
-    ir: &IrFile,
-    declaration: PackageMethodDeclaration,
-) -> Result<String, UndeterminedDiagnosticType> {
-    match declaration {
-        PackageMethodDeclaration::Function(index) => {
-            render_declaration(&ir.package_functions[index], ir.package.as_deref())
-        }
-        PackageMethodDeclaration::PropertyAnnotationMarker(function) => {
-            let function = &ir.functions[function as usize];
-            let mut rendered = format!(
-                "fun {}(): Unit defined in ",
-                rendered_callable_name(&function.name)
-            );
-            match ir.package.as_deref() {
-                Some(package) if !package.is_empty() => rendered.push_str(package),
-                _ => rendered.push_str("root package"),
-            }
-            Ok(rendered)
-        }
-    }
-}
-
 fn clash_message(name: &str, descriptor: &str, declarations: &[String]) -> String {
     let mut message = format!(
         "platform declaration clash: The following declarations have the same JVM signature ({name}{descriptor}):"
@@ -1532,82 +1288,6 @@ fn clash_message(name: &str, descriptor: &str, declarations: &[String]) -> Strin
     message
 }
 
-fn value_parameters(
-    function: &crate::ir::IrPackageFunction,
-) -> Result<&[(String, crate::types::Ty)], UndeterminedDiagnosticType> {
-    function
-        .params
-        .get(function.context_count..)
-        .ok_or(UndeterminedDiagnosticType::InvalidContextParameterCount)
-}
-
-fn render_declaration(
-    function: &crate::ir::IrPackageFunction,
-    package: Option<&str>,
-) -> Result<String, UndeterminedDiagnosticType> {
-    let mut rendered = String::from("fun ");
-    if !function.type_params.is_empty() {
-        rendered.push('<');
-        for (index, parameter) in function.type_params.iter().enumerate() {
-            if index > 0 {
-                rendered.push_str(", ");
-            }
-            rendered.push_str(&parameter.name);
-            let bounds = parameter
-                .bounds
-                .iter()
-                .copied()
-                .filter(|bound| !is_default_bound(*bound))
-                .collect::<Vec<_>>();
-            if !bounds.is_empty() {
-                rendered.push_str(" : ");
-                for (bound_index, bound) in bounds.iter().enumerate() {
-                    if bound_index > 0 {
-                        rendered.push_str(" & ");
-                    }
-                    rendered.push_str(&source_type_name(*bound)?);
-                }
-            }
-        }
-        rendered.push_str("> ");
-    }
-    if let Some(receiver) = function.receiver {
-        rendered.push_str(&source_type_name(receiver)?);
-        rendered.push('.');
-    }
-    rendered.push_str(&rendered_callable_name(&function.name));
-    rendered.push('(');
-    for (index, (name, ty)) in value_parameters(function)?.iter().enumerate() {
-        if index > 0 {
-            rendered.push_str(", ");
-        }
-        rendered.push_str(name);
-        rendered.push_str(": ");
-        rendered.push_str(&source_type_name(*ty)?);
-    }
-    rendered.push_str("): ");
-    rendered.push_str(&source_type_name(function.ret)?);
-    rendered.push_str(" defined in ");
-    match package {
-        Some(package) if !package.is_empty() => rendered.push_str(package),
-        _ => rendered.push_str("root package"),
-    }
-    Ok(rendered)
-}
-
-fn render_generated_package_delegate(
-    function: &crate::ir::IrFunction,
-    package: Option<&str>,
-) -> Result<String, UndeterminedDiagnosticType> {
-    render_physical_function(
-        function,
-        (0..function.params.len()).map(|_| "<this>"),
-        package
-            .filter(|package| !package.is_empty())
-            .unwrap_or("root package"),
-    )
-}
-
 fn render_generated_member_delegate(
     function: &crate::ir::IrFunction,
     owner: crate::types::TypeName,
@@ -1617,23 +1297,6 @@ fn render_generated_member_delegate(
         (0..function.params.len()).map(|_| "<this>"),
         &owner.render().replace(['/', '$'], "."),
     )
-}
-
-fn render_member_function(
-    ir: &IrFile,
-    function: FunId,
-    owner: crate::types::TypeName,
-) -> Result<String, UndeterminedDiagnosticType> {
-    let declaration = &ir.functions[function as usize];
-    let identities = ir
-        .function_parameter_identities(function)
-        .ok_or(UndeterminedDiagnosticType::InvalidContextParameterCount)?;
-    let names = identities
-        .iter()
-        .map(|identity| identity.source_name.as_deref())
-        .collect::<Option<Vec<_>>>()
-        .ok_or(UndeterminedDiagnosticType::InvalidContextParameterCount)?;
-    render_physical_function(declaration, names, &owner.render().replace(['/', '$'], "."))
 }
 
 fn render_physical_function<'a>(
@@ -1704,26 +1367,6 @@ fn rendered_callable_name(name: &str) -> String {
     } else {
         format!("`{name}`")
     }
-}
-
-/// kotlinc's `MemberComparator` order: name, then rendered receiver and value-parameter types
-/// (classifiers qualified), then type-parameter count.
-fn declaration_order(
-    function: &crate::ir::IrPackageFunction,
-) -> Result<(String, String, Vec<String>, usize), UndeterminedDiagnosticType> {
-    Ok((
-        function.name.clone(),
-        function
-            .receiver
-            .map(qualified_type_name)
-            .transpose()?
-            .unwrap_or_default(),
-        value_parameters(function)?
-            .iter()
-            .map(|(_, ty)| qualified_type_name(*ty))
-            .collect::<Result<Vec<_>, _>>()?,
-        function.type_params.len(),
-    ))
 }
 
 fn is_default_bound(bound: crate::types::Ty) -> bool {
