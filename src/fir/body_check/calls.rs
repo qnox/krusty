@@ -2026,7 +2026,7 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedCallShape,
                 )
             })?;
-        let receiver = self.explicit_receiver(receiver)?;
+        let receiver = self.explicit_dispatch_receiver(receiver)?;
         self.selected_member_call_with_semantics(expression, arguments, &selected, receiver)
     }
 

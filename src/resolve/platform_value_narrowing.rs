@@ -101,7 +101,7 @@ impl Checker<'_> {
     }
 
     /// Whether `e` produces an enhanced result: a call whose value carries `EnhancedNullability`,
-    /// or a value conditional one of whose branches produces one (a common
+    /// or a value conditional or `try` one of whose branches produces one (a common
     /// supertype keeps the attribute). A declared type reaching the conditional then guards its
     /// branches where they produce their values.
     fn has_enhanced_result(&self, e: ExprId) -> bool {
@@ -118,6 +118,13 @@ impl Checker<'_> {
                 return arms
                     .iter()
                     .any(|arm| self.branch_has_enhanced_result(arm.body));
+            }
+            // A `try` produces its value through its body or one of its catches.
+            Expr::Try { body, catches, .. } => {
+                return self.branch_has_enhanced_result(*body)
+                    || catches
+                        .iter()
+                        .any(|clause| self.branch_has_enhanced_result(clause.body));
             }
             // `when (val x = ...)` is a block declaring the subject before the `when`.
             Expr::Block { .. } => {

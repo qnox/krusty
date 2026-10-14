@@ -541,10 +541,10 @@ impl BodyFirChecker<'_> {
                 && is_value_boundary(self.file.expr(expression))
             {
                 self.guard_platform_conditional(expression, value, target)?;
-            } else if let Some(conversion) =
-                self.platform_producer_conversion(expression, cause, target)
-            {
-                return Ok(Some(conversion));
+            } else {
+                return Ok(Some(
+                    self.platform_producer_conversion(expression, value, cause, target),
+                ));
             }
         }
         if self
@@ -787,8 +787,9 @@ impl BodyFirChecker<'_> {
 
     /// Put a checked platform-type boundary on the producer selected by Kotlin's conditional
     /// rules. A declared expected type reaches `if`/`when` branches and an Elvis fallback, while an
-    /// Elvis left operand remains the nullable probe. A block hands the type on to its trailing
-    /// value (`when (val x = ...)` is a block declaring the subject before the `when`).
+    /// Elvis left operand remains the nullable probe. A `try` hands it to its body and every
+    /// `catch`, never its `finally`. A block hands the type on to its trailing value
+    /// (`when (val x = ...)` is a block declaring the subject before the `when`).
     fn guard_platform_conditional(
         &mut self,
         source: ExprId,
@@ -888,6 +889,48 @@ impl BodyFirChecker<'_> {
                 };
                 *rhs = guarded;
             }
+            Expr::Try { body, catches, .. } => {
+                let (body_value, catch_values) = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::Try {
+                        body,
+                        catches: checked,
+                        ..
+                    } if checked.len() == catches.len() => (
+                        *body,
+                        checked.iter().map(|catch| catch.body).collect::<Vec<_>>(),
+                    ),
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                let body_value = self.guard_platform_branch(body, body_value, target)?;
+                let catch_values = catches
+                    .iter()
+                    .zip(catch_values)
+                    .map(|(clause, value)| self.guard_platform_branch(clause.body, value, target))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let FirExprKind::Try {
+                    body,
+                    catches: checked,
+                    ..
+                } = &mut self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked try expression still exists")
+                    .kind
+                else {
+                    unreachable!("the checked try shape was validated above")
+                };
+                *body = body_value;
+                for (catch, guarded) in checked.iter_mut().zip(catch_values) {
+                    catch.body = guarded;
+                }
+            }
             Expr::Block {
                 trailing: Some(trailing),
                 ..
@@ -929,7 +972,7 @@ impl BodyFirChecker<'_> {
         target: ResolvedTy,
     ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
         match self.file.expr(source).clone() {
-            Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => {
+            Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } | Expr::Try { .. } => {
                 self.guard_platform_conditional(source, value, target)?;
                 Ok(value)
             }
@@ -960,14 +1003,7 @@ impl BodyFirChecker<'_> {
             _ if !self.info.produces_unchecked_java_value(source) => Ok(value),
             _ => {
                 let cause = self.expression_origin(source)?;
-                let conversion = self
-                    .platform_producer_conversion(source, cause, target)
-                    .ok_or_else(|| {
-                        self.failure(
-                            self.file.expr_span(source),
-                            BodyCheckFailureKind::UnsupportedCallShape,
-                        )
-                    })?;
+                let conversion = self.platform_producer_conversion(source, value, cause, target);
                 Ok(self.body.add_expr(crate::fir::FirExpr {
                     origin: cause,
                     ty: target,
@@ -975,6 +1011,28 @@ impl BodyFirChecker<'_> {
                 }))
             }
         }
+    }
+
+    /// A member access's explicit dispatch `receiver`. Resolution commits a Java value received by
+    /// a value class to that class's non-null type (see `resolve::value_classes`), and it is guarded
+    /// against that type like an argument.
+    pub(super) fn explicit_dispatch_receiver(
+        &mut self,
+        receiver: ExprId,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
+        let mut checked = self.explicit_receiver(receiver)?;
+        if checked.conversion.is_none() && self.info.platform_narrowings.contains_key(&receiver) {
+            let span = self
+                .file
+                .expr_span(receiver)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+            let received = self.info.semantic_ty(receiver).platform_lower_bound();
+            let target = self.resolved_type(span, received)?;
+            let cause = self.expression_origin(receiver)?;
+            checked.conversion =
+                Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+        }
+        Ok(checked)
     }
 
     /// An extension call's explicit `receiver`, converted as the argument of the receiver
@@ -995,26 +1053,52 @@ impl BodyFirChecker<'_> {
                 .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
             let target = self.resolved_type(span, parameter)?;
             let cause = self.expression_origin(call)?;
-            checked.conversion = self.platform_producer_conversion(receiver, cause, target);
+            checked.conversion =
+                Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
         }
         Ok(checked)
     }
 
-    fn platform_producer_conversion(
+    /// The implicit not-null cast over the checked `value` of `source`. kotlinc names the check
+    /// only when the cast's operand is a call (`name(...)`, a property accessor included) or a
+    /// field read (`checkNotNullExpressionValue`); over any other operand — a local or captured
+    /// value, a `try`, a conditional merged in argument position — it keeps the value in a
+    /// temporary and uses the message-less `checkNotNull(Object)`.
+    pub(super) fn platform_producer_conversion(
         &mut self,
         source: ExprId,
+        value: crate::fir::FirExprId,
         cause: OriginId,
         target: ResolvedTy,
-    ) -> Option<FirConversion> {
+    ) -> FirConversion {
         // Reordered named arguments make the call a composite expression: their values are
-        // evaluated in source order into temporaries before the invocation. The check still
-        // exists, but cannot name that composite producer, so kotlinc uses `checkNotNull(Object)`.
-        let message = if self.call_reorders_arguments(source) {
+        // evaluated in source order into temporaries before the invocation, so the check cannot
+        // name that composite producer.
+        let message = if self.call_reorders_arguments(source) || self.reads_local_storage(value) {
             None
         } else {
-            Some(self.platform_narrowing_message(source)?)
+            self.platform_narrowing_message(source)
         };
-        Some(self.platform_narrowing_conversion(message, cause, target))
+        self.platform_narrowing_conversion(message, cause, target)
+    }
+
+    /// Whether the checked `value` reads a local value, directly or through the storage a lambda
+    /// or local class captured it into. Such a read is not a call or a declared field, so its
+    /// implicit not-null cast has no name.
+    fn reads_local_storage(&self, value: crate::fir::FirExprId) -> bool {
+        self.body.expr(value).is_some_and(|expression| {
+            matches!(
+                expression.kind,
+                FirExprKind::ValueRead(_)
+                    | FirExprKind::CapturedValueRead { .. }
+                    | FirExprKind::LateinitRead { .. }
+                    | FirExprKind::ClassStorageRead { .. }
+                    | FirExprKind::ClassStorageSharedRead { .. }
+                    | FirExprKind::ConstructorCaptureRead { .. }
+                    | FirExprKind::EnclosingClassStorageRead { .. }
+                    | FirExprKind::CapturedClassStorageRead { .. }
+            )
+        })
     }
 
     fn call_reorders_arguments(&self, source: ExprId) -> bool {
@@ -1631,11 +1715,16 @@ impl BodyFirChecker<'_> {
     }
 }
 
-/// A conditional, or a block producing its trailing value: the shapes whose value a declared
-/// platform narrowing guards where it is produced rather than as a whole.
+/// A conditional, a `try`, or a block producing its trailing value: the shapes whose value a
+/// declared platform narrowing guards where it is produced rather than as a whole. kotlinc casts a
+/// `try`'s body and each `catch` to the `try`'s expected type the way it casts `if`/`when` arms.
 fn is_value_boundary(expression: &Expr) -> bool {
     matches!(
         expression,
-        Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } | Expr::Block { .. }
+        Expr::If { .. }
+            | Expr::When { .. }
+            | Expr::Elvis { .. }
+            | Expr::Try { .. }
+            | Expr::Block { .. }
     )
 }
