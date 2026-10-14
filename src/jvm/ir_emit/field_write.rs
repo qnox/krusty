@@ -138,6 +138,19 @@ impl Emitter<'_> {
         // A value that carried its OWN source line leaves that line in effect; the store belongs to
         // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
         // the property's line stays in effect over everything that follows the store.
+        // A property initializer whose value was inlined forgot the line in effect
+        // (`markLineNumberAfterInlineIfNeeded`), so its `putfield` writes that line again: an
+        // entry of the inlined call's, which the constructor's curated table keeps.
+        if code.line_forgotten() && self.ir.property_initializer_stores.contains(&statement) {
+            if let Some(&line) = self
+                .ir
+                .expr_lines
+                .get(&statement)
+                .filter(|&&line| line != 0)
+            {
+                code.inlined_line(line.min(u32::from(u16::MAX)) as u16);
+            }
+        }
         if self.ir.expr_source_lines.contains_key(&value) {
             if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
                 self.mark_expression_line(statement, statement_line, code);

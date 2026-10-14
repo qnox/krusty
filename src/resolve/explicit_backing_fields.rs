@@ -8,6 +8,145 @@
 use super::*;
 
 impl Checker<'_> {
+    /// Check explicit backing-field initializer bodies and publish the storage type visible to
+    /// subsequent member bodies. A non-local property's storage type is a finalized Pass-1 fact;
+    /// this pass uses its stable declaration identity and never derives that fact from body syntax.
+    /// Body-local classes are the exception because their signatures deliberately remain on the
+    /// lexical body rung until this bounded class check.
+    pub(super) fn check_explicit_backing_field_initializers(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+        declaration: DeclId,
+        current_owner: Option<TypeName>,
+        body_local_class: bool,
+        properties: &mut [ScopedProperty],
+    ) {
+        let field_scope = scope.child(ScopeKind::Block);
+        let field_scope = &field_scope;
+        for property in properties.iter() {
+            self.declare_scoped_property(field_scope, property, false);
+        }
+        let primary_parameter_types = current_owner
+            .and_then(|owner| self.fed_source().classifier(owner))
+            .and_then(|classifier| {
+                classifier
+                    .constructors
+                    .first()
+                    .and_then(|constructor| constructor.params.get(..class.props.len()))
+                    .map(|parameters| parameters.to_vec())
+            })
+            .unwrap_or_else(|| {
+                class
+                    .props
+                    .iter()
+                    .map(|parameter| self.type_ref_ty(field_scope, &parameter.ty))
+                    .collect()
+            });
+        self.declare_initializer_parameters(field_scope, &class.props, primary_parameter_types);
+
+        for (property_index, property) in class.body_props.iter().enumerate() {
+            let Some(field) = property.explicit_backing_field.as_ref() else {
+                continue;
+            };
+            let selected = self
+                .selected_body_declarations
+                .as_ref()
+                .is_none_or(|selected| selected.contains(&property.span));
+            if !selected {
+                continue;
+            }
+            let source_member = crate::libraries::SourceMember::ClassProperty {
+                file: self.file_index,
+                owner: declaration.0,
+                property: (class.props.len() + property_index) as u32,
+            };
+            let stable_declaration = self.active_declarations.map(|active| {
+                active
+                    .class_body_property_declaration(
+                        declaration,
+                        u32::try_from(property_index).expect("too many class properties"),
+                    )
+                    .expect("active class body property has no stable declaration")
+            });
+            let scoped_index = properties
+                .iter()
+                .position(|candidate| match stable_declaration {
+                    Some(stable) => candidate.stable_declaration == Some(stable),
+                    None => candidate.source_member == Some(source_member),
+                });
+            let declared = scoped_index
+                .map(|index| properties[index].ty)
+                .or_else(|| {
+                    stable_declaration
+                        .zip(self.resolved_index)
+                        .and_then(|(stable, index)| index.signature(stable))
+                        .map(|signature| signature.result.get())
+                })
+                .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
+
+            let property_suppression_depth = self.push_declaration_policies(
+                field_scope,
+                &property.annotations,
+                &property.annotation_args,
+            );
+            let initializer_scope = field_scope.child(ScopeKind::Block);
+            if body_local_class {
+                self.declare_property_initializer_class_storage_capture(
+                    &initializer_scope,
+                    declaration,
+                    &property.name,
+                );
+            }
+            let checked_storage = match (&field.ty, property.init) {
+                (Some(reference), _) => self.check_declaration_type(field_scope, reference),
+                // kotlinc resolves the initializer against the property's public type. Pass 1
+                // owns the resulting storage type; Pass 2 checks only the executable body.
+                (None, Some(initializer)) => match declared {
+                    Some(expected) => self.expr_expected(&initializer_scope, initializer, expected),
+                    None => self.expr(&initializer_scope, initializer),
+                },
+                (None, None) => Ty::Error,
+            };
+            let storage = if body_local_class || self.active_declarations.is_none() {
+                checked_storage
+            } else {
+                self.stable_property_storage_type(stable_declaration)
+                    .unwrap_or(Ty::Error)
+            };
+            if !storage.mentions_error() && !storage.mentions_pending() {
+                self.explicit_backing_field_types
+                    .insert((property.span.lo, property.span.hi), storage);
+                if let Some(scoped_index) = scoped_index {
+                    let scoped = &mut properties[scoped_index];
+                    let declared = scoped.ty;
+                    scoped.owner_storage_ty = Some(storage);
+                    self.declare_scoped_property(field_scope, scoped, true);
+                    if field.ty.is_none()
+                        && !crate::assignable::is_subtype(
+                            &crate::assignable::TyCtx::new(),
+                            self,
+                            storage,
+                            declared,
+                        )
+                    {
+                        self.diags.error(
+                            property.span,
+                            format!(
+                                "backing field type of '{}' is '{}', which is not a subtype of its property type '{}'.",
+                                property.name,
+                                storage.source_name(),
+                                declared.source_name(),
+                            ),
+                        );
+                    }
+                }
+            }
+            self.active_lexical_policies
+                .truncate(property_suppression_depth);
+        }
+    }
+
     /// A qualified read sees an explicit backing field's type when a lexical binding of this
     /// property carries that field and the receiver's static type is exactly the declaring class.
     /// The field is loaded only when this expression is compiled into that class (`other.a` and

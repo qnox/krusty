@@ -56,3 +56,20 @@ impl Emitter<'_> {
         }
     }
 }
+
+/// The line entries a constructor's initializer statements recorded since `marks_before`, and the
+/// offsets among them where a store writes its line again after an inlined value. kotlinc keeps
+/// those even right after an entry of the same line.
+pub(super) fn record_initializer_lines(
+    code: &CodeBuilder,
+    marks_before: usize,
+    (lines, restored): (&mut Vec<(u16, u32)>, &mut Vec<u16>),
+) {
+    let recorded = &code.line_marks()[marks_before..];
+    lines.extend(recorded.iter().map(|&(pc, line)| (pc, u32::from(line))));
+    restored.extend(
+        code.inlined_line_marks()
+            .filter(|mark| recorded.contains(mark))
+            .map(|(pc, _)| pc),
+    );
+}
