@@ -34,6 +34,7 @@ pub(super) fn setter_owned(ir: &IrFile, index: u32) -> bool {
 /// storage behind public static accessors, exactly as a top-level property's on its facade.
 pub(super) fn property_signature(
     ir: &IrFile,
+    class: &crate::ir::IrClass,
     property: &crate::ir::IrCompanionBlockProperty,
 ) -> JvmPropertySignature {
     let local_classifiers = crate::metadata::local_classifiers::names(ir);
@@ -87,7 +88,7 @@ pub(super) fn property_signature(
                 )
             }),
         }),
-        synthetic_method: None,
+        synthetic_method: property_marker_signature(ir, class, property.source_order),
         moved_from_interface_companion: false,
     }
 }

@@ -67,6 +67,48 @@ fn block_members_are_static_members_of_their_class() {
 }
 
 #[test]
+fn block_property_annotations_reach_the_marker_and_metadata() {
+    const SRC: &str = "@Target(AnnotationTarget.PROPERTY)\n\
+        annotation class Mark\n\
+        class A {\n\
+        \x20   companion {\n\
+        \x20       @Mark val value: Int = 1\n\
+        \x20   }\n\
+        }\n";
+    assert_members_and_metadata_match_kotlinc("BlockPropertyAnnotation", SRC, &["A"]);
+}
+
+#[test]
+fn block_property_field_annotations_reach_the_exact_static_field() {
+    const SRC: &str = "@Retention(AnnotationRetention.RUNTIME)\n\
+        @Target(AnnotationTarget.FIELD)\n\
+        annotation class Mark(val value: String)\n\
+        class A {\n\
+        \x20   companion {\n\
+        \x20       @field:Mark(\"block\") val value: Int = 1\n\
+        \x20   }\n\
+        }\n";
+    let comparison = assert_members_and_metadata_match_kotlinc_on(
+        "BlockPropertyFieldAnnotation",
+        SRC,
+        &["A"],
+        &[common::stdlib_jar()],
+    )
+    .pop()
+    .expect("A comparison");
+    let header = "private static final int value;";
+    let reference = common::method_block(&comparison.reference, header);
+    let krusty = common::method_block(&comparison.krusty, header);
+    assert!(
+        reference
+            .iter()
+            .any(|line| line == "RuntimeVisibleAnnotations:"),
+        "kotlinc field carries the runtime annotation: {reference:#?}"
+    );
+    assert_eq!(krusty, reference, "field annotation facts match kotlinc");
+}
+
+#[test]
 fn block_member_calls_block_member_and_companion_extension_unqualified() {
     const SRC: &str = "class A {\n\
         \x20   companion {\n\
@@ -390,6 +432,41 @@ fn block_property_beside_companion_object_property_keeps_its_field_name() {
         fun box() = E.value + E.Companion.value\n";
     assert_members_and_metadata_match_kotlinc("FieldNames", SRC, &["E"]);
     assert_eq!(run(SRC).expect("field names"), "OK");
+}
+
+#[test]
+fn value_class_erasure_disambiguates_companion_object_storage() {
+    const SRC: &str = "@JvmInline value class V(val value: Int)\n\
+        class E {\n\
+        \x20   companion { val x: Int = 1 }\n\
+        \x20   companion object { val x: V = V(2) }\n\
+        }\n\
+        fun box(): String =\n\
+        \x20   if (E.x == 1 && E.Companion.x.value == 2) \"OK\" else \"fail\"\n";
+    assert_members_and_metadata_match_kotlinc("ErasedFieldNames", SRC, &["E"]);
+    assert_eq!(run(SRC).expect("erased companion field names"), "OK");
+}
+
+#[test]
+fn disambiguated_companion_storage_keeps_its_own_nullability() {
+    const SRC: &str = "class C {\n\
+        \x20   companion { val x: String? = null }\n\
+        \x20   companion object { val x: String = \"K\" }\n\
+        }\n\
+        fun box(): String = if (C.x == null && C.Companion.x == \"K\") \"OK\" else \"fail\"\n";
+    for comparison in assert_members_and_metadata_match_kotlinc_on(
+        "DisambiguatedFieldNullability",
+        SRC,
+        &["C"],
+        &[common::stdlib_jar()],
+    ) {
+        assert_eq!(
+            common::member_blocks(&comparison.krusty),
+            common::member_blocks(&comparison.reference),
+            "C: disambiguated field annotations must match kotlinc's"
+        );
+    }
+    assert_eq!(run(SRC).expect("disambiguated nullability"), "OK");
 }
 
 #[test]

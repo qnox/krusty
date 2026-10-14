@@ -41,6 +41,16 @@ impl BodyFirChecker<'_> {
             element_ty,
         )?;
         let variable = self.loop_variable(statement, name);
+        // The iterable runs before the body, and a counted loop's header is known from it alone.
+        let iterable_expression = self.expression(iterable)?;
+        let progression = if iteration_ty.array_elem().is_some() || iteration_ty == Ty::String {
+            None
+        } else {
+            self.progression_loop_header(variable, element_ty, iterable, iterable_expression)?
+        };
+        if progression.is_some() {
+            self.counted_loop_variables.insert(variable);
+        }
         let mut body = self.checked_loop_body(
             target,
             label,
@@ -55,7 +65,6 @@ impl BodyFirChecker<'_> {
             )),
             body,
         )?;
-        let iterable_expression = self.expression(iterable)?;
         let header = if let Some((header, consumed)) =
             self.with_index_loop_header(statement, variable, iterable, iterable_expression, body)?
         {
@@ -72,9 +81,7 @@ impl BodyFirChecker<'_> {
                 },
                 iterable: iterable_expression,
             }
-        } else if let Some(header) =
-            self.progression_loop_header(variable, element_ty, iterable, iterable_expression)?
-        {
+        } else if let Some(header) = progression {
             header
         } else {
             self.iterator_loop_header(

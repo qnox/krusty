@@ -8,7 +8,7 @@
 //!
 //! Runs BEFORE the value-class pass, which renames a marker alongside its mangled getter.
 
-use crate::ir::{IrExpr, IrFile, IrFunction};
+use crate::ir::{FnParamInfo, IrExpr, IrFile, IrFunction, IrParameterIdentity};
 use crate::names::property_getter_name;
 use crate::types::Ty;
 
@@ -19,57 +19,55 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
     for class_index in 0..ir.classes.len() {
         let annotated = ir.classes[class_index].property_annotations.clone();
         for property in annotated {
-            // Nothing survives into the class file (an erased optional expectation, say).
-            if property.annotations.retains_none() {
+            // A retained application needs its JVM carrier. A suppressed SOURCE application has
+            // no annotation attribute, but kotlinc still emits the empty marker that its property
+            // metadata names. An erased optional expectation needs neither.
+            if property.annotations.retains_none()
+                && !property.annotations.has_suppressed_source_application()
+            {
                 continue;
             }
             let getter = property_getter_name(&property.property);
             let marker_name = format!("{getter}$annotations");
-            // A plugin may already have synthesized this property's marker (the serialization plugin
-            // does for `@SerialName`). Attach the annotations to THAT method rather than emitting a
-            // second one with the same name and descriptor, which would not even load.
-            if let Some(&existing) = ir.classes[class_index]
-                .methods
-                .iter()
-                .find(|&&fid| ir.functions[fid as usize].name == marker_name)
+            let class_identity = ir.classes[class_index].fq_name_id();
+            let (params, identities, after) =
+                ir.property_accessor_parameters(class_index, property.source_order);
+            // A plugin may already have synthesized this exact property's marker (the serialization
+            // plugin does for `@SerialName`). Consume that recorded declaration edge; a same-named
+            // source or unrelated synthetic method is not marker provenance.
+            if let Some(&existing) = ir
+                .property_annotation_markers
+                .get(&(class_identity, property.source_order))
             {
+                let function = &ir.functions[existing as usize];
+                assert!(
+                    ir.synthetic_methods.contains(&existing)
+                        && function.name == marker_name
+                        && function.params == params
+                        && function.ret == Ty::Unit,
+                    "a recorded property annotation marker has an invalid JVM declaration"
+                );
                 ir.function_annotations
                     .insert(existing, property.annotations);
-                let class_identity = ir.classes[class_index].fq_name_id();
-                ir.property_annotation_markers
-                    .insert((class_identity, property.property.clone()), existing);
+                ir.fn_source_order.insert(existing, property.source_order);
                 continue;
             }
             // The getter's position fixes the marker's; a property whose accessor this class does
             // not own still gets its marker, appended last.
-            let after = ir.classes[class_index]
-                .methods
-                .iter()
-                .position(|&fid| ir.functions[fid as usize].name == getter);
-            let ret = ir.add_expr(IrExpr::Return(None));
-            let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![ret],
-                value: None,
+            let after = after.and_then(|getter| {
+                ir.classes[class_index]
+                    .methods
+                    .iter()
+                    .position(|&fid| fid == getter)
             });
-            let marker = ir.add_fun(IrFunction {
-                name: marker_name,
-                params: vec![],
-                ret: Ty::Unit,
-                body: Some(body),
-                is_static: true,
-                dispatch_receiver: None,
-                param_checks: Vec::new(),
-            });
+            let marker = synthesize_marker(ir, marker_name, params, identities);
             // Not `final` (kotlinc emits none), not a described declaration (`synthetic_methods` keeps
             // it out of `@Metadata`'s function list — it is named by the PROPERTY's signature instead),
             // and deprecated so a Kotlin consumer never calls it.
-            ir.open_methods.insert(marker);
-            ir.synthetic_methods.insert(marker);
-            ir.deprecated_methods.insert(marker);
             ir.function_annotations.insert(marker, property.annotations);
-            let class_identity = ir.classes[class_index].fq_name_id();
+            ir.fn_source_order.insert(marker, property.source_order);
             ir.property_annotation_markers
-                .insert((class_identity, property.property.clone()), marker);
+                .insert((class_identity, property.source_order), marker);
             let methods = &mut ir.classes[class_index].methods;
             match after {
                 Some(index) => methods.insert(index + 1, marker),
@@ -77,4 +75,44 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
             }
         }
     }
+
+    let package_properties = ir
+        .package_properties
+        .iter()
+        .filter(|property| property.suppressed_source_annotation_application)
+        .map(|property| (property.property, property.name.clone()))
+        .collect::<Vec<_>>();
+    for (property, name) in package_properties {
+        let marker_name = format!("{}$annotations", property_getter_name(&name));
+        let marker = synthesize_marker(ir, marker_name, Vec::new(), Vec::new());
+        ir.mark_jvm_package_property_annotation_marker(property, marker);
+    }
+}
+
+fn synthesize_marker(
+    ir: &mut IrFile,
+    name: String,
+    params: Vec<Ty>,
+    identities: Vec<IrParameterIdentity>,
+) -> u32 {
+    let ret = ir.add_expr(IrExpr::Return(None));
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![ret],
+        value: None,
+    });
+    let marker = ir.add_fun(IrFunction {
+        name,
+        params,
+        ret: Ty::Unit,
+        body: Some(body),
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+    ir.open_methods.insert(marker);
+    ir.synthetic_methods.insert(marker);
+    ir.deprecated_methods.insert(marker);
+    ir.fn_params
+        .insert(marker, FnParamInfo::identities(identities));
+    marker
 }

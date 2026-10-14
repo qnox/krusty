@@ -1476,15 +1476,19 @@ where
         // compact header environment is consumed; no provider root or source locator crosses
         // this boundary.
         let default_arguments = inline_preparation::defaults(
-            &mut pass1_headers,
-            &mut index,
+            inline_preparation::DefaultPreparationInputs {
+                files: &files[..inferred_end],
+                local_contexts: &local_class_contexts[..inferred_end],
+                skip: &parse_errors,
+                checked_count,
+            },
+            inline_preparation::DefaultPreparationState {
+                headers: &mut pass1_headers,
+                index: &mut index,
+                symbols: &mut symbols,
+                diags,
+            },
             std::mem::take(&mut signature_default_work_items),
-            &files[..inferred_end],
-            &local_class_contexts[..inferred_end],
-            &parse_errors,
-            checked_count,
-            &mut symbols,
-            diags,
         );
         match default_arguments {
             Some(default_arguments) => {

@@ -76,6 +76,7 @@ impl Parser<'_> {
     }
 
     pub(super) fn parse_annotation(&mut self) -> (Option<AnnotationRef>, Vec<ExprId>) {
+        let at = self.tok().span.lo;
         self.bump(); // '@'
                      // optional use-site target: `file:`, `get:`, `param:`, ...
         let mut use_site = false;
@@ -107,7 +108,9 @@ impl Parser<'_> {
                 if !qname.is_empty() {
                     let annotation = AnnotationRef {
                         name: qname,
+                        at,
                         span: annotation_span,
+                        property_site: None,
                     };
                     self.file.file_annotations.push((annotation, args));
                 }
@@ -123,17 +126,33 @@ impl Parser<'_> {
         if target == "file" && !qname.is_empty() {
             let annotation = AnnotationRef {
                 name: qname.clone(),
+                at,
                 span: annotation_span,
+                property_site: None,
             };
             self.file.file_annotations.push((annotation, args.clone()));
         }
-        if use_site || qname.is_empty() {
+        if qname.is_empty() {
+            (None, args)
+        } else if target == "field" {
+            (
+                Some(AnnotationRef {
+                    name: qname,
+                    at,
+                    span: annotation_span,
+                    property_site: Some(crate::types::PropertyAnnotationSite::Field),
+                }),
+                args,
+            )
+        } else if use_site {
             (None, args)
         } else {
             (
                 Some(AnnotationRef {
                     name: qname,
+                    at,
                     span: annotation_span,
+                    property_site: None,
                 }),
                 args,
             )

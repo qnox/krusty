@@ -774,6 +774,11 @@ pub struct PropMeta {
     /// The setter's own visibility; one narrower than the property's (`internal set`,
     /// `private set`) makes the setter's word non-default.
     pub setter_visibility: crate::types::Visibility,
+    /// Whether Kotlin metadata reports that the source property declares annotations. Suppressed
+    /// SOURCE provenance may retain a target marker without setting this bit.
+    pub declares_annotations: bool,
+    /// JVM-only synthetic annotation marker selected by facade realization.
+    pub annotation_method: Option<(String, String)>,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
     /// The accessors' own annotations (`@A get`, `@A set`, `set(@A v)`): each accessor word's
@@ -875,7 +880,8 @@ struct AccessorWords {
 
 impl AccessorWords {
     fn of(m: &PropMeta) -> Self {
-        let default_word = visibility_bits(m.visibility) << 1;
+        let shared = visibility_bits(m.visibility) << 1;
+        let default_word = shared | u64::from(m.declares_annotations);
         let not_default = |declared: bool| {
             if declared {
                 property_flags::ACCESSOR_IS_NOT_DEFAULT
@@ -884,7 +890,7 @@ impl AccessorWords {
             }
         };
         let accessors = &m.accessor_annotations;
-        let getter = default_word
+        let getter = shared
             | not_default(m.modifiers.declared_getter || m.modifiers.delegated)
             | u64::from(accessors.getter.declares_annotations());
         let narrowed = m.setter_visibility != m.visibility;
@@ -1061,6 +1067,7 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
     };
     let pflags = (base & !property_flags::VISIBILITY_MASK)
         | (vis << 1)
+        | u64::from(m.declares_annotations)
         | const_bit
         | companion_bit
         | lateinit_bit
@@ -1101,6 +1108,13 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
 /// `JvmProtoBuf.propertySignature` (f100): the field and accessors a JVM facade realizes the
 /// property with.
 fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
+    // The annotation marker is f2 and kotlinc interns its signature before either accessor, even
+    // though the field (f1) is serialized first below. Build every nested method record in that
+    // visit order so the package string table matches the class-metadata builder.
+    let annotation_method = m
+        .annotation_method
+        .as_ref()
+        .map(|(name, descriptor)| jvm_method_sig(st, name, descriptor));
     // A `const val` has NO accessor — reads inline the `ConstantValue`; kotlinc records the field
     // entry alone.
     let (getter, setter) = if m.is_const {
@@ -1123,6 +1137,9 @@ fn jvm_property_signature(st: &mut StringTable<'_>, p: &mut Pb, m: &PropMeta) {
             field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
         }
         jvm.field_message(1, &field);
+    }
+    if let Some(annotation_method) = &annotation_method {
+        jvm.field_message(2, annotation_method);
     }
     if let Some(getter) = &getter {
         jvm.field_message(3, getter);
@@ -1393,6 +1410,8 @@ mod tests {
                 has_backing_field: true,
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
+                declares_annotations: false,
+                annotation_method: None,
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1450,6 +1469,8 @@ mod tests {
                     ..Default::default()
                 },
                 setter_visibility: crate::types::Visibility::Public,
+                declares_annotations: false,
+                annotation_method: None,
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1510,6 +1531,8 @@ mod tests {
                     ..Default::default()
                 },
                 setter_visibility: crate::types::Visibility::Public,
+                declares_annotations: false,
+                annotation_method: None,
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1569,6 +1592,8 @@ mod tests {
                 has_backing_field: true,
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
+                declares_annotations: false,
+                annotation_method: None,
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1621,6 +1646,8 @@ mod tests {
                     ..Default::default()
                 },
                 setter_visibility: crate::types::Visibility::Public,
+                declares_annotations: false,
+                annotation_method: None,
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,

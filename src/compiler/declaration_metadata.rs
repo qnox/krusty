@@ -23,13 +23,15 @@ pub(super) fn declaration_annotations(
     annotations: &[ast::AnnotationRef],
     info: &TypeInfo,
 ) -> crate::ir::DeclarationAnnotations {
-    checked_annotations(annotations.iter().map(|annotation| {
-        info.applied_annotation(annotation).unwrap_or_else(|| {
-            panic!(
+    checked_annotations(annotations.iter().filter_map(|annotation| {
+        match info.applied_annotation(annotation) {
+            Some(applied) => Some(applied),
+            None if info.discarded_annotation_application(annotation) => None,
+            None => panic!(
                 "frontend did not record checked annotation application at {}..{}",
                 annotation.span.lo, annotation.span.hi
-            )
-        })
+            ),
+        }
     }))
 }
 
@@ -39,17 +41,29 @@ fn property_site_annotations(
     on_constructor_parameter: bool,
     site: crate::types::PropertyAnnotationSite,
 ) -> crate::ir::DeclarationAnnotations {
-    checked_annotations(
-        declared
-            .iter()
-            .filter_map(|annotation| info.applied_annotation(annotation))
-            .filter(|applied| {
+    // Kotlin lowers explicit use-site applications before annotations whose declaration target
+    // defaults to that site, even when the defaulted annotation was written first. Preserve source
+    // order inside each group; this is the annotation order emitted on the physical declaration.
+    let applications = [true, false].into_iter().flat_map(|explicit| {
+        declared.iter().filter_map(move |annotation| {
+            if annotation.property_site.is_some() != explicit {
+                return None;
+            }
+            let applied = info.applied_annotation(annotation)?;
+            let selected = annotation.property_site.or_else(|| {
                 applied
                     .targets
                     .property_declaration_site(on_constructor_parameter)
-                    == Some(site)
-            }),
-    )
+            });
+            (selected == Some(site)).then_some(applied)
+        })
+    });
+    let suppressed_source_application = site == crate::types::PropertyAnnotationSite::Property
+        && declared
+            .iter()
+            .any(|annotation| info.retains_suppressed_source_property_application(annotation));
+    checked_annotations(applications)
+        .with_suppressed_source_application(suppressed_source_application)
 }
 
 fn checked_annotations<'a>(
@@ -79,6 +93,46 @@ pub(super) fn accessor_annotations(
         setter_parameter: setter
             .map_or_else(Default::default, |setter| site(&setter.param_annotations)),
     }
+}
+
+pub(super) fn top_level_property_retains_suppressed_source_application(
+    property: &ast::PropDecl,
+    info: &TypeInfo,
+) -> bool {
+    property
+        .annotations
+        .iter()
+        .any(|annotation| info.retains_suppressed_source_property_application(annotation))
+}
+
+/// The PROPERTY-targeted applications declared on a separately hoisted `companion { ... }`
+/// property. The property is not part of its classifier's ordinary AST property lists, so its
+/// checked applications cross the metadata handoff with that declaration itself.
+pub(super) fn companion_block_property_annotations(
+    property: &ast::PropDecl,
+    info: &TypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    property_site_annotations(
+        &property.annotations,
+        info,
+        false,
+        crate::types::PropertyAnnotationSite::Property,
+    )
+}
+
+/// The FIELD-targeted applications declared on a separately hoisted `companion { ... }`
+/// property. They belong to the block property's exact static storage declaration, not to an
+/// ordinary same-named field of the classifier.
+pub(super) fn companion_block_field_annotations(
+    property: &ast::PropDecl,
+    info: &TypeInfo,
+) -> crate::ir::DeclarationAnnotations {
+    property_site_annotations(
+        &property.annotations,
+        info,
+        false,
+        crate::types::PropertyAnnotationSite::Field,
+    )
 }
 
 pub(super) fn value_parameter_annotations(
@@ -137,8 +191,20 @@ pub(super) fn class_field_annotations(
 pub(super) fn class_property_annotations(
     class: &ast::ClassDecl,
     info: &TypeInfo,
+    source_orders: &[Option<u32>],
 ) -> Vec<crate::ir::PropertyAnnotations> {
     let mut out = Vec::new();
+    let declaration_count = class
+        .props
+        .iter()
+        .filter(|parameter| parameter.is_property)
+        .count()
+        + class.body_props.len();
+    assert_eq!(
+        declaration_count,
+        source_orders.len(),
+        "every class property has one stable declaration identity slot"
+    );
     let declarations = class
         .props
         .iter()
@@ -150,15 +216,18 @@ pub(super) fn class_property_annotations(
                 .iter()
                 .map(|property| (&property.name, &property.annotations, false)),
         );
-    for (name, declared, on_constructor_parameter) in declarations {
+    for ((name, declared, on_constructor_parameter), &source_order) in
+        declarations.zip(source_orders)
+    {
         let annotations = property_site_annotations(
             declared,
             info,
             on_constructor_parameter,
             crate::types::PropertyAnnotationSite::Property,
         );
-        if annotations.declares_annotations() {
+        if let Some(source_order) = source_order.filter(|_| annotations.declares_annotations()) {
             out.push(crate::ir::PropertyAnnotations {
+                source_order,
                 property: name.clone(),
                 annotations,
             });

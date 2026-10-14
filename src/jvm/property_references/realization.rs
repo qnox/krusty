@@ -134,6 +134,12 @@ pub(crate) struct PropertyReferenceRealization {
     /// The private member property whose owner's `access$get<X>$p`/`access$set<X>$p` the carrier
     /// calls, which that owner declares in its synthetic-accessor plan.
     pub member_access_bridge: Option<crate::fir::PropertyId>,
+    /// The hoisted companion field whose outer class's `access$get<X>$cp` the carrier calls when
+    /// the source did not declare a getter. A declared getter stays a call to that accessor.
+    pub hoisted_companion_getter: Option<u32>,
+    /// The hoisted companion field whose outer class's `access$set<X>$cp` the carrier calls when
+    /// the source did not declare a setter. A declared setter stays a call to that accessor.
+    pub hoisted_companion_setter: Option<u32>,
 }
 
 #[derive(Clone, Debug)]

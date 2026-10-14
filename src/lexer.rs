@@ -6,7 +6,6 @@
 
 use crate::diag::{DiagSink, Span};
 use crate::token::{decode_char_literal_content, keyword, Token, TokenKind};
-use unicode_general_category::{get_general_category, GeneralCategory};
 
 pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
     lexer(src, diags).run()
@@ -1243,7 +1242,8 @@ fn is_ascii_ident_start(c: u8) -> bool {
 fn is_ident_start_at(bytes: &[u8], index: usize) -> bool {
     bytes.get(index).is_some_and(|byte| {
         is_ascii_ident_start(*byte)
-            || (*byte >= 0x80 && char_at(bytes, index).is_some_and(is_kotlin_letter))
+            || (*byte >= 0x80
+                && char_at(bytes, index).is_some_and(crate::names::is_identifier_start))
     })
 }
 
@@ -1252,22 +1252,8 @@ fn is_ident_continue_at(bytes: &[u8], index: usize) -> bool {
         *byte == b'_'
             || byte.is_ascii_alphanumeric()
             || (*byte >= 0x80
-                && char_at(bytes, index).is_some_and(|character| {
-                    is_kotlin_letter(character)
-                        || get_general_category(character) == GeneralCategory::DecimalNumber
-                }))
+                && char_at(bytes, index).is_some_and(crate::names::is_identifier_continue))
     })
-}
-
-fn is_kotlin_letter(character: char) -> bool {
-    matches!(
-        get_general_category(character),
-        GeneralCategory::UppercaseLetter
-            | GeneralCategory::LowercaseLetter
-            | GeneralCategory::TitlecaseLetter
-            | GeneralCategory::ModifierLetter
-            | GeneralCategory::OtherLetter
-    )
 }
 
 fn char_at(bytes: &[u8], index: usize) -> Option<char> {

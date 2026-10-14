@@ -1248,11 +1248,13 @@ fn a_provider_member_without_an_identity_fails_as_missing_stable_call_target() {
         .into_iter()
         .filter_map(|work| {
             check_and_dispatch_body(
-                &analysis.files[0],
-                info,
-                SourceFileId::from_raw(0),
+                crate::fir::BodyCheckUnit {
+                    file: &analysis.files[0],
+                    info,
+                    source: SourceFileId::from_raw(0),
+                    index: &index,
+                },
                 work,
-                &index,
                 sources.origins_mut(),
                 &mut inline_bodies,
                 &mut sink,

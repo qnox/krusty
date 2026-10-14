@@ -82,6 +82,19 @@ pub(super) fn accept_active_debug_metadata(
     for declaration in active.stable_declarations() {
         if let Some((_, classifier)) = active.class(file, declaration) {
             if let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() {
+                let declaration_span = file
+                    .declaration_prefixes
+                    .at(classifier.span.lo)
+                    .map(|prefix| crate::diag::Span::new(prefix.start.lo, classifier.span.hi))
+                    .unwrap_or(classifier.span);
+                ir.record_class_diagnostic_span(class, declaration_span);
+                for (entry, source) in ir.classes[class as usize]
+                    .enum_entries
+                    .iter_mut()
+                    .zip(&classifier.enum_entries)
+                {
+                    entry.diagnostic_span = Some(source.span);
+                }
                 ir.classes[class as usize].decl_line = classifier.decl_line;
                 ir.classes[class as usize].decl_start_line = classifier.decl_start_line;
                 ir.classes[class as usize].decl_end_line = classifier.decl_end_line;
@@ -152,9 +165,27 @@ pub(super) fn accept_active_debug_metadata(
             .map(|property| property.decl_line)
             .or_else(|| constructor_parameter.map(|property| property.decl_line));
         let accessor_lines = body_property.map(|property| property.accessor_lines);
-        if let Some(line) = property_line.filter(|line| *line != 0) {
-            if let Some(property) = index.property_for_declaration(declaration) {
-                if let Some(property) = ir.checked_properties.get_mut(&property) {
+        if let Some(property) = index.property_for_declaration(declaration) {
+            if let Some(property) = ir.checked_properties.get_mut(&property) {
+                property.diagnostic_span = body_property
+                    .map(|property| property.span)
+                    .or_else(|| constructor_parameter.map(|property| property.span));
+                property.getter_diagnostic_span = body_property.and_then(|property| {
+                    let mut span = property.getter_span?;
+                    if let Some(annotation) = property.getter_annotations.first() {
+                        span.lo = annotation.at;
+                    }
+                    Some(span)
+                });
+                property.setter_diagnostic_span = body_property.and_then(|property| {
+                    let setter = property.setter.as_ref()?;
+                    let mut span = setter.span;
+                    if let Some(annotation) = setter.annotations.first() {
+                        span.lo = annotation.at;
+                    }
+                    Some(span)
+                });
+                if let Some(line) = property_line.filter(|line| *line != 0) {
                     property.decl_line = line;
                     let accessor_lines = accessor_lines.unwrap_or_default();
                     property.accessor_lines = crate::ir::IrAccessorLines {
@@ -282,7 +313,7 @@ pub(super) fn attach_stable_function_inference_metadata(
 
 /// Record the annotations on `property`'s accessors for the accessor declarations lowering
 /// materializes from it.
-fn attach_accessor_annotations(
+fn attach_property_metadata(
     property: &crate::ast::PropDecl,
     declaration: DeclarationId,
     info: &crate::resolve::TypeInfo,
@@ -290,11 +321,64 @@ fn attach_accessor_annotations(
     ir: &mut IrFile,
 ) {
     let annotations = super::declaration_metadata::accessor_annotations(property, info);
-    if !annotations.declares_annotations() {
+    let Some(property_id) = index.property_for_declaration(declaration) else {
         return;
+    };
+    if annotations.declares_annotations() {
+        ir.accessor_annotations.insert(property_id, annotations);
     }
-    if let Some(property) = index.property_for_declaration(declaration) {
-        ir.accessor_annotations.insert(property, annotations);
+    let header = index
+        .declaration_header(declaration)
+        .expect("a checked property retains its declaration header");
+    if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
+        let property_annotations =
+            super::declaration_metadata::companion_block_property_annotations(property, info);
+        let field_annotations =
+            super::declaration_metadata::companion_block_field_annotations(property, info);
+        if field_annotations.declares_annotations() {
+            ir.companion_block_field_annotations
+                .insert(property_id, field_annotations);
+        }
+        if property_annotations.declares_annotations() {
+            let declaring_classifier = index
+                .property(property_id)
+                .and_then(|property| property.extension_receiver)
+                .and_then(|receiver| receiver.get().non_null().obj_internal())
+                .expect("a companion-block property retains its declaring classifier identity");
+            let source_order = index
+                .source_order(declaration)
+                .expect("a companion-block property retains its stable source order");
+            let declaring_class = index
+                .classifier_declaration(declaring_classifier)
+                .and_then(|classifier| ir.checked_classifier_classes.get(&classifier))
+                .copied()
+                .expect("a companion-block property retains its declaring classifier");
+            let owner = &mut ir.classes[declaring_class as usize];
+            assert!(
+                !owner
+                    .property_annotations
+                    .iter()
+                    .any(|existing| existing.source_order == source_order),
+                "one property declaration publishes its annotations once"
+            );
+            owner
+                .property_annotations
+                .push(crate::ir::PropertyAnnotations {
+                    source_order,
+                    property: property.name.clone(),
+                    annotations: property_annotations,
+                });
+        }
+    }
+    if let Some(package_property) = ir
+        .package_properties
+        .iter_mut()
+        .find(|package_property| package_property.property == property_id)
+    {
+        package_property.suppressed_source_annotation_application =
+            super::declaration_metadata::top_level_property_retains_suppressed_source_application(
+                property, info,
+            );
     }
 }
 
@@ -321,7 +405,7 @@ pub(super) fn attach_checked_declaration_metadata(
         attach_function_metadata(function, selected_root, info, index, ir);
     }
     if let Some(property) = active.property(file, selected_root) {
-        attach_accessor_annotations(property, selected_root, info, index, ir);
+        attach_property_metadata(property, selected_root, info, index, ir);
     }
     let Some((source_class, class)) = active.class(file, selected_root) else {
         return;
@@ -330,13 +414,38 @@ pub(super) fn attach_checked_declaration_metadata(
     let Some(class_id) = ir.checked_classifier_classes.get(&stable_class).copied() else {
         return;
     };
+    let property_source_orders = class
+        .props
+        .iter()
+        .enumerate()
+        .filter(|(_, property)| property.is_property)
+        .map(|(property_index, _)| {
+            active
+                .constructor_property_declaration(
+                    source_class,
+                    u32::try_from(property_index).expect("too many constructor properties"),
+                )
+                .and_then(|declaration| index.source_order(declaration))
+        })
+        .chain((0..class.body_props.len()).map(|property_index| {
+            active
+                .class_body_property_declaration(
+                    source_class,
+                    u32::try_from(property_index).expect("too many class properties"),
+                )
+                .and_then(|declaration| index.source_order(declaration))
+        }))
+        .collect::<Vec<_>>();
     let classifier = ir.classes[class_id as usize].fq_name_id();
     let ir_class = &mut ir.classes[class_id as usize];
     ir_class.applied_annotations =
         super::declaration_metadata::declaration_annotations(&class.annotations, info);
     ir_class.field_annotations = super::declaration_metadata::class_field_annotations(class, info);
-    ir_class.property_annotations =
-        super::declaration_metadata::class_property_annotations(class, info);
+    ir_class.property_annotations = super::declaration_metadata::class_property_annotations(
+        class,
+        info,
+        &property_source_orders,
+    );
     ir_class.primary_ctor_annotations = super::declaration_metadata::declaration_annotations(
         class
             .primary_ctor_annotations
@@ -412,7 +521,7 @@ pub(super) fn attach_checked_declaration_metadata(
     }
     for (property_index, property) in class.body_props.iter().enumerate() {
         if let Some(declaration) = body_property_declaration(property_index) {
-            attach_accessor_annotations(property, declaration, info, index, ir);
+            attach_property_metadata(property, declaration, info, index, ir);
         }
     }
 

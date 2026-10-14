@@ -238,19 +238,23 @@ fn emit_analyzed_into<B: Backend>(
             for group in groups {
                 let diagnostics_start = diags.diags.len();
                 if !consume_body_group(
-                    &active_file,
-                    &active,
-                    raw_source,
-                    source_id,
-                    &group,
-                    &mut symbols,
-                    &mut index,
-                    &streamed_cache,
-                    &mut source_map,
-                    &mut inline_bodies,
-                    &mut body_session,
-                    &mut sink,
-                    diags,
+                    ActiveBodyGroup {
+                        file: &active_file,
+                        declarations: &active,
+                        raw_source,
+                        source: source_id,
+                        group: &group,
+                        streamed_cache: &streamed_cache,
+                    },
+                    BodyGroupConsumers {
+                        symbols: &mut symbols,
+                        index: &mut index,
+                        source_map: &mut source_map,
+                        inline_bodies: &mut inline_bodies,
+                        session: &mut body_session,
+                        sink: &mut sink,
+                        diags,
+                    },
                 ) {
                     let internal_failure = diags.diags[diagnostics_start..]
                         .iter()
@@ -723,22 +727,46 @@ impl crate::fir::CheckedBodySink for DeferredCheckedBodies {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn consume_body_group(
-    active_file: &File,
-    active: &crate::fir::ActiveSourceDeclarations,
+struct ActiveBodyGroup<'a> {
+    file: &'a File,
+    declarations: &'a crate::fir::ActiveSourceDeclarations,
     raw_source: usize,
-    source_id: crate::fir::SourceFileId,
-    group: &BodyCheckGroup,
-    symbols: &mut crate::resolve::PassTwoSymbols,
-    index: &mut crate::fir::ResolvedModuleIndex,
-    streamed_cache: &crate::fir::StreamedModuleProjectionCache,
-    source_map: &mut crate::fir::SourceMap,
-    inline_bodies: &mut crate::fir::InlineBodyStore,
-    body_session: &mut crate::fir::BodyCheckSession,
-    sink: &mut crate::fir_lower::CommonIrBodySink<'_>,
-    diags: &mut DiagSink,
+    source: crate::fir::SourceFileId,
+    group: &'a BodyCheckGroup,
+    streamed_cache: &'a crate::fir::StreamedModuleProjectionCache,
+}
+
+struct BodyGroupConsumers<'a, 'ir> {
+    symbols: &'a mut crate::resolve::PassTwoSymbols,
+    index: &'a mut crate::fir::ResolvedModuleIndex,
+    source_map: &'a mut crate::fir::SourceMap,
+    inline_bodies: &'a mut crate::fir::InlineBodyStore,
+    session: &'a mut crate::fir::BodyCheckSession,
+    sink: &'a mut crate::fir_lower::CommonIrBodySink<'ir>,
+    diags: &'a mut DiagSink,
+}
+
+fn consume_body_group(
+    active_group: ActiveBodyGroup<'_>,
+    consumers: BodyGroupConsumers<'_, '_>,
 ) -> bool {
+    let ActiveBodyGroup {
+        file: active_file,
+        declarations: active,
+        raw_source,
+        source: source_id,
+        group,
+        streamed_cache,
+    } = active_group;
+    let BodyGroupConsumers {
+        symbols,
+        index,
+        source_map,
+        inline_bodies,
+        session: body_session,
+        sink,
+        diags,
+    } = consumers;
     let Some(info) = check_body_group(
         active_file,
         raw_source,
@@ -762,12 +790,14 @@ fn consume_body_group(
     for body in group.work.iter().copied() {
         let mut checked = DeferredCheckedBodies::default();
         let result = crate::fir::check_and_dispatch_active_body_in_session(
-            active_file,
+            crate::fir::BodyCheckUnit {
+                file: active_file,
+                info: &info,
+                source: source_id,
+                index,
+            },
             active,
-            &info,
-            source_id,
             body,
-            index,
             source_map.origins_mut(),
             inline_bodies,
             &mut checked,
@@ -1152,12 +1182,14 @@ pub fn check_frontend_only(
                 };
                 for body in group.work {
                     if let Err(error) = crate::fir::check_and_dispatch_active_body_in_session(
-                        &active_file,
+                        crate::fir::BodyCheckUnit {
+                            file: &active_file,
+                            info: &info,
+                            source: source_id,
+                            index: &index,
+                        },
                         &active,
-                        &info,
-                        source_id,
                         body,
-                        &index,
                         source_map.origins_mut(),
                         &mut inline_bodies,
                         &mut sink,

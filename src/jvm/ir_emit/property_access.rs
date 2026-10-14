@@ -8,6 +8,12 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum PropertyReceiverUse {
+    Read,
+    Write,
+}
+
 /// Exact field selected for a property declared in this compilation.
 ///
 /// A capture spliced ahead of a source property can share its IR spelling (`x` beside the capture
@@ -35,6 +41,89 @@ pub(super) fn declared_property_field<'a>(
 }
 
 impl Emitter<'_> {
+    /// Whether a static property write retains its source receiver's effects. Ordinary companion
+    /// properties are instance-shaped lookup coordinates over hoisted private storage, so their
+    /// receiver disappears. A `@JvmField` realization is a true static-field write and evaluates
+    /// an explicit receiver before `putstatic`, as does an external field whose local declaration
+    /// is unavailable.
+    pub(super) fn static_property_write_evaluates_receiver(
+        &self,
+        operation: crate::ir::ExprId,
+    ) -> bool {
+        let Some(crate::jvm::property_realizations::PropertyRealization::Local(property)) =
+            self.property_realizations.get(operation)
+        else {
+            return true;
+        };
+        let Some(crate::ir::IrLocalPropertyLayout::Member {
+            class, property, ..
+        }) = self.ir.local_property_layouts.get(property)
+        else {
+            return true;
+        };
+        let companion = self.ir.classes[*class as usize].fq_name;
+        self.ir
+            .jvm_companion_property_static(companion, *property)
+            .map_or(true, |static_| self.ir.is_jvm_field_static(static_))
+    }
+
+    /// Emit the source receiver according to an already-selected property realization. Instance
+    /// accessors/fields consume it; an ordinary static realization still evaluates and drops an
+    /// effectful receiver. A companion `@JvmField` has distinct read/write rules at its call sites:
+    /// reads treat the receiver as a qualifier, while writes evaluate and pop it before `putstatic`.
+    pub(super) fn emit_property_receiver(
+        &mut self,
+        receiver: crate::ir::ExprId,
+        lookup_owner: TypeName,
+        access_owner: TypeName,
+        takes_receiver: bool,
+        expected: &Ty,
+        use_: PropertyReceiverUse,
+        code: &mut CodeBuilder,
+    ) {
+        if takes_receiver {
+            self.emit_value(receiver, code);
+            self.narrow_on_stack(self.value_ty(receiver), *expected, code);
+            return;
+        }
+        // A companion property is looked up on the companion but physically stored on its outer
+        // class. A read drops that lookup coordinate. A write preserves a receiver that runs code
+        // (for example `Outer.Companion` or `self()`), then discards its value before the
+        // receiverless outer-field bridge; an implicit `this` runs no code and remains omitted.
+        if lookup_owner != access_owner {
+            if use_ == PropertyReceiverUse::Write
+                && !crate::ir::expr_runs_no_code(self.ir, receiver)
+            {
+                self.emit_value(receiver, code);
+                code.pop();
+            }
+            return;
+        }
+        // A receiverless realization does not make the receiver expression disappear. Elide only
+        // an expression that runs no code, or a singleton/static read of the very owner whose
+        // static access initializes it anyway; every other receiver is evaluated and popped.
+        let initializes_owner = match self.ir.expr(receiver) {
+            IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
+                self.ir,
+                *classifier,
+                crate::jvm::singleton_storage::of(self.classifiers, *classifier),
+            )
+            .is_some_and(|published| published.owner == access_owner),
+            IrExpr::ExternalStaticField { owner, .. }
+            | IrExpr::ExternalStaticInstance { owner, .. } => *owner == access_owner,
+            IrExpr::StaticInstance { owner, .. } => self
+                .ir
+                .classes
+                .get(*owner as usize)
+                .is_some_and(|class| class.fq_name == access_owner),
+            _ => false,
+        };
+        if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
+            self.emit_value(receiver, code);
+            code.pop();
+        }
+    }
+
     /// Select the property-read realization available from declarations emitted by this compilation.
     /// `None` deliberately means the external bytecode-provider path must decide.
     fn selected_local_property_read_access(
@@ -42,19 +131,35 @@ impl Emitter<'_> {
         owner: TypeName,
         name: &str,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
-        self.declared_property_read_access(owner, name, None, false)
+        self.declared_property_read_access(owner, name, None, None, false)
     }
 
-    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
-    /// field carries the inline uninitialized guard, so the read emission and [`Self::emits_control_flow`]
-    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
-    fn is_lateinit_field(&self, owner: TypeName, name: &str) -> bool {
-        self.ir
+    /// Is this exact physical field a `lateinit` backing field of a declaration THIS compilation is
+    /// emitting? Hoisted companion storage lives in `IrFile::statics`, not in the companion's
+    /// compacted field table. Both inventories therefore participate at this JVM boundary, keyed by
+    /// the complete classfile field identity rather than source spelling. Read emission and
+    /// [`Self::emits_control_flow`] must answer this one question the same way — a disagreement is a
+    /// `VerifyError` at link time.
+    fn is_lateinit_field(&self, owner: TypeName, name: &str, descriptor: &str) -> bool {
+        let instance = self
+            .ir
             .classes
             .iter()
             .find(|class| class.fq_name == owner)
-            .and_then(|class| class.fields.iter().find(|field| field.name == name))
-            .is_some_and(|field| field.is_lateinit())
+            .is_some_and(|class| {
+                class.fields.iter().enumerate().any(|(index, field)| {
+                    field.is_lateinit()
+                        && instance_field_jvm_name(self.ir, self.run, class, index) == name
+                        && type_descriptor(jvm_value_ty(&field.ty)) == descriptor
+                })
+            });
+        instance
+            || self.ir.statics.iter().enumerate().any(|(index, field)| {
+                field.is_lateinit
+                    && field.owner == Some(owner)
+                    && self.ir.static_field_jvm_name(index as u32) == name
+                    && type_descriptor(jvm_declared_ty(&field.ty)) == descriptor
+            })
     }
 
     /// Whether this property read emits the uninitialized guard inline. A direct field load does.
@@ -66,7 +171,12 @@ impl Emitter<'_> {
             return false;
         };
         match access {
-            PropertyAccess::Field { owner, name, .. } => self.is_lateinit_field(owner, &name),
+            PropertyAccess::Field {
+                owner,
+                name,
+                descriptor,
+                ..
+            } => self.is_lateinit_field(owner, &name, &descriptor),
             PropertyAccess::AccessBridge {
                 inline_uninitialized_guard,
                 ..
@@ -113,7 +223,15 @@ impl Emitter<'_> {
         let takes_receiver = accessor_takes_receiver(&access);
         let receiver_ty = accessor_receiver_ty(&access, access_owner);
         if let Some(receiver) = receiver.filter(|_| !receiver_is_static_field_qualifier) {
-            self.emit_property_receiver(receiver, access_owner, takes_receiver, &receiver_ty, code);
+            self.emit_property_receiver(
+                receiver,
+                operation.owner,
+                access_owner,
+                takes_receiver,
+                &receiver_ty,
+                PropertyReceiverUse::Read,
+                code,
+            );
         } else if takes_receiver {
             self.run.set_emit_error(format!(
                 "receiver-less property realization requires an instance receiver: {}",
@@ -129,7 +247,7 @@ impl Emitter<'_> {
                 is_static,
             } => {
                 let slot = crate::jvm::physical_type::field_slot(&descriptor);
-                let lateinit = self.is_lateinit_field(owner, &name);
+                let lateinit = self.is_lateinit_field(owner, &name, &descriptor);
                 let exported = (!is_static)
                     .then(|| self.exporting_instance_field_method(operation.expression, false))
                     .flatten();

@@ -1,7 +1,9 @@
 //! kotlinc keeps the `KProperty` references its delegated-property operators receive in one
 //! `$$delegatedProperties` array per class (`PropertyReferenceLowering`): a leading
 //! `static final synthetic` field, filled first in `<clinit>` in declaration order, read as
-//! `$$delegatedProperties[i]`. Such a `<clinit>` has no line table, and a delegate's constructor
+//! `$$delegatedProperties[i]`. A canonical generated array suppresses `<clinit>` lines; when a
+//! source `@JvmField` displaces it, each element construction maps to its delegated property's
+//! declaration and the source initializer contributes its own store line. A delegate's constructor
 //! store maps to its property's line.
 //!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
@@ -51,7 +53,11 @@ fn assert_identical_against(
             .find(|(internal, _)| internal == class)
             .map(|(_, bytes)| bytes)
             .expect("krusty emits the class");
-        assert!(&reference == ours, "{class} differs from kotlinc's build");
+        assert_eq!(
+            reference.as_slice(),
+            ours.as_slice(),
+            "{class} differs from kotlinc's build"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -83,6 +89,83 @@ fn a_class_keeps_its_delegated_property_references_in_one_array() {
          }}\n"
     );
     assert_identical("ShelfArray", &src, &["Shelf", "Crate", "Crate$Companion"]);
+}
+
+#[test]
+fn a_companion_field_does_not_collide_with_the_delegated_property_array() {
+    let src = "import kotlin.reflect.KProperty\n\
+        class D {\n\
+        \x20   operator fun getValue(owner: C, property: KProperty<*>): String = property.name\n\
+        }\n\
+        class C {\n\
+        \x20   val delegated: String by D()\n\
+        \x20   companion object {\n\
+        \x20       val `$$delegatedProperties`: Array<KProperty<*>> = emptyArray()\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("DelegatedArrayCollision", src, &["C"]);
+}
+
+#[test]
+fn a_distinct_descriptor_companion_field_yields_the_generated_array_spelling() {
+    let src = "import kotlin.reflect.KProperty\n\
+        class D {\n\
+        \x20   operator fun getValue(owner: C, property: KProperty<*>): String = property.name\n\
+        }\n\
+        class C {\n\
+        \x20   val delegated: String by D()\n\
+        \x20   companion object {\n\
+        \x20       val `$$delegatedProperties`: Int = 1\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("DistinctDelegatedArrayCollision", src, &["C"]);
+}
+
+#[test]
+fn a_jvmfield_companion_field_keeps_the_delegated_array_spelling() {
+    let src = "import kotlin.reflect.KProperty\n\
+        class D {\n\
+        \x20   operator fun getValue(owner: C, property: KProperty<*>): String = property.name\n\
+        }\n\
+        class C {\n\
+        \x20   val delegated: String by D()\n\
+        \x20   companion object {\n\
+        \x20       @JvmField val `$$delegatedProperties`: Array<KProperty<*>> = emptyArray()\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("JvmFieldDelegatedArrayCollision", src, &["C"]);
+}
+
+#[test]
+fn an_allocated_delegated_array_name_clashes_with_ordinary_companion_storage() {
+    let src = "import kotlin.reflect.KProperty\n\
+        class D {\n\
+        \x20   operator fun getValue(owner: C, property: KProperty<*>): String = property.name\n\
+        }\n\
+        class C {\n\
+        \x20   val delegated: String by D()\n\
+        \x20   companion object {\n\
+        \x20       @JvmField val `$$delegatedProperties`: Array<KProperty<*>> = emptyArray()\n\
+        \x20       val `$$delegatedProperties$1`: Array<KProperty<*>> = emptyArray()\n\
+        \x20   }\n\
+        }\n";
+    common::assert_error_blocks_match_kotlinc(&[("AllocatedDelegatedArrayCollision.kt", src)], &[]);
+}
+
+#[test]
+fn an_allocated_delegated_array_name_clashes_with_mutable_companion_storage() {
+    let src = "import kotlin.reflect.KProperty\n\
+        class D {\n\
+        \x20   operator fun getValue(owner: C, property: KProperty<*>): String = property.name\n\
+        }\n\
+        class C {\n\
+        \x20   val delegated: String by D()\n\
+        \x20   companion object {\n\
+        \x20       @JvmField val `$$delegatedProperties`: Array<KProperty<*>> = emptyArray()\n\
+        \x20       var `$$delegatedProperties$1`: Array<KProperty<*>> = emptyArray()\n\
+        \x20   }\n\
+        }\n";
+    common::assert_error_blocks_match_kotlinc(&[("MutableDelegatedArrayCollision.kt", src)], &[]);
 }
 
 #[test]

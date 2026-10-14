@@ -540,12 +540,21 @@ pub(super) fn complete(
     // annotation on: `@SerialName`, OR a property-level `@Serializable(with = X::class)` custom
     // serializer. The marker's stem is the property's JVM getter name, so a Boolean `isFoo` yields
     // `isFoo$annotations` (JavaBeans `is`-prefix rule).
+    let class_identity = ir.classes[class_id as usize].fq_name_id();
     for (prop, _) in &foo_fields {
         if serial_name_of(ctx, ir, class_id, prop).is_none()
             && field_serializer_of(ctx, ir, class_id, prop).is_none()
         {
             continue;
         }
+        let source_order = ir.classes[class_id as usize]
+            .properties
+            .iter()
+            .find(|property| property.name == *prop)
+            .expect("a serialized field retains its property declaration")
+            .source_order;
+        let (params, identities, _) =
+            ir.property_accessor_parameters(class_id as usize, source_order);
         let ann_ret = ir.add_expr(IrExpr::Return(None));
         let ann_body = ir.add_expr(IrExpr::Block {
             stmts: vec![ann_ret],
@@ -553,7 +562,7 @@ pub(super) fn complete(
         });
         let marker = ir.add_fun(IrFunction {
             name: format!("{}$annotations", property_getter_name(prop)),
-            params: vec![],
+            params,
             ret: unit(),
             body: Some(ann_body),
             is_static: true,
@@ -563,7 +572,11 @@ pub(super) fn complete(
         ir.open_methods.insert(marker);
         ir.synthetic_methods.insert(marker);
         ir.deprecated_methods.insert(marker);
+        ir.fn_params
+            .insert(marker, crate::ir::FnParamInfo::identities(identities));
         ir.classes[class_id as usize].methods.push(marker);
+        ir.property_annotation_markers
+            .insert((class_identity, source_order), marker);
     }
 
     let plain_data_class = plain_data_class(ir, class_id);

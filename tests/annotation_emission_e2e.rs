@@ -669,6 +669,24 @@ fn concatenated_string_constant_matches_kotlinc() {
     );
 }
 
+/// A selected primitive conversion is part of Kotlin's constant-expression language. Its call
+/// syntax must not make annotation folding reinterpret it as a nested annotation construction.
+#[test]
+fn primitive_conversion_call_is_an_annotation_constant() {
+    require_same_annotations(
+        "primitive_conversion_constant",
+        "PrimitiveConversionConstant.kt",
+        "q/PrimitiveConversionConstantKt",
+        &["marked()"],
+        "package q\n\
+         @Target(AnnotationTarget.FUNCTION)\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         annotation class ByteMark(val value: Byte)\n\
+         @ByteMark(8.toByte())\n\
+         fun marked() {}\n",
+    );
+}
+
 /// A singleton `const val` is a compile-time constant of the same expressions a top-level one is.
 ///
 /// Literal companion constants already fold. An object or companion initializer that is a

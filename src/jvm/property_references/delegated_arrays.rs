@@ -38,6 +38,7 @@ fn element_type() -> Ty {
 #[derive(Default)]
 pub(crate) struct DelegatedPropertyArrays {
     by_owner: HashMap<TypeName, Vec<ExprId>>,
+    field_names: HashMap<TypeName, String>,
 }
 
 impl DelegatedPropertyArrays {
@@ -46,12 +47,48 @@ impl DelegatedPropertyArrays {
             .into_iter()
             .map(|(owner, elements)| (names.get(&owner).copied().unwrap_or(owner), elements))
             .collect();
+        self.field_names = std::mem::take(&mut self.field_names)
+            .into_iter()
+            .map(|(owner, field)| (names.get(&owner).copied().unwrap_or(owner), field))
+            .collect();
     }
 
     /// The elements of `owner`'s array, or `None` when it has none.
     pub(crate) fn elements(&self, owner: TypeName) -> Option<&[ExprId]> {
         self.by_owner.get(&owner).map(Vec::as_slice)
     }
+
+    /// Physical field selected for `owner`'s generated array. A source `@JvmField` owns its ABI
+    /// spelling, so the generated field takes the first free `$N` suffix in that one collision.
+    pub(crate) fn field_name(&self, owner: TypeName) -> &str {
+        self.field_names.get(&owner).map_or(FIELD, String::as_str)
+    }
+}
+
+fn generated_field_name(ir: &IrFile, owner: TypeName) -> String {
+    // Fields already owned by the class, plus companion fields with a fixed public ABI, keep their
+    // source spelling. An ordinary hoisted companion field remains suffixable and is deliberately
+    // left for the later physical-name allocator, so the generated array keeps kotlinc's canonical
+    // spelling in that case.
+    let occupied = ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, field)| {
+            field.owner == Some(owner)
+                && (!ir.is_jvm_companion_hoisted_static(*index as u32)
+                    || ir.is_jvm_field_static(*index as u32)
+                    || field.is_const)
+        })
+        .map(|(index, _)| ir.static_field_jvm_name(index as u32))
+        .collect::<Vec<_>>();
+    if !occupied.contains(&FIELD) {
+        return FIELD.to_string();
+    }
+    (1usize..)
+        .map(|suffix| format!("{FIELD}${suffix}"))
+        .find(|candidate| !occupied.contains(&candidate.as_str()))
+        .expect("an unused delegated-property array suffix always exists")
 }
 
 /// One delegated reference operand awaiting its slot.
@@ -198,20 +235,42 @@ pub(super) fn place(ir: &mut IrFile, operands: Vec<DelegatedOperand>) -> Delegat
             .enumerate()
             .map(|(slot, operand)| {
                 index.insert((owner, operand.property), slot);
-                operand.element.clone()
+                let line = match operand.property {
+                    DelegatedProperty::Declared(property) => ir
+                        .checked_properties
+                        .get(&property)
+                        .map_or(0, |declaration| declaration.decl_line),
+                    DelegatedProperty::Local(_) => 0,
+                };
+                (operand.element.clone(), line)
             })
             .collect::<Vec<_>>();
         allocated.push((owner, elements));
     }
     for (owner, elements) in allocated {
-        let elements = elements.into_iter().map(|element| ir.add_expr(element));
-        arrays.by_owner.insert(owner, elements.collect());
+        let field_name = generated_field_name(ir, owner);
+        // A public source field can displace the generated array from its canonical spelling.
+        // kotlinc then retains the declaration line of each delegated property whose reflected
+        // value is constructed; a canonical array suppresses the complete `<clinit>` line table.
+        let displaced = field_name != FIELD;
+        let elements = elements
+            .into_iter()
+            .map(|(element, line)| {
+                let expression = ir.add_expr(element);
+                if displaced && line != 0 {
+                    ir.expr_source_lines.insert(expression, line);
+                }
+                expression
+            })
+            .collect();
+        arrays.by_owner.insert(owner, elements);
+        arrays.field_names.insert(owner, field_name);
     }
     for operand in operands {
         let slot = index[&(operand.owner, operand.property)];
         let array = ir.add_expr(IrExpr::ExternalStaticField {
             owner: operand.owner,
-            name: FIELD.to_string(),
+            name: arrays.field_name(operand.owner).to_string(),
             descriptor: DESCRIPTOR.to_string(),
         });
         let slot = ir.add_expr(IrExpr::Const(IrConst::Int(slot as i32)));

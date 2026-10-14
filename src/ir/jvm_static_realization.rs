@@ -7,6 +7,24 @@
 use super::{IrFile, IrStaticAccessor, TypeName};
 
 impl IrFile {
+    pub(crate) fn mark_jvm_package_property_annotation_marker(
+        &mut self,
+        property: crate::fir::PropertyId,
+        function: u32,
+    ) {
+        self.jvm_package_property_annotation_markers
+            .insert(property, function);
+    }
+
+    pub(crate) fn jvm_package_property_annotation_marker(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<u32> {
+        self.jvm_package_property_annotation_markers
+            .get(&property)
+            .copied()
+    }
+
     /// Record/query the JVM-only companion backing-storage realization selected after common
     /// lowering. Keeping this in a backend-populated side table prevents a physical JVM layout bit
     /// from becoming part of an ordinary common-IR static declaration.
@@ -32,6 +50,24 @@ impl IrFile {
         self.jvm_companion_property_statics
             .get(&(companion, property))
             .copied()
+    }
+
+    /// The exact companion property declaration whose storage `index` realizes on the JVM.
+    /// Consumers that need declaration-owned facts use this recorded edge instead of recovering
+    /// an owner or property from the physical static's spelling.
+    pub(crate) fn jvm_companion_static_declaration(
+        &self,
+        index: u32,
+    ) -> Option<(&super::IrClass, &super::IrProperty)> {
+        let (&(companion, property), _) = self
+            .jvm_companion_property_statics
+            .iter()
+            .find(|(_, static_index)| **static_index == index)?;
+        let class = self
+            .classes
+            .iter()
+            .find(|class| class.fq_name == companion)?;
+        Some((class, class.properties.get(property as usize)?))
     }
 
     pub(crate) fn set_jvm_static_field_name(&mut self, index: u32, name: String) {
@@ -90,6 +126,37 @@ impl IrFile {
                 }
                 _ => None,
             })
+    }
+
+    /// The resolved annotations of the source property static `index` stores: a top-level
+    /// property, or a companion property hoisted onto its outer class. Other statics have none.
+    pub(crate) fn static_declaration_annotations(&self, index: u32) -> &[TypeName] {
+        let top_level = self.local_property_layouts.iter().find_map(|(property, layout)| {
+            matches!(
+                layout,
+                crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } if *storage == index
+            )
+            .then(|| {
+                self.package_properties
+                    .iter()
+                    .find(|declaration| declaration.property == *property)
+            })
+            .flatten()
+            .map(|declaration| &declaration.annotations[..])
+        });
+        let hoisted = || {
+            self.jvm_companion_property_statics
+                .iter()
+                .find(|(_, static_index)| **static_index == index)
+                .and_then(|((companion, property), _)| {
+                    let class = self
+                        .classes
+                        .iter()
+                        .find(|class| class.fq_name == *companion)?;
+                    Some(&class.properties.get(*property as usize)?.annotations[..])
+                })
+        };
+        top_level.or_else(hoisted).unwrap_or_default()
     }
 
     pub(crate) fn has_jvm_default_static_getter(&self, index: u32) -> bool {

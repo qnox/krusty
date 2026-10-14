@@ -60,6 +60,259 @@ fn annotations_on_member_accessors_match_kotlinc() {
 }
 
 #[test]
+fn same_named_member_and_extension_properties_keep_distinct_annotation_markers() {
+    assert_module_matches_kotlinc(&[(
+        "OverloadedMarkers.kt",
+        "package accessors\n\
+         \n\
+         @Target(AnnotationTarget.PROPERTY)\n\
+         annotation class Marker(val value: String)\n\
+         \n\
+         class OverloadedMarkers {\n\
+         \x20   @Marker(\"member\") val item: Int = 1\n\
+         \x20   @Marker(\"extension\") val String.item: Int get() = length\n\
+         }\n",
+    )]);
+}
+
+#[test]
+fn a_member_extension_marker_clash_renders_its_receiver_parameter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "ExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   fun `getItem$annotations`(receiver: String) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_escapes_its_generic_receiver_parameter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "GenericExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<`T value`> {\n\
+             \x20   @Marker val `T value`.item: Int get() = 1\n\
+             \x20   fun `getItem$annotations`(receiver: `T value`) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_lists_a_different_source_shape_first() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "GenericExtensionMarkerOrder.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<A> {\n\
+             \x20   @Marker val A.item: Int get() = 1\n\
+             \x20   fun `getItem$annotations`(receiver: Any?) {}\n\
+             \x20   fun `getItem$annotations`(receiver: A) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn marker_clash_qualifies_same_named_classifier_shapes_across_the_group() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "QualifiedExtensionMarkerClash.kt",
+            "class A { class Foo }\n\
+             class B { class Foo }\n\
+             @Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val List<A.Foo>.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: List<B.Foo>) {}\n\
+             \x20   fun `getItem$annotations`(receiver: List<A.Foo>) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_replaces_only_nested_type_parameters() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "NestedGenericExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T> {\n\
+             \x20   @Marker val List<T>.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: List<T>) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_star_projects_a_generic_bound() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "BoundedGenericExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T : List<String>> {\n\
+             \x20   @Marker val T.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_marker_bound_and_star_projection_with_the_same_diagnostic_shape_have_stable_order() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "SameDiagnosticShapeExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T : List<String>> {\n\
+             \x20   @Marker val T.item: Int get() = size\n\
+             \x20   fun `getItem$annotations`(receiver: List<*>) {}\n\
+             \x20   fun `getItem$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn independent_marker_clash_groups_follow_property_source_order() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "IndependentExtensionMarkerClashes.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T> {\n\
+             \x20   @Marker val T.zed: Int get() = 1\n\
+             \x20   fun `getZed$annotations`(receiver: T) {}\n\
+             \x20   @Marker val T.alpha: Int get() = 1\n\
+             \x20   fun `getAlpha$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_marker_clash_erases_a_function_bound() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FunctionBoundExtensionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C<T : (String) -> Int> {\n\
+             \x20   @Marker val T.item: Int get() = 1\n\
+             \x20   fun `getItem$annotations`(receiver: T) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_member_extension_function_marker_clash_renders_its_receiver() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "ExtensionFunctionMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   fun String.`getItem$annotations`() {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_renamed_property_accessor_clashes_with_an_extension_marker() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "AccessorMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   var other: String = \"\"\n\
+             \x20       @JvmName(\"getItem\\$annotations\") set(value) { field = value }\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_renamed_member_extension_accessor_clashes_with_a_context_extension_marker() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "MemberExtensionAccessorMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   context(_: Int)\n\
+             \x20   @Marker val String.item: Int get() = length\n\
+             \x20   var Int.other: String\n\
+             \x20       get() = \"\"\n\
+             \x20       @JvmName(\"getItem\\$annotations\") set(value) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_renamed_member_extension_accessor_clashes_with_a_generated_data_method() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "GeneratedDataMethodClash.kt",
+            "data class D(val x: Int) {\n\
+             \x20   val Int.foo: D\n\
+             \x20       @JvmName(\"copy\") get() = this@D\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn a_renamed_companion_block_accessor_clashes_with_a_context_property_marker() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "CompanionBlockAccessorMarkerClash.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class Marker\n\
+             class C {\n\
+             \x20   context(_: Int)\n\
+             \x20   @Marker val item: Int get() = 0\n\
+             \x20   companion {\n\
+             \x20       var other: Int = 0\n\
+             \x20           @JvmName(\"getItem\\$annotations\") set(value) { field = value }\n\
+             \x20   }\n\
+             }\n",
+        )],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
+    );
+}
+
+#[test]
 fn annotations_on_top_level_accessors_match_kotlinc() {
     assert_module_matches_kotlinc(&[
         ("Annotations.kt", ANNOTATIONS),
@@ -201,6 +454,227 @@ fn an_annotation_on_a_wrong_accessor_target_is_rejected_like_kotlinc() {
     let sources = [("Wrong.kt", WRONG_TARGETS)];
     assert_eq!(common::reference_error_ledger(&sources, &[]), *ledger);
     common::assert_errors_match_kotlinc(&sources, &[]);
+}
+
+/// An explicit property use-site is a semantic target selection, not an emission hint. The
+/// annotation class must allow that exact target before the checked application is published.
+#[test]
+fn an_explicit_field_site_requires_a_field_target() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class PropertyOnly\n\
+             class C {\n\
+             \x20   @field:PropertyOnly val value: Int = 1\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Target applicability is independent of argument typing. kotlinc reports the bad argument first
+/// and the explicit-site error second; neither failure suppresses the other.
+#[test]
+fn an_explicit_field_site_is_checked_after_invalid_arguments() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.PROPERTY)\n\
+             annotation class PropertyOnly(val number: Int)\n\
+             class C {\n\
+             \x20   @field:PropertyOnly(\"bad\") val value: Int = 1\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Allowing `FIELD` on the annotation class is not enough: an explicit `@field:` still requires
+/// the annotated property declaration to own a backing field.
+#[test]
+fn an_explicit_field_site_rejects_a_computed_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             class C {\n\
+             \x20   @field:FieldOnly val value: Int get() = 1\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Interface ownership makes a body-less property implicitly abstract; the absence of a written
+/// `abstract` modifier does not give an explicit `@field:` application storage to target.
+#[test]
+fn an_explicit_field_site_rejects_an_implicit_abstract_interface_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             interface I {\n\
+             \x20   @field:FieldOnly val value: Int\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// An annotation-class constructor `val` declares an annotation element on an interface, not a
+/// backing field that can receive an explicit `@field:` application.
+#[test]
+fn an_explicit_field_site_rejects_an_annotation_class_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             annotation class Token(@field:FieldOnly val value: Int)\n",
+        )],
+        &[],
+    );
+}
+
+/// A primary-constructor property defaults to the value-parameter site before considering its
+/// field, including when that constructor is the element list of an annotation class.
+#[test]
+fn an_annotation_class_property_defaults_to_its_constructor_parameter_site() {
+    assert_module_matches_kotlinc(&[(
+        "ConstructorPropertySite.kt",
+        "@Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FIELD)\n\
+         annotation class Mark\n\
+         annotation class Token(@Mark val value: Int)\n",
+    )]);
+}
+
+/// A use-site target is constrained by its declaration host even when the annotation class permits
+/// both the declaration's ordinary target and `FIELD`.
+#[test]
+fn an_explicit_field_site_rejects_a_non_property_declaration() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.CLASS, AnnotationTarget.FIELD)\n\
+             annotation class ClassOrField\n\
+             @field:ClassOrField class C\n",
+        )],
+        &[],
+    );
+}
+
+/// Suppression silences the invalid-site diagnostic, and kotlinc retains the application on the
+/// actual class declaration despite the `@field:` prefix.
+#[test]
+fn a_suppressed_field_site_on_a_class_is_published_on_the_class() {
+    assert_module_matches_kotlinc(&[(
+        "FieldSite.kt",
+        "@Retention(AnnotationRetention.RUNTIME)\n\
+         @Target(AnnotationTarget.CLASS, AnnotationTarget.FIELD)\n\
+         annotation class ClassOrField\n\
+         @Suppress(\"WRONG_ANNOTATION_TARGET_WITH_USE_SITE_TARGET\")\n\
+         @field:ClassOrField class C\n",
+    )]);
+}
+
+/// A source member is not the synthetic carrier merely because its spelling matches the marker
+/// name. The generated no-arg marker and the source declaration are a physical JVM clash.
+#[test]
+fn a_suppressed_property_marker_clashes_with_a_same_signature_source_member() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "MarkerClash.kt",
+            "class C {\n\
+             \x20   @Suppress(\"VOLATILE_ON_VALUE\")\n\
+             \x20   @Volatile val value: Int = 1\n\
+             \x20   fun `getValue$annotations`() {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// A same-named source overload with a parameter remains separate from the generated `()V`
+/// marker. Marker reuse is selected by compiler provenance and exact signature, not spelling.
+#[test]
+fn a_suppressed_property_marker_coexists_with_a_source_overload() {
+    assert_module_matches_kotlinc(&[(
+        "MarkerOverload.kt",
+        "class C {\n\
+         \x20   @Suppress(\"VOLATILE_ON_VALUE\")\n\
+         \x20   @Volatile val value: Int = 1\n\
+         \x20   fun `getValue$annotations`(number: Int) {}\n\
+         }\n",
+    )]);
+}
+
+/// A Kotlin `Unit` property getter returns the boxed `kotlin.Unit`; it does not use the JVM `void`
+/// descriptor of an annotation marker. The two same-named methods therefore coexist.
+#[test]
+fn a_suppressed_property_marker_coexists_with_a_unit_property_getter() {
+    assert_module_matches_kotlinc(&[(
+        "MarkerProperty.kt",
+        "class C {\n\
+         \x20   @Suppress(\"VOLATILE_ON_VALUE\")\n\
+         \x20   @Volatile val foo: Int = 1\n\
+         \x20   val `foo$annotations`: Unit = Unit\n\
+         }\n",
+    )]);
+}
+
+/// Function declarations use the same host-aware rejection rather than treating `FIELD` in the
+/// annotation class's own target set as permission for an invalid use-site prefix.
+#[test]
+fn an_explicit_field_site_rejects_a_function_declaration() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FUNCTION, AnnotationTarget.FIELD)\n\
+             annotation class FunctionOrField\n\
+             @field:FunctionOrField fun call() {}\n",
+        )],
+        &[],
+    );
+}
+
+/// A field-only annotation defaults to the backing-field site, which is still invalid when the
+/// property is computed and has no field to receive it.
+#[test]
+fn an_implicit_field_site_rejects_a_computed_property() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Target(AnnotationTarget.FIELD)\n\
+             annotation class FieldOnly\n\
+             class C {\n\
+             \x20   @FieldOnly\n\
+             \x20   var value: Int\n\
+             \x20       get() = 1\n\
+             \x20       set(value) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// An annotation retained on a transient local-declaration statement still rejects the property
+/// use-site prefix against the local-variable host.
+#[test]
+fn an_explicit_field_site_rejects_a_local_declaration() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "FieldSite.kt",
+            "@Retention(AnnotationRetention.SOURCE)\n\
+             @Target(AnnotationTarget.FIELD, AnnotationTarget.LOCAL_VARIABLE)\n\
+             annotation class FieldOrLocal\n\
+             fun call() { @field:FieldOrLocal val value = 1 }\n",
+        )],
+        &[],
+    );
 }
 
 /// A Java `@Target` maps each `ElementType` to its Kotlin targets; the diagnostic lists their

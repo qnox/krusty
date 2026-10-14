@@ -46,6 +46,9 @@ pub struct RetainedAnnotation {
 /// the declaration onto its physical representation (a JVM marker method, for example).
 #[derive(Clone, Debug)]
 pub struct PropertyAnnotations {
+    /// Stable source declaration order. This is the declaration identity; `property` is payload and
+    /// may be shared by an ordinary property and a member extension property.
+    pub source_order: u32,
     pub property: String,
     pub annotations: DeclarationAnnotations,
 }
@@ -58,6 +61,11 @@ pub struct DeclarationAnnotations {
     /// file or metadata record names them, yet the declaration's metadata flags still report
     /// `hasAnnotations` (kotlinc derives that flag from FIR, before the removal).
     erased_optional_expectations: bool,
+    /// A suppressed SOURCE application that remains declaration provenance even though its payload
+    /// does not survive retention (suppressed immutable `@Volatile` is such a property). The JVM
+    /// uses this provenance to retain the property's empty annotation marker; it does not set
+    /// Kotlin metadata's `HAS_ANNOTATIONS` bit.
+    suppressed_source_application: bool,
 }
 
 impl DeclarationAnnotations {
@@ -65,6 +73,7 @@ impl DeclarationAnnotations {
         Self {
             retained: annotations,
             erased_optional_expectations: false,
+            suppressed_source_application: false,
         }
     }
 
@@ -92,11 +101,30 @@ impl DeclarationAnnotations {
         annotations
     }
 
-    /// Whether the declaration declares annotations — the `hasAnnotations` fact its metadata
-    /// reports: a retained application or an erased optional expectation. Never derive it from
-    /// [`Self::retains_none`].
+    /// Whether the declaration carries annotation provenance: a retained application, an erased
+    /// optional expectation, or a suppressed SOURCE application retained for target realization.
+    /// Never derive it from [`Self::retains_none`].
     pub fn declares_annotations(&self) -> bool {
+        !self.retained.is_empty()
+            || self.erased_optional_expectations
+            || self.suppressed_source_application
+    }
+
+    /// Whether Kotlin metadata reports `HAS_ANNOTATIONS`. Suppressed SOURCE provenance can require
+    /// a target carrier without making the source declaration annotated in metadata.
+    pub(crate) fn declares_metadata_annotations(&self) -> bool {
         !self.retained.is_empty() || self.erased_optional_expectations
+    }
+
+    pub(crate) fn with_suppressed_source_application(mut self, retained: bool) -> Self {
+        self.suppressed_source_application = retained;
+        self
+    }
+
+    /// Whether a suppressed SOURCE application remains part of the declaration's semantic
+    /// provenance even though [`Self::retains_none`] is true.
+    pub fn has_suppressed_source_application(&self) -> bool {
+        self.suppressed_source_application
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {

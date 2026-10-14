@@ -241,8 +241,56 @@ impl BodyFirChecker<'_> {
         Ok(Some(CompoundMemberReceiver::Snapshot(declaration)))
     }
 
+    /// Bind the receiver and index operands of `array[indices] op= value` once, before the read
+    /// inside `value`, and substitute every shared occurrence. An operand already substituted by an
+    /// enclosing access is left alone; a foldable one ([`Self::is_foldable_operand`]) becomes its
+    /// own substitution and takes no slot. The caller removes each returned substitution after the
+    /// write and keeps the declarations.
+    pub(super) fn bind_compound_index_operands(
+        &mut self,
+        array: ExprId,
+        indices: &[ExprId],
+        value: ExprId,
+        origin: OriginId,
+    ) -> Result<Vec<(ExprId, Option<FirStatementId>)>, BodyCheckFailure> {
+        let mut bindings = Vec::new();
+        if !self.is_compound_index_assignment(array, indices, value) {
+            return Ok(bindings);
+        }
+        for operand in std::iter::once(array).chain(indices.iter().copied()) {
+            if self.expression_substitutions.contains_key(&operand) {
+                continue;
+            }
+            let initializer = self.expression(operand)?;
+            if self.is_foldable_operand(initializer) {
+                self.expression_substitutions.insert(operand, initializer);
+                bindings.push((operand, None));
+                continue;
+            }
+            let ty = self.expression_type(operand)?;
+            let (declaration, replacement, _) = self.bind_temporary(origin, ty, initializer);
+            self.expression_substitutions.insert(operand, replacement);
+            bindings.push((operand, Some(declaration)));
+        }
+        Ok(bindings)
+    }
+
+    /// Whether a temporary holding `expression` folds back into its uses: kotlinc's JVM optimization
+    /// replaces a temporary whose initializer is a constant or a read of an immutable value with
+    /// that value, so an access operand of this shape takes no slot.
+    pub(super) fn is_foldable_operand(&self, expression: FirExprId) -> bool {
+        matches!(
+            self.body
+                .expr(expression)
+                .map(|expression| &expression.kind),
+            Some(FirExprKind::Constant(_))
+        ) || self.is_immutable_binding_read(expression)
+    }
+
     /// Whether `expression` is a plain read of a lexical `val`, a parameter, or a `this` receiver
     /// of this body or of an enclosing one: a value no evaluation between two reads can change.
+    /// A counted loop's variable is not one: kotlinc's loop lowering makes it the induction
+    /// variable, which its temporary folding sees as a `var`.
     ///
     /// A `val` a local classifier or a suspend lambda captured is not one: kotlinc's temporary
     /// survives once local declaration lowering has turned that read into a capture-field read,
@@ -272,11 +320,14 @@ impl BodyFirChecker<'_> {
                 .class_receivers
                 .iter()
                 .any(|binding| binding.owner == *owner && binding.field == *field),
-            Some(FirExprKind::ValueRead(value)) => self
-                .scopes
-                .iter()
-                .flat_map(|scope| scope.values())
-                .any(|binding| binding.value == *value && immutable(binding)),
+            Some(FirExprKind::ValueRead(value)) => {
+                !self.counted_loop_variables.contains(value)
+                    && self
+                        .scopes
+                        .iter()
+                        .flat_map(|scope| scope.values())
+                        .any(|binding| binding.value == *value && immutable(binding))
+            }
             // A callable lifted to a method receives its captures as parameters; a suspend lambda
             // is a class of its own and reads them from capture fields instead.
             Some(FirExprKind::CapturedValueRead {

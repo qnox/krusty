@@ -32,6 +32,7 @@ mod nesting;
 mod properties;
 mod return_labels;
 mod superclass_references;
+mod type_annotations;
 mod type_parameters;
 mod value_parameters;
 use class_recovery::error_class_decl;
@@ -3903,43 +3904,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_atom(&mut self) -> TypeRef {
-        // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`), recorded by the
-        // type's start offset (`TypeRef.span.lo`) with any argument list keyed by annotation span.
-        let mut type_anns = Vec::new();
-        while self.at(TokenKind::At) {
-            self.bump(); // '@'
-            let (qname, annotation_span) = self.parse_annotation_reference();
-            // An argument-bearing type annotation `@Ann("a") String`. A following `(` is annotation
-            // args ONLY if it is NOT the parameter list of a function type — `@Composable () -> Unit`
-            // has the `(` belong to the type. Disambiguate by peeking past the balanced `(…)`: an
-            // `->` after it means a function type (leave the `(`), otherwise consume the args.
-            if self.at(TokenKind::LParen) && !self.paren_group_precedes_arrow(self.i) {
-                let arguments = self.parse_annotation_args();
-                self.record_type_annotation_arguments(annotation_span, arguments);
-            }
-            if !qname.is_empty() {
-                type_anns.push(AnnotationRef {
-                    name: qname,
-                    span: annotation_span,
-                });
-            }
-            // The grammar is `annotation NL*` — a line break may separate the annotation from the type
-            // it annotates (and from a following annotation), as in a wrapped type-argument list:
-            //     List<
-            //         @Ann(with = S::class)
-            //         Outer.Inner,
-            //     >
-            // Skip those breaks so the type is parsed next; `span` below then still points at the TYPE
-            // token, which is the key `type_annotations` is recorded under. A `;` is NOT a line break
-            // here (it cannot separate an annotation from its type), so leave it to fail as before.
-            while self.at(TokenKind::Newline) && !self.at_semicolon() {
-                self.bump();
-            }
-        }
-        let span = self.tok().span;
-        if !type_anns.is_empty() {
-            self.file.type_annotations.insert(span.lo, type_anns);
-        }
+        let span = self.parse_leading_type_annotations();
         // `suspend` modifier on a function type: `suspend (A) -> B` — consume and parse as function type.
         let mut fun_suspend = false;
         if self.at(TokenKind::Ident) && self.keyword_text("suspend") {

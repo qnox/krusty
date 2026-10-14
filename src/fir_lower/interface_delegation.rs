@@ -499,6 +499,9 @@ fn materialize_delegation(
                         .or_default()
                         .push(crate::ir::MemberExtProp {
                             name,
+                            diagnostic_span: None,
+                            getter_diagnostic_span: None,
+                            setter_diagnostic_span: None,
                             source_order: u32::MAX,
                             receiver,
                             ty,
@@ -515,9 +518,13 @@ fn materialize_delegation(
                 }
                 ir.classes[class as usize].properties.push(IrProperty {
                     name,
+                    diagnostic_span: None,
+                    getter_diagnostic_span: None,
+                    setter_diagnostic_span: None,
                     context_params,
                     source_order: u32::MAX,
                     decl_line: 0,
+                    accessor_lines: crate::ir::IrAccessorLines::default(),
                     ty,
                     type_params,
                     visibility: crate::types::Visibility::Public,
@@ -643,7 +650,11 @@ fn delegated_call(
                         result.get(),
                     )),
                     interface: *interface,
-                    module_target: None,
+                    module_target: match *target {
+                        ResolvedDelegatedModuleTarget::Function(callable) => Some(callable),
+                        ResolvedDelegatedModuleTarget::PropertyGetter(_)
+                        | ResolvedDelegatedModuleTarget::PropertySetter(_) => None,
+                    },
                     target: Some(match *target {
                         ResolvedDelegatedModuleTarget::Function(callable) => {
                             IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(

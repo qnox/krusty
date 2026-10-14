@@ -11,6 +11,8 @@ use crate::types::{SemanticCallableOwner, Ty, TypeName};
 
 use super::KlibLibraries;
 
+const NATIVE_DEFAULT_IMPORT_PACKAGES: &[&str] = &["kotlin.native"];
+
 impl DependencyAccessPolicy for KlibLibraries {
     fn internal_classifier_accessible(&self, owner: TypeName) -> bool {
         self.inventory.classifier_is_friend(owner)
@@ -60,6 +62,20 @@ impl SemanticPlatform for KlibLibraries {
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
         internal.starts_with("kotlin/")
+    }
+
+    fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        // The provider remains target-neutral: the opened libraries themselves identify Native by
+        // publishing the documented `kotlin.native` package. A Wasm stdlib has no such package and
+        // therefore receives no Native-only wildcard import.
+        if self
+            .inventory
+            .package_exists(crate::types::type_name("kotlin"), "native")
+        {
+            NATIVE_DEFAULT_IMPORT_PACKAGES
+        } else {
+            &[]
+        }
     }
 
     /// A KLIB top-level declaration is owned by its package; no container class realizes it.

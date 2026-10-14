@@ -1,6 +1,6 @@
 //! Method parameter annotations and Java reflection names.
 
-use super::{split_declaration_annotations, ClassWriter};
+use super::{annotation_values::split_declaration_annotations, ClassWriter};
 
 /// How many parameters a JVM method descriptor `(…)ret` declares — one per top-level type, an
 /// `L…;` or `[…` counting as one.

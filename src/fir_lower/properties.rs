@@ -177,6 +177,9 @@ pub(super) fn predeclare_properties(
                     property.id,
                     IrCheckedProperty {
                         declaration,
+                        diagnostic_span: None,
+                        getter_diagnostic_span: None,
+                        setter_diagnostic_span: None,
                         source_order,
                         decl_line: 0,
                         decl_start_line: 0,
@@ -421,8 +424,8 @@ pub(super) fn finalize_properties(
     Ok(())
 }
 
-/// Anchor `layout`'s storage and accessors on the property's line, and an accessor written with a
-/// body of its own on that accessor's line, ending on its body's last line.
+/// Anchor `layout`'s storage and accessors on the property's line, and a written accessor on its
+/// own header line. An accessor with a body additionally retains that body's last line.
 pub(super) fn apply_property_decl_line(
     ir: &mut IrFile,
     layout: &IrLocalPropertyLayout,
@@ -612,6 +615,9 @@ fn materialize_member_extension_property(
         .or_default()
         .push(crate::ir::MemberExtProp {
             name: property.name.clone(),
+            diagnostic_span: property.diagnostic_span,
+            getter_diagnostic_span: property.getter_diagnostic_span,
+            setter_diagnostic_span: property.setter_diagnostic_span,
             source_order,
             receiver,
             ty: property.ty,
@@ -700,6 +706,7 @@ fn materialize_top_level_property(
             accessors: top_level_accessors(index, &property),
             line: 0,
             source_order,
+            property_delegate: false,
         });
         if companion_block_owner.is_some() {
             ir.companion_blocks.mark_storage(storage_index);
@@ -930,10 +937,18 @@ fn record_companion_block_property(
     let class = ir.classes[owner as usize].fq_name_id();
     let has_constant = index.compile_time_constant(property.declaration).is_some()
         || ir.companion_blocks.has_constant_initializer(property_id);
+    let field_annotations = ir
+        .companion_block_field_annotations
+        .remove(&property_id)
+        .unwrap_or_default();
     ir.companion_blocks
         .record_property(crate::ir::IrCompanionBlockProperty {
             class,
             name: property.name.clone(),
+            diagnostic_span: property.diagnostic_span,
+            getter_diagnostic_span: property.getter_diagnostic_span,
+            setter_diagnostic_span: property.setter_diagnostic_span,
+            field_annotations,
             ty: property.ty,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_const: property.flags.has(DeclarationFlags::CONST),
@@ -1101,6 +1116,7 @@ fn materialize_member_property(
             accessors: crate::ir::IrStaticAccessors::DEFAULT,
             line: 0,
             source_order,
+            property_delegate: false,
         });
         ir.declared_class_statics
             .entry(owner)
@@ -1392,9 +1408,13 @@ fn materialize_member_property(
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
         name: property.name.clone(),
+        diagnostic_span: property.diagnostic_span,
+        getter_diagnostic_span: property.getter_diagnostic_span,
+        setter_diagnostic_span: property.setter_diagnostic_span,
         context_params: named_context_parameters(index, property.declaration, &context_parameters)?,
         source_order,
         decl_line: 0,
+        accessor_lines: property.accessor_lines,
         ty: property.ty,
         type_params,
         visibility: property.visibility,

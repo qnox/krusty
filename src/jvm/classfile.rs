@@ -21,6 +21,7 @@ mod debug_metadata;
 mod descriptor_mentions;
 mod enclosing_method;
 mod exception_tables;
+mod field_annotations;
 mod inline_call_stacks;
 mod inner_classes;
 mod late_fields;
@@ -36,6 +37,8 @@ mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
 
+pub(crate) use annotation_values::split_declaration_annotations;
+use annotation_values::{NOT_NULL, NULLABLE};
 use descriptor_mentions::DescriptorMentionCache;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
@@ -433,40 +436,6 @@ struct FieldInfo {
     invisible_anns: Vec<Vec<u8>>,
 }
 
-/// Partition retained declaration annotations into the two class-file attributes the JVM splits them
-/// across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then `RuntimeInvisibleAnnotations`
-/// (BINARY). Common IR carries one list per declaration; this boundary is the only place the split
-/// exists. SOURCE-retained applications never reach the IR.
-/// kotlinc's synthesized non-null annotation type.
-const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
-/// kotlinc's synthesized nullable annotation type.
-const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
-
-pub(crate) fn split_declaration_annotations(
-    annotations: &crate::ir::DeclarationAnnotations,
-) -> (
-    Vec<crate::ir::AppliedAnnotation>,
-    Vec<crate::ir::AppliedAnnotation>,
-) {
-    use crate::types::AnnotationRetention;
-    let of = |keep: fn(&AnnotationRetention) -> bool| {
-        annotations
-            .iter()
-            .filter(|retained| keep(&retained.retention))
-            .map(|retained| retained.annotation.clone())
-            .collect()
-    };
-    (
-        of(|retention| {
-            matches!(
-                retention,
-                AnnotationRetention::Default | AnnotationRetention::Runtime
-            )
-        }),
-        of(|retention| matches!(retention, AnnotationRetention::Binary)),
-    )
-}
-
 /// What every `@kotlin.Metadata` of one compilation stamps beside its payload: the `mv` version,
 /// and whether `xi` carries kotlinc's pre-release flag (`LanguageVersionSettings.isPreRelease`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -845,41 +814,6 @@ impl ClassWriter {
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
         });
-    }
-
-    /// Attach user annotations to the most recently added field. The JVM representation boundary
-    /// maps semantic retention onto visible/invisible class-file attributes.
-    pub fn set_last_field_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
-        let (vis, invis) = self.encode_declaration_annotations(annotations);
-        if let Some(f) = self.fields.last_mut() {
-            f.visible_anns = vis;
-            f.invisible_anns = invis;
-        }
-    }
-
-    /// Encode one `annotation` structure (type_index + element_value_pairs) to a fresh byte buffer.
-    fn encode_annotation(&mut self, a: &crate::ir::AppliedAnnotation) -> Vec<u8> {
-        let mut body = Vec::new();
-        self.ev_annotation(&mut body, a);
-        body
-    }
-
-    /// Encode retained declaration annotations in class-file attribute order: all visible entries,
-    /// then all invisible entries. Common IR carries no JVM attribute split.
-    fn encode_declaration_annotations(
-        &mut self,
-        annotations: &crate::ir::DeclarationAnnotations,
-    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        let (visible, invisible) = split_declaration_annotations(annotations);
-        let visible = visible
-            .iter()
-            .map(|annotation| self.encode_annotation(annotation))
-            .collect();
-        let invisible = invisible
-            .iter()
-            .map(|annotation| self.encode_annotation(annotation))
-            .collect();
-        (visible, invisible)
     }
 
     /// Attach a `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) describing the file facade.
@@ -1309,20 +1243,6 @@ impl ClassWriter {
         };
         if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
             m.access |= 0x1000;
-        }
-    }
-
-    /// Attach `@NotNull` / `@Nullable` (a `RuntimeInvisibleAnnotations`) to a previously-added field by
-    /// name — kotlinc annotates the backing field of a non-null reference property. No-op if not found.
-    pub fn set_field_nullability(&mut self, name: &str, ann_type: &str) {
-        if !self.nullability_annotations {
-            return;
-        }
-        let n = self.cp.utf8(name);
-        let ti = self.cp.utf8(ann_type);
-        let ann = vec![(ti >> 8) as u8, ti as u8, 0, 0];
-        if let Some(f) = self.fields.iter_mut().find(|f| f.name == n) {
-            f.invisible_anns = vec![ann];
         }
     }
 

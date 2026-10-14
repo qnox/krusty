@@ -66,6 +66,7 @@ mod package_declarations;
 mod properties;
 mod property_references;
 mod ranges;
+mod safe_call_equality;
 mod sam_conversions;
 #[cfg(test)]
 mod sam_target_tests;

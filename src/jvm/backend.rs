@@ -99,7 +99,9 @@ pub(crate) struct BackendPassFacts {
 /// 2. `realize_top_level_jvm_fields` — select public field storage for eligible top-level
 ///    `@JvmField` declarations through stable property/layout identities.
 ///
-/// 3. `lower_companion_properties` — realize supported companion backing fields as JVM outer statics.
+/// 3. `lower_companion_properties`, then `place_delegated_arrays` — realize supported companion
+///    backing fields as JVM outer statics, then allocate each generated delegated-property array
+///    against that complete owner-static inventory.
 ///    Common IR keeps the ordinary declaration and semantic initializer for other targets.
 ///
 /// 4. `check_before_result_coercion` — move a `!!` or platform assertion over the coercion that
@@ -121,7 +123,8 @@ pub(crate) struct BackendPassFacts {
 /// 7. `collection_barriers::select` — record collection bridge and method-entry plans.
 ///
 /// 8. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
-///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
+///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected), then
+///    allocate hoisted companion-field names from their final physical descriptors.
 ///
 /// 9. `elide_default_property_stores` — omit declaration stores already supplied by JVM field
 ///    initialization, judged by each field's physical slot now that carriers are realized. Common
@@ -217,6 +220,15 @@ fn run_backend_passes_after_plugins(
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::jvm::companion::lower_companion_properties(ir, &facts.property_realizations);
+    // A generated delegated-property array shares its owner's static namespace with companion
+    // backing fields. Allocate and rewrite its operands only after hoisting has made that namespace
+    // complete, while every generated element still participates in the representation passes
+    // below.
+    crate::jvm::property_references::place_delegated_arrays(
+        ir,
+        &mut facts.property_reference_realizations,
+        classpath,
+    );
     // Delegated properties that share a source name (extension properties for different
     // receivers) each lower a `{name}$delegate` static. The JVM name is unique per owner:
     // the first keeps that spelling and each later one takes the next `$N` suffix.
@@ -286,6 +298,10 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::ValueClasses);
     }
+    crate::jvm::companion::finalize_hoisted_static_field_names(
+        ir,
+        &facts.property_reference_realizations.delegated_arrays,
+    );
     // Companion fields move before value-class erasure. A private property reference was realized
     // against the companion instance accessor; point it at the outer class's `access$…$cp` now
     // that the field's physical type is known.
@@ -906,8 +922,13 @@ impl JvmBackend {
             );
             return Vec::new();
         }
-        if crate::jvm::declaration_collisions::validate(&ir, &pass_facts.override_results, diags)
-            .is_err()
+        if crate::jvm::declaration_collisions::validate(
+            &ir,
+            &pass_facts.override_results,
+            &pass_facts.property_reference_realizations.delegated_arrays,
+            diags,
+        )
+        .is_err()
         {
             return Vec::new();
         }
@@ -1266,11 +1287,6 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        crate::jvm::property_references::place_delegated_arrays(
-            &mut file.ir,
-            &mut property_reference_realizations,
-            &*self.cp,
-        );
         self.emit_streamed_ir(
             file,
             property_realizations,
@@ -1443,6 +1459,10 @@ pub fn facade_package_metadata_from_ir(
                         &Default::default(),
                     )
                 }),
+                annotation_method: ir
+                    .jvm_package_property_annotation_marker(declaration.property)
+                    .and_then(|marker| ir.functions.get(marker as usize))
+                    .map(|marker| (marker.name.clone(), "()V".to_string())),
                 ..crate::metadata::declaration_records::package_property(
                     ir,
                     declaration,
@@ -1513,7 +1533,10 @@ fn property_field(
         _ => return None,
     };
     let field = ir.statics.get(storage as usize)?;
-    Some((name, crate::jvm::names::type_descriptor(field.ty)))
+    Some((
+        name,
+        crate::jvm::names::type_descriptor(crate::jvm::method_descriptors::jvm_value_ty(&field.ty)),
+    ))
 }
 
 /// The JVM descriptor of a package function realized from its declaration: context parameters,
@@ -1764,6 +1787,7 @@ mod tests {
             accessors: crate::ir::IrStaticAccessors::ABSENT,
             line: 0,
             source_order: 0,
+            property_delegate: false,
         });
         ir.local_property_layouts.insert(
             property_id,
@@ -1788,6 +1812,7 @@ mod tests {
             has_constant: true,
             visibility: crate::types::Visibility::Public,
             annotations: Box::new([]),
+            suppressed_source_annotation_application: false,
             flags: crate::fir::DeclarationFlags::default(),
             spellings: crate::spelling::DeclaredSpellings::default(),
             has_backing_field: true,
@@ -1851,6 +1876,10 @@ mod tests {
             ),
             (
                 "lower_companion_properties(",
+                &["src/jvm/companion.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "finalize_hoisted_static_field_names(",
                 &["src/jvm/companion.rs", "src/jvm/backend.rs"],
             ),
             (

@@ -124,7 +124,7 @@ fn try_checked_source_set_function_body_rewriting(
     crate::resolve::publish_checked_local_signatures(
         file,
         source,
-        &mut analysis.symbols,
+        &analysis.symbols,
         analysis.types[source_index].as_ref().expect("checked file"),
         &mut index,
     )
@@ -179,25 +179,31 @@ fn try_checked_source_set_function_body_rewriting(
     let mut session = BodyCheckSession::default();
     session.install_active_source(&active);
     let body = check_body_unit_with_parameters_and_defaults(
-        file,
-        analysis.types[source_index].as_ref().expect("checked file"),
-        source,
-        BodyOwnerId::from_raw(declaration.raw()),
-        file.expr_span(root).expect("function body span"),
-        Some(root),
-        &parameters,
-        &[],
-        CheckedBodyReceiverShape {
-            context_receivers: &signature.parameters[..context_count],
-            extension_receiver: super::driver::body_extension_receiver(
-                &index,
-                declaration,
-                callable.shape.extension_receiver,
-            ),
+        BodyCheckUnit {
+            file,
+            info: analysis.types[source_index].as_ref().expect("checked file"),
+            source,
+            index: &index,
         },
-        None,
-        matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
-        &index,
+        CheckedBodyRoot {
+            owner: BodyOwnerId::from_raw(declaration.raw()),
+            span: file.expr_span(root).expect("function body span"),
+            expression: Some(root),
+            property_storage_type: None,
+            value_target: matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
+        },
+        CheckedBodySignature {
+            parameters: &parameters,
+            defaults: &[],
+            receiver_shape: CheckedBodyReceiverShape {
+                context_receivers: &signature.parameters[..context_count],
+                extension_receiver: super::driver::body_extension_receiver(
+                    &index,
+                    declaration,
+                    callable.shape.extension_receiver,
+                ),
+            },
+        },
         sources.origins_mut(),
         &mut session,
     )?;

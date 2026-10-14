@@ -40,7 +40,9 @@ pub(in crate::resolve) fn collect_stable_visibility_suppressions(
         {
             let annotation = AnnotationRef {
                 name: String::new(),
+                at: application.annotation.lo,
                 span: application.annotation,
+                property_site: None,
             };
             if !table
                 .resolved_annotation(stub.source.raw(), &annotation)

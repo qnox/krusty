@@ -28,7 +28,7 @@ pub(super) fn body_extension_receiver(
     }
 }
 
-fn function_at_anchor<'a>(file: &'a File, range: Span) -> Option<&'a FunDecl> {
+fn function_at_anchor(file: &File, range: Span) -> Option<&FunDecl> {
     file.decl_arena
         .iter()
         .find_map(|declaration| match declaration {
@@ -191,17 +191,19 @@ fn class_initialization_parameters<'a>(
 
 /// Check and route any body-unit shape currently representable by checked FIR. The match is
 /// exhaustive so adding a parser/header body kind cannot silently bypass FIR construction.
-#[allow(clippy::too_many_arguments)]
 pub fn check_and_dispatch_body(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let BodyCheckUnit {
+        file,
+        source,
+        index,
+        ..
+    } = unit;
     let mut cursor = crate::fir::ActiveSourceCursor::new(source, index);
     let active = cursor
         .bind_next(file, source, index)
@@ -212,12 +214,9 @@ pub fn check_and_dispatch_body(
     );
     let mut session = BodyCheckSession::default();
     check_and_dispatch_active_body_in_session(
-        file,
+        unit,
         &active,
-        info,
-        source,
         work,
-        index,
         origins,
         inline_bodies,
         ordinary_sink,
@@ -226,18 +225,20 @@ pub fn check_and_dispatch_body(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn check_and_dispatch_bound_body_in_session(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let BodyCheckUnit {
+        file,
+        source,
+        index,
+        ..
+    } = unit;
     let mut cursor = crate::fir::ActiveSourceCursor::new(source, index);
     let active = cursor
         .bind_next(file, source, index)
@@ -247,12 +248,9 @@ pub(super) fn check_and_dispatch_bound_body_in_session(
         "focused FIR body checking must bind the complete live parser arena"
     );
     check_and_dispatch_active_body_in_session(
-        file,
+        unit,
         &active,
-        info,
-        source,
         work,
-        index,
         origins,
         inline_bodies,
         ordinary_sink,
@@ -260,25 +258,18 @@ pub(super) fn check_and_dispatch_bound_body_in_session(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn check_and_dispatch_body_in_session(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
     check_and_dispatch_body_in_session_with_source(
-        file,
+        unit,
         None,
-        info,
-        source,
         work,
-        index,
         origins,
         inline_bodies,
         ordinary_sink,
@@ -288,14 +279,10 @@ pub fn check_and_dispatch_body_in_session(
 
 /// Pass-2 entry point. Syntax is obtained only from the fresh parser binding stream, never from a
 /// stable source range retained by Pass 1.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_and_dispatch_active_body_in_session(
-    file: &File,
+    unit: BodyCheckUnit<'_>,
     active: &ActiveSourceDeclarations,
-    info: &TypeInfo,
-    source: SourceFileId,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
@@ -303,12 +290,9 @@ pub(crate) fn check_and_dispatch_active_body_in_session(
 ) -> Result<(), CheckedBodyDriverFailure> {
     session.install_active_source(active);
     check_and_dispatch_body_in_session_with_source(
-        file,
+        unit,
         Some(active),
-        info,
-        source,
         work,
-        index,
         origins,
         inline_bodies,
         ordinary_sink,
@@ -316,19 +300,21 @@ pub(crate) fn check_and_dispatch_active_body_in_session(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_and_dispatch_body_in_session_with_source(
-    file: &File,
+    unit: BodyCheckUnit<'_>,
     active: Option<&ActiveSourceDeclarations>,
-    info: &TypeInfo,
-    source: SourceFileId,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let BodyCheckUnit {
+        file,
+        info,
+        source,
+        index,
+    } = unit;
     crate::trace_compiler!(
         "fir",
         "check body declaration={:?} kind={:?} name={:?} anchor={:?}",
@@ -339,12 +325,9 @@ fn check_and_dispatch_body_in_session_with_source(
     );
     let result = match work.kind {
         BodyKind::Function => check_and_dispatch_scheduled_function_body_in_session_with_source(
-            file,
+            unit,
             active,
-            info,
-            source,
             work,
-            index,
             origins,
             inline_bodies,
             ordinary_sink,
@@ -365,13 +348,10 @@ fn check_and_dispatch_body_in_session_with_source(
                     .ok_or(CheckedBodyDriverFailure::MissingBody)?;
                 let parameters = class_initialization_parameters(file, info, class, index, active)?;
                 let body = check_expression_body_with_parameters_in_session(
-                    file,
-                    info,
-                    source,
+                    unit,
                     work.owner,
                     root,
                     &parameters,
-                    index,
                     origins,
                     session,
                 )
@@ -380,11 +360,8 @@ fn check_and_dispatch_body_in_session_with_source(
                 Ok(())
             }
             Some(_) => check_and_dispatch_property_body(
-                file,
-                info,
-                source,
+                unit,
                 work,
-                index,
                 origins,
                 inline_bodies,
                 ordinary_sink,
@@ -395,11 +372,8 @@ fn check_and_dispatch_body_in_session_with_source(
         },
         BodyKind::Delegate | BodyKind::Getter | BodyKind::Setter => {
             check_and_dispatch_property_body(
-                file,
-                info,
-                source,
+                unit,
                 work,
-                index,
                 origins,
                 inline_bodies,
                 ordinary_sink,
@@ -412,13 +386,10 @@ fn check_and_dispatch_body_in_session_with_source(
                 .script_body
                 .ok_or(CheckedBodyDriverFailure::MissingBody)?;
             let body = check_expression_body_with_parameters_in_session(
-                file,
-                info,
-                source,
+                unit,
                 work.owner,
                 root,
                 &[],
-                index,
                 origins,
                 session,
             )
@@ -427,15 +398,17 @@ fn check_and_dispatch_body_in_session_with_source(
             Ok(())
         }
         BodyKind::EnumEntry => check_and_dispatch_enum_entry(
-            file,
-            info,
-            source,
+            EnumEntryBodySource {
+                file,
+                info,
+                source,
+                index,
+                active,
+            },
             work,
-            index,
             origins,
             ordinary_sink,
             session,
-            active,
         ),
         BodyKind::Constructor => check_and_dispatch_constructor_body(
             ConstructorBodySource {
@@ -488,18 +461,30 @@ fn enum_entry_for_work<'a>(
     Some((class_declaration, class, entry))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn check_and_dispatch_enum_entry(
-    file: &File,
-    info: &TypeInfo,
+/// The source an enum-entry constructor call is checked against: the transiently parsed file, its
+/// semantic tables, and the stable declarations it belongs to.
+struct EnumEntryBodySource<'a> {
+    file: &'a File,
+    info: &'a TypeInfo,
     source: SourceFileId,
+    index: &'a ResolvedModuleIndex,
+    active: Option<&'a ActiveSourceDeclarations>,
+}
+
+fn check_and_dispatch_enum_entry(
+    enum_source: EnumEntryBodySource<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
-    active: Option<&ActiveSourceDeclarations>,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let EnumEntryBodySource {
+        file,
+        info,
+        source,
+        index,
+        active,
+    } = enum_source;
     let anchor = index
         .declaration_anchor(work.declaration)
         .ok_or(CheckedBodyDriverFailure::MissingBody)?;
@@ -542,7 +527,16 @@ fn check_and_dispatch_enum_entry(
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
 
     let mut checker = BodyFirChecker::new(
-        file, info, source, work.owner, entry.span, index, origins, session,
+        BodyCheckUnit {
+            file,
+            info,
+            source,
+            index,
+        },
+        work.owner,
+        entry.span,
+        origins,
+        session,
     );
     let cause = checker.origins.source(source, entry.span);
     let arguments = checker
@@ -583,19 +577,21 @@ fn check_and_dispatch_enum_entry(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_and_dispatch_property_body(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
     active: Option<&ActiveSourceDeclarations>,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let BodyCheckUnit {
+        file,
+        info,
+        source,
+        index,
+    } = unit;
     let anchor = index
         .declaration_anchor(work.declaration)
         .ok_or(CheckedBodyDriverFailure::MissingBody)?;
@@ -702,52 +698,54 @@ fn check_and_dispatch_property_body(
                 .expect("checked explicit backing-field storage must be publishable")
         });
     let mut body = check_body_unit_with_parameters_and_defaults(
-        file,
-        info,
-        source,
-        work.owner,
-        file.expr_span(root)
-            .ok_or(CheckedBodyDriverFailure::MissingBody)?,
-        Some(root),
-        &parameters,
-        &[],
-        CheckedBodyReceiverShape {
-            context_receivers,
-            extension_receiver: body_extension_receiver(
-                index,
-                property_declaration,
-                property_header.extension_receiver,
-            ),
+        unit,
+        CheckedBodyRoot {
+            owner: work.owner,
+            span: file
+                .expr_span(root)
+                .ok_or(CheckedBodyDriverFailure::MissingBody)?,
+            expression: Some(root),
+            property_storage_type: (work.kind == BodyKind::Initializer)
+                .then_some(property_storage_type)
+                .flatten(),
+            value_target: match work.kind {
+                BodyKind::Initializer => Some(property_storage_type.unwrap_or(signature.result)),
+                BodyKind::Getter if matches!(property.getter, Some(FunBody::Expr(_))) => {
+                    Some(signature.result)
+                }
+                BodyKind::Setter
+                    if property
+                        .setter
+                        .as_ref()
+                        .and_then(|setter| setter.body.as_ref())
+                        .is_some_and(|body| matches!(body, FunBody::Expr(_))) =>
+                {
+                    Some(
+                        crate::fir::ResolvedTy::new(crate::types::Ty::Unit)
+                            .expect("Unit is a publishable FIR type"),
+                    )
+                }
+                BodyKind::Delegate
+                | BodyKind::Getter
+                | BodyKind::Setter
+                | BodyKind::Function
+                | BodyKind::EnumEntry
+                | BodyKind::Constructor
+                | BodyKind::Script => None,
+            },
         },
-        (work.kind == BodyKind::Initializer)
-            .then_some(property_storage_type)
-            .flatten(),
-        match work.kind {
-            BodyKind::Initializer => Some(property_storage_type.unwrap_or(signature.result)),
-            BodyKind::Getter if matches!(property.getter, Some(FunBody::Expr(_))) => {
-                Some(signature.result)
-            }
-            BodyKind::Setter
-                if property
-                    .setter
-                    .as_ref()
-                    .and_then(|setter| setter.body.as_ref())
-                    .is_some_and(|body| matches!(body, FunBody::Expr(_))) =>
-            {
-                Some(
-                    crate::fir::ResolvedTy::new(crate::types::Ty::Unit)
-                        .expect("Unit is a publishable FIR type"),
-                )
-            }
-            BodyKind::Delegate
-            | BodyKind::Getter
-            | BodyKind::Setter
-            | BodyKind::Function
-            | BodyKind::EnumEntry
-            | BodyKind::Constructor
-            | BodyKind::Script => None,
+        CheckedBodySignature {
+            parameters: &parameters,
+            defaults: &[],
+            receiver_shape: CheckedBodyReceiverShape {
+                context_receivers,
+                extension_receiver: body_extension_receiver(
+                    index,
+                    property_declaration,
+                    property_header.extension_receiver,
+                ),
+            },
         },
-        index,
         origins,
         session,
     )
@@ -807,24 +805,17 @@ fn check_and_dispatch_property_body(
 
 /// Same-parse adapter for checking one function selected by its stable declaration identity.
 /// Production Pass 2 uses `ActiveSourceDeclarations` instead of searching by this diagnostic span.
-#[allow(clippy::too_many_arguments)]
 pub fn check_and_dispatch_scheduled_function_body(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
 ) -> Result<(), CheckedBodyDriverFailure> {
     let mut session = BodyCheckSession::default();
     check_and_dispatch_scheduled_function_body_in_session(
-        file,
-        info,
-        source,
+        unit,
         work,
-        index,
         origins,
         inline_bodies,
         ordinary_sink,
@@ -832,25 +823,18 @@ pub fn check_and_dispatch_scheduled_function_body(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn check_and_dispatch_scheduled_function_body_in_session(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
     check_and_dispatch_scheduled_function_body_in_session_with_source(
-        file,
+        unit,
         None,
-        info,
-        source,
         work,
-        index,
         origins,
         inline_bodies,
         ordinary_sink,
@@ -858,19 +842,21 @@ pub fn check_and_dispatch_scheduled_function_body_in_session(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_and_dispatch_scheduled_function_body_in_session_with_source(
-    file: &File,
+    unit: BodyCheckUnit<'_>,
     active: Option<&ActiveSourceDeclarations>,
-    info: &TypeInfo,
-    source: SourceFileId,
     work: BodyWorkItem,
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     inline_bodies: &mut InlineBodyStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let BodyCheckUnit {
+        file,
+        source,
+        index,
+        ..
+    } = unit;
     let anchor = index
         .declaration_anchor(work.declaration)
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
@@ -968,25 +954,26 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
         CheckedBodyDriverFailure::ParameterShapeMismatch
     })?;
     let mut body = check_body_unit_with_parameters_and_defaults(
-        file,
-        info,
-        source,
-        work.owner,
-        function.span,
-        root,
-        &parameters,
-        &[],
-        CheckedBodyReceiverShape {
-            context_receivers,
-            extension_receiver: body_extension_receiver(
-                index,
-                work.declaration,
-                callable.shape.extension_receiver,
-            ),
+        unit,
+        CheckedBodyRoot {
+            owner: work.owner,
+            span: function.span,
+            expression: root,
+            property_storage_type: None,
+            value_target: matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
         },
-        None,
-        matches!(function.body, FunBody::Expr(_)).then_some(signature.result),
-        index,
+        CheckedBodySignature {
+            parameters: &parameters,
+            defaults: &[],
+            receiver_shape: CheckedBodyReceiverShape {
+                context_receivers,
+                extension_receiver: body_extension_receiver(
+                    index,
+                    work.declaration,
+                    callable.shape.extension_receiver,
+                ),
+            },
+        },
         origins,
         session,
     )
@@ -1003,18 +990,20 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
 /// Check signature-owned default expressions while the provider's Pass-1 syntax is live. The
 /// provider supplies lexical ownership; signature, receiver shape, parameters, and emitted ABI all
 /// come from the surviving target. The resulting checked fragment is stored before syntax dies.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_and_dispatch_signature_defaults_in_session(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     work: DefaultArgumentProvider,
-    index: &ResolvedModuleIndex,
     active: &ActiveSourceDeclarations,
     origins: &mut OriginStore,
     ordinary_sink: &mut impl CheckedBodySink,
     session: &mut BodyCheckSession,
 ) -> Result<(), CheckedBodyDriverFailure> {
+    let BodyCheckUnit {
+        file,
+        source,
+        index,
+        ..
+    } = unit;
     // Signature defaults are checked before Pass 2's body dispatch, which is what otherwise
     // installs this binding. Without it, a default lambda inside an expect class drops the naming
     // walk's owner and the inline-depth marker has nothing to be spelled from.
@@ -1024,11 +1013,8 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
         .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
     if provider.kind == DeclarationKind::Constructor {
         return check_and_dispatch_signature_constructor_defaults(
-            file,
-            info,
-            source,
+            unit,
             work,
-            index,
             active,
             origins,
             ordinary_sink,
@@ -1093,25 +1079,26 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
         .ok_or(CheckedBodyDriverFailure::ParameterShapeMismatch)?;
     let owner = BodyOwnerId::from_raw(work.target.raw());
     let mut body = check_body_unit_with_parameters_and_defaults(
-        file,
-        info,
-        source,
-        owner,
-        function.span,
-        None,
-        &parameters,
-        &defaults,
-        CheckedBodyReceiverShape {
-            context_receivers,
-            extension_receiver: body_extension_receiver(
-                index,
-                work.target,
-                callable.shape.extension_receiver,
-            ),
+        unit,
+        CheckedBodyRoot {
+            owner,
+            span: function.span,
+            expression: None,
+            property_storage_type: None,
+            value_target: None,
         },
-        None,
-        None,
-        index,
+        CheckedBodySignature {
+            parameters: &parameters,
+            defaults: &defaults,
+            receiver_shape: CheckedBodyReceiverShape {
+                context_receivers,
+                extension_receiver: body_extension_receiver(
+                    index,
+                    work.target,
+                    callable.shape.extension_receiver,
+                ),
+            },
+        },
         origins,
         session,
     )

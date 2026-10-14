@@ -13,6 +13,87 @@ pub(super) struct AccessorOwner<'a> {
     pub(super) run: &'a EmitRun,
 }
 
+pub(in crate::jvm) struct EmittedAccessorSignature {
+    pub(in crate::jvm) name: String,
+    pub(in crate::jvm) descriptor: String,
+}
+
+/// The exact default accessor the property declaration claims for `property` on `side`.
+///
+/// A source-written accessor already occupies its method slot and is represented by its IR
+/// function instead. The declaration still claims this physical slot when another generated
+/// method already occupies it: declaration-clash validation must diagnose that collision before
+/// emission suppresses a duplicate classfile method.
+pub(in crate::jvm) fn declared_signature(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    property: &crate::ir::IrProperty,
+    side: PropertyAccessorSide,
+    override_results: &crate::jvm::override_results::OverrideResults,
+) -> Option<EmittedAccessorSignature> {
+    if property.is_private || is_jvm_field(class, &property.name) {
+        return None;
+    }
+    let field = class.fields.get(property.backing_field? as usize)?;
+    let accessor_jt = declared_property_accessor_jvm(ir, property, field);
+    let (name, descriptor) = match side {
+        PropertyAccessorSide::Getter => {
+            let property_index = class
+                .properties
+                .iter()
+                .position(|declared| std::ptr::eq(declared, property))?;
+            let getter_jt = if override_results.boxes_member_property(
+                class.fq_name,
+                u32::try_from(property_index).expect("too many class properties"),
+            ) {
+                jvm_declared_ty(&Ty::nullable(property.ty))
+            } else {
+                accessor_jt
+            };
+            (
+                property
+                    .getter_jvm_name
+                    .clone()
+                    .unwrap_or_else(|| crate::names::property_getter_name(&property.name)),
+                format!("(){}", type_descriptor(getter_jt)),
+            )
+        }
+        PropertyAccessorSide::Setter if property.is_var => (
+            property
+                .setter_jvm_name
+                .clone()
+                .unwrap_or_else(|| crate::names::property_setter_name(&property.name)),
+            format!("({})V", type_descriptor(accessor_jt)),
+        ),
+        PropertyAccessorSide::Setter => return None,
+    };
+    Some(EmittedAccessorSignature { name, descriptor })
+}
+
+/// The default accessor the class writer can emit without duplicating an existing method slot.
+fn emitted_signature(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    property: &crate::ir::IrProperty,
+    side: PropertyAccessorSide,
+    override_results: &crate::jvm::override_results::OverrideResults,
+) -> Option<EmittedAccessorSignature> {
+    let written_accessor = match side {
+        PropertyAccessorSide::Getter => property.getter,
+        PropertyAccessorSide::Setter => property.setter,
+    };
+    if written_accessor.is_some() {
+        return None;
+    }
+    let signature = declared_signature(ir, class, property, side, override_results)?;
+    let occupied = class.methods.iter().any(|&fid| {
+        let function = &ir.functions[fid as usize];
+        function.name == signature.name
+            && function_descriptor(ir, override_results, fid) == signature.descriptor
+    });
+    (!occupied).then_some(signature)
+}
+
 /// The nullability annotation an accessor's header carries for the reference type `jt`. A field
 /// typed by a class type parameter answers from the field's own classification, the one the
 /// class-wide accessor pass attaches: `T?` is `@Nullable`, a non-null-bounded `T` is `@NotNull`,
@@ -54,15 +135,12 @@ pub(super) fn emit(
         override_results,
         run,
     } = *owner;
-    // `@JvmField` IS the declaration's realization: the field is the property's public face and
-    // kotlinc emits no accessor beside it. Synthesizing one here would advertise a method the
-    // metadata (correctly) never records.
-    if property.is_private || is_jvm_field(c, &property.name) {
-        return;
-    }
-    let Some(field_index) = property.backing_field else {
+    let Some(planned) = emitted_signature(ir, c, property, side, override_results) else {
         return;
     };
+    let field_index = property
+        .backing_field
+        .expect("a planned declared property accessor has backing storage");
     let Some(field) = c.fields.get(field_index as usize) else {
         return;
     };
@@ -79,7 +157,6 @@ pub(super) fn emit(
     let field_jt = jvm_value_ty(&field.ty);
     let field_desc = type_descriptor(field_jt);
     let accessor_jt = declared_property_accessor_jvm(ir, property, field);
-    let accessor_desc = type_descriptor(accessor_jt);
     // A scalar getter result over a reference-returning overridden getter is the wrapper; the
     // setter keeps taking the scalar (see `jvm::override_results`).
     let boxed_getter = c
@@ -97,26 +174,17 @@ pub(super) fn emit(
     // `public final getName()`); Kotlin rejects overriding a non-open property, so the flag is
     // safe. Interface accessors stay non-final (their default bodies dispatch virtually).
     let overridable = property.is_open || c.is_interface;
-    let getter = property
-        .getter_jvm_name
-        .clone()
-        .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
-    let occupied = |name: &str, descriptor: &str| {
-        c.methods.iter().any(|&fid| {
-            let function = &ir.functions[fid as usize];
-            function.name == name && ir_method_desc(&function.params, &function.ret) == descriptor
-        })
-    };
-    let getter_desc = format!("(){}", type_descriptor(getter_jt));
-    if matches!(side, PropertyAccessorSide::Getter) && !occupied(&getter, &getter_desc) {
+    if matches!(side, PropertyAccessorSide::Getter) {
+        let getter = &planned.name;
+        let getter_desc = &planned.descriptor;
         // Visit the method header before constructing its code. This is especially observable for a
         // setter guard (`<set-?>`) and for a generic accessor Signature.
         let sig = &signatures.getter;
         let getter_ann = accessor_nullability(ir, fq_name, property, field, getter_jt);
         let annotations = &property.accessor_annotations.getter;
         cw.reserve_method_pool_with_annotations(
-            &getter,
-            &getter_desc,
+            getter,
+            getter_desc,
             sig.as_deref(),
             &getter_ann.into_iter().collect::<Vec<_>>(),
             annotations,
@@ -157,28 +225,25 @@ pub(super) fn emit(
         g.ensure_locals(1);
         g.link();
         let access = default_accessor_access(property.visibility, overridable);
-        cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
-        super::function_annotations::emit_declared(cw, annotations, &getter, &getter_desc);
+        cw.add_method_sig(access, getter, getter_desc, &g, sig.as_deref());
+        super::function_annotations::emit_declared(cw, annotations, getter, getter_desc);
         // The class-wide pass annotates accessors by their backing field's type, which a boxed
         // getter result does not have.
         if boxed_getter {
-            cw.set_method_nullability(&getter, &getter_desc, getter_ann, &[]);
+            cw.set_method_nullability(getter, getter_desc, getter_ann, &[]);
         }
         seed_accessor_locals(c, fq_name, cw);
     }
     if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
-        let setter = property
-            .setter_jvm_name
-            .clone()
-            .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
-        let setter_desc = format!("({accessor_desc})V");
-        if !occupied(&setter, &setter_desc) {
+        let setter = &planned.name;
+        let setter_desc = &planned.descriptor;
+        {
             let sig = &signatures.setter;
             let setter_ann = accessor_nullability(ir, fq_name, property, field, accessor_jt);
             let annotations = &property.accessor_annotations.setter;
             cw.reserve_method_pool_with_annotations(
-                &setter,
-                &setter_desc,
+                setter,
+                setter_desc,
                 sig.as_deref(),
                 &setter_ann.into_iter().collect::<Vec<_>>(),
                 annotations,
@@ -224,8 +289,8 @@ pub(super) fn emit(
             st.ensure_locals(1 + words);
             st.link();
             let access = default_accessor_access(property.setter_visibility, overridable);
-            cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
-            super::function_annotations::emit_declared(cw, annotations, &setter, &setter_desc);
+            cw.add_method_sig(access, setter, setter_desc, &st, sig.as_deref());
+            super::function_annotations::emit_declared(cw, annotations, setter, setter_desc);
             seed_accessor_locals(c, fq_name, cw);
         }
     }

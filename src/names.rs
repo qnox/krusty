@@ -1,8 +1,32 @@
 //! Kotlin source/metadata naming helpers shared across compiler phases.
 
+use unicode_general_category::{get_general_category, GeneralCategory};
+
 /// Kotlin's conventional name for an unnamed companion object, used for both the nested classifier
 /// segment (`Outer$Companion`) and the singleton field (`Outer.Companion`).
 pub(crate) const COMPANION_OBJECT_NAME: &str = "Companion";
+
+/// Whether `character` may start an ordinary (non-backticked) Kotlin identifier.
+///
+/// This common name boundary is shared by tokenization and diagnostic source rendering, so both
+/// use Kotlin's exact Unicode-category contract rather than Rust's broader alphabetic predicate.
+pub(crate) fn is_identifier_start(character: char) -> bool {
+    character == '_'
+        || matches!(
+            get_general_category(character),
+            GeneralCategory::UppercaseLetter
+                | GeneralCategory::LowercaseLetter
+                | GeneralCategory::TitlecaseLetter
+                | GeneralCategory::ModifierLetter
+                | GeneralCategory::OtherLetter
+        )
+}
+
+/// Whether `character` may continue an ordinary (non-backticked) Kotlin identifier.
+pub(crate) fn is_identifier_continue(character: char) -> bool {
+    is_identifier_start(character)
+        || get_general_category(character) == GeneralCategory::DecimalNumber
+}
 
 /// Getter name for a Kotlin property: `x` -> `getX`; `isOpen` keeps `isOpen`.
 pub fn property_getter_name(prop: &str) -> String {
@@ -45,5 +69,14 @@ mod tests {
         assert_eq!(property_getter_name("island"), "getIsland");
         assert_eq!(property_setter_name("island"), "setIsland");
         assert_eq!(property_getter_name("äpfel"), "getÄpfel");
+    }
+
+    #[test]
+    fn identifier_categories_match_kotlin() {
+        assert!(is_identifier_start('π'));
+        assert!(!is_identifier_start('٢'));
+        assert!(is_identifier_continue('٢'));
+        assert!(!is_identifier_start('Ⅻ'));
+        assert!(!is_identifier_continue('²'));
     }
 }
