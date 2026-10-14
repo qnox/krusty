@@ -13,6 +13,149 @@ use crate::types::{Ty, TypeName};
 
 use super::{definitely_non_null_ty, inaccessible_classifier_message, Checker, CheckerScope};
 
+/// The type arguments one use applies an alias to.
+#[derive(Clone, Copy)]
+pub(super) enum AliasArguments<'r> {
+    /// The arguments written at the use, which must match the alias's arity.
+    Written(&'r [TypeRef]),
+    /// A class literal's left-hand side written without arguments: kotlinc applies the alias to a
+    /// star projection of each of its parameters (`Arr::class` is `KClass<Arr<*>>`).
+    StarProjected,
+}
+
+impl<'r> AliasArguments<'r> {
+    pub(super) fn of(reference: &'r TypeRef) -> Self {
+        if reference.is_class_literal_lhs() && reference.targs.is_empty() {
+            Self::StarProjected
+        } else {
+            Self::Written(&reference.targs)
+        }
+    }
+}
+
+/// Apply a generated star for every omitted alias parameter, then give every retained classifier
+/// argument the readable bound owned by that expanded classifier. Alias parameters themselves
+/// cannot declare bounds, but `typealias Alias<T> = Box<T>` must still produce `Box<*>` whose star
+/// reads as `Box`'s declared `T` bound.
+pub(super) fn star_projected_alias_type(
+    formals: &[String],
+    expansion: Ty,
+    classifier: &mut dyn FnMut(TypeName) -> Option<std::sync::Arc<crate::libraries::LibraryType>>,
+) -> Ty {
+    let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+    let bindings = formals
+        .iter()
+        .map(|formal| (formal.clone(), star))
+        .collect::<crate::symbol_resolver::GSigBinds>();
+    let applied = crate::types::ty_subst_alias_expansion(expansion, &bindings);
+    alias_target_star_bounds(applied, classifier)
+}
+
+fn alias_target_star_bounds(
+    ty: Ty,
+    classifier: &mut dyn FnMut(TypeName) -> Option<std::sync::Arc<crate::libraries::LibraryType>>,
+) -> Ty {
+    match ty {
+        Ty::Nullable(inner) => Ty::nullable(alias_target_star_bounds(*inner, classifier)),
+        Ty::PlatformNullable(inner) => {
+            Ty::platform_nullable(alias_target_star_bounds(*inner, classifier))
+        }
+        Ty::DefinitelyNotNull(inner) => Ty::DefinitelyNotNull(crate::types::intern_ty(
+            alias_target_star_bounds(*inner, classifier),
+        )),
+        Ty::InProjection(inner) => Ty::in_projection(alias_target_star_bounds(*inner, classifier)),
+        Ty::OutProjection(inner) => {
+            Ty::out_projection(alias_target_star_bounds(*inner, classifier))
+        }
+        // A retained star already carries the bound of its owning classifier. Only a star in the
+        // argument list below has that owner available; descending through the stored bound can
+        // also revisit a recursive F-bound indefinitely.
+        Ty::StarProjection(_) => ty,
+        Ty::Obj(owner, arguments) if !arguments.is_empty() => {
+            let parsed = arguments
+                .iter()
+                .map(|argument| {
+                    if generated_star_argument(*argument) {
+                        None
+                    } else {
+                        Some(alias_target_star_bounds(*argument, classifier))
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut resolved = parsed
+                .iter()
+                .zip(arguments)
+                .map(|(parsed, original)| parsed.unwrap_or(*original))
+                .collect::<Vec<_>>();
+            if parsed.iter().any(Option::is_none) {
+                let declaration = classifier(owner)
+                    .expect("resolved typealias expansion target has no classifier declaration");
+                let bindings = super::projected_classifier_argument_bindings(
+                    declaration.type_params(),
+                    &parsed,
+                );
+                let default_bound = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+                for (index, argument) in parsed.iter().enumerate() {
+                    if argument.is_some() {
+                        continue;
+                    }
+                    let upper_bound = declaration
+                        .type_param_bounds()
+                        .get(index)
+                        .and_then(|bounds| bounds.first())
+                        .copied()
+                        .map(|bound| {
+                            crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
+                        })
+                        .unwrap_or(default_bound);
+                    resolved[index] = Ty::star_projection(upper_bound);
+                }
+            }
+            Ty::obj_args_name(owner, &resolved)
+        }
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| alias_target_star_bounds(*parameter, classifier))
+                .collect::<Vec<_>>(),
+            alias_target_star_bounds(signature.ret, classifier),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| alias_target_star_bounds(*part, classifier))
+                .collect::<Vec<_>>(),
+        ),
+        // Alias formals have already been substituted. Any remaining variable belongs to an
+        // enclosing declaration and keeps its declaration-owned bound; following an F-bound here
+        // would revisit the same variable.
+        Ty::TyParam(_, _) => ty,
+        other => other,
+    }
+}
+
+/// Whether an expanded classifier argument is one of this alias application's generated stars.
+/// Substituting a star for a formal used as `T?`, `in T`, or `out T` wraps the projection in the
+/// occurrence's modifier, but Kotlin still projects the owning classifier argument as `*`; the
+/// owner supplies its bound below. Source syntax cannot write one of these wrappers around a star
+/// in an alias application with omitted arguments, so it arises from the generated alias-formal
+/// binding rather than from an independently written target argument.
+fn generated_star_argument(ty: Ty) -> bool {
+    match ty {
+        Ty::StarProjection(_) => true,
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::DefinitelyNotNull(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner) => generated_star_argument(*inner),
+        _ => false,
+    }
+}
+
 /// One alias template applied to the arguments of a single use.
 pub(super) struct AppliedAlias {
     pub(super) ty: Ty,
@@ -45,7 +188,7 @@ impl Checker<'_> {
                 alias.formals,
                 alias.expansion,
                 &reference.name,
-                &reference.targs,
+                AliasArguments::of(reference),
                 reference.span,
             ));
         }
@@ -55,7 +198,7 @@ impl Checker<'_> {
                 alias.formals,
                 alias.expansion,
                 &reference.name,
-                &reference.targs,
+                AliasArguments::of(reference),
                 reference.span,
             ));
         }
@@ -64,7 +207,7 @@ impl Checker<'_> {
             scope,
             identity,
             &reference.name,
-            &reference.targs,
+            AliasArguments::of(reference),
             reference.span,
         ))
     }
@@ -76,7 +219,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         identity: TypeName,
         display_name: &str,
-        arguments: &[TypeRef],
+        arguments: AliasArguments<'_>,
         span: Span,
     ) -> AppliedAlias {
         let Some((formals, expansion)) = self.source_alias_expansion(identity) else {
@@ -94,9 +237,21 @@ impl Checker<'_> {
         formals: Vec<String>,
         expansion: Ty,
         display_name: &str,
-        arguments: &[TypeRef],
+        arguments: AliasArguments<'_>,
         span: Span,
     ) -> AppliedAlias {
+        let arguments = match arguments {
+            AliasArguments::Written(arguments) => arguments,
+            AliasArguments::StarProjected => {
+                // A star projection composes with no declaration-site variance to a conflict.
+                return AppliedAlias {
+                    ty: star_projected_alias_type(&formals, expansion, &mut |owner| {
+                        crate::symbol_source::SymbolSource::classifier(&self.fed_source(), owner)
+                    }),
+                    conflicts: Vec::new(),
+                };
+            }
+        };
         if formals.len() != arguments.len() {
             self.diags.error(
                 span,

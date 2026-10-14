@@ -5291,6 +5291,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays on the reified channel. Tests: `class_literal_e2e::array_class_literals`,
   `class_literal_e2e::array_class_literals_report_no_diagnostic`.
 
+- **A bare class literal of a generic typealias applies the alias to star projections.** With no
+  written type arguments, `Alias::class` applies the alias to `*` for each of its own parameters and
+  expands that, so the arity check does not apply. For `typealias Arr<T> = Array<T>`, `Arr::class`
+  is `KClass<Arr<*>>`, which is `KClass<Array<*>>`. `IntMap::class` for
+  `typealias IntMap<A> = Map<A, Int>` is `KClass<Map<*, Int>>`, not the target's `Map<*, *>`.
+  Each generated star takes its readable upper bound from the expanded target classifier, not from
+  the unbounded alias parameter: for `class Box<T : Node>; typealias Alias<T> = Box<T>`, the star in
+  `Alias::class` reads as `Node` during inference. Occurrence nullability on an alias formal does
+  not wrap that projection: `typealias Alias<T> = List<T?>; Alias::class` expands to `List<*>`, not
+  a nullable star payload. Nullability on the expansion itself is different: `typealias Maybe<T> =
+  List<T>?; Maybe::class` is rejected because the expanded left-hand side does not denote a class.
+  A qualified spelling retains the same selected alias declaration and application:
+  `demo.Alias::class` is not reinterpreted as the raw expanded classifier.
+  Occurrence variance does not wrap a generated star: `typealias In<T> = Box<in T>; In::class`
+  and the corresponding `out T` form both expand to `KClass<Box<*>>`.
+  Library aliases follow the same rule: `ArrayList::class` is `KClass<ArrayList<*>>`. The
+  class-literal left-hand side carries `TrFlags::CLASS_LITERAL_LHS`, and
+  `alias_projection::AliasArguments::StarProjected` is the one rule for checking and signature
+  solving. Tests: `class_literal_alias_star_projection_e2e`.
+
 - **Signature inference binds a callee type parameter from a lambda argument's RESULT.** When a type
   parameter occurs only in the lambda's return position (`lazy { 1 }`, `make { 1 }`,
   `listOf("x").map { it.length }`), the light signature pass infers the lambda body under the

@@ -36,6 +36,10 @@ impl TrFlags {
     // diagnostic authority, under its declaration's lexical policy; the mark keeps the file-scope
     // fallback from rechecking it outside that policy, as for annotations.
     const SUPERCLASS: u16 = 1 << 10;
+    // The left-hand side of a class literal. A generic typealias written there without type
+    // arguments is applied to star projections of its own parameters (`Arr::class` is
+    // `KClass<Arr<*>>`) instead of failing the ordinary arity check.
+    const CLASS_LITERAL_LHS: u16 = 1 << 11;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -95,6 +99,10 @@ impl TrFlags {
     pub const fn with_superclass(self, on: bool) -> Self {
         self.with(Self::SUPERCLASS, on)
     }
+    #[inline]
+    pub const fn with_class_literal_lhs(self, on: bool) -> Self {
+        self.with(Self::CLASS_LITERAL_LHS, on)
+    }
 }
 
 impl TypeRef {
@@ -110,6 +118,10 @@ impl TypeRef {
         }
     }
 
+    #[inline]
+    pub(crate) fn is_class_literal_lhs(&self) -> bool {
+        self.flags.has(TrFlags::CLASS_LITERAL_LHS)
+    }
     #[inline]
     pub fn nullable(&self) -> bool {
         self.flags.has(TrFlags::NULLABLE)

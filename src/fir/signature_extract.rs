@@ -1139,7 +1139,7 @@ impl SignatureConstraintExtractor {
         Some((
             TypeRef {
                 name: names.join("."),
-                flags: TrFlags::default(),
+                flags: TrFlags::default().with_class_literal_lhs(true),
                 arg: None,
                 // A nested classifier's semantic application is ordered as its own arguments,
                 // then captured arguments from the nearest enclosing classifier outward. The

@@ -628,7 +628,8 @@ impl HeaderSyntaxArena {
             .with_in_projection(ty.flags.in_projection())
             .with_out_projection(ty.flags.out_projection())
             .with_import(ty.flags.is_import())
-            .with_star_projection(ty.flags.star_projection());
+            .with_star_projection(ty.flags.star_projection())
+            .with_class_literal_lhs(ty.flags.class_literal_lhs());
         let (name, arg, targs, fun_params, fun_context_count) = match ty.kind {
             HeaderTypeKind::Classifier {
                 detail,
