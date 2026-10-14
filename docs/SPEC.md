@@ -16667,6 +16667,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   solution is always an application in the value's own hierarchy, and where that does not make the
   arguments fit, the call still fails. Explicit type arguments are never touched — a wrong one stays
   an error. Tests: `tests/bound_relation_type_variable_e2e.rs`.
+- **An unsolved formal's stand-in approximates its recursive bound.** Before a member extension's
+  lambda arguments are analyzed, each formal no argument has reached stands for its declared bound.
+  A recursive bound (`R : Comparable<R>`) names the formal itself; that occurrence becomes a star
+  projection (`Comparable<*>`), as kotlinc approximates a variable's self-referential bound, so the
+  stand-in never contains the formal it replaces. Binding `R` to `Comparable<R>` made every later
+  substitution grow the type by a level and never finish. Tests:
+  `tests/member_extension_recursive_bound_e2e.rs`.
 - **A NULLABLE PRIMITIVE parameter is its BOX in the descriptor and its own name in `@Metadata`.**
   `Int?` compiles to `Ljava/lang/Integer;` while `@Metadata` keeps `kotlin/Int`, so metadata alignment
   has to relate the two. Comparing them through the classifier ERASURE GROUPS does not: those relate
