@@ -94,16 +94,21 @@ fn operations_kotlinc_cannot_evaluate_stay_operations() {
 /// A safe call's selector reads the receiver's temporary, not the receiver expression, so a
 /// constant receiver does not make `String.get`/`String.length` intrinsic-const: kotlinc keeps the
 /// `charAt`/`length` calls (`primitiveTypes/kt4098.kt`), while the receiver itself, and the same
-/// operations without the safe call, still fold.
+/// operations without the safe call, still fold. The temporary also hides the receiver's shape:
+/// `Direction.LEFT?.name` calls `name()` although `Direction.LEFT.name` folds to `"LEFT"`.
+/// `ordinal` never folds, through a safe call or not.
 #[test]
 fn a_safe_call_over_a_constant_receiver_stays_a_call() {
     const SOURCE: &str = "package store\n\
+         enum class Direction { LEFT, RIGHT }\n\
          fun sink(value: Any?) {}\n\
          fun discarded() {\n\
          \x20   \"123456\"?.get(0)!!.toInt()\n\
          \x20   \"123456\"?.get(0)\n\
          \x20   \"123456\"?.length\n\
          \x20   (\"12\" + \"34\")?.length\n\
+         \x20   Direction.LEFT?.name\n\
+         \x20   Direction.LEFT?.ordinal\n\
          }\n\
          fun used() {\n\
          \x20   sink(\"123456\"?.get(0))\n\
@@ -112,6 +117,10 @@ fn a_safe_call_over_a_constant_receiver_stays_a_call() {
          \x20   sink(\"123456\".length)\n\
          \x20   sink(\"123456\"[0])\n\
          \x20   sink((\"12\" + \"34\")?.length)\n\
+         \x20   sink(Direction.LEFT?.name)\n\
+         \x20   sink(Direction.LEFT.name)\n\
+         \x20   sink(Direction.LEFT?.ordinal)\n\
+         \x20   sink(Direction.LEFT.ordinal)\n\
          }\n";
     common::byte_diff_against_kotlinc_cp(
         "SafeCallConstantReceiver",

@@ -12532,8 +12532,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `"123456"?.length` calls `length()`, even discarded (`"123456"?.get(0)!!.toInt()` keeps its
   `charAt; pop`), while `"123456"[0]` and `"123456".length` still fold. The receiver itself is
   folded as the temporary's initializer (`("12" + "34")?.length` reads the length of `"1234"`).
-  Common lowering binds the receiver expression to that temporary in the evaluation memo once the
-  receiver is lowered. (`constant_evaluation_e2e::a_safe_call_over_a_constant_receiver_stays_a_call`.
+  The temporary hides the receiver's shape as well as its value: `Direction.LEFT?.name` calls
+  `name()` on the temporary although `Direction.LEFT.name` folds to `ldc "LEFT"` (`ordinal` folds
+  in neither form). Common lowering binds the receiver expression to that temporary once the
+  receiver is lowered; every fold that inspects an operand's node rather than its value reads it
+  through the same binding. (`constant_evaluation_e2e::a_safe_call_over_a_constant_receiver_stays_a_call`.
   Corpus: `primitiveTypes/kt4098.kt`.)
 - **Delegated property references (kotlinc's `PropertyReferenceLowering`).** The `KProperty` a
   class's, object's or file facade's delegated-property operators receive live in one
