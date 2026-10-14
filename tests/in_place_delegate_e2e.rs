@@ -328,7 +328,8 @@ fn package_delegate_method_clashes_with_a_default_property_accessor() {
 
 #[test]
 fn package_delegate_method_clashes_with_a_companion_extension_default_accessor() {
-    const SOURCE: &str = "package store\n\
+    const SOURCE: &str = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        package store\n\
         \n\
         import kotlin.reflect.KProperty\n\
         \n\
@@ -336,9 +337,10 @@ fn package_delegate_method_clashes_with_a_companion_extension_default_accessor()
         companion val Host.`x$delegate`: Any? = null\n\
         operator fun Unit.getValue(thisRef: Any?, property: KProperty<*>): Int = 1\n\
         val x: Int by Unit\n";
-    let result = common::compiler_diagnostics(
+    let result = common::compiler_diagnostics_with_reference_args(
         &[("PackageDelegateCompanionPropertyAccessorClash.kt", SOURCE)],
         &[common::stdlib_jar()],
+        &["-XXLanguage:+CompanionBlocksAndExtensions".to_string()],
     );
     common::expect_identical_rejection(
         &result,
