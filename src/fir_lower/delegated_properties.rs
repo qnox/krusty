@@ -28,7 +28,7 @@ use crate::types::{Ty, TypeName};
 use super::generics::{attach_accessor_type_parameters, declaration_type_parameters};
 use super::properties::{
     add_accessor_function, record_accessor_visibilities, set_accessor_parameter_identities,
-    setter_visibility, stamp_generated_property_nodes, AccessorResult,
+    setter_visibility, stamp_generated_property_nodes, AccessorFunctionInput, AccessorResult,
 };
 use super::FirFileLoweringFailure;
 
@@ -138,13 +138,13 @@ pub(super) fn materialize_top_level_delegate(
     at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
-        crate::names::property_getter_name(&property.name),
-        extension_receiver.into_iter().collect(),
-        property.ty,
-        read,
-        AccessorResult::Delegated(plan.get_value.result.get()),
-        true,
-        None,
+        AccessorFunctionInput::getter(
+            crate::names::property_getter_name(&property.name),
+            extension_receiver.into_iter().collect(),
+            property.ty,
+            read,
+            AccessorResult::Delegated(plan.get_value.result.get()),
+        ),
     );
     let setter = plan
         .set_value
@@ -176,16 +176,14 @@ pub(super) fn materialize_top_level_delegate(
             )?;
             Ok(add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                extension_receiver
-                    .into_iter()
-                    .chain(std::iter::once(property.ty))
-                    .collect(),
-                Ty::Unit,
-                write,
-                AccessorResult::AsDeclared,
-                false,
-                None,
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    extension_receiver
+                        .into_iter()
+                        .chain(std::iter::once(property.ty))
+                        .collect(),
+                    write,
+                ),
             ))
         })
         .transpose()?;
@@ -204,6 +202,10 @@ pub(super) fn materialize_top_level_delegate(
     ir.fn_source_order.insert(getter, source_order);
     if let Some(setter) = setter {
         ir.fn_source_order.insert(setter, source_order);
+    }
+    let type_params = declaration_type_parameters(index, property.declaration);
+    for function in std::iter::once(getter).chain(setter) {
+        attach_accessor_type_parameters(ir, function, &type_params);
     }
     realizations.insert(
         property_id,
@@ -335,13 +337,14 @@ pub(super) fn materialize_member_delegate(
     at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
-        crate::names::property_getter_name(&property.name),
-        Vec::new(),
-        property.ty,
-        read,
-        AccessorResult::Delegated(plan.get_value.result.get()),
-        true,
-        Some(owner_type),
+        AccessorFunctionInput::getter(
+            crate::names::property_getter_name(&property.name),
+            Vec::new(),
+            property.ty,
+            read,
+            AccessorResult::Delegated(plan.get_value.result.get()),
+        )
+        .with_dispatch_receiver(owner_type),
     );
     let setter = plan
         .set_value
@@ -374,13 +377,12 @@ pub(super) fn materialize_member_delegate(
             )?;
             Ok(add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                vec![property.ty],
-                Ty::Unit,
-                write,
-                AccessorResult::AsDeclared,
-                false,
-                Some(owner_type),
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    vec![property.ty],
+                    write,
+                )
+                .with_dispatch_receiver(owner_type),
             ))
         })
         .transpose()?;
@@ -587,13 +589,14 @@ pub(super) fn materialize_member_extension_delegate(
     at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
         ir,
-        crate::names::property_getter_name(&property.name),
-        vec![extension_receiver],
-        property.ty,
-        read,
-        AccessorResult::Delegated(plan.get_value.result.get()),
-        true,
-        Some(owner),
+        AccessorFunctionInput::getter(
+            crate::names::property_getter_name(&property.name),
+            vec![extension_receiver],
+            property.ty,
+            read,
+            AccessorResult::Delegated(plan.get_value.result.get()),
+        )
+        .with_dispatch_receiver(owner),
     );
     let setter = plan
         .set_value
@@ -626,13 +629,12 @@ pub(super) fn materialize_member_extension_delegate(
             )?;
             Ok(add_accessor_function(
                 ir,
-                crate::names::property_setter_name(&property.name),
-                vec![extension_receiver, property.ty],
-                Ty::Unit,
-                write,
-                AccessorResult::AsDeclared,
-                false,
-                Some(owner),
+                AccessorFunctionInput::setter(
+                    crate::names::property_setter_name(&property.name),
+                    vec![extension_receiver, property.ty],
+                    write,
+                )
+                .with_dispatch_receiver(owner),
             ))
         })
         .transpose()?;
@@ -657,8 +659,13 @@ pub(super) fn materialize_member_extension_delegate(
             ir.open_methods.insert(function);
         }
         ir.classes[class_id as usize].methods.push(function);
+        // An extension receiver may name a type parameter of the declaring class rather than one
+        // owned by the property. Preserve those semantic positions independently of the property's
+        // own generic declaration so JVM Signature emission can write `(TA;)...` after erasure.
+        let signature = &ir.functions[function as usize];
+        ir.member_semantic_sigs
+            .insert(function, (signature.params.clone(), signature.ret));
         if !type_params.is_empty() {
-            let signature = &ir.functions[function as usize];
             ir.signatures.insert(
                 function,
                 crate::ir::IrGenericSig {
@@ -689,6 +696,11 @@ pub(super) fn materialize_member_extension_delegate(
             setter,
             visibility: property.visibility,
             type_params,
+            accessor_annotations: ir
+                .accessor_annotations
+                .get(&property_id)
+                .cloned()
+                .unwrap_or_default(),
         });
     realizations.insert(
         property_id,

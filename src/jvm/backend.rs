@@ -217,6 +217,15 @@ fn run_backend_passes_after_plugins(
     // A package property remains a semantic declaration plus a checked common-IR layout. Join the
     // stable identities here, where `@JvmField` becomes a JVM storage decision.
     crate::jvm::property_storage::realize_top_level_jvm_fields(ir);
+    // Some early representation decisions need to know whether an exact checked classifier is a
+    // value class. Publish that declaration inventory before the first such decision; later
+    // representation passes still own erasure, boxing and mangling.
+    if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
+        return Err(SkipReason::ValueClasses);
+    }
+    // A singleton or constant delegate is evaluated in place, with no `x$delegate` storage. Before
+    // companion hoisting and delegate-field naming, which then see only the storage that remains.
+    crate::jvm::in_place_delegates::realize(ir);
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::jvm::companion::lower_companion_properties(ir, &facts.property_realizations);
@@ -260,6 +269,7 @@ fn run_backend_passes_after_plugins(
     // before the value-class pass (which retargets them once mangled names are known).
     // A scalar result over a reference-returning overridden slot is the wrapper; its bridges follow.
     // A bridge to a value-class override asks which dependency classes are value classes.
+    // Refresh the inventory for declarations synthesized since the first publication above.
     if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
         return Err(SkipReason::ValueClasses);
     }
@@ -382,6 +392,12 @@ fn run_backend_passes_after_plugins(
     // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
     // names those from the value-class spelling and only then appends `$<module>` to the member.
     crate::jvm::internal_names::mangle_internal_members(ir, module_name, facade);
+    // A delegated property's reflected signature names its declaration's physical getter. Its
+    // exact FunId was retained when the reference was built; consume that identity only after
+    // value-class and internal-member naming have fixed the accessor's final JVM ABI.
+    facts
+        .property_reference_realizations
+        .finalize_delegated_getter_signatures(ir);
     // A specialized suspend lambda is already a real class when suspend lowering completes, but
     // its JVM name depends on the caller's final placement and lifted spelling. Realize that name
     // only now and keep the coroutine-emission facts keyed by the same physical identity.
@@ -1448,9 +1464,29 @@ pub fn facade_package_metadata_from_ir(
                     format!("({parameters})V"),
                 )
             });
+            // A delegate evaluated in place has no storage; its `get<X>$delegate` stands in.
+            let delegate_method =
+                ir.jvm_package_delegate_method(declaration.property)
+                    .map(|method| {
+                        let function = &ir.functions[method as usize];
+                        (
+                            function.name.clone(),
+                            crate::jvm::method_descriptors::ir_method_desc(
+                                &function.params,
+                                &function.ret,
+                            ),
+                        )
+                    });
+            let package_record = crate::metadata::declaration_records::package_property(
+                ir,
+                declaration,
+                setter_function,
+            );
             crate::metadata::builder::PropMeta {
                 getter,
                 setter,
+                has_backing_field: package_record.has_backing_field && delegate_method.is_none(),
+                delegate_method,
                 field_name: field.as_ref().and_then(|(name, _)| name.clone()),
                 field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
                     super::metadata_method_signatures::requires_field_signature(
@@ -1463,11 +1499,7 @@ pub fn facade_package_metadata_from_ir(
                     .jvm_package_property_annotation_marker(declaration.property)
                     .and_then(|marker| ir.functions.get(marker as usize))
                     .map(|marker| (marker.name.clone(), "()V".to_string())),
-                ..crate::metadata::declaration_records::package_property(
-                    ir,
-                    declaration,
-                    setter_function,
-                )
+                ..package_record
             }
         })
         .collect::<Vec<_>>();
@@ -1551,9 +1583,14 @@ fn declared_method_descriptor(declaration: &crate::ir::IrPackageFunction) -> Str
     if let Some(receiver) = declaration.receiver.filter(|_| !declaration.companion) {
         physical.insert(declaration.context_count.min(physical.len()), receiver);
     }
+    // Each parameter is a value slot: a `Unit` one is the `kotlin.Unit` reference, not `void`.
     let mut descriptor = physical
         .iter()
-        .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+        .map(|parameter| {
+            crate::jvm::names::type_descriptor(crate::jvm::method_descriptors::jvm_value_ty(
+                parameter,
+            ))
+        })
         .collect::<String>();
     if declaration.suspend {
         descriptor.push_str("Lkotlin/coroutines/Continuation;");

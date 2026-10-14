@@ -471,6 +471,12 @@ impl Checker<'_> {
             }
             crate::types::PropertyAnnotationSite::Property => crate::types::KotlinTarget::Property,
             crate::types::PropertyAnnotationSite::Field => crate::types::KotlinTarget::Field,
+            crate::types::PropertyAnnotationSite::Getter => {
+                crate::types::KotlinTarget::PropertyGetter
+            }
+            crate::types::PropertyAnnotationSite::Setter => {
+                crate::types::KotlinTarget::PropertySetter
+            }
         };
         if site == crate::types::PropertyAnnotationSite::Field {
             if let Some(declaration_target) = fieldless_target {

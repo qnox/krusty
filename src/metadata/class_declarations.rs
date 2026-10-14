@@ -410,7 +410,10 @@ fn declared_functions(ir: &IrFile, c: &IrClass) -> Vec<u32> {
             if !source_callable_fids.contains(&fid) || ir.is_interface_delegation_function(fid) {
                 return false;
             }
-            if ir.lambda_own_params_from.contains_key(&fid) || ir.synthetic_methods.contains(&fid) {
+            if ir.lambda_own_params_from.contains_key(&fid)
+                || ir.synthetic_methods.contains(&fid)
+                || ir.is_jvm_delegate_method(fid)
+            {
                 return false;
             }
             if ext_prop_accessor_fids.contains(&fid) {
@@ -648,7 +651,9 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
             ),
             annotations: property_annotations(c, ext.source_order),
             field_annotations: Default::default(),
-            accessor_annotations: Default::default(),
+            accessor_annotations: crate::metadata::AccessorMetadataAnnotations::of(
+                &ext.accessor_annotations,
+            ),
             companion: false,
         };
         props.push(record);

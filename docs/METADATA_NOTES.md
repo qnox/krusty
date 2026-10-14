@@ -175,10 +175,12 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - A non-default setter records `Property.setter_value_parameter` (f6), and kotlinc serializes it
   before the property's name, so its name and type strings come first in `d2`. An unnamed parameter
   is `value` on a bodiless `private set` and `<set-?>` on a delegated `var` (with or without
-  `private set`). A delegated property's `JvmPropertySignature.field` names its `x$delegate` field
-  (desc `Lapp/D;`); reflection (`KProperty.get`) reads it, and a `var` whose setter word says
-  not-default but has no setter parameter fails with `No type in ProtoBuf.ValueParameter`.
-  Tests: `tests/metadata_property_flags_e2e.rs`, `class_builder` unit test
+  `private set`). An ordinary delegated property's `JvmPropertySignature.field` names its
+  `x$delegate` field (desc `Lapp/D;`). A singleton or constant delegate is evaluated in place, so
+  that signature omits `field` and records the generated `get<X>$delegate` method in
+  `delegateMethod` (f5) instead. Reflection reads the recorded realization. A `var` whose setter
+  word says not-default but has no setter parameter fails with `No type in ProtoBuf.ValueParameter`.
+  Tests: `tests/in_place_delegate_e2e.rs`, `tests/metadata_property_flags_e2e.rs`, `class_builder` unit test
   `private_setter_records_value_parameter_before_the_property_name`.
 
 - `ReturnValueStatus` lives in `Function.flags` bits 16-17 and `Property.flags` bits 17-18
@@ -335,11 +337,13 @@ keeps the default setter, which is private and so never generated: f100 names on
 f8 is still 66 with a `<set-?>` parameter, and another class in the file writes through
 `access$set<X>$p`.
 
-A delegated top-level property records `isDelegated` as a member property does, and its
-`JvmPropertySignature.field` names the `x$delegate` storage, interned after the accessors, with its
-descriptor when the field's type maps differently from the property's (see `JvmFieldSignature.desc`
-presence above). A top-level `lateinit` property likewise records `isLateinit`. A private
-delegated property's accessors are private methods. Tests:
+A delegated top-level property records `isDelegated` as a member property does. An ordinary
+delegate's `JvmPropertySignature.field` names the `x$delegate` storage, interned after the accessors,
+with its descriptor when the field's type maps differently from the property's (see
+`JvmFieldSignature.desc` presence above). A singleton or constant delegate has no storage entry;
+its generated `get<X>$delegate` method is interned before the accessors and recorded as
+`JvmPropertySignature.delegateMethod` (f5). A top-level `lateinit` property likewise records
+`isLateinit`. A private delegated property's accessors are private methods. Tests:
 `a_delegated_top_level_property_records_its_delegate_field` and
 `a_top_level_lateinit_property_records_lateinit`.
 

@@ -203,7 +203,15 @@ impl<'a> Layout<'a> {
             }
         }
         let orphaned: Vec<bool> = (0..count)
-            .map(|index| owned[index] && kept[index] && !rewritten_reach[index] && !leading[index])
+            .map(|index| {
+                owned[index]
+                    && kept[index]
+                    && !rewritten_reach[index]
+                    && !leading[index]
+                    // A class signature is visited with the class header by ASM. It may fall into
+                    // the first method's coarse pool range, but that method never owns it.
+                    && !read.early_class_entries.contains(&(index as u16))
+            })
             .collect();
         let anchored = orphan_anchors(read, relaid, &by_method, &orphaned);
         if unnamed == Unnamed::Kept {

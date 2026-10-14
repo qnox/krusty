@@ -730,9 +730,9 @@ pub(crate) fn class_message(
                 Vec::new()
             }
         };
-        let annotations: Vec<Pb> = records(st, &p.annotations);
         let getter_annotations = records(st, &accessors.getter);
         let setter_annotations = records(st, &accessors.setter);
+        let annotations: Vec<Pb> = records(st, &p.annotations);
         let field_annotations = records(st, &p.field_annotations);
         let fields = [
             AnnotationSite::Property,

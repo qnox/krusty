@@ -13,7 +13,7 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty};
 
-fn declared_primary_bound(parameter: &IrTypeParameter) -> Option<Ty> {
+pub(super) fn declared_primary_bound(parameter: &IrTypeParameter) -> Option<Ty> {
     parameter
         .bounds
         .iter()

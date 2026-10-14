@@ -15,7 +15,7 @@
 
 use crate::fx_hash::HashMap;
 
-use crate::ir::FunId;
+use crate::ir::{ExprId, FunId, IrConst, IrExpr};
 use crate::types::{Ty, TypeName};
 
 /// The physical accessor a property reference calls.
@@ -186,9 +186,34 @@ pub(crate) struct PropertyReferenceRealizations {
     pub(crate) local_delegated: super::local_delegated_properties::LocalDelegatedProperties,
     /// The operands found by `realize`, until `place_delegated_arrays` gives them their slots.
     pub(super) pending_delegated: Vec<super::delegated_arrays::DelegatedOperand>,
+    /// The string operand that reflects each declared delegated property's getter, paired with
+    /// the exact accessor declaration whose final JVM name and descriptor it must publish.
+    delegated_getter_signatures: Vec<(ExprId, FunId)>,
 }
 
 impl PropertyReferenceRealizations {
+    pub(super) fn record_delegated_getter_signature(&mut self, signature: ExprId, getter: FunId) {
+        self.delegated_getter_signatures.push((signature, getter));
+    }
+
+    /// Publish the physical getter signature after every declaration-naming pass has run. The
+    /// lowering-generated reference retains the accessor's stable identity rather than trying to
+    /// rediscover a value-class- or module-mangled method from its source spelling.
+    pub(crate) fn finalize_delegated_getter_signatures(&self, ir: &mut crate::ir::IrFile) {
+        for &(signature, getter) in &self.delegated_getter_signatures {
+            let getter = &ir.functions[getter as usize];
+            let physical = format!(
+                "{}{}",
+                getter.name,
+                crate::jvm::method_descriptors::ir_method_desc(&getter.params, &getter.ret)
+            );
+            let IrExpr::Const(IrConst::String(value)) = &mut ir.exprs[signature as usize] else {
+                panic!("a delegated getter signature remains a string constant");
+            };
+            *value = physical.into();
+        }
+    }
+
     pub(crate) fn remap_delegated_owners(
         &mut self,
         names: &crate::fx_hash::HashMap<TypeName, TypeName>,

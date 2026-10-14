@@ -17,6 +17,7 @@ mod constructor_bodies;
 mod declaration_inventory;
 mod default_calls;
 mod default_constructions;
+mod delegate_names;
 mod descriptor_parameters;
 mod equality;
 mod function_invocation;
@@ -35,6 +36,7 @@ mod representation;
 use representation::is_ref;
 mod result_tail_boxing;
 mod return_unboxing;
+mod sam_names;
 mod substitution_coercions;
 mod suspend_results;
 mod synth_members;
@@ -1047,8 +1049,13 @@ pub(crate) fn lower_value_classes(
         }
     }
 
-    // 1b. Rewrite calls carrying an exact selected source declaration to its mangled realization
-    // (`super.f(vc)`, an interface method).
+    delegate_names::rename(
+        ir,
+        &mut renamed_functions,
+        &orig_params,
+        &orig_rets,
+        &callable_under,
+    );
     if !renamed_functions.is_empty() {
         mangled_calls::rename(
             ir,
@@ -1058,29 +1065,7 @@ pub(crate) fn lower_value_classes(
             &under,
         );
     }
-    // The checker already selected one SAM declaration. Its declared signature and suspend fact
-    // travel on the lambda, so the physical slot is realized from those, not from a
-    // `(classifier, name, arity)` map. Two methods of one fun interface can share a name and an
-    // arity while their value-class hashes differ; the map keeps only one of them.
-    if !callable_under.is_empty() {
-        for expression in &mut ir.exprs {
-            let IrExpr::Lambda {
-                sam: Some(target), ..
-            } = expression
-            else {
-                continue;
-            };
-            let method = vc_mangle_once(
-                &target.method,
-                &target.declared_parameters,
-                &target.declared_result,
-                &callable_under,
-                false,
-                target.suspend,
-            );
-            target.method = method;
-        }
-    }
+    sam_names::rename(ir, &callable_under);
     // Common IR keeps the SAM declaration semantic. Once this backend has chosen value-class
     // carriers, publish the exact physical interface slot beside it. LambdaMetafactory (and the
     // class-based SAM strategy) must implement that erased slot, not a descriptor reconstructed

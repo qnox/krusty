@@ -513,6 +513,7 @@ fn materialize_delegation(
                             setter,
                             visibility: crate::types::Visibility::Public,
                             type_params,
+                            accessor_annotations: Default::default(),
                         });
                     continue;
                 }

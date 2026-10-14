@@ -358,7 +358,7 @@ impl<'a> JvmClassRealization<'a> {
                 ..JvmPropertySignature::default()
             },
             PropertyOrigin::MemberExtension(index) => {
-                self.member_extension(&ir.member_ext_props[&c.fq_name_id()][index])
+                self.member_extension(index, &ir.member_ext_props[&c.fq_name_id()][index])
             }
             PropertyOrigin::CompanionBlock(index) => companion_blocks::property_signature(
                 ir,
@@ -475,6 +475,16 @@ impl<'a> JvmClassRealization<'a> {
             // is what connects the property to it (and the marker's FINAL name, which the
             // value-class pass may have mangled with the getter's).
             synthetic_method: property_marker_signature(ir, c, property.source_order),
+            delegate_method: ir
+                .class_id_by_name(c.fq_name)
+                .and_then(|class| ir.jvm_member_delegate_method(class, property_index as u32))
+                .map(|method| {
+                    let function = &ir.functions[method as usize];
+                    (
+                        function.name.clone(),
+                        ir_method_desc(&function.params, &function.ret),
+                    )
+                }),
             // kotlinc marks an interface companion's `@JvmField` property record: the backing
             // field was MOVED onto the interface itself.
             moved_from_interface_companion: companion_of_interface(ir, c)
@@ -482,7 +492,11 @@ impl<'a> JvmClassRealization<'a> {
         }
     }
 
-    fn member_extension(&self, ext: &crate::ir::MemberExtProp) -> JvmPropertySignature {
+    fn member_extension(
+        &self,
+        property_index: usize,
+        ext: &crate::ir::MemberExtProp,
+    ) -> JvmPropertySignature {
         let (ir, c) = (self.ir, self.c);
         let ext_delegate = ext
             .delegate_field
@@ -496,6 +510,18 @@ impl<'a> JvmClassRealization<'a> {
                     .filter(|physical| self.requires_field_signature(ext.ty, physical)),
             }),
             synthetic_method: property_marker_signature(ir, c, ext.source_order),
+            delegate_method: ir
+                .class_id_by_name(c.fq_name)
+                .and_then(|class| {
+                    ir.jvm_member_extension_delegate_method(class, property_index as u32)
+                })
+                .map(|method| {
+                    let function = &ir.functions[method as usize];
+                    (
+                        function.name.clone(),
+                        ir_method_desc(&function.params, &function.ret),
+                    )
+                }),
             moved_from_interface_companion: false,
         }
     }

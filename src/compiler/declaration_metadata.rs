@@ -79,19 +79,36 @@ pub(super) fn accessor_annotations(
     property: &ast::PropDecl,
     info: &TypeInfo,
 ) -> crate::ir::AccessorAnnotations {
-    let site = |entries: &[ast::AccessorAnnotation]| {
-        let annotations = entries
+    let site = |entries: &[ast::AccessorAnnotation],
+                target: crate::types::PropertyAnnotationSite| {
+        let targeted = property
+            .annotations
             .iter()
-            .map(|entry| entry.annotation.clone())
-            .collect::<Vec<_>>();
-        declaration_annotations(&annotations, info)
+            .filter(|annotation| annotation.property_site == Some(target))
+            .filter_map(|annotation| info.applied_annotation(annotation));
+        let declared = entries
+            .iter()
+            .filter_map(|entry| info.applied_annotation(&entry.annotation));
+        checked_annotations(targeted.chain(declared))
     };
     let setter = property.setter.as_ref();
     crate::ir::AccessorAnnotations {
-        getter: site(&property.getter_annotations),
-        setter: setter.map_or_else(Default::default, |setter| site(&setter.annotations)),
-        setter_parameter: setter
-            .map_or_else(Default::default, |setter| site(&setter.param_annotations)),
+        getter: site(
+            &property.getter_annotations,
+            crate::types::PropertyAnnotationSite::Getter,
+        ),
+        setter: site(
+            setter.map_or(&[], |setter| setter.annotations.as_slice()),
+            crate::types::PropertyAnnotationSite::Setter,
+        ),
+        setter_parameter: setter.map_or_else(Default::default, |setter| {
+            checked_annotations(
+                setter
+                    .param_annotations
+                    .iter()
+                    .filter_map(|entry| info.applied_annotation(&entry.annotation)),
+            )
+        }),
     }
 }
 

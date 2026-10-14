@@ -134,13 +134,19 @@ impl Parser<'_> {
         }
         if qname.is_empty() {
             (None, args)
-        } else if target == "field" {
+        } else if matches!(target.as_str(), "field" | "get" | "set") {
+            let property_site = match target.as_str() {
+                "field" => crate::types::PropertyAnnotationSite::Field,
+                "get" => crate::types::PropertyAnnotationSite::Getter,
+                "set" => crate::types::PropertyAnnotationSite::Setter,
+                _ => unreachable!("matched property annotation use-site"),
+            };
             (
                 Some(AnnotationRef {
                     name: qname,
                     at,
                     span: annotation_span,
-                    property_site: Some(crate::types::PropertyAnnotationSite::Field),
+                    property_site: Some(property_site),
                 }),
                 args,
             )
