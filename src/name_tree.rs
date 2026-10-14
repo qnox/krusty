@@ -831,6 +831,13 @@ impl NameTree {
         &self.node(id).segment
     }
 
+    /// Source classifier segments retained inside one final name-tree segment. Metadata can publish
+    /// `Outer.Inner` before the enclosing classifier identity has been interned separately; expose
+    /// that stored structure without making diagnostic consumers render and reparse the name.
+    pub(crate) fn source_nested_segments(&self, id: NameId) -> Vec<&str> {
+        self.node(id).segment.split('.').collect()
+    }
+
     /// Slots across every child table still retained, including ones superseded by a growth.
     #[cfg(test)]
     fn retained_table_slots(&self) -> usize {

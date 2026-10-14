@@ -250,6 +250,13 @@ impl TypeName {
             .map_or(self.segment_ref(), |(_, nested)| nested)
     }
 
+    /// Source/metadata classifier segments stored in this identity's final name-tree node.
+    /// Diagnostic rendering uses this when a dependency's enclosing identity was not interned as a
+    /// separate node; semantic lookup continues to use [`Self::nested_owner`].
+    pub(crate) fn source_nested_segments(self) -> Vec<&'static str> {
+        type_names().source_nested_segments(self.name_id())
+    }
+
     /// Whether this classifier identity is `owner` or is nested in it. Callers must use this
     /// identity-tree relation instead of rendering names and interpreting string prefixes.
     pub fn same_or_nested_within(self, owner: TypeName) -> bool {

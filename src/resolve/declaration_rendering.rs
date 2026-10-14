@@ -507,10 +507,12 @@ fn classifier_display(
     {
         return classifier_segment_display(source, collection, arguments, false);
     }
+    let classifier = source.classifier(name);
     if name.nested_owner().is_some()
-        || source
-            .classifier(name)
-            .is_some_and(|classifier| classifier.outer_instance.is_some())
+        || classifier.as_ref().is_some_and(|classifier| {
+            classifier.outer_instance.is_some()
+                || classifier.is_nested && name.source_nested_segments().len() > 1
+        })
     {
         return nested_classifier_display(source, name, arguments);
     }
@@ -548,6 +550,31 @@ fn nested_classifier_display(
             .map(|classifier| classifier.own_type_parameter_count)
             .unwrap_or(0);
         let remaining = arguments.len().saturating_sub(argument);
+        // A dependency metadata identity can retain `Outer.Inner` in one final name-tree segment
+        // before `Outer` is interned as an exact owner node. The classifier still publishes both
+        // that it is nested and how many parameters it owns. Put its own argument prefix on the
+        // innermost source segment and the captured suffix on the outermost one; intermediate
+        // segments have no independently loaded declaration from which an arity could be claimed.
+        if enclosing.is_none()
+            && segments.is_empty()
+            && classifier
+                .as_ref()
+                .is_some_and(|classifier| classifier.is_nested)
+        {
+            let source_segments = classifier_name.source_nested_segments();
+            if let [outer, middle @ .., inner] = source_segments.as_slice() {
+                let count = own_arity.min(remaining);
+                segments.push((inner, &arguments[argument..argument + count]));
+                argument += count;
+                for segment in middle.iter().rev() {
+                    segments.push((segment, &[]));
+                }
+                segments.push((outer, &arguments[argument..]));
+                argument = arguments.len();
+                current = None;
+                continue;
+            }
+        }
         // The final enclosing segment can be absent from a lazy federated source even though the
         // inner declaration published its stable identity. Arguments are stored innermost-out, so
         // after every inner segment has consumed its declaration-owned prefix, the remaining suffix
@@ -725,6 +752,28 @@ mod tests {
         assert_eq!(
             readable_type(&source, Ty::obj_args_name(inner, &[Ty::Int, Ty::String])),
             "Outer<String>.Inner<Int>"
+        );
+    }
+
+    #[test]
+    fn nested_display_partitions_a_single_metadata_name_segment() {
+        let empty = EmptySymbolSource;
+        let identity =
+            crate::types::type_name_child(type_name("diag_flat_2245"), "Envelope.Member");
+        let mut classifier = (*empty
+            .classifier(crate::types::wk::any())
+            .expect("core Any classifier"))
+        .clone();
+        classifier.is_nested = true;
+        classifier.own_type_parameter_count = 1;
+        let source = RoleSource {
+            identity,
+            classifier: std::sync::Arc::new(classifier),
+        };
+
+        assert_eq!(
+            readable_type(&source, Ty::obj_args_name(identity, &[Ty::Int, Ty::String])),
+            "Envelope<String>.Member<Int>"
         );
     }
 }

@@ -368,12 +368,18 @@ impl Checker<'_> {
         // that declares an unimplemented member is the first of these that declares it.
         let mut classifiers = hierarchy
             .iter()
-            .filter_map(|(owner, _, depth)| Some((*depth, source.classifier(*owner)?)))
+            .filter_map(|(owner, receiver, depth)| {
+                Some((*depth, *receiver, source.classifier(*owner)?))
+            })
             .collect::<Vec<_>>();
-        classifiers.sort_by_key(|(depth, classifier)| (*depth, classifier.is_interface()));
+        classifiers.sort_by_key(|(depth, _, classifier)| (*depth, classifier.is_interface()));
+        let classifier_receivers = classifiers
+            .iter()
+            .map(|(_, receiver, _)| *receiver)
+            .collect::<Vec<_>>();
         let classifiers = classifiers
             .into_iter()
-            .map(|(_, classifier)| classifier)
+            .map(|(_, _, classifier)| classifier)
             .collect::<Vec<_>>();
         let names = classifiers
             .iter()
@@ -589,6 +595,8 @@ impl Checker<'_> {
                 };
                 if let Some(obligation) = obligation {
                     unresolved.push(declared_property(
+                        &source,
+                        &classifier_receivers,
                         &classifiers,
                         &normalized_functions,
                         &normalized_properties,
@@ -675,6 +683,8 @@ fn declaration_order(classifier: &LibraryType, name: &str) -> usize {
 /// (`AbstractCollection.size()` is `Collection.size`), so that method places the obligation on
 /// its class, while the property itself renders from the nearest classifier that declares it.
 fn declared_property(
+    source: &dyn SymbolSource,
+    classifier_receivers: &[Ty],
     classifiers: &[Arc<LibraryType>],
     normalized_functions: &[&FunctionInfo],
     normalized_properties: &[&PropertyInfo],
@@ -804,7 +814,7 @@ fn declared_property(
         .iter()
         .find_map(|classifier| declared(classifier))
         .map_or_else(|| obligation.clone(), |(_, declaration)| declaration);
-    let (place, in_interface, position, overload) = match nearest {
+    let (place, declaring_interface, position, overload) = match nearest {
         Some((place, classifier)) => (
             place,
             classifier.is_interface(),
@@ -813,9 +823,36 @@ fn declared_property(
         ),
         None => (classifiers.len(), false, 0, 0),
     };
+    // Source FIR retains the abstract class that owns a fake override, while dependency metadata
+    // contains only the interface declarations that feed it. If such a class lies before the
+    // recovered declaration, kotlinc attributes the obligation to that base class. This is a
+    // diagnostic provenance fact only: slot identity and declaration rendering above remain based
+    // on the exact normalized declarations.
+    let source_abstract_class_presents_slot = classifier_receivers
+        .iter()
+        .copied()
+        .zip(classifiers)
+        .take(place)
+        .any(|(receiver, classifier)| {
+            !classifier.is_interface()
+                && classifier.inheritance.is_abstract
+                && classifier.stable_declaration.is_some()
+                && crate::symbol_resolver::member_declarations_in_hierarchy(source, receiver, name)
+                    .properties()
+                    .iter()
+                    .any(|property| same_slot_and_result(property))
+        });
     UnimplementedMember {
         declaration: UnimplementedDeclaration::Property(Box::new(declaration)),
-        in_interface,
+        // A fake override can be presented on an abstract class even though the declaration we
+        // recover for readable rendering originated in an interface. Prefer the obligation's exact
+        // owner when it carries that fact; source FIR additionally retains the class-side applied
+        // slot checked above. Classpath metadata without either fact keeps the interface owner and
+        // therefore retains kotlinc's `abstract member`.
+        in_interface: !source_abstract_class_presents_slot
+            && source
+                .classifier(obligation.owner)
+                .map_or(declaring_interface, |owner| owner.is_interface()),
         order: (place, true, position, overload),
     }
 }
@@ -831,12 +868,15 @@ fn implements_abstract_function(
 ) -> bool {
     if implementation.flags.suspend != declaration.flags.suspend
         || implementation.context_count != declaration.context_count
-        || implementation.is_extension() != declaration.is_extension()
     {
         return false;
     }
-    crate::symbol_resolver::function_input_shapes_match(source, declaration, implementation)
-        || flexible_function_keys_match(implementation, declaration)
+    (implementation.is_extension() == declaration.is_extension()
+        && (crate::symbol_resolver::function_input_shapes_match(
+            source,
+            declaration,
+            implementation,
+        ) || flexible_function_keys_match(implementation, declaration)))
         || java_scope_implements(source, java_classifiers, implementation, declaration)
 }
 

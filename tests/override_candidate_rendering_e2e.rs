@@ -529,6 +529,26 @@ fn source_covariant_property_recovery_keeps_the_selected_result() {
     );
 }
 
+/// An abstract source class does not become the diagnostic owner of every later interface
+/// obligation merely because it precedes that interface in the hierarchy. Only an exact property
+/// slot presented through that class's own hierarchy is a source fake override.
+#[test]
+fn unrelated_source_abstract_class_does_not_claim_interface_property() {
+    assert_complete_errors(
+        &[
+            (
+                "Base.kt",
+                "package fixture\n\nabstract class Base { fun marker() = Unit }\ninterface Named { val owner: String }\n",
+            ),
+            ("Main.kt", "class Derived : fixture.Base(), fixture.Named\n"),
+        ],
+        &[
+            "Main.kt:1:1: class 'Derived' is not abstract and does not implement abstract member:",
+            "| val owner: String",
+        ],
+    );
+}
+
 /// Equal-result `val` and `var` declarations form one fake override, but the mutable declaration
 /// owns the setter capability that the concrete subclass is also missing.
 #[test]
