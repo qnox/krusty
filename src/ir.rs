@@ -2406,6 +2406,10 @@ pub struct IrFile {
     /// 1-based source line of a class's primary-ctor closing `)` — kotlinc maps the ctor
     /// `$default` overload's `return` to it. Absent = single-line/unknown (the one-entry table).
     pub ctor_close_lines: crate::fx_hash::HashMap<TypeName, u32>,
+    /// 1-based source line where a class's written primary constructor starts (its first
+    /// modifier, annotation, `constructor` keyword, or `(`). kotlinc maps the constructor's
+    /// trailing `return` to it. Absent = no written primary constructor.
+    pub ctor_open_lines: crate::fx_hash::HashMap<TypeName, u32>,
     /// The declaration-owned source lines of each SECONDARY constructor, by its stable declaration.
     /// The declaration metadata handoff records them while the parser unit is live; lowering copies
     /// them onto the constructor it builds, which happens after that unit's syntax is gone.

@@ -1136,6 +1136,11 @@ pub struct ClassDecl {
     /// closing `}`; for a bodyless declaration it is the line containing the final header token.
     /// Filled by the same parser post-pass as [`Self::decl_line`].
     pub decl_end_line: u32,
+    /// AT PARSE: the byte offset where a written primary constructor starts (its first modifier,
+    /// annotation, `constructor` keyword, or `(`); the parser post-pass REWRITES it to the 1-based
+    /// source line. 0 = no written primary constructor. kotlinc maps the constructor's trailing
+    /// `return` to this line.
+    pub ctor_open_line: u32,
     /// AT PARSE: the byte offset of the primary constructor's closing `)`; the same parser
     /// post-pass that fills `decl_line` REWRITES it to the 1-based source line. 0 = no primary
     /// parameter list. kotlinc maps the ctor `$default` overload's `return` to this line.
