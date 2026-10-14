@@ -158,6 +158,7 @@ mod enhanced_values;
 mod overload_diagnostics;
 mod override_plans;
 mod platform_value_narrowing;
+mod value_classes;
 pub use platform_value_narrowing::PlatformNarrowing;
 mod plugin_class_checks;
 mod plugin_class_predicate;
@@ -34527,6 +34528,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             },
         );
     }
+    c.narrow_value_class_receivers();
     let enhanced_values = c.enhanced_value_heads();
     let Checker {
         expr_types,
@@ -46448,21 +46450,6 @@ impl<'a> Checker<'a> {
                 .insert((reference.span.lo, reference.span.hi), resolved);
         }
         resolved
-    }
-
-    /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
-    ///
-    /// Keep this as the single checker-level semantic query. The module provider exports its
-    /// `value_field` through the same `LibraryType::value_underlying` shape as decoded dependencies,
-    /// so callers must not pair a source-table lookup with a separate classpath fallback. Besides
-    /// duplicating policy, that split would fail to recognize value classes supplied by any future
-    /// provider added to the federated resolver.
-    fn ty_is_value_class(&self, t: Ty) -> bool {
-        t.non_null().kotlin_class_internal().is_some_and(|name| {
-            self.resolver()
-                .classifier(name)
-                .is_some_and(|class| class.value_underlying.is_some())
-        })
     }
 
     fn report_val_reassignment(&mut self, span: Span, message: impl Into<String>) {

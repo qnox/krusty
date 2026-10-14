@@ -1839,13 +1839,7 @@ impl BodyFirChecker<'_> {
                     {
                         self.source_member_operator_call(expression, convention, *lo, &[*hi])?
                     } else {
-                        FirExprKind::Range {
-                            operation: Self::range_operation(*kind),
-                            start: self.expression(*lo)?,
-                            start_type: self.expression_type(*lo)?,
-                            end: self.expression(*hi)?,
-                            end_type: self.expression_type(*hi)?,
-                        }
+                        self.range_literal(*kind, *lo, *hi)?
                     }
                 }
                 Expr::IncDec {
@@ -3160,8 +3154,8 @@ impl BodyFirChecker<'_> {
                         })?,
                     variable_ty,
                 )?;
-                let start = self.expression(range.start)?;
-                let end = self.expression(range.end)?;
+                let (start, end) =
+                    self.counted_range_bounds(range.start, range.end, variable_ty)?;
                 let variable = self.loop_variable(statement, name);
                 self.counted_loop_variables.insert(variable);
                 let body = self.checked_loop_body(

@@ -107,6 +107,73 @@ impl BodyFirChecker<'_> {
         }))
     }
 
+    /// The bounds of a counted loop over a range literal. kotlinc's `HeaderInfoBuilder` keeps a
+    /// bound of the progression's own element type as it is and commits it to that non-null type,
+    /// so a Java value there is checked where the loop reads it — the receiver of `..` included. A
+    /// bound it must first widen (`0L..javaInt`) is converted through a call and stays unchecked.
+    pub(super) fn counted_range_bounds(
+        &mut self,
+        start: ExprId,
+        end: ExprId,
+        counter: ResolvedTy,
+    ) -> Result<(FirExprId, FirExprId), BodyCheckFailure> {
+        Ok((
+            self.counted_range_bound(start, counter)?,
+            self.counted_range_bound(end, counter)?,
+        ))
+    }
+
+    fn counted_range_bound(
+        &mut self,
+        bound: ExprId,
+        counter: ResolvedTy,
+    ) -> Result<FirExprId, BodyCheckFailure> {
+        let value = self.expression(bound)?;
+        if !self.info.produces_unchecked_java_value(bound)
+            || self.info.ty(bound).range_operand_bound() != counter.get()
+        {
+            return Ok(value);
+        }
+        let cause = self.expression_origin(bound)?;
+        let conversion = self.platform_producer_conversion(bound, value, cause, counter);
+        Ok(self.body.add_expr(FirExpr {
+            origin: cause,
+            ty: counter,
+            kind: FirExprKind::ImplicitConversion { value, conversion },
+        }))
+    }
+
+    /// A range literal used as a value, built by the compiler-supplied range construction. Its
+    /// end is the argument of `rangeTo`/`rangeUntil` and is committed like one; its start is the
+    /// dispatch receiver and is not.
+    pub(super) fn range_literal(
+        &mut self,
+        kind: RangeKind,
+        start: ExprId,
+        end: ExprId,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let start_value = self.expression(start)?;
+        let start_type = self.expression_type(start)?;
+        let (end_value, end_type) = if self.info.platform_narrowings.contains_key(&end) {
+            let span = self
+                .file
+                .expr_span(end)
+                .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+            let target =
+                self.resolved_type(span, self.info.semantic_ty(end).platform_lower_bound())?;
+            (self.value_at_selected_boundary(end, target)?, target)
+        } else {
+            (self.expression(end)?, self.expression_type(end)?)
+        };
+        Ok(FirExprKind::Range {
+            operation: Self::range_operation(kind),
+            start: start_value,
+            start_type,
+            end: end_value,
+            end_type,
+        })
+    }
+
     /// The comparison resolution selected for a counted loop over `class` when its counter is
     /// unsigned. An unsigned loop without one is a missing stable target.
     pub(super) fn unsigned_loop_compare(
