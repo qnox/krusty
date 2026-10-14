@@ -10,17 +10,18 @@ use crate::ast::TypeRef;
 /// copy, not a semantic type: it exists only while explicit headers are resolved and is discarded
 /// before checked FIR streaming starts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct HeaderTypeFlags(u8);
+pub struct HeaderTypeFlags(u16);
 
 impl HeaderTypeFlags {
-    const NULLABLE: u8 = 1 << 0;
-    const DEFINITELY_NON_NULL: u8 = 1 << 1;
-    const FUNCTION_RECEIVER: u8 = 1 << 2;
-    const SUSPEND_FUNCTION: u8 = 1 << 3;
-    const IN_PROJECTION: u8 = 1 << 4;
-    const OUT_PROJECTION: u8 = 1 << 5;
-    const IMPORT: u8 = 1 << 6;
-    const STAR_PROJECTION: u8 = 1 << 7;
+    const NULLABLE: u16 = 1 << 0;
+    const DEFINITELY_NON_NULL: u16 = 1 << 1;
+    const FUNCTION_RECEIVER: u16 = 1 << 2;
+    const SUSPEND_FUNCTION: u16 = 1 << 3;
+    const IN_PROJECTION: u16 = 1 << 4;
+    const OUT_PROJECTION: u16 = 1 << 5;
+    const IMPORT: u16 = 1 << 6;
+    const STAR_PROJECTION: u16 = 1 << 7;
+    const CLASS_LITERAL_LHS: u16 = 1 << 8;
 
     pub(super) fn from_type_ref(ty: &TypeRef) -> Self {
         let mut bits = 0;
@@ -33,6 +34,7 @@ impl HeaderTypeFlags {
             (Self::OUT_PROJECTION, ty.out_projection()),
             (Self::IMPORT, ty.is_import()),
             (Self::STAR_PROJECTION, ty.is_star_projection()),
+            (Self::CLASS_LITERAL_LHS, ty.is_class_literal_lhs()),
         ] {
             if enabled {
                 bits |= flag;
@@ -71,6 +73,10 @@ impl HeaderTypeFlags {
 
     pub const fn star_projection(self) -> bool {
         self.0 & Self::STAR_PROJECTION != 0
+    }
+
+    pub const fn class_literal_lhs(self) -> bool {
+        self.0 & Self::CLASS_LITERAL_LHS != 0
     }
 }
 

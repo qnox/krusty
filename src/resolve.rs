@@ -45696,85 +45696,6 @@ impl<'a> Checker<'a> {
         self.source_package
     }
 
-    /// Resolve a bare unbound class-literal receiver through the ordinary type-reference channel,
-    /// including parser-owned type arguments. Values remain bound literals and type parameters use
-    /// the reified path.
-    fn class_literal_unbound_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        e: ExprId,
-        n: &str,
-    ) -> Option<Ty> {
-        if scope.tparam_contains(n) {
-            return None;
-        }
-        if self.lookup(scope, n).is_some() {
-            return None;
-        }
-        let explicit_arguments = self
-            .file
-            .call_type_args
-            .get(&e.0)
-            .is_some_and(|arguments| !arguments.is_empty());
-        if self.file.bare_array_class_literal && !explicit_arguments {
-            let internal = self.select_classifier(scope, n).found()?;
-            // A parameterless typealias may expand to a fully applied reference-array type. Keep
-            // that expansion intact; only the raw classifier selected directly from this scope
-            // receives Kotlin's implicit star projection for a bare class literal.
-            let source_alias = scope.type_alias(n).is_some()
-                || self
-                    .scoped_source_alias_identity(scope, n)
-                    .and_then(|identity| self.source_alias_expansion(identity))
-                    .is_some()
-                || self.selected_alias_expansion(n, internal, false).is_some();
-            if Ty::obj_name(internal).is_reference_array() && !source_alias {
-                return Some(Ty::obj_args_name(
-                    internal,
-                    &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
-                ));
-            }
-        }
-        let reference = TypeRef {
-            name: n.to_string(),
-            flags: TrFlags::default(),
-            arg: None,
-            targs: self
-                .file
-                .call_type_args
-                .get(&e.0)
-                .cloned()
-                .unwrap_or_default(),
-            span: self.file.expr_spans[e.0 as usize],
-            fun_params: Vec::new(),
-            fun_context_count: 0,
-        };
-        let ty = self.type_ref_ty(scope, &reference);
-        if ty == Ty::Error {
-            return None;
-        }
-        // Keep the Kotlin classifier type in semantic results (`KClass<Int>`, not
-        // `KClass<java.lang.Integer>`). The backend chooses the boxed JVM class token when it emits
-        // the literal; representation must not leak into frontend generic arguments.
-        Some(ty)
-    }
-
-    fn validate_class_literal_type_arguments(&mut self, e: ExprId, target: ExprId, ty: Ty) -> Ty {
-        let has_type_arguments = self
-            .file
-            .call_type_args
-            .get(&target.0)
-            .is_some_and(|arguments| !arguments.is_empty());
-        if has_type_arguments && !ty.is_reference_array() {
-            self.diags.error(
-                self.span(e),
-                "only classes are allowed on the left-hand side of a class literal.".to_string(),
-            );
-            Ty::Error
-        } else {
-            ty
-        }
-    }
-
     fn obj_with_targs_name(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -46152,7 +46073,7 @@ impl<'a> Checker<'a> {
                                 alias.formals,
                                 alias.expansion,
                                 &r.name,
-                                &r.targs,
+                                alias_projection::AliasArguments::of(r),
                                 r.span,
                             );
                             conflicts = applied.conflicts;

@@ -1,5 +1,6 @@
 //! Resolver-backed classifier, type, and member-extension lookups for signature solving.
 
+use super::super::alias_projection::{star_projected_alias_type, AliasArguments};
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
@@ -471,6 +472,16 @@ impl ProductionSignatureSemantics<'_> {
             "compact typealias use spelling={} formals={formals:?} template={expansion:?}",
             reference.name,
         );
+        if matches!(AliasArguments::of(reference), AliasArguments::StarProjected) {
+            return Some(star_projected_alias_type(
+                &formals,
+                expansion,
+                &mut |owner| {
+                    self.with_resolver(scope, |resolver| resolver.classifier(owner))
+                        .ok()
+                },
+            ));
+        }
         if formals.len() != reference.targs.len() {
             self.record_source_diagnostic_at(
                 scope.owner,
