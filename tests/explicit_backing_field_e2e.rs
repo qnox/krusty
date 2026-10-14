@@ -244,3 +244,45 @@ fn value_class_backing_fields_run() {
         "OK"
     );
 }
+
+/// An untyped field initializer is resolved against the property type, so an otherwise unbound
+/// `mutableListOf()` or `emptyList()` infers its element from the property's `List<Failure>`; the
+/// field keeps the initializer's own type, `MutableList<Failure>` or `List<Failure>`.
+const PROPERTY_TYPED_INITIALIZER: &str = "class Failure(val message: String)\n\
+val failures: List<Failure> field = mutableListOf()\n\
+fun record(message: String) { failures.add(Failure(message)) }\n\
+class Checks {\n\
+    val failed: List<Failure> field = emptyList()\n\
+    fun count() = failed.size\n\
+}\n\
+open class Parent {\n\
+    open val failed: List<Any> = emptyList()\n\
+}\n\
+class Child : Parent() {\n\
+    final override val failed: List<Failure> field = mutableListOf()\n\
+    fun record(message: String) { failed.add(Failure(message)) }\n\
+    fun message() = failed.single().message\n\
+}\n\
+fun box(): String {\n\
+    record(\"OK\")\n\
+    val child = Child()\n\
+    child.record(\"Child\")\n\
+    return if (Checks().count() == 0 && child.message() == \"Child\") {\n\
+        failures.single().message\n\
+    } else \"Fail\"\n\
+}\n";
+
+#[test]
+fn untyped_field_initializer_infers_from_the_property_type_as_kotlinc_does() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("Checks.kt", PROPERTY_TYPED_INITIALIZER)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn untyped_field_initializer_inferred_from_the_property_type_runs() {
+    common::expect_box_ok_with_stdlib(
+        PROPERTY_TYPED_INITIALIZER,
+        "property-typed field initializer",
+    );
+}

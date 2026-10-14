@@ -26,7 +26,25 @@ fn explicit_backing_field_type_must_refine_property_type() {
     );
     assert_eq!(
         errors,
-        ["backing field type of 'value' is 'Any', which is not a subtype of its property type 'String'."]
+        [
+            "backing field type of 'value' is 'Any', which is not a subtype of its property type 'String'."
+        ]
+    );
+}
+
+#[test]
+fn inferred_explicit_backing_field_type_reports_one_exact_mismatch() {
+    let errors = check_with_detected_features(
+        "// LANGUAGE: +ExplicitBackingFields\n\
+         class Holder {\n\
+             val value: String field = 1\n\
+         }",
+    );
+    assert_eq!(
+        errors,
+        [
+            "backing field type of 'value' is 'Int', which is not a subtype of its property type 'String'."
+        ]
     );
 }
 

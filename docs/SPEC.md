@@ -4145,6 +4145,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `getProgressionLastElement`'s unsigned argument coercions are not calls. The counted-loop lowering
   records those nodes as `SyntheticOriginKind::InlinedCall`; the JVM emitter applies the rule.
   `tests/unsigned_loop_lines_e2e.rs` (full-byte against kotlinc).
+- **A property initializer's store repeats its line after an inlined value.** The inlined call
+  forgets the constructor's line, so kotlinc's `putfield` writes the property's line again and the
+  constructor's table holds that line twice in a row (`val failed: MutableList<F> =
+  mutableListOf()`). The constructor's same-line collapse keeps that entry; a value that is not
+  inlined (`ArrayList()`) keeps one. `tests/inlined_property_initializer_line_e2e.rs` (full-byte
+  against kotlinc).
 - **A local stores an inlined generic result on the call's line.** The inlined body forgets the
   caller's line, and kotlinc's `visitVariable` marks the declaration before it narrows the erased
   result, so the `checkcast` starts that line and the store does not open another entry.
@@ -11091,6 +11097,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class see the public type and call the getter. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus:
   six `properties/backingField/*ValueClassExplicitBackingField` tests.
+- **An untyped backing field initializer is resolved against the property type.** kotlinc's
+  `transformBackingField` gives the initializer of `val failed: List<F> field = mutableListOf()`
+  the property's return type as its expected type, then keeps the initializer's own resolved type
+  as the field type: `MutableList<F>`. Pass 1 publishes that storage type under the property's
+  stable declaration identity; Pass 2 checks the executable initializer under the public type and
+  consumes the published storage fact. This also prevents an inherited same-named property from
+  supplying the initializer's expectation. Tests: `tests/explicit_backing_field_e2e.rs`.
 - **A value class's erased bridge calls its interface entry by the entry's name.** A value class
   implementing `Comparable<Int>` has the static `compareTo-impl(II)I`, the instance entry
   `compareTo(I)I` on the box, and the erased `compareTo(Object)I` bridge, which unboxes the

@@ -2681,6 +2681,7 @@ fn emit_class(
     // `(start_pc, line)` for the ctor's LineNumberTable — one per body-property initializer, plus the
     // trailing `return`. Empty when the class has no body properties (kotlinc emits a single entry).
     let mut ctor_lines: Vec<(u16, u32)> = Vec::new();
+    let mut ctor_restored_lines: Vec<u16> = Vec::new();
     // `init`-block locals, with the ranges emission recorded. Empty ranges stay until the method
     // is written so an unused local's store is not removed as a temporary.
     let mut init_locals: Vec<(u16, u16, u16, String, String)> = Vec::new();
@@ -2858,11 +2859,8 @@ fn emit_class(
                 e.render_initializer_boundaries = false;
                 e.constructor_initializer_class = None;
                 e.record_locals = false;
-                ctor_lines.extend(
-                    ctor.line_marks()[marks_before..]
-                        .iter()
-                        .map(|&(pc, line)| (pc, u32::from(line))),
-                );
+                let lines = (&mut ctor_lines, &mut ctor_restored_lines);
+                initializer_lines::record_initializer_lines(&ctor, marks_before, lines);
                 init_locals.extend(ctor.local_entries().iter().filter_map(
                     |&(start, length, slot, ref name, ref desc)| {
                         length.map(|length| (start, length, slot, name.clone(), desc.clone()))
@@ -3159,6 +3157,7 @@ fn emit_class(
                     .as_ref()
                     .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
                 lines: &ctor_lines,
+                restored_lines: &ctor_restored_lines,
                 init_locals: &init_locals,
             },
         );
