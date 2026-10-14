@@ -84,12 +84,14 @@ impl BodyLowering<'_> {
                         .ok_or(FirLoweringFailure::MissingExpression(*initializer))?
                         .ty
                         .get();
-                    statements.push(self.ir.add_expr(IrExpr::Variable {
+                    let container = self.ir.add_expr(IrExpr::Variable {
                         index: temporary,
                         ty: initializer_ty,
                         init: Some(initializer_value),
                         named: false,
-                    }));
+                    });
+                    self.ir.destructuring_containers.insert(container);
+                    statements.push(container);
                     let initializer_read = self.ir.add_expr(IrExpr::GetValue(temporary));
                     self.set_expression_state(
                         *initializer,

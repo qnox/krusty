@@ -4238,9 +4238,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   point: its promised value loads the result temporary in `materializeAt`. So
   `val x = try { … } catch (…) { … }` marks the `try`'s line on the `iload`/`aload` of the
   temporary (after the catch body's line), and `val y =\n try { … }` marks the store on `y`'s
-  line after it. Only a `try` that is the initializer itself counts; an assignment
-  (`visitSetValue` marks before visiting its value) and any other consumer read the temporary on
-  the line already in effect. Test: `tests/declared_try_line_e2e.rs`.
+  line after it. A destructuring declaration's unnamed container has the same source role as
+  kotlinc's `<destruct>` variable, so `val (a, b) = try { … }` restores the declaration's line too.
+  Only a `try` that is the initializer itself counts; an assignment (`visitSetValue` marks before
+  visiting its value) and any other consumer read the temporary on the line already in effect.
+  Test: `tests/declared_try_line_e2e.rs`.
 - **A local variable's slot is entered before its initializer**, as kotlinc's `visitVariable`
   enters it before visiting the initializer: every local and temporary the initializer declares
   sits above the variable and is free again for the statements after it

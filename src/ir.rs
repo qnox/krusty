@@ -2158,6 +2158,9 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// Unnamed `Variable` declarations holding a destructuring declaration's container. This is
+    /// source-role provenance; a backend decides whether that role affects physical debug lines.
+    pub(crate) destructuring_containers: crate::fx_hash::HashSet<ExprId>,
     /// Inline lambda-argument markers whose store takes the target's synthetic inline line rather
     /// than a source line. Common lowering flags the marker of an `@InlineOnly` expansion whose
     /// lambda body starts on the call's own line; a target maps it to its synthetic-line
