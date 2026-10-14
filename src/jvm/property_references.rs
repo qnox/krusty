@@ -300,8 +300,9 @@ pub(super) fn realize(
 }
 
 /// Choose each class's `$$delegatedProperties` for the delegated operands [`realize`] found, once
-/// dependency calls are realized: an operand an inline operator never reads is `null` instead and
-/// takes no slot.
+/// dependency calls and companion storage are realized: an operand an inline operator never reads
+/// is `null` instead and takes no slot. Waiting for companion storage makes the owner's complete
+/// static-field namespace available before the generated array receives its physical name.
 pub(crate) fn place_delegated_arrays(
     ir: &mut IrFile,
     realizations: &mut PropertyReferenceRealizations,
@@ -476,6 +477,8 @@ fn classifier_property(
             protected_getter_bridge: None,
             protected_setter_bridge: None,
             member_access_bridge: None,
+            hoisted_companion_getter: None,
+            hoisted_companion_setter: None,
         },
     )
 }
@@ -667,6 +670,8 @@ fn external_property(
             protected_getter_bridge: None,
             protected_setter_bridge: None,
             member_access_bridge: None,
+            hoisted_companion_getter: None,
+            hoisted_companion_setter: None,
         },
     ))
 }
@@ -993,6 +998,8 @@ fn module_property(
             protected_getter_bridge: None,
             protected_setter_bridge: None,
             member_access_bridge: access_bridge.then_some(target),
+            hoisted_companion_getter: None,
+            hoisted_companion_setter: None,
         },
     ))
 }
@@ -1053,21 +1060,25 @@ fn synthesize(
 }
 
 /// A private companion property is realized before its field moves to the outer class. Once that
-/// hoist (and any value-class carrier erasure) has happened, the reference calls
-/// `access$get<X>$cp` there, and a `var` calls `access$set<X>$cp` with the same physical value.
-/// Reflection still reports `get<X>` of that field type, including a nullable primitive carrier
-/// that stayed boxed.
+/// hoist (and any value-class carrier erasure) has happened, each compiler-supplied accessor calls
+/// the outer field's `access$get<X>$cp` or `access$set<X>$cp` with the same physical value. A
+/// source-declared accessor remains a call through the companion's member bridge, so its body is
+/// not bypassed. Reflection still reports `get<X>` of the field type, including a nullable
+/// primitive carrier that stayed boxed.
 pub(crate) fn retarget_hoisted_companion_references(
     ir: &mut IrFile,
     realizations: &mut PropertyReferenceRealizations,
 ) {
     struct Retarget {
         class_index: usize,
+        static_index: u32,
         outer: TypeName,
         getter_call: String,
         getter_descriptor: String,
         declared_getter: String,
         setter_call: Option<String>,
+        source_declared_getter: bool,
+        source_declared_setter: bool,
         physical: Ty,
         value_class: Option<TypeName>,
     }
@@ -1109,6 +1120,10 @@ pub(crate) fn retarget_hoisted_companion_references(
         else {
             continue;
         };
+        let Some(property_declaration) = companion_class.properties.get(*property_index as usize)
+        else {
+            continue;
+        };
         if !ir.is_jvm_companion_hoisted_static(static_index) || ir.is_jvm_field_static(static_index)
         {
             continue;
@@ -1126,11 +1141,14 @@ pub(crate) fn retarget_hoisted_companion_references(
             .map(|name| format!("access${name}$cp"));
         pending.push(Retarget {
             class_index,
+            static_index,
             outer,
             getter_call: format!("access${declared_getter}$cp"),
             getter_descriptor,
             declared_getter,
             setter_call,
+            source_declared_getter: property_declaration.modifiers.declared_getter,
+            source_declared_setter: property_declaration.modifiers.declared_setter,
             physical,
             // A field that is already the value class is the boxed nullable carrier (`I?`).
             // Recording it as a carrier would unbox the bridge argument to the underlying primitive.
@@ -1150,30 +1168,47 @@ pub(crate) fn retarget_hoisted_companion_references(
             .setter_call
             .as_ref()
             .map(|_| format!("({})V", crate::jvm::names::type_descriptor(update.physical)));
-        realization.physical_getter_ret = Some(update.physical);
-        realization.getter_bridge_owner = Some(update.outer);
-        realization.reflection_getter =
-            Some((update.declared_getter, update.getter_descriptor.clone()));
-        realization.getter_field = None;
-        realization.setter_field = None;
-        realization.member_access_bridge = None;
-        realization.accessor_names_are_physical = true;
-        if update.setter_call.is_some() {
+        let retarget_getter = !update.source_declared_getter;
+        let retarget_setter = update.setter_call.is_some() && !update.source_declared_setter;
+        if retarget_getter {
+            realization.physical_getter_ret = Some(update.physical);
+            realization.getter_bridge_owner = Some(update.outer);
+            realization.reflection_getter = Some((
+                update.declared_getter.clone(),
+                update.getter_descriptor.clone(),
+            ));
+            realization.getter_field = None;
+            realization.hoisted_companion_getter = Some(update.static_index);
+        }
+        if retarget_setter {
             realization.physical_setter_value = Some(update.physical);
             realization.setter_bridge_owner = Some(update.outer);
+            realization.setter_field = None;
+            realization.hoisted_companion_setter = Some(update.static_index);
         }
+        if !update.source_declared_getter
+            && !(update.setter_call.is_some() && update.source_declared_setter)
+        {
+            realization.member_access_bridge = None;
+        }
+        realization.accessor_names_are_physical = true;
         // The value-class pass may already have marked this reference for unboxing. A nullable
         // primitive carrier is stored as the box, so that mark has to be cleared with the retarget.
-        realization.boxed_value_class = update.value_class;
+        if retarget_getter {
+            realization.boxed_value_class = update.value_class;
+        }
         let reference = ir.classes[update.class_index]
             .prop_ref
             .as_mut()
             .expect("the scan only queued classes that have a property reference");
-        reference.call_owner_internal = Some(update.outer);
-        reference.getter_name = update.getter_call;
-        reference.getter_descriptor = Some(update.getter_descriptor);
-        reference.ext_facade = None;
-        if let Some(setter_call) = update.setter_call {
+        if retarget_getter {
+            reference.getter_name = update.getter_call;
+            reference.getter_descriptor = Some(update.getter_descriptor);
+        }
+        if retarget_setter {
+            let setter_call = update
+                .setter_call
+                .expect("a retargeted setter has a selected setter");
             reference.setter_name = Some(setter_call);
             reference.setter_descriptor = setter_descriptor;
         }

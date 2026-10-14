@@ -194,7 +194,6 @@ impl Parser<'_> {
         self.finish_assignment_stmt(Stmt::IncDec { name, dec, prefix }, start, target)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn safe_incdec_access_value_expr(
         &mut self,
         e: ExprId,
@@ -270,29 +269,18 @@ impl Parser<'_> {
     /// is discarded. Safe updates have no operand record on their guarded outer block, so the
     /// conditional stays live.
     pub(super) fn discard_incdec_access_value(&mut self, expression: ExprId) -> bool {
-        if !self.file.incdec_access_operands.contains_key(&expression) {
+        let Some(access) = self.file.incdec_accesses.get(&expression) else {
             return false;
-        }
+        };
+        let (keeps_reread, original) = (access.prefix, access.original);
         let Expr::Block { stmts, trailing } = self.file.expr(expression).clone() else {
             return false;
         };
         let Some(trailing) = trailing else {
             return false;
         };
-        let keeps_reread = !matches!(
-            self.file.expr(trailing),
-            Expr::Name(name) if name == "$$incDecOriginal"
-        );
-        let original = stmts.iter().position(|&statement| {
-            matches!(
-                self.file.stmt(statement),
-                Stmt::Local { name, .. } if name == "$$incDecOriginal"
-            )
-        });
         let mut stmts = stmts;
-        if let Some(original) = original {
-            stmts.remove(original);
-        }
+        stmts.retain(|&statement| Some(statement) != original);
         let reread = keeps_reread.then(|| {
             let span = self.file.expr_spans[trailing.0 as usize];
             self.file.add_stmt(Stmt::Expr(trailing), span)
@@ -357,13 +345,11 @@ impl Parser<'_> {
             start,
         );
         statements.push(value_local);
-        let original_read = if prefix {
-            None
-        } else {
+        let original = (!prefix).then(|| {
             let original_init = self
                 .file
                 .add_expr(Expr::Name(VALUE.to_string()), target_span);
-            statements.push(self.file.add_stmt(
+            let original = self.file.add_stmt(
                 Stmt::Local {
                     is_var: false,
                     name: ORIGINAL.to_string(),
@@ -371,30 +357,30 @@ impl Parser<'_> {
                     init: original_init,
                 },
                 start,
-            ));
-            Some(
-                self.file
-                    .add_expr(Expr::Name(ORIGINAL.to_string()), target_span),
-            )
-        };
+            );
+            statements.push(original);
+            original
+        });
 
         // Preserve the canonical inc/dec node on a lexical variable. The resolver therefore owns
         // operator-convention validation and exact overload selection instead of seeing an ordinary
         // `.inc()` call manufactured by the parser.
-        statements.push(self.parse_incdec(VALUE.to_string(), dec, prefix, start, target_span));
+        let update = self.parse_incdec(VALUE.to_string(), dec, prefix, start, target_span);
+        statements.push(update);
         let assigned_value = self
             .file
             .add_expr(Expr::Name(VALUE.to_string()), target_span);
-        let assignment = self
+        let store = self
             .finish_incdec_access_assignment(target_write, assigned_value, start, target_span)
             .expect("cached member/index target has an assignment form");
-        statements.push(assignment);
+        statements.push(store);
         let trailing = if prefix {
             self.share_incdec_access_target(target, target_span)
                 .map(|(_, read, _)| read)
                 .expect("the first share already accepted this access")
         } else {
-            original_read.expect("postfix keeps the first read")
+            self.file
+                .add_expr(Expr::Name(ORIGINAL.to_string()), target_span)
         };
         let block = self.file.add_expr(
             Expr::Block {
@@ -403,7 +389,17 @@ impl Parser<'_> {
             },
             Span::new(start.lo, self.file.expr_spans[e.0 as usize].hi),
         );
-        self.file.incdec_access_operands.insert(block, operands);
+        self.file.incdec_accesses.insert(
+            block,
+            IncDecAccess {
+                operands,
+                value: value_local,
+                original,
+                update,
+                store,
+                prefix,
+            },
+        );
         block
     }
 

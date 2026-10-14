@@ -126,6 +126,168 @@ fun box(): String {\n\
     );
 }
 
+/// A delegation forwarder has no source declaration of its own, but it still occupies the class's
+/// physical method namespace. Its scalar result is boxed when it implements a type-parameter slot;
+/// that boxed descriptor must clash with a member-extension property's nullable-scalar getter just
+/// as it does in kotlinc.
+#[test]
+fn a_boxed_delegation_forwarder_clashes_with_a_member_extension_getter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base<T> { fun getValue(receiver: Int): T }\n\
+             interface Boxed : Base<Int> { override fun getValue(receiver: Int): Int }\n\
+             class Impl : Boxed { override fun getValue(receiver: Int): Int = receiver }\n\
+             class C(impl: Boxed) : Boxed by impl {\n\
+             \x20   val Int.value: Int? get() = null\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// A stored property's default getter is emitted directly from its property declaration and has no
+/// `IrFunction`. It nevertheless shares the class method namespace with generated delegation
+/// forwarders, so the collision inventory must compare those two representation paths.
+#[test]
+fn a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base<T> { fun getValue(): T }\n\
+             interface Boxed : Base<Int> { override fun getValue(): Int }\n\
+             class Impl : Boxed { override fun getValue(): Int = 1 }\n\
+             class C(impl: Boxed) : Boxed by impl {\n\
+             \x20   val value: Int? = null\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Emission compares an existing delegation method by its selected physical descriptor, not by
+/// the pre-boxing IR return. A primitive property getter therefore remains present beside the
+/// boxed implementation method and its erased bridge when all three slots are distinct.
+#[test]
+fn a_primitive_property_getter_survives_a_boxed_delegation_forwarder() {
+    const SRC: &str = "interface Base<T> { fun getValue(): T }\n\
+interface Boxed : Base<Int> { override fun getValue(): Int }\n\
+class Impl : Boxed { override fun getValue(): Int = 1 }\n\
+class C(impl: Boxed) : Boxed by impl { val value: Int = 2 }\n\
+fun box(): String {\n\
+    val c = C(Impl())\n\
+    val base: Base<Int> = c\n\
+    if (c.getValue() != 1) return \"direct\"\n\
+    if (base.getValue() != 1) return \"base\"\n\
+    if (c.value == 0) return \"property-zero\"\n\
+    if (c.value == 1) return \"property-one\"\n\
+    if (c.value != 2) return \"property-other\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("all distinct physical getters are emitted"),
+        "OK"
+    );
+}
+
+#[test]
+fn primitive_property_and_boxed_delegation_getters_match_kotlinc_descriptors() {
+    const SRC: &str = "interface Base<T> { fun getValue(): T }\n\
+interface Boxed : Base<Int> { override fun getValue(): Int }\n\
+class Impl : Boxed { override fun getValue(): Int = 1 }\n\
+class C(impl: Boxed) : Boxed by impl { val value: Int = 2 }\n";
+    let classes = common::expect_classes_with_stdlib(SRC, "DistinctDelegatedGetters");
+    let Some(reference) = common::kotlinc_library(SRC) else {
+        return;
+    };
+    let (_, emitted) = classes
+        .iter()
+        .find(|(name, _)| name == "C")
+        .expect("krusty emits C");
+    let reference = std::fs::read(reference.join("C.class")).expect("kotlinc emits C");
+    let getters = |bytes: &[u8]| {
+        declared_methods(bytes)
+            .into_iter()
+            .filter(|method| method.starts_with("getValue "))
+            .fold(std::collections::BTreeMap::new(), |mut counts, method| {
+                *counts.entry(method).or_insert(0usize) += 1;
+                counts
+            })
+    };
+    let expected = std::collections::BTreeMap::from([
+        ("getValue ()I".to_string(), 1),
+        ("getValue ()Ljava/lang/Integer;".to_string(), 1),
+        ("getValue ()Ljava/lang/Object;".to_string(), 1),
+    ]);
+    assert_eq!(getters(emitted), expected);
+    assert_eq!(getters(emitted), getters(&reference));
+}
+
+/// Generic forwarders retain their declaration type parameters and non-default bounds in the
+/// detailed clash diagnostic instead of looking like an unresolved use of the type parameter.
+#[test]
+fn a_generic_delegation_forwarder_renders_its_type_parameter_bound() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base { fun <T : Any> getValue(): T }\n\
+             class C(base: Base) : Base by base { val value: Any? = null }\n",
+        )],
+        &[],
+    );
+}
+
+/// Kotlin renders a callable type parameter's first bound inline and each additional bound in a
+/// trailing `where` clause, including on a generated delegation forwarder.
+#[test]
+fn a_generic_delegation_forwarder_renders_additional_bounds_in_a_where_clause() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base { fun <`class`> getValue(): `class` where `class` : CharSequence, `class` : Comparable<`class`> }\n\
+             class C(base: Base) : Base by base { val value: CharSequence? = null }\n",
+        )],
+        &[],
+    );
+}
+
+/// An implicit stored-property accessor has no `IrFunction`, so its class-owned type parameter
+/// must still use Kotlin identifier escaping when it is listed beside a delegation forwarder.
+#[test]
+fn an_implicit_property_getter_escapes_its_class_type_parameter() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Base { fun getValue(): Any? }\n\
+             class C<`T value`>(base: Base, x: `T value`) : Base by base {\n\
+                 val value: `T value` = x\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// Delegated property accessors retain property semantics in clash diagnostics: their callable
+/// spelling is `<get-name>`/`<set-name>`, and a setter's final parameter is `<set-?>` rather than an
+/// ordinary source value parameter.
+#[test]
+fn delegated_property_forwarders_render_accessor_clashes() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Read { val foo: Int }\n\
+             class ReadImpl(override val foo: Int) : Read\n\
+             class Getter(read: Read) : Read by read { fun getFoo(): Int = 0 }\n\
+             interface Mutable { var bar: Int }\n\
+             class MutableImpl(override var bar: Int) : Mutable\n\
+             class Setter(mutable: Mutable) : Mutable by mutable {\n\
+             \x20   fun setBar(value: Int) {}\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
 /// Delegation to a generic interface instantiated with a REFERENCE type argument (`A<String> by a`):
 /// the interface method `foo(): T` erases to `Object`, so a raw forward through the synthesized field
 /// is correct (the unbox/checkcast happens at the call site). The non-`val` param uses a `$$delegate_N`.

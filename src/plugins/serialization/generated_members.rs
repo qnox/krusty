@@ -149,9 +149,13 @@ pub(super) fn descriptor_property(
 ) -> IrProperty {
     IrProperty {
         name: "descriptor".to_string(),
+        diagnostic_span: None,
+        getter_diagnostic_span: None,
+        setter_diagnostic_span: None,
         context_params: Vec::new(),
         source_order,
         decl_line: 0,
+        accessor_lines: crate::ir::IrAccessorLines::default(),
         ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
         type_params: Vec::new(),
         visibility: Visibility::Public,

@@ -6,6 +6,35 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// Select the JVM access for an active-source property by the exact declaration coordinate
+    /// retained from checked FIR. Companion storage may already have been moved to the outer class;
+    /// consume that backend table directly instead of recovering the property from its spelling.
+    pub(super) fn local_property_read_access(
+        &self,
+        target: crate::fir::PropertyId,
+        selected_accessor: Option<&str>,
+        selected_interface: bool,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        let crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            owner,
+            name,
+            property,
+            ..
+        } = self.ir.local_property_layouts.get(&target)?
+        else {
+            return None;
+        };
+        debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
+        self.declared_property_read_access(
+            *owner,
+            name,
+            Some(*property as usize),
+            selected_accessor,
+            selected_interface,
+        )
+    }
+
     /// Whether a property of `owner` may be reached as its raw backing FIELD from the class currently
     /// being emitted. Only inside the declaring class (the field is private everywhere else) — and only
     /// for a FINAL property. An `open`/`override` property is redeclared by subclasses, which replace its
@@ -64,16 +93,19 @@ impl Emitter<'_> {
         &self,
         owner: TypeName,
         name: &str,
+        selected_property: Option<usize>,
         selected_accessor: Option<&str>,
         selected_interface: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
-        if let Some(index) = class
-            .properties
-            .iter()
-            .position(|property| property.name == name)
-        {
+        let declared_index = selected_property.or_else(|| {
+            class
+                .properties
+                .iter()
+                .position(|property| property.name == name)
+        });
+        if let Some(index) = declared_index {
             if let Some(access) =
                 self.hoisted_companion_property_access(class.fq_name, index as u32, false)
             {
@@ -84,7 +116,6 @@ impl Emitter<'_> {
         // A property that DECLARES an accessor (computed, delegated, or `field`-using) is always read
         // through it — the accessor is user code, and a direct field load would skip it. Only a plain
         // backing-field property may be read directly, and only from inside the declaring class.
-        let declared_index = class.properties.iter().position(|p| p.name == name);
         let declared = declared_index.map(|index| &class.properties[index]);
         // A scalar getter result over a reference-returning overridden getter is the wrapper;
         // the read unboxes it (see `jvm::override_results`).
@@ -141,16 +172,21 @@ impl Emitter<'_> {
         // A value-class-typed property's accessor is `@JvmName`-mangled (`getId-<hash>`), so match the
         // mangled spelling too — the alternative is falling through to a private backing field, which is
         // an `IllegalAccessError` from anywhere but the declaring class.
-        let accessor = class.methods.iter().copied().find(|&fid| {
-            let f = &self.ir.functions[fid as usize];
-            let named = f.name == accessor_name
-                || f.name
-                    .strip_prefix(&accessor_name)
-                    .is_some_and(|rest| rest.starts_with('-'));
-            let getter_shape = f.params.is_empty()
-                || (f.is_static && f.name.ends_with("-impl") && f.params.len() == 1);
-            named && getter_shape
-        });
+        let accessor = declared
+            .is_none()
+            .then(|| {
+                class.methods.iter().copied().find(|&fid| {
+                    let f = &self.ir.functions[fid as usize];
+                    let named = f.name == accessor_name
+                        || f.name
+                            .strip_prefix(&accessor_name)
+                            .is_some_and(|rest| rest.starts_with('-'));
+                    let getter_shape = f.params.is_empty()
+                        || (f.is_static && f.name.ends_with("-impl") && f.params.len() == 1);
+                    named && getter_shape
+                })
+            })
+            .flatten();
         if let Some(function) = accessor.filter(|_| !direct_field || field.is_none()) {
             let accessor = &self.ir.functions[function as usize];
             return Some(PropertyAccess::Accessor {
@@ -248,67 +284,142 @@ impl Emitter<'_> {
         writable: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
-        let static_id = self.ir.jvm_companion_property_static(companion, property)?;
-        let storage = self.ir.statics.get(static_id as usize)?;
-        let owner = storage.owner?;
-        let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
-        let declared = self
+        let storage = hoisted_companion_storage(self.ir, companion, property, writable)?;
+        let declaration = self
             .ir
             .classes
             .iter()
             .find(|class| class.fq_name == companion)?
             .properties
             .get(property as usize)?;
-        // A declared accessor is user code. The outer `<clinit>` calls it (through
-        // `access$get…` / `access$set…` when it is private) instead of touching the field.
-        // The accessor body and the declaration initializer store are the field operations.
-        let calls_declared_accessor = if writable {
-            declared.modifiers.declared_setter
-        } else {
-            declared.modifiers.declared_getter
-        };
-        if calls_declared_accessor {
-            return None;
+        // A source assignment retained in the companion initializer still calls a visible default
+        // `lateinit` setter. The outer `<clinit>` owns storage initialization, but that must not
+        // erase the source accessor boundary (`Companion.setText(value)`).
+        if writable
+            && self.render_initializer_boundaries
+            && self.ir.statics[storage.index as usize].is_lateinit
+            && matches!(
+                declaration.setter_visibility,
+                crate::types::Visibility::Public | crate::types::Visibility::Internal
+            )
+        {
+            let setter = declaration.setter?;
+            let function = &self.ir.functions[setter as usize];
+            return Some(PropertyAccess::Accessor {
+                owner: companion,
+                name: declaration
+                    .setter_jvm_name
+                    .clone()
+                    .unwrap_or_else(|| function.name.clone()),
+                descriptor: method_descriptor(&[jvm_declared_ty(&function.params[0])], Ty::Unit),
+                is_static: false,
+                is_interface: false,
+                static_receiver: None,
+            });
         }
-        let private_property = declared.is_private;
-        let property_name = declared.name.clone();
-        let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
-        if emitted_by_owner || self.ir.is_jvm_field_static(static_id) {
+        let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(storage.owner));
+        if emitted_by_owner || self.ir.is_jvm_field_static(storage.index) {
             return Some(PropertyAccess::Field {
-                owner,
-                name: self.ir.static_field_jvm_name(static_id).to_string(),
-                descriptor,
+                owner: storage.owner,
+                name: self.ir.static_field_jvm_name(storage.index).to_string(),
+                descriptor: storage.descriptor(self.ir),
                 is_static: true,
             });
         }
-        if !private_property {
+        if !storage.bridged {
             return None;
         }
-        let (name, descriptor) = if writable {
-            (
-                format!(
-                    "access${}$cp",
-                    crate::names::property_setter_name(&property_name)
-                ),
-                format!("({descriptor})V"),
-            )
-        } else {
-            (
-                format!(
-                    "access${}$cp",
-                    crate::names::property_getter_name(&property_name)
-                ),
-                format!("(){descriptor}"),
-            )
-        };
+        let (name, descriptor) = storage.bridge_shape(self.ir, writable);
         Some(PropertyAccess::AccessBridge {
-            owner,
+            owner: storage.owner,
             name,
             descriptor,
             takes_receiver: false,
-            inline_uninitialized_guard: None,
+            // The `$cp` bridge exposes raw hoisted storage. A normal private `lateinit` read owns
+            // the guard at this use site; `::property.isInitialized` is a distinct IR operation
+            // and never selects this property-access realization.
+            inline_uninitialized_guard: (!writable
+                && self.ir.statics[storage.index as usize].is_lateinit)
+                .then(|| self.ir.statics[storage.index as usize].name.clone()),
         })
     }
+}
+
+/// The outer-class static field that holds a hoisted companion property, as one use reaches it.
+pub(super) struct HoistedCompanionStorage {
+    pub(super) index: u32,
+    /// The outer class that declares the field.
+    pub(super) owner: TypeName,
+    /// A class other than `owner` reaches the field through `access$get…$cp` / `access$set…$cp`:
+    /// the property (for a read) or its default setter (for a write) is private, so that side has
+    /// no callable companion accessor.
+    pub(super) bridged: bool,
+}
+
+impl HoistedCompanionStorage {
+    fn descriptor(&self, ir: &IrFile) -> String {
+        type_descriptor(jvm_declared_ty(&ir.statics[self.index as usize].ty))
+    }
+
+    /// The name and descriptor of the outer class's `$cp` bridge for a read, or a write.
+    pub(super) fn bridge_shape(&self, ir: &IrFile, writable: bool) -> (String, String) {
+        hoisted_bridge_shape(ir, self.index, writable)
+    }
+}
+
+/// `access$get<X>$cp` / `access$set<X>$cp` of hoisted static `index`, with its descriptor.
+pub(super) fn hoisted_bridge_shape(ir: &IrFile, index: u32, writable: bool) -> (String, String) {
+    let storage = &ir.statics[index as usize];
+    let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
+    if writable {
+        (
+            format!("access${}$cp", property_setter_name(&storage.name)),
+            format!("({descriptor})V"),
+        )
+    } else {
+        (
+            format!("access${}$cp", property_getter_name(&storage.name)),
+            format!("(){descriptor}"),
+        )
+    }
+}
+
+/// The hoisted field a read (or write) of companion property `property` uses, when the
+/// property's field moved to the outer class and the use is not a declared accessor's call: a
+/// declared accessor is user code, which the outer `<clinit>` calls too (through `access$get…` /
+/// `access$set…` when it is private). The accessor body and the declaration initializer store are
+/// the field operations.
+pub(super) fn hoisted_companion_storage(
+    ir: &IrFile,
+    companion: TypeName,
+    property: u32,
+    writable: bool,
+) -> Option<HoistedCompanionStorage> {
+    let index = ir.jvm_companion_property_static(companion, property)?;
+    let owner = ir.statics.get(index as usize)?.owner?;
+    let declared = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name == companion)?
+        .properties
+        .get(property as usize)?;
+    let calls_declared_accessor = if writable {
+        declared.modifiers.declared_setter
+    } else {
+        declared.modifiers.declared_getter
+    };
+    if calls_declared_accessor {
+        return None;
+    }
+    Some(HoistedCompanionStorage {
+        index,
+        owner,
+        bridged: (if writable {
+            declared.setter_visibility.is_private()
+        } else {
+            declared.is_private
+        }) && !ir.is_jvm_field_static(index),
+    })
 }
 
 /// Descriptor of an annotation-interface member. `KClass` is returned as `java.lang.Class`.

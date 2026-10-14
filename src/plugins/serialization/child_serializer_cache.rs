@@ -260,6 +260,7 @@ pub(super) fn add_child_serializer_cache(
                 accessors: crate::ir::IrStaticAccessors::ABSENT,
                 line: 0,
                 source_order: u32::MAX,
+                property_delegate: false,
             });
             return None;
         }
@@ -374,6 +375,7 @@ pub(super) fn add_child_serializer_cache(
             // kotlinc's `<clinit>` maps the cache's array construction to the same declaration line.
             line: owner_decl_line,
             source_order: u32::MAX,
+            property_delegate: false,
         });
         // Read the static just declared rather than describing the field again: a read built from a
         // DESCRIPTOR carries the erased type, so returning it coerces to the accessor's declared

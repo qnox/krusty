@@ -58,8 +58,9 @@ pub(super) fn emit(
                 .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
                 .map(|(_, parameter)| parameter.as_str())
                 .or(field.type_param.as_deref());
-            let field_sig =
-                property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+            let field_sig = property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
+                .field
+                .filter(|_| !field.is_property_delegate());
             let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
             cw.add_field_sig(
                 acc,
@@ -90,6 +91,9 @@ pub(super) fn emit(
     emitter.record_locals = true;
     let mut clinit = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
+    if delegated_property_array::exists(env, c.fq_name) {
+        emitter.cw.omit_method_lines("<clinit>", "()V");
+    }
     let ci = emitter.cw.class_ref(fq_name);
     let init = emitter.cw.methodref(fq_name, "<init>", "()V");
     let fref = emitter.cw.fieldref(fq_name, instance_name, &self_desc);
@@ -254,7 +258,9 @@ fn emit_interface_companion_member_fields(
                     .map(|(_, parameter)| parameter.as_str())
                     .or(field.type_param.as_deref());
                 let field_sig =
-                    property_jvm_signatures(signature_formatter, &field.ty, type_parameter).field;
+                    property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
+                        .field
+                        .filter(|_| !field.is_property_delegate());
                 let physical_name = instance_field_jvm_name(ir, run, c, field_index);
                 let descriptor = ir_type_desc(&field.ty);
                 let nullability = field_visibility::publishes_field_nullability(c, field_index)

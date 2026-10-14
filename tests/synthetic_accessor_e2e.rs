@@ -166,6 +166,33 @@ fn private_member_properties_used_from_other_classes_go_through_field_accessors(
     common::expect_box_same_as_kotlinc(SRC, "MemberFieldAccessors");
 }
 
+/// Same-line source positions do not erase expression order. The first read remains ahead of the
+/// independent write, while the write's own target is still discovered before its assigned value.
+#[test]
+fn independent_same_line_companion_accesses_keep_source_order() {
+    const SRC: &str = r#"
+class Holder {
+    companion object {
+        private var first = "O"
+        private var second = ""
+    }
+
+    class Nested {
+        fun touch(): String { val read = first; second = read + "K"; return second }
+    }
+}
+
+fun box(): String = Holder.Nested().touch()
+"#;
+
+    common::assert_class_code_matches_kotlinc(
+        "IndependentSameLineCompanionAccessors",
+        SRC,
+        "Holder",
+    );
+    common::expect_box_same_as_kotlinc(SRC, "IndependentSameLineCompanionAccessorsRun");
+}
+
 /// A named object's private backing fields are JVM statics. A nested object reaches them through
 /// receiverless `access$get<X>$p()` / `access$set<X>$p(value)` bridges that `getstatic` / `putstatic`
 /// the field. An instance bridge would `getfield` a static field and throw

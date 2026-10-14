@@ -1111,7 +1111,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc-built `@JvmField var`. Hoisted companion statics are no longer registered in
   `declared_class_statics[owner]`: kotlinc's OWNER metadata carries NO record for a hoisted
   companion property (the declaration belongs to the companion's metadata alone), and the bogus
-  const-flavored owner record was the last owner-class byte divergence. Byte-identical to kotlinc
+  const-flavored owner record was the last owner-class byte divergence. The public `@JvmField` ABI
+  spelling also takes priority over same-signature private storage from a `companion { ... }` block:
+  the private field receives the next `$N` suffix. A same-signature block `const val` is itself a
+  public owner field, so neither declaration can be renamed and kotlinc reports a platform
+  declaration clash at both properties. A field named `Companion` that instead collides
+  with the owner's synthetic companion alias is rejected with kotlinc's two exact platform-
+  declaration-clash diagnostics; the backend must not silently make that invalid source legal by
+  renaming the public field. Byte-identical to kotlinc
   for owner + companion in the class-owner (val + var), internal-val, and interface-owner shapes
   (also under `-jvm-default=no-compatibility`); runtime round-trips same-file, cross-file, and
   cross-module (`tests/jvmfield_companion_e2e.rs`). Ineligible placements FALL BACK TOGETHER: the
@@ -5024,6 +5031,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameters; without that record the attribute was missing. Test:
   `tests/delegation_forwarder_signature_e2e.rs`.
 
+- **A delegation forwarder participates in declaration clashes by its physical JVM descriptor.**
+  A generated forwarder has no source function declaration, but it occupies the same method
+  namespace as declared functions and property accessors. Descriptor comparison happens after the
+  backend's override representation is selected: when `Boxed : Base<Int>` overrides
+  `Base<T>.getValue`, the delegated `getValue` result is the boxed `Integer`, not the raw semantic
+  `Int`. It therefore clashes with either a nullable-`Int` member-extension getter having the same
+  receiver parameter or a stored nullable-`Int` property's emission-only implicit getter. krusty
+  reports the platform declaration clash like kotlinc instead of emitting duplicate class methods.
+  Conversely, a primitive property getter remains emitted beside a boxed delegation forwarder and
+  its erased bridge when their backend-selected descriptors are distinct.
+  A generic forwarder retains its declared type parameters and non-default bounds in the detailed
+  declaration list; the first bound is inline and additional bounds use Kotlin's trailing `where`
+  clause. Backticked type-parameter names retain their Kotlin escaping in forwarder and implicit
+  property-accessor type positions.
+  A delegated property's generated accessors retain property syntax in that diagnostic
+  (`<get-name>`/`<set-name>` and the setter value `<set-?>`), rather than rendering as ordinary
+  generated functions. Tests:
+  `tests/interface_delegation_e2e.rs::a_boxed_delegation_forwarder_clashes_with_a_member_extension_getter`,
+  `…::a_boxed_delegation_forwarder_clashes_with_an_implicit_property_getter`,
+  `…::a_primitive_property_getter_survives_a_boxed_delegation_forwarder`,
+  `…::a_generic_delegation_forwarder_renders_its_type_parameter_bound`,
+  `…::a_generic_delegation_forwarder_renders_additional_bounds_in_a_where_clause`,
+  `…::an_implicit_property_getter_escapes_its_class_type_parameter`,
+  `…::delegated_property_forwarders_render_accessor_clashes`.
+
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
   AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,
@@ -7376,7 +7408,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   WRONG_ANNOTATION_TARGET at the `@`: `this annotation is not applicable to target 'getter'.
   Applicable targets: <list>`, the Kotlin `@Target` entries in declared order without duplicates, or
   for a Java `@Target` the union of each `ElementType`'s Kotlin targets in Kotlin target order
-  followed by `expression` (identical on 2.4.0, 2.4.10 and 2.4.20). Retained applications are
+  followed by `expression` (identical on 2.4.0, 2.4.10 and 2.4.20). An explicit property
+  `@field:A` application is checked against `field` at the complete `@field:A` prefix before its
+  checked application is published; the use-site cannot override an annotation class whose
+  declared targets exclude `FIELD`. Argument checking remains independent and precedes this site
+  check, so one invalid application reports both diagnostics in kotlinc's order. Retained applications are
   written on the getter/setter method (and the setter's parameter) by retention, for member,
   top-level and companion properties, declared or default accessors alike. `@Metadata` sets
   `HAS_ANNOTATIONS` on the accessor's flags word (`getter_flags` f7, `setter_flags` f8) and on the
@@ -7389,6 +7425,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   names the renamed method) but not a bodyless one; use-site targets (`@get:A`) are not part of this
   path. Tests: `property_accessor_annotation_e2e`, `expression_line_marks_e2e` (setter
   fall-through), `types::annotation_targets` unit tests.
+
+  A retained `PROPERTY` annotation's synthetic `$annotations` method occupies the same physical JVM
+  method namespace as source declarations. When more than one independent marker collision group
+  exists in a class, kotlinc orders the groups by the earliest retained declaration source position,
+  not by hash-map iteration or lexicographic JVM signature. Only that earliest group contributes the
+  generated declaration's diagnostic at the class header; every colliding source declaration still
+  receives its own group diagnostic. The JVM signature is only a deterministic tie-breaker after
+  source provenance. Test:
+  `tests/property_accessor_annotation_e2e.rs::independent_marker_clash_groups_follow_property_source_order`.
 
 - **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
   a body.** Two independent checks, both syntactic and both measured against the reference
@@ -17026,6 +17071,128 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference compiler as well. Corpus: `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`,
   `statics/incInClassObject.kt`, `increment/argumentWithSideEffects.kt`,
   `defaultArguments/convention/incWithDefaultInGetter.kt` (the second `get` applies its default).
+- **An enum constructor's `init` block closes on its `}` line.** kotlinc marks an `init` block's
+  closing brace with a line entry of its own; where the next instruction is the constructor's
+  `return`, which maps back to the class header line, a `nop` holds the brace's line. A class's
+  primary constructor already marked the header line through the code builder, which realizes
+  the pending `nop`; an enum's constructor wrote its header entry only into the table, so the
+  brace line and the `return` shared one pc. The enum constructor now marks it the same way.
+  Test: `tests/enum_init_block_line_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`,
+  `enum/initEnumAfterObjectAccess.kt`.
+- **An inner class's `this$0` is typed by the outer class's default type.** kotlinc's outer
+  instance field has the outer class applied to its own type parameters (`Outer<T, R>`), so a
+  generic outer signs it (`LOuter<TT;TR;>;`). Lowering takes that type from the resolved
+  classifier's self type for the field only; the constructor's outer-instance parameter is a
+  physical prefix and stays the plain class. Test: `tests/inner_outer_field_signature_e2e.rs`.
+  Corpus: `innerNested/innerWithDefaultArgumentGenericExtensionProperty.kt`,
+  `delegation/delegationToInnerClassOfGenericClass.kt`, `reflection/classes/qualifiedName.kt`.
+- **A property delegate's storage field has no generic `Signature`.** kotlinc's `ClassCodegen`
+  writes no `Signature` for a field of `PROPERTY_DELEGATE` origin, so `val x by Box<String>(…)`
+  stores into `Box x$delegate` with the erased descriptor only. The lowering marks that storage
+  (an instance field's `IrField` flag, a static's `property_delegate`) and every field table — the
+  facade, a class, an object and an enum class — drops the generic signature for it. A companion's
+  delegate that the JVM backend hoists to the outer class is a new field in kotlinc and keeps its
+  `Signature`. Test: `tests/delegate_field_signature_e2e.rs`. Corpus: `delegatedProperty/genericDelegate.kt`,
+  `fieldRename/delegates.kt`, `typeMapping/kt3863.kt`, `enum/k54079.kt`.
+- **A primitive compared with a reference is not boxed; an equality with a safe call folds.**
+  A source `==` between a primitive and a nullable primitive stays one structural equality, both
+  operands evaluated in source order (common IR no longer spills the nullable operand first). The
+  JVM backend realizes it as kotlinc's `Equals` intrinsic does from the operands' JVM types: an
+  `int`-category or `long` value against any reference, or a boxed primitive against such a value,
+  is kotlinc's `PrimitiveToObjectComparison` — the reference is checked (`dup; ifnonnull` for a
+  box, `dup; instanceof` for anything else), both values are discarded on failure, and otherwise
+  the reference is unboxed and compared, with no `Boolean` materialized in a condition. A boxed
+  left operand keeps the right primitive in a temporary. `Boolean`, `Float` and `Double` keep
+  their own forms. A `Byte`/`Short` pair compares at `Int` as kotlinc's FIR2IR builds it: the
+  nullable side becomes the safe conversion `e?.toInt()`. Both kotlinc/JVM and Kotlin/Native fold
+  `safe?.x == p` and `p == safe?.x` (with `p` a non-null primitive) into the safe call's guard,
+  `false` on the null path, so the other operand is not evaluated for a `null` receiver; `!=`
+  negates the folded equality. The Native corpus explicitly pins that behavior (while noting it
+  might be a Kotlin bug), so common lowering records the shared evaluation order before backend
+  selection. A right-side fold reads an immutable receiver binding directly. Test:
+  `tests/primitive_to_object_equality_e2e.rs`.
+  Corpus: `primitiveTypes/equalityWithObject/generated/*`, `binaryOp/eqNullableShortToShort.kt`,
+  `binaryOp/eqNullableToPrimitiveWithSideEffects.kt`, `safeCall/safeCallEqPrimitive.kt`,
+  `safeCall/safeCallNotEqPrimitive.kt`, `casts/literalExpressionAsGenericArgument/*`.
+- **A companion property assigned only by `init` blocks is an outer-class static.** kotlinc's
+  `MoveOrCopyCompanionObjectFieldsLowering` moves every class companion's backing field to the
+  outer class, with or without an initializer. A property with no initializer gets no static
+  initializer of its own; the companion's `init` blocks run in the outer `<clinit>` and write the
+  static in source order, and the companion reaches it through `access$get…$cp`/`access$set…$cp`.
+  A property reference still calls a source-declared getter or setter; only a compiler-supplied
+  accessor is retargeted to the raw outer-field bridge.
+  Test: `tests/companion_init_assigned_property_e2e.rs`. Corpus:
+  `statics/anonymousInitializerInClassObject.kt`.
+- **A protected or internal companion property is an outer-class static too.** The move covers
+  every visibility. The companion's synthesized accessors keep the property's visibility (a
+  protected getter and setter; an internal pair is module-mangled, `getX$main`), and the outer
+  class's `access$get…$cp`/`access$set…$cp` bridges keep the unmangled name. A bodiless private
+  setter has no companion method and is recorded as absent from the static realization, whether
+  or not the property has an initializer; a nested class writes through the outer field's public
+  synthetic bridge. An explicit expression written as a companion property's receiver is a lookup
+  coordinate rather than a runtime receiver: `self().x` does not evaluate `self()` once the selected
+  property is realized as an outer static. A canonical companion singleton read is retained when it
+  is needed to trigger class initialization. Test:
+  `tests/companion_property_visibility_e2e.rs`. Corpus: `regressions/kt5395.kt` (`protected val`).
+- **An enum class's companion properties are enum statics.** kotlinc moves an enum companion's
+  backing fields like any class companion's, and runs the companion initializer in the enum's
+  `<clinit>` after the entries, `$VALUES`, `$ENTRIES` and the `Companion` store, interleaving
+  property stores and `init` blocks in source order. A hoisted store's line entry does not add
+  the closing-line entry a generated static's store does. The enum's static fields are emitted in
+  declaration order, and a companion `const val` is a `ConstantValue` field the `<clinit>` does
+  not store. An `@JvmField` whose name and descriptor collide with an enum entry is a platform
+  declaration clash: both are public ABI fields, so neither may take the private-storage `$N`
+  suffix. Tests: `tests/enum_companion_property_e2e.rs`, `tests/jvmfield_companion_e2e.rs`. Corpus:
+  `enum/companionAccessingEnumValue.kt`, `enum/enumEntriesInCompanion.kt`,
+  `enum/initEntriesInCompanionObject.kt`.
+- **A class initializer does not store a static's JVM default value.** kotlinc's
+  `ExpressionCodegen.visitSetField` drops a field initializer in `<clinit>` whose constant is the
+  field type's default (`0`, `false`, `'\u0000'`, `+0.0`, `null`). The class and enum
+  `<clinit>`s apply the same elision the file facade already does, so a hoisted companion
+  `var count = 0` has no store. Test: `tests/companion_default_initializer_e2e.rs`.
+- **`@Volatile` and `@Transient` are backing-field modifiers.** kotlinc's
+  `ClassCodegen.computeFieldFlags` sets `ACC_VOLATILE` on a field whose property carries
+  `kotlin.jvm.Volatile` and `ACC_TRANSIENT` for `kotlin.jvm.Transient`; both annotations have
+  SOURCE retention, so the flag is all that reaches the class file. The JVM backend reads the
+  property's resolved annotation identities for a class, constructor or object property, a
+  companion property hoisted to its outer class and a top-level property.
+  `kotlin.concurrent.Volatile` resolves to the same identity. An unsuppressed immutable property is
+  rejected and does not publish the application. Suppressing `VOLATILE_ON_VALUE` retains it, and
+  kotlinc emits the unusual `ACC_FINAL | ACC_VOLATILE` field flags; the backend matches that
+  classfile shape even though a JVM may reject the illegal modifier pair when loading it. Test:
+  `tests/volatile_field_e2e.rs`. Corpus: `volatile/volatileInt.kt` and its siblings.
+- **An outer class bridges a hoisted companion field only for another class's use.** kotlinc's
+  `SyntheticAccessorLowering` creates `access$get…$cp` / `access$set…$cp` when code outside the
+  outer class reaches the moved field: the companion's own accessors, a nested class reading a
+  private property, or a property-reference carrier. The outer class reads and writes the field
+  directly, so a private companion property used only there, or never, has no bridge. The JVM
+  backend plans these accessors with the other synthetic accessors of the outer class, from the
+  same uses its emitter routes through them. Test: `tests/companion_field_bridge_use_e2e.rs`.
+  Corpus: `classes/kt1018.kt`, `objects/kt1047.kt`, `objects/kt1047a.kt`,
+  `properties/kt4252.kt`.
+- **A backing field's descriptor interns before its nullability annotation.** kotlinc's class
+  writer visits the fields after the methods, each as its name, its descriptor and then its
+  `@NotNull`/`@Nullable` annotation. A private field no method reads or writes therefore adds its
+  descriptor to the constant pool ahead of the annotation type. Test:
+  `tests/unread_field_annotation_order_e2e.rs`.
+- **A member or index `++`/`--` builds kotlinc's block, and binds only operands that need it.**
+  kotlinc's FIR writes `a.p++` as `{ val <unary> = a.p; a.p = <unary>.inc(); <unary> }`, `++a.p` as
+  `{ a.p = a.p.inc(); a.p }`, and an index update the same way over `get`/`set`. The receiver and
+  the index operands go into temporaries first, but kotlinc's JVM optimization folds a temporary
+  whose initializer is a constant or a read of an immutable value (a `val`, a parameter, the
+  current `this`) back into its uses, so only an operand such as a call, a `var` or a nested access
+  takes a slot. A compound index assignment (`a[i] += x`) binds its operands by the same rule. A
+  counted loop's variable does not count as immutable: kotlinc's loop lowering makes it the
+  induction variable, so a temporary holding it survives. The postfix temporary is unnamed, so it has no `LocalVariableTable` row, and its
+  `inc()` is computed into the write: an `Int` property never becomes `iinc`. The statement form
+  keeps the same shape: the old value is still stored before the write, including for a property
+  reached through an implicit receiver or a top-level property. Checked FIR rebuilds these blocks
+  from the parser's expansion (`IncDecAccess`) in `src/fir/body_check/blocks.rs`. Not matched yet: a
+  statement whose write pushes nothing between the store and the load of the old value (a
+  top-level property, or a reference value moved with `swap`), where kotlinc's block-scope label
+  keeps the temporary, and the slots of an index update in statement position, which kotlinc keeps
+  until the enclosing block ends. Test: `tests/access_increment_shape_e2e.rs`. Corpus:
+  `increment/argumentWithSideEffects.kt`, `increment/kt36956.kt`, `classes/kt1891.kt`.
 - **A shared-cell capture stays one cell however many callables it crosses, and is forwarded BY the
   cell.** `var ok = "fail"; fun mk(): C = object : C { override fun i() = ok }` — the anonymous
   object must see the write `ok = "OK"` that happens after `mk()` returns, so it has to hold the

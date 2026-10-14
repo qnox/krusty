@@ -254,20 +254,18 @@ pub(super) fn attach(file: &mut File, src: &str) {
     }
 }
 
-/// The header and end lines of `property`'s accessors written with a body of their own.
+/// The source header lines of written accessors, and the end lines of accessors with bodies.
+/// A bodiless visibility-only accessor still owns its header line: JVM synthesis can use that
+/// declaration boundary even though there is no source body to lower.
 fn accessor_lines(
     property: &crate::ast::PropDecl,
     line_at: impl Fn(u32) -> u32,
     body_lines: impl Fn(&FunBody) -> crate::ast::FunBodyLines,
 ) -> crate::ast::AccessorLines {
-    let getter = property
-        .getter_span
-        .filter(|_| property.getter.is_some())
-        .map_or(0, |span| line_at(span.lo));
+    let getter = property.getter_span.map_or(0, |span| line_at(span.lo));
     let setter = property
         .setter
         .as_ref()
-        .filter(|setter| setter.body.is_some())
         .map_or(0, |setter| line_at(setter.span.lo));
     let getter_end = property
         .getter
@@ -361,5 +359,15 @@ mod tests {
             assert_eq!(class.span.hi as usize, end, "{name} exact span");
             assert_eq!(class.decl_end_line, line, "{name} end line");
         }
+    }
+
+    #[test]
+    fn a_bodyless_setter_retains_its_own_header_line() {
+        let class = parsed_class(
+            "class Holder {\n    lateinit var value: String\n        private set\n}\n",
+            "Holder",
+        );
+        assert_eq!(class.body_props[0].accessor_lines.setter, 3);
+        assert_eq!(class.body_props[0].accessor_lines.setter_end, 0);
     }
 }

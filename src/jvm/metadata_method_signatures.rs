@@ -85,7 +85,10 @@ pub(super) fn requires_field_signature(
 /// `mapTypeDefault`: the descriptor `ClassMapperLite` gives the type's class id, nullability
 /// ignored, or `None` for a type with no class id (a type parameter) or a local one.
 fn map_type_default(ty: Ty, local_classifiers: &HashSet<TypeName>) -> Option<String> {
-    let ty = ty.non_null();
+    // Source aliases and qualified builtin spellings share one semantic classifier. Normalize
+    // before applying ClassMapperLite so `kotlin.Unit` is reconstructed as method-result `V`, not
+    // mistaken for the physical `Lkotlin/Unit;` carrier of a field or parameter.
+    let ty = ty.non_null().canonical_semantic();
     Some(match ty {
         Ty::Obj(classifier, _) if local_classifiers.contains(&classifier) => return None,
         Ty::Obj(classifier, _) => super::jvm_class_map::class_mapper_lite_descriptor(classifier),
@@ -176,6 +179,11 @@ mod tests {
             [],
             Ty::String,
             "(Lkotlin/reflect/KFunction;)Ljava/lang/String;",
+            &none
+        ));
+        assert!(requires_field_signature(
+            Ty::obj("kotlin/Unit"),
+            "Lkotlin/Unit;",
             &none
         ));
     }

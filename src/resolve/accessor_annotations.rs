@@ -45,11 +45,17 @@ impl Checker<'_> {
         target: KotlinTarget,
     ) {
         for entry in annotations {
-            let Some(classifier) =
-                self.check_annotation_application(scope, &entry.annotation, &entry.arguments)
-            else {
+            let Some(classifier) = self.check_non_property_annotation_application(
+                scope,
+                &entry.annotation,
+                &entry.arguments,
+                target.description(),
+            ) else {
                 continue;
             };
+            if entry.annotation.property_site.is_some() {
+                continue;
+            }
             let Some(targets) = self.diagnostic_annotation_targets(classifier) else {
                 continue;
             };

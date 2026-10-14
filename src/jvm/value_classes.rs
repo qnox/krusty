@@ -28,6 +28,7 @@ mod mangled_calls;
 mod member_names;
 mod module_members;
 mod operand_nullness;
+mod property_annotation_markers;
 mod property_references;
 mod reference_returns;
 mod representation;
@@ -685,6 +686,11 @@ pub(crate) fn lower_value_classes(
     // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
     // owns their compatibility and the implementation getter keeps its ordinary spelling.
     let mut divergent_getters = HashSet::default();
+    let property_annotation_markers = ir
+        .property_annotation_markers
+        .values()
+        .copied()
+        .collect::<HashSet<_>>();
     for (&owner, edges) in &ir.property_overrides {
         let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
             continue;
@@ -740,6 +746,7 @@ pub(crate) fn lower_value_classes(
                 | "toString-impl"
                 | "<init>"
         ) || is_divergent_override_getter
+            || property_annotation_markers.contains(&(fid as u32))
             || realized_members.any_delegators.contains(&(fid as u32));
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
@@ -1037,29 +1044,6 @@ pub(crate) fn lower_value_classes(
                 dispatch_receiver: Some(get),
                 args: vec![],
             };
-        }
-    }
-
-    // 1a′. A `@Serializable` property's `get<X>$annotations()` marker follows its getter's value-class
-    //      mangle: when `getX` mangled to `getX-<hash>`, kotlinc names the marker `getX-<hash>$annotations`.
-    //      The marker is a static (no dispatch receiver), so its owner comes from the class method list.
-    if !mangle_map.is_empty() {
-        let mut renames: Vec<(u32, String)> = Vec::new();
-        for c in &ir.classes {
-            for &fid in &c.methods {
-                let Some(f) = ir.functions.get(fid as usize) else {
-                    continue;
-                };
-                let Some(base) = f.name.strip_suffix("$annotations") else {
-                    continue;
-                };
-                if let Some(mangled) = mangle_map.get(&(c.fq_name, base.to_string(), 0)) {
-                    renames.push((fid, format!("{mangled}$annotations")));
-                }
-            }
-        }
-        for (fid, name) in renames {
-            ir.functions[fid as usize].name = name;
         }
     }
 
@@ -3834,6 +3818,7 @@ pub(crate) fn lower_value_classes(
     // built-in value classes such as UInt are callable value classes even though they are not
     // declarations owned by this source module.
     accessor_names::stamp_synthesized(ir, &callable_under);
+    property_annotation_markers::rename(ir, &callable_under);
 
     let realized =
         property_references::realize(ir, &callable_under, property_reference_realizations);

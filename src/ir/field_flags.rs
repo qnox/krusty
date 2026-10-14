@@ -14,6 +14,8 @@ impl IrfFlags {
     /// Storage the compiler introduces with no source declaration behind it, such as an interface
     /// delegation's `$$delegate_N`.
     pub(super) const COMPILER_GENERATED: u8 = 1 << 4;
+    /// A delegated property's `x$delegate` storage: it holds the delegate, not a property value.
+    pub(super) const PROPERTY_DELEGATE: u8 = 1 << 5;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -49,6 +51,10 @@ impl IrfFlags {
     pub const fn with_compiler_generated(self, on: bool) -> Self {
         self.with(Self::COMPILER_GENERATED, on)
     }
+    #[inline]
+    pub const fn with_property_delegate(self, on: bool) -> Self {
+        self.with(Self::PROPERTY_DELEGATE, on)
+    }
 }
 
 impl super::IrField {
@@ -60,6 +66,16 @@ impl super::IrField {
     #[inline]
     pub fn with_compiler_generated(mut self, on: bool) -> Self {
         self.flags = self.flags.with_compiler_generated(on);
+        self
+    }
+    /// See [`IrfFlags::PROPERTY_DELEGATE`].
+    #[inline]
+    pub fn is_property_delegate(&self) -> bool {
+        self.flags.has(IrfFlags::PROPERTY_DELEGATE)
+    }
+    #[inline]
+    pub fn with_property_delegate(mut self, on: bool) -> Self {
+        self.flags = self.flags.with_property_delegate(on);
         self
     }
 }

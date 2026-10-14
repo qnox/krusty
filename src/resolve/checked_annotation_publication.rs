@@ -77,7 +77,7 @@ pub(crate) fn publish_checked_classifier_annotations(
                     facts: annotation.facts,
                 })
                 .collect::<Vec<_>>();
-            let expected = class
+            let fully_checked = class
                 .annotations
                 .iter()
                 .filter(|annotation| {
@@ -85,8 +85,11 @@ pub(crate) fn publish_checked_classifier_annotations(
                         .resolved_annotation(file_index as u32, annotation)
                         .is_some()
                 })
-                .count();
-            if applications.len() == expected {
+                .all(|annotation| {
+                    info.applied_annotation(annotation).is_some()
+                        || info.discarded_annotation_application(annotation)
+                });
+            if fully_checked {
                 checked.push((internal, applications));
             } else if !diags.has_errors() {
                 diags.error(
@@ -305,19 +308,30 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         function: &FunDecl,
         include_value_parameters: bool,
+        declaration_target: &'static str,
     ) -> usize {
         let suppression_depth =
             self.push_declaration_policies(scope, &function.annotations, &function.annotation_args);
         self.check_declaration_type_parameter_annotations(scope, function.signature_span.lo);
         for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
-            self.check_annotation_application(scope, annotation, arguments);
+            self.check_non_property_annotation_application(
+                scope,
+                annotation,
+                arguments,
+                declaration_target,
+            );
         }
         if include_value_parameters {
             for parameter in &function.params {
                 for (annotation, arguments) in
                     parameter.annotations.iter().zip(&parameter.annotation_args)
                 {
-                    self.check_annotation_application(scope, annotation, arguments);
+                    self.check_non_property_annotation_application(
+                        scope,
+                        annotation,
+                        arguments,
+                        "value parameter",
+                    );
                 }
             }
         }
@@ -361,6 +375,7 @@ impl Checker<'_> {
             &method_scope,
             function,
             include_value_parameters,
+            "function",
         );
         self.active_lexical_policies.truncate(suppression_depth);
     }

@@ -1,6 +1,9 @@
 //! A method's own annotation attributes: the declared ones and kotlinc's return nullability.
 
-use super::{ClassWriter, ConstPool, NOT_NULL, NULLABLE};
+use super::{
+    annotation_values::{NOT_NULL, NULLABLE},
+    ClassWriter, ConstPool,
+};
 
 impl ClassWriter {
     /// Attach kotlinc's non-null annotations to a previously-added method (matched by name+descriptor):

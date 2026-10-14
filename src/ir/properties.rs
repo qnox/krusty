@@ -17,6 +17,106 @@ pub struct IrInlineTypeSubstitution {
     pub value: Ty,
 }
 
+impl IrFile {
+    /// A property's source-level accessor parameters and identities, together with its getter.
+    ///
+    /// Plugins and targets consume this common declaration edge instead of rediscovering a
+    /// property from a generated accessor's spelling.
+    pub(crate) fn property_accessor_parameters(
+        &self,
+        class_index: usize,
+        source_order: u32,
+    ) -> (Vec<Ty>, Vec<IrParameterIdentity>, Option<FunId>) {
+        let class = &self.classes[class_index];
+        if let Some(property) = class
+            .properties
+            .iter()
+            .find(|property| property.source_order == source_order)
+        {
+            if let Some(getter) = property.getter {
+                let (parameters, identities) = declared_parameters(self, getter);
+                return (parameters, identities, Some(getter));
+            }
+            let mut context_ordinal = 0;
+            let identities = property
+                .context_params
+                .iter()
+                .map(|(name, kind, _)| {
+                    let identity = match kind {
+                        crate::types::ContextParameterKind::Named => {
+                            IrParameterIdentity::context_value(name)
+                        }
+                        crate::types::ContextParameterKind::Anonymous => {
+                            IrParameterIdentity::anonymous_context_parameter(context_ordinal)
+                        }
+                        crate::types::ContextParameterKind::LegacyReceiver => {
+                            IrParameterIdentity::context_receiver(context_ordinal)
+                        }
+                        crate::types::ContextParameterKind::None => {
+                            panic!("a property context parameter retains its semantic role")
+                        }
+                    };
+                    context_ordinal += 1;
+                    identity
+                })
+                .collect();
+            let parameters = property
+                .context_params
+                .iter()
+                .map(|(_, _, ty)| *ty)
+                .collect();
+            return (parameters, identities, property.getter);
+        }
+        if let Some(property) =
+            self.member_ext_props
+                .get(&class.fq_name_id())
+                .and_then(|properties| {
+                    properties
+                        .iter()
+                        .find(|property| property.source_order == source_order)
+                })
+        {
+            let (parameters, identities) = declared_parameters(self, property.getter);
+            return (parameters, identities, Some(property.getter));
+        }
+        if let Some(property) = self
+            .companion_blocks
+            .properties_of(class.fq_name_id())
+            .find(|property| property.source_order == source_order)
+        {
+            return match property.getter {
+                Some(getter) => {
+                    let (parameters, identities) = declared_parameters(self, getter);
+                    (parameters, identities, Some(getter))
+                }
+                None => (Vec::new(), Vec::new(), None),
+            };
+        }
+        assert!(
+            self.declared_class_statics
+                .get(&class.fq_name_id())
+                .into_iter()
+                .flatten()
+                .any(|&static_id| self.statics[static_id as usize].source_order == source_order),
+            "a property annotation names a declaration owned by its class"
+        );
+        (Vec::new(), Vec::new(), None)
+    }
+}
+
+fn declared_parameters(ir: &IrFile, function: FunId) -> (Vec<Ty>, Vec<IrParameterIdentity>) {
+    let parameters = ir.functions[function as usize].params.clone();
+    let identities = ir
+        .function_parameter_identities(function)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
+    assert!(
+        parameters.is_empty() || identities.len() == parameters.len(),
+        "a property accessor with parameters retains their exact identities"
+    );
+    (parameters, identities)
+}
+
 /// Property-owned index used while checked inline accessors are materialized and spliced.
 #[derive(Default)]
 pub(crate) struct IrInlinePropertyAccess {
@@ -24,9 +124,8 @@ pub(crate) struct IrInlinePropertyAccess {
     pub(crate) splices: crate::fx_hash::HashMap<ExprId, IrInlinePropertySplice>,
 }
 
-/// Where a property's accessors written with a body start and end, each a 1-based line (0 when
-/// the accessor has no body of its own). Such an accessor is a declaration of its own and anchors
-/// on its own line; any other accessor anchors on the property's line.
+/// Where a property's written accessor headers start, and where accessor bodies end, each a
+/// 1-based line. A visibility-only accessor retains its header with a zero body end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IrAccessorLines {
     pub getter: u32,
@@ -41,6 +140,13 @@ pub struct IrAccessorLines {
 #[derive(Clone, Debug)]
 pub struct IrCheckedProperty {
     pub declaration: crate::fir::DeclarationId,
+    /// Exact source name span retained for diagnostics that can only be classified after a backend
+    /// has selected the declaration's physical representation.
+    pub diagnostic_span: Option<crate::diag::Span>,
+    /// Exact source accessor declaration spans, beginning at the first accessor annotation when
+    /// present. A representation-dependent clash belongs to the accessor, not the whole property.
+    pub getter_diagnostic_span: Option<crate::diag::Span>,
+    pub setter_diagnostic_span: Option<crate::diag::Span>,
     /// The declaration's stable source position, the key its accessors take in `fn_source_order`.
     pub source_order: u32,
     /// Source declaration line accepted while the bounded Pass-2 syntax unit is live. This is
@@ -89,6 +195,11 @@ pub struct IrCheckedProperty {
 #[derive(Clone, Debug)]
 pub struct MemberExtProp {
     pub name: String,
+    /// Exact source spans for diagnostics about the declaration and its accessors. Dependency and
+    /// compiler-generated member extensions have no source location.
+    pub diagnostic_span: Option<crate::diag::Span>,
+    pub getter_diagnostic_span: Option<crate::diag::Span>,
+    pub setter_diagnostic_span: Option<crate::diag::Span>,
     /// Stable source declaration order. This identifies the property for declaration-owned facts
     /// such as its checked type spelling; `name` is metadata payload and may be shared by overloads.
     pub source_order: u32,
@@ -149,13 +260,22 @@ pub enum IrPropertyModality {
 #[derive(Clone, Debug)]
 pub struct IrProperty {
     pub name: String,
+    /// Exact source property span for a representation-dependent declaration diagnostic. Generated
+    /// properties have no source declaration and leave this absent.
+    pub diagnostic_span: Option<crate::diag::Span>,
+    pub getter_diagnostic_span: Option<crate::diag::Span>,
+    pub setter_diagnostic_span: Option<crate::diag::Span>,
     /// Named context parameters in source order. Metadata records these separately from ordinary
     /// value parameters, and checked call sites supply their operands implicitly.
     pub context_params: Vec<(String, crate::types::ContextParameterKind, Ty)>,
-    /// Source byte offset and 1-based declaration line. These remain attached to the declaration so
-    /// a backend can order/debug synthesized accessors without rebinding the property by spelling.
+    /// Stable source declaration order and 1-based declaration line. These remain attached to the
+    /// declaration so a backend can order/debug synthesized accessors without rebinding the
+    /// property by spelling.
     pub source_order: u32,
     pub decl_line: u32,
+    /// Source lines retained for backend-synthesized accessors after their functions have been
+    /// materialized. In particular, a bodiless private setter can delimit a `lateinit` getter.
+    pub accessor_lines: IrAccessorLines,
     /// The property's language-level type. This is also the type exposed by its accessors.
     pub ty: Ty,
     /// Type parameters this property declares (`var <X, Y> ctx: Map<X, Y>`). They are not the

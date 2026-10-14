@@ -5,6 +5,40 @@ use super::{u2, ClassWriter};
 use crate::kt_string::KtString;
 use crate::types::TypeName;
 
+/// kotlinc's synthesized non-null annotation type.
+pub(super) const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
+/// kotlinc's synthesized nullable annotation type.
+pub(super) const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
+
+/// Partition retained declaration annotations into the two class-file attributes the JVM splits
+/// them across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then
+/// `RuntimeInvisibleAnnotations` (BINARY). Common IR carries one list per declaration; this
+/// boundary is the only place the split exists. SOURCE-retained applications never reach the IR.
+pub(crate) fn split_declaration_annotations(
+    annotations: &crate::ir::DeclarationAnnotations,
+) -> (
+    Vec<crate::ir::AppliedAnnotation>,
+    Vec<crate::ir::AppliedAnnotation>,
+) {
+    use crate::types::AnnotationRetention;
+    let of = |keep: fn(&AnnotationRetention) -> bool| {
+        annotations
+            .iter()
+            .filter(|retained| keep(&retained.retention))
+            .map(|retained| retained.annotation.clone())
+            .collect()
+    };
+    (
+        of(|retention| {
+            matches!(
+                retention,
+                AnnotationRetention::Default | AnnotationRetention::Runtime
+            )
+        }),
+        of(|retention| matches!(retention, AnnotationRetention::Binary)),
+    )
+}
+
 /// The physical name an annotation type contributes to `InnerClasses`, and its descriptor.
 /// Both strings are owned by the class writer, so user-defined annotation identities do not enter
 /// a process-lifetime name or descriptor cache.
@@ -18,6 +52,34 @@ fn annotation_class_text(name: TypeName) -> (String, String) {
 }
 
 impl ClassWriter {
+    /// Encode one `annotation` structure (type_index + element_value_pairs) to a fresh byte buffer.
+    pub(super) fn encode_annotation(
+        &mut self,
+        annotation: &crate::ir::AppliedAnnotation,
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        self.ev_annotation(&mut body, annotation);
+        body
+    }
+
+    /// Encode retained declaration annotations in class-file attribute order: all visible entries,
+    /// then all invisible entries. Common IR carries no JVM attribute split.
+    pub(super) fn encode_declaration_annotations(
+        &mut self,
+        annotations: &crate::ir::DeclarationAnnotations,
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let (visible, invisible) = split_declaration_annotations(annotations);
+        let visible = visible
+            .iter()
+            .map(|annotation| self.encode_annotation(annotation))
+            .collect();
+        let invisible = invisible
+            .iter()
+            .map(|annotation| self.encode_annotation(annotation))
+            .collect();
+        (visible, invisible)
+    }
+
     fn record_annotation_class(&mut self, name: TypeName) -> u16 {
         let (internal, descriptor) = annotation_class_text(name);
         let utf8 = self.cp.utf8(&descriptor);

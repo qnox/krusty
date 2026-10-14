@@ -28,6 +28,7 @@ use field_visibility::{declared_field_access, default_accessor_access, is_jvm_fi
 use inherited_default_forwarders::emit_default_impls_forwarders;
 
 mod access_bridges;
+mod accessor_emission_order;
 mod annotation_impl;
 mod annotation_interface;
 mod array_elements;
@@ -76,6 +77,7 @@ mod emit_options;
 pub(super) mod enclosure;
 mod enum_entry_subclass;
 mod enum_reflection_call;
+mod enum_synthetic_fields;
 pub use emit_options::{EmitOptions, DEFAULT_METADATA_VERSION};
 mod explicit_backing_fields;
 mod field_read;
@@ -170,6 +172,8 @@ use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
+mod method_placement;
+use method_placement::MethodPlacement;
 mod primary_super_call;
 mod secondary_constructor;
 mod static_accessors;
@@ -808,7 +812,11 @@ fn attach_synth_nullability(
                 continue;
             }
             if let Some(a) = ann(&f.name, f.ty) {
-                cw.set_field_nullability(&instance_field_jvm_name(ir, run, c, index), a);
+                cw.set_field_nullability(
+                    &instance_field_jvm_name(ir, run, c, index),
+                    &desc(jvm_value_ty(&f.ty)),
+                    a,
+                );
             }
         }
     }
@@ -817,20 +825,24 @@ fn attach_synth_nullability(
     if let Some(companion) = &c.companion_class {
         cw.set_field_nullability(
             companion.nested_segment_ref(),
+            &format!("L{};", companion.render()),
             "Lorg/jetbrains/annotations/NotNull;",
         );
-        for s in ir
+        for (index, s) in ir
             .statics
             .iter()
             .enumerate()
             .filter(|(index, s)| {
                 ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
             })
-            .map(|(_, s)| s)
-            .filter(|s| !s.is_lateinit)
+            .filter(|(_, s)| !s.is_lateinit)
         {
             if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
-                cw.set_field_nullability(&s.name, a);
+                cw.set_field_nullability(
+                    ir.static_field_jvm_name(index as u32),
+                    &desc(jvm_declared_ty(&s.ty)),
+                    a,
+                );
             }
         }
     }
@@ -863,8 +875,17 @@ fn attach_synth_nullability(
         };
         let (getter, setter) = accessor_jvm_names(c, &property.name);
         let pd = desc(hoisted.ty);
-        cw.set_method_nullability(&getter, &format!("(){pd}"), Some(a), &[]);
-        if hoisted.is_var {
+        if property
+            .getter
+            .is_some_and(|getter| !ir.method_visibility(getter).is_private())
+        {
+            cw.set_method_nullability(&getter, &format!("(){pd}"), Some(a), &[]);
+        }
+        if hoisted.is_var
+            && property
+                .setter
+                .is_some_and(|setter| !ir.method_visibility(setter).is_private())
+        {
             cw.set_method_nullability(&setter, &format!("({pd})V"), None, &[Some(a)]);
         }
     }
@@ -1014,6 +1035,9 @@ fn emit_jvm_interface_companion_surface(
         emitter.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
+        if array {
+            emitter.cw.omit_method_lines("<clinit>", "()V");
+        }
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
         for &(static_index, s, init) in &clinit_statics {
@@ -1517,17 +1541,31 @@ fn emit_pass(
         };
         let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
-        emit_method_maybe_rescued(
-            ir,
-            i as u32,
-            StaticOwner::Facade,
-            facade,
-            facade,
-            &mut cw,
-            false,
-            env,
-            rescued,
-        );
+        if rescued {
+            // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
+            // `emit_all_with_class_meta`) — bypass the early return.
+            emit_method_inner(
+                ir,
+                i as u32,
+                StaticOwner::Facade,
+                facade,
+                facade,
+                &mut cw,
+                false,
+                env,
+            );
+        } else {
+            emit_method(
+                ir,
+                i as u32,
+                StaticOwner::Facade,
+                facade,
+                facade,
+                &mut cw,
+                false,
+                env,
+            );
+        }
         // A facade has no class declaration to close on.
         function_debug::attach_declared_function_debug(
             ir,
@@ -1933,13 +1971,16 @@ fn return_primitive(code: &mut CodeBuilder, ty: Ty) {
 fn property_marker_signature(
     ir: &IrFile,
     c: &crate::ir::IrClass,
-    property: &str,
+    source_order: u32,
 ) -> Option<(String, String)> {
     let marker = ir
         .property_annotation_markers
-        .get(&(c.fq_name_id(), property.to_string()))?;
+        .get(&(c.fq_name_id(), source_order))?;
     let function = ir.functions.get(*marker as usize)?;
-    Some((function.name.clone(), "()V".to_string()))
+    Some((
+        function.name.clone(),
+        ir_method_desc(&function.params, &function.ret),
+    ))
 }
 
 fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
@@ -2025,10 +2066,12 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
 /// setter synthesized, and a custom setter still needs its implicit default getter. A same-named method
 /// with a different return descriptor does not hide the accessor.
 #[derive(Clone, Copy)]
-enum PropertyAccessorSide {
+pub(super) enum PropertyAccessorSide {
     Getter,
     Setter,
 }
+
+pub(in crate::jvm) use declared_property_accessor::declared_signature as declared_property_accessor_signature;
 
 /// What emitting one class's property accessors (and the `$annotations` markers beside them) needs
 /// besides the IR: the class's JVM name, its file facade, the signature formatter, and the emit
@@ -2081,7 +2124,7 @@ fn emit_declared_property_accessors(
         // method table (and the constant pool behind it) matches kotlinc's.
         if let Some(&marker) = ir
             .property_annotation_markers
-            .get(&(c.fq_name_id(), property.name.clone()))
+            .get(&(c.fq_name_id(), property.source_order))
         {
             // The marker is STATIC (kotlinc's shape): no `this` slot.
             emit_method(
@@ -2162,7 +2205,7 @@ fn emit_scheduled_member(
             // directly after that property's accessors — it has no source order of its own.
             if let Some(&marker) = ir
                 .property_annotation_markers
-                .get(&(c.fq_name_id(), property.name.clone()))
+                .get(&(c.fq_name_id(), property.source_order))
             {
                 // The marker is STATIC (kotlinc's shape): no `this` slot.
                 emit_method(
@@ -2553,27 +2596,25 @@ fn emit_class(
         } else {
             declared_field_access(c, field_index, static_storage(ir, c))
         };
-        // A field typed by a bare type parameter (`val a: A`) carries a `Signature` (`TA;`); a
-        // PARAMETERIZED concrete type (`val xs: List<String>`) carries its full generic signature. Both
-        // like kotlinc; disjoint (a field is one or the other).
+        // A bare type parameter field (`val a: A`) signs `TA;`, a parameterized one its generic type;
+        // a property's `x$delegate` storage signs nothing (kotlinc's `PROPERTY_DELEGATE` origin).
         let type_parameter = ir
             .field_signatures(&fq_name)
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
-        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter).field;
+        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter)
+            .field
+            .filter(|_| !field.is_property_delegate());
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
-        // Coroutine continuation fields are compiler-generated storage rather than Kotlin
-        // properties, so they are visited eagerly and receive no nullability annotation. Declared
-        // properties, a data class's included, use the later field-table visit: their methods
-        // establish the preceding pool window and their backing fields carry Kotlin's nullability
-        // annotation.
+        // Coroutine continuation fields are compiler-generated storage, visited eagerly with no
+        // nullability annotation. Declared properties (a data class's too) use the later field-table
+        // visit, after their methods, and carry Kotlin's nullability annotation.
         if is_continuation && matches!(name.as_str(), "result" | "this$0" | "label") {
-            // kotlinc interns a continuation's SPILL field names with the field visit, but `result`,
-            // `this$0` and `label` first appear where they are USED — `this$0` in the constructor's
-            // `putfield`, the other two in `invokeSuspend`. Declaring them eagerly interned all three
-            // ahead of the constructor and shifted every later pool entry.
+            // kotlinc interns SPILL field names at the field visit, but `result`, `this$0` and `label`
+            // where they are USED (`this$0` in the constructor's `putfield`, the others in
+            // `invokeSuspend`); declaring them eagerly shifted every later pool entry.
             cw.add_field_late_sig(
                 acc,
                 &physical_name,
@@ -3059,38 +3100,13 @@ fn emit_class(
             }
         }
     }
-    // A companion's synthetic `(…, DefaultConstructorMarker)` ctor goes AFTER the accessors —
-    // kotlinc's companion member order (private <init>, accessors, marker <init>). A class hiding a
-    // value-class-parameter primary puts its accessor after `equals` the same way.
-    if c.has_primary_ctor && marker_accessor_emitted_last(ir, c) && has_ctor_marker_accessor(ir, c)
-    {
-        let physical_parameters = class_ctor_jvm_tys(c);
-        let parameter_identities =
-            super::method_parameters::primary_constructor_identities(ir, c, &physical_parameters);
-        constructor_defaults::emit_ctor_marker_accessor(
-            &fq_name,
-            &physical_parameters,
-            &parameter_identities,
-            &mut cw,
-        );
-    }
     // `-jvm-default=disable`: an inherited body gets an explicit override forwarding to the holder,
     // or every inherited call is an `AbstractMethodError`. kotlinc adds them before the bridges, and
     // `<clinit>` follows both.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     access_bridges::emit_private_member_access_bridges(ir, c, &fq_name, &mut cw, env.run);
-    constructor_accessors::emit_accessors(ir, c, &fq_name, &mut cw);
-    static_fields::emit_hoisted_companion_bridges(ir, &fq_name, &mut cw);
-    static_accessors::emit(
-        ir,
-        env.run,
-        &env.run.static_accessor_plan.borrow(),
-        StaticOwner::Class(c.fq_name),
-        facade,
-        c.decl_start_line.max(c.decl_line),
-        &mut cw,
-    );
+    accessor_emission_order::emit(ir, c, &fq_name, facade, env, &mut cw);
     if !static_storage(ir, c) {
         static_fields::emit_class_static_initializer(
             ir,
@@ -3613,6 +3629,7 @@ fn emit_enum_class(
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let self_desc = format!("L{fq};");
     let arr_desc = format!("[{self_desc}");
+    let synthetic_enum_fields = enum_synthetic_fields::names(ir, c);
     // An enum extends the PARAMETERIZED `java.lang.Enum<E>`, so it carries a class `Signature` —
     // whose value interns between the class and superclass names, as ASM visits them.
     let mut cw = new_classifier_writer(ir, c, "java/lang/Enum", env, opts);
@@ -3664,9 +3681,6 @@ fn emit_enum_class(
     // Property backing fields are private (kotlinc), reached through the synthesized `getX()`/`setX()`
     // accessors — for both the primary-constructor fields and body member-property fields
     // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
-    let enum_field_acc = |f: &IrField| {
-        (if f.is_private() { 0x0002 } else { 0x0001 }) | if f.is_final() { 0x0010 } else { 0 }
-    };
     // kotlinc emits an ENUM's `Companion` field FIRST — ahead of the constructor properties, the
     // entry constants and `$VALUES`/`$ENTRIES` — unlike an ordinary class, where it follows the
     // instance fields. Emitting it last also interned its name and descriptor late, so the class
@@ -3707,46 +3721,25 @@ fn emit_enum_class(
     cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
-    for (f, t) in c.fields.iter().zip(&field_tys) {
+    for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
+        let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let nullability = (!f.is_lateinit())
             .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
             .flatten();
         let signature =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).field;
+            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())
+                .field
+                .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
-            enum_field_acc(f),
-            &f.name,
+            field_visibility::declared_field_access(c, field_index, false),
+            &physical_name,
             &type_descriptor(*t),
             signature.as_deref(),
             None,
             nullability,
         );
     }
-    // A `@Serializable enum`'s `$cachedSerializer$delegate` follows the property fields and precedes
-    // the entry constants: `Companion, value, $cachedSerializer$delegate, <entries>`.
-    for s in ir.statics.iter().filter(|s| s.owner_matches(&fq)) {
-        // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path).
-        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
-        let acc = if s.visibility.is_private() {
-            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
-        } else {
-            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        };
-        // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
-        // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
-        // annotation — the same treatment the class and facade field tables give their statics.
-        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let ann = (!s.is_lateinit && field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
-            .then_some("Lorg/jetbrains/annotations/NotNull;");
-        cw.add_field_late_sig(
-            acc,
-            &s.name,
-            &ir_type_desc(&s.ty),
-            signatures.field.as_deref(),
-            None,
-            ann,
-        );
-    }
+    static_fields::emit_enum_static_fields(ir, c, &fq, &signature_formatter, &mut cw);
     // One static-final constant per entry, plus the private `$VALUES` array. kotlinc visits the
     // fields after the methods, so each name interns where a body first references it (`$values`
     // reads every entry), or at the field visit.
@@ -3762,7 +3755,7 @@ fn emit_enum_class(
     }
     cw.add_field_late(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
-        "$VALUES",
+        &synthetic_enum_fields.values,
         &arr_desc,
         None,
         None,
@@ -3771,7 +3764,7 @@ fn emit_enum_class(
     // `kotlin/enums/EnumEntries`, initialized in `<clinit>` from `EnumEntriesKt.enumEntries($VALUES)`.
     cw.add_field_late(
         0x0002 | 0x0008 | 0x0010 | ACC_SYNTHETIC,
-        "$ENTRIES",
+        &synthetic_enum_fields.entries,
         "Lkotlin/enums/EnumEntries;",
         None,
         None,
@@ -3803,13 +3796,13 @@ fn emit_enum_class(
         let mut field_i = 0usize;
         for (argument, ty) in c.ctor_args.iter().zip(&all_param_tys) {
             if argument.is_field {
-                let name = &c.fields[field_i].name;
+                let name = instance_field_jvm_name(ir, env.run, c, field_i);
                 if let Some(line) = property_line(ir, c, field_i as u32) {
                     store_lines.push((ctor.bytes.len() as u16, line));
                 }
                 ctor.aload(0);
                 load(*ty, slot, &mut ctor);
-                let field = cw.fieldref(&fq, name, &type_descriptor(*ty));
+                let field = cw.fieldref(&fq, &name, &type_descriptor(*ty));
                 ctor.putfield(field, slot_words(*ty) as i32);
                 field_i += 1;
             }
@@ -3845,18 +3838,18 @@ fn emit_enum_class(
         e.render_initializer_boundaries = false;
         max_locals = max_locals.max(e.frame.max());
     }
-    // The pc the trailing `return` starts at — kotlinc maps it back to the class HEADER line.
+    // The `return` maps back to the class header; a pending closing `init` line owns a `nop`.
+    if c.decl_line != 0 && !store_lines.is_empty() {
+        ctor.mark_line(c.decl_line);
+    }
     let ctor_return_pc = ctor.bytes.len() as u16;
     ctor.ret_void();
     ctor.ensure_locals(max_locals);
     ctor.link();
-    // An enum's constructor is `private`. An entry subclass reaches it through the marker accessor
-    // emitted with the class's other accessors, or through the `$default` overload.
+    // An enum's ctor is `private`: an entry subclass reaches it via its marker accessor or `$default`.
     let base_ctor_acc = 0x0002;
-    // kotlinc emits a generic `Signature` on the enum ctor listing only the USER params (the synthetic
-    // leading `(String, int)` are excluded) — e.g. `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
-    // javap reads it to display `Color()` instead of `Color(String, int)`; without it the synthetic
-    // params leak into the disassembly (a per-enum divergence from kotlinc).
+    // kotlinc's `Signature` on the enum ctor lists only the USER params, without the synthetic
+    // leading `(String, int)`: `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
     // An enum declaring ONLY secondary constructors has no primary to emit: every entry names one
     // of the secondaries. Registering the synthesized primary anyway collided with a no-argument
     // secondary — both are `(String, int)V` — and the class failed to load with a
@@ -4034,9 +4027,9 @@ fn emit_enum_class(
     // `$ENTRIES`. Only after all of them does kotlinc reach the entry constants themselves.
     cw.reserve_method_name("values");
     cw.reserve_descriptor(&format!("(){arr_desc}"));
-    cw.reserve_method_name("$VALUES");
+    cw.reserve_method_name(&synthetic_enum_fields.values);
     cw.reserve_descriptor(&arr_desc);
-    cw.fieldref(&fq, "$VALUES", &arr_desc);
+    cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
     cw.class_ref("java/lang/Object");
     cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
     // `values()` casts the `clone()` result back: `checkcast [LE;`.
@@ -4065,13 +4058,17 @@ fn emit_enum_class(
     cw.reserve_descriptor("()Lkotlin/enums/EnumEntries;");
     cw.reserve_descriptor(&format!("()Lkotlin/enums/EnumEntries<{self_desc}>;"));
     cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;");
-    cw.reserve_method_name("$ENTRIES");
+    cw.reserve_method_name(&synthetic_enum_fields.entries);
     cw.reserve_descriptor("Lkotlin/enums/EnumEntries;");
-    cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    cw.fieldref(
+        &fq,
+        &synthetic_enum_fields.entries,
+        "Lkotlin/enums/EnumEntries;",
+    );
     cw.reserve_method_name("$values");
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
-    let valref = cw.fieldref(&fq, "$VALUES", &arr_desc);
+    let valref = cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
     vals.getstatic(valref, 1);
     // kotlinc invokes `clone()` via `java/lang/Object` (not the `[LE;` array type).
     let clone_m = cw.methodref("java/lang/Object", "clone", "()Ljava/lang/Object;");
@@ -4100,7 +4097,11 @@ fn emit_enum_class(
     // getEntries(): the `entries` property accessor → `return $ENTRIES`. Carries the generic
     // `Signature` `()Lkotlin/enums/EnumEntries<LSelf;>;` kotlinc emits.
     let mut gent = CodeBuilder::new(0);
-    let entref = cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+    let entref = cw.fieldref(
+        &fq,
+        &synthetic_enum_fields.entries,
+        "Lkotlin/enums/EnumEntries;",
+    );
     gent.getstatic(entref, 1);
     gent.areturn();
     gent.ensure_locals(0);
@@ -4147,6 +4148,15 @@ fn emit_enum_class(
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
     constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
+    static_accessors::emit(
+        ir,
+        env.run,
+        &env.run.static_accessor_plan.borrow(),
+        StaticOwner::Class(c.fq_name),
+        facade,
+        c.decl_start_line.max(c.decl_line),
+        &mut cw,
+    );
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.
@@ -4171,7 +4181,8 @@ fn emit_enum_class(
             Ty::Unit,
             c.enum_entries
                 .iter()
-                .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied()),
+                .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied())
+                .chain(ir.companion_clinit_body(c.fq_name)),
         );
         e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
             env.signature_symbols,
@@ -4179,6 +4190,9 @@ fn emit_enum_class(
         e.record_locals = true;
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
+        if delegated_property_array::exists(env, c.fq_name) {
+            e.cw.omit_method_lines("<clinit>", "()V");
+        }
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
         // Consecutive enum entries on one source line share one LNT entry.
         for (i, entry) in c.enum_entries.iter().enumerate() {
@@ -4272,7 +4286,7 @@ fn emit_enum_class(
         // `$VALUES = $values()` — kotlinc factors the array build into a private `$values()` helper.
         let vfn = e.cw.methodref(&fq, "$values", &format!("(){arr_desc}"));
         clinit.invokestatic(vfn, 0, 1);
-        let valref = e.cw.fieldref(&fq, "$VALUES", &arr_desc);
+        let valref = e.cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
         clinit.putstatic(valref, 1);
         // `$ENTRIES = EnumEntriesKt.enumEntries((Enum[]) $VALUES)`.
         clinit.getstatic(valref, 1);
@@ -4284,41 +4298,44 @@ fn emit_enum_class(
             "([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;",
         );
         clinit.invokestatic(entries_fn, 1, 1);
-        let entref = e.cw.fieldref(&fq, "$ENTRIES", "Lkotlin/enums/EnumEntries;");
+        let entref = e.cw.fieldref(
+            &fq,
+            &synthetic_enum_fields.entries,
+            "Lkotlin/enums/EnumEntries;",
+        );
         clinit.putstatic(entref, 1);
         // An ENUM initializes its `Companion` FIRST, then the serializer statics that read through
         // it (`$cachedSerializer$delegate`) — the reverse of a plain class's `<clinit>` order, and
         // the same precedence the leading field block uses.
         emit_companion_init(e.cw, &mut clinit, &fq, c);
-        // A generated static's store gets its OWN `<clinit>` line entry, the way each entry's
-        // construction does, and the trailing `return` maps to the class's closing line. `<clinit>`'s
-        // table is CURATED through `set_method_lines` — `add_method` DROPS a `<clinit>` builder's
-        // line marks — so pushing entries here is the only thing that reaches the attribute.
+        // A static's store gets its OWN `<clinit>` line entry, as each entry's construction does;
+        // after a generated (not hoisted) one the trailing `return` maps to the closing line.
+        // `add_method` DROPS a `<clinit>` builder's line marks: only `set_method_lines` lands them.
         let mut stepped_away = false;
         for &(static_index, s) in &owner_statics {
-            let Some(init) = s.init else {
+            let Some(init) = static_fields::stored_clinit_initializer(ir, s) else {
                 continue;
             };
             if s.line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(s.line) {
                 clinit_lines.push((clinit.bytes.len() as u16, s.line));
-                stepped_away = true;
+                stepped_away |= !ir.is_jvm_companion_hoisted_static(static_index);
             }
             e.emit_static_initializer_store(&fq, static_index, init, &mut clinit);
         }
-        // The trailing `return` is mapped back only when a store STEPPED AWAY from the entries'
-        // line. An enum with no generated statics has a single-entry table, and adding a closing
-        // entry there is four bytes kotlinc does not write.
+        if let Some(body) = ir.companion_clinit_body(c.fq_name) {
+            e.emit_companion_clinit_body(c, &fq, body, &mut clinit, &mut clinit_lines);
+        }
+        // The trailing `return` is mapped back only when a generated store STEPPED AWAY from the
+        // entries' line; otherwise kotlinc writes no closing entry.
         if stepped_away
             && c.decl_end_line != 0
             && clinit_lines.last().map(|&(_, line)| line) != Some(c.decl_end_line)
         {
-            // The frontend records the source declaration's end while syntax is available; the
-            // backend consumes that checked source fact instead of guessing from entry lines.
+            // The frontend's recorded source end, not a guess from entry lines.
             clinit_lines.push((clinit.bytes.len() as u16, c.decl_end_line));
         }
         clinit.ret_void();
-        // `max_locals` is exactly what the body allocated — entry-arg spills enter the frame, and a
-        // `<clinit>` that spills nothing has no locals at all (kotlinc writes 0, not a floor of 2).
+        // `max_locals` is exactly what the body allocated (kotlinc writes 0, not a floor of 2).
         clinit.ensure_locals(e.frame.max());
         clinit.link();
         clinit
@@ -4383,27 +4400,6 @@ fn emit_enum_class(
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
-#[allow(clippy::too_many_arguments)]
-fn emit_method_maybe_rescued(
-    ir: &IrFile,
-    fid: u32,
-    static_owner: StaticOwner,
-    owner: &str,
-    facade: &str,
-    cw: &mut ClassWriter,
-    instance: bool,
-    env: &EmitEnv,
-    rescued: bool,
-) {
-    if rescued {
-        // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
-        // `emit_all_with_class_meta`) — bypass the early return.
-        emit_method_inner(ir, fid, static_owner, owner, facade, cw, instance, env);
-    } else {
-        emit_method(ir, fid, static_owner, owner, facade, cw, instance, env);
-    }
-}
-
 fn emit_method(
     ir: &IrFile,
     fid: u32,
@@ -4444,7 +4440,15 @@ fn emit_holder_method(
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
-    emit_method_inner_with_holder(ir, fid, None, owner, facade, cw, true, env, Some(receiver));
+    emit_placed_method(
+        ir,
+        fid,
+        MethodPlacement::Holder(receiver),
+        owner,
+        facade,
+        cw,
+        env,
+    );
 }
 
 /// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
@@ -4506,39 +4510,35 @@ fn emit_method_inner(
     instance: bool,
     env: &EmitEnv,
 ) {
-    emit_method_inner_with_holder(
-        ir,
-        fid,
-        Some(static_owner),
-        owner,
-        facade,
-        cw,
+    let placement = MethodPlacement::Declared {
+        static_owner,
         instance,
-        env,
-        None,
-    );
+    };
+    emit_placed_method(ir, fid, placement, owner, facade, cw, env);
 }
 
-/// `holder_receiver` is `Some(interface)` when the body is being written onto that interface's
-/// `$DefaultImpls` holder: the code and slots are the instance method's, but the method is `static`
-/// and its descriptor carries the receiver as parameter 0.
-#[allow(clippy::too_many_arguments)]
-fn emit_method_inner_with_holder(
+fn emit_placed_method(
     ir: &IrFile,
     fid: u32,
-    static_owner: Option<StaticOwner>,
+    placement: MethodPlacement,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
-    instance: bool,
     env: &EmitEnv,
-    holder_receiver: Option<crate::types::TypeName>,
 ) {
+    let (static_owner, instance, holder_receiver) = match placement {
+        MethodPlacement::Declared {
+            static_owner,
+            instance,
+        } => (Some(static_owner), instance, None),
+        MethodPlacement::Holder(receiver) => (None, true, Some(receiver)),
+    };
     let f = &ir.functions[fid as usize];
     let body = f.body.unwrap();
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
     let mut e = Emitter::new(ir, cw, env, static_owner, owner, facade, ret, [body]);
+    e.function = Some(fid);
     e.method_exports_private_access = static_accessors::method_exports_private_calls(
         ir,
         &env.run.static_accessor_plan.borrow(),
@@ -5362,6 +5362,8 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// Source or backend-generated function whose body is currently being emitted.
+    function: Option<u32>,
     export_private_calls: bool,
     method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
@@ -5547,6 +5549,7 @@ impl<'a> Emitter<'a> {
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
+            function: None,
             export_private_calls: false,
             method_exports_private_access: false,
             finally_markers: false,
@@ -6091,6 +6094,7 @@ impl<'a> Emitter<'a> {
         if let Some(mut access) = self.declared_property_read_access(
             operation.owner,
             operation.name,
+            None,
             selected.map(|(name, _)| name.as_str()),
             operation.interface,
         ) {
@@ -6200,6 +6204,13 @@ impl<'a> Emitter<'a> {
             | PropertyAccess::AccessBridge { owner, .. } => *owner,
         };
         let takes_receiver = accessor_takes_receiver(&access);
+        let writes_static_field = matches!(
+            &access,
+            PropertyAccess::Field {
+                is_static: true,
+                ..
+            }
+        );
         // A value that cannot carry the operand stack (a handler, suspension, or loop transfer)
         // spills BOTH operands in source order (receiver, then value), then reloads them. Spilling
         // only the value would reverse observable side effects. An ordinary branchy value keeps the
@@ -6229,7 +6240,24 @@ impl<'a> Emitter<'a> {
             );
         } else if let Some(receiver) = operation.receiver {
             let receiver_ty = accessor_receiver_ty(&access, access_owner);
-            self.emit_property_receiver(receiver, access_owner, takes_receiver, &receiver_ty, code);
+            if writes_static_field {
+                if self.static_property_write_evaluates_receiver(operation.expression) {
+                    // Unlike a read through a static `@JvmField` qualifier, a write evaluates its
+                    // explicit receiver even when companion lookup retargeted storage to the outer.
+                    self.emit_value(receiver, code);
+                    code.pop();
+                }
+            } else {
+                self.emit_property_receiver(
+                    receiver,
+                    operation.owner,
+                    access_owner,
+                    takes_receiver,
+                    &receiver_ty,
+                    property_access::PropertyReceiverUse::Write,
+                    code,
+                );
+            }
         } else if takes_receiver {
             self.run.set_emit_error(format!(
                 "receiver-less property realization requires an instance receiver: {}",
@@ -6341,66 +6369,6 @@ impl<'a> Emitter<'a> {
                 code.invokestatic(m, words, 0);
             }
         }
-    }
-
-    /// Emit the source receiver according to an already-selected property realization. Instance
-    /// accessors/fields consume it; a static realization still evaluates and drops an effectful receiver.
-    /// Reads and writes share this exact rule so `side().p` and `side().p = v` cannot diverge.
-    fn emit_property_receiver(
-        &mut self,
-        receiver: crate::ir::ExprId,
-        access_owner: TypeName,
-        takes_receiver: bool,
-        expected: &Ty,
-        code: &mut CodeBuilder,
-    ) {
-        if takes_receiver {
-            self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), *expected, code);
-            return;
-        }
-        // A receiverless realization does not make the receiver expression disappear. Elide only an
-        // expression that runs no code, or a singleton/static read of the very owner whose static access
-        // initializes it anyway; every other receiver is evaluated and popped.
-        let initializes_owner = match self.ir.expr(receiver) {
-            IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
-                self.ir,
-                *classifier,
-                crate::jvm::singleton_storage::of(self.classifiers, *classifier),
-            )
-            .is_some_and(|published| published.owner == access_owner),
-            IrExpr::ExternalStaticField { owner, .. }
-            | IrExpr::ExternalStaticInstance { owner, .. } => *owner == access_owner,
-            IrExpr::StaticInstance { owner, .. } => self
-                .ir
-                .classes
-                .get(*owner as usize)
-                .is_some_and(|class| class.fq_name == access_owner),
-            _ => false,
-        };
-        if !crate::ir::expr_runs_no_code(self.ir, receiver) && !initializes_owner {
-            self.emit_value(receiver, code);
-            code.pop();
-        }
-    }
-
-    /// Select the JVM access for an active-source property by the exact declaration coordinate
-    /// retained from checked FIR. Companion storage may already have been moved to the outer class;
-    /// consume that backend table directly instead of recovering the property from its spelling.
-    fn local_property_read_access(
-        &self,
-        target: crate::fir::PropertyId,
-        selected_accessor: Option<&str>,
-        selected_interface: bool,
-    ) -> Option<crate::jvm::inline::PropertyAccess> {
-        let crate::ir::IrLocalPropertyLayout::Member {
-            class, owner, name, ..
-        } = self.ir.local_property_layouts.get(&target)?
-        else {
-            return None;
-        };
-        debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
-        self.declared_property_read_access(*owner, name, selected_accessor, selected_interface)
     }
 
     fn local_property_write_access(

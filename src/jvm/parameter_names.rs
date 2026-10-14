@@ -165,6 +165,32 @@ pub(super) fn function_locals(
     )
 }
 
+/// Local-variable spellings for a static property-annotation marker. Its extension receiver is the
+/// property's receiver rather than a callable receiver, and kotlinc publishes that slot as
+/// `<this>`; context parameters keep their ordinary declaration spellings.
+pub(super) fn property_annotation_marker_locals(
+    ir: &IrFile,
+    function: u32,
+    types: &[crate::types::Ty],
+) -> Option<Vec<Option<String>>> {
+    let identities = ir.function_parameter_identities(function)?;
+    let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
+    let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
+    Some(
+        identities
+            .iter()
+            .zip(anonymous)
+            .map(|(identity, anonymous)| {
+                if identity.role == IrParameterRole::ExtensionReceiver {
+                    Some("<this>".to_string())
+                } else {
+                    anonymous.or_else(|| local_variable(identity, ""))
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Kotlin 2.4.20 names an anonymous context parameter by its generated label in the IR itself, so
 /// the label is also its local-variable name; earlier releases left it unnamed there, publishing the
 /// label only to reflection and null assertions. A lambda literal's own context-function parameter

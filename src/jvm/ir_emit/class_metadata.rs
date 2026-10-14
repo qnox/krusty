@@ -249,7 +249,7 @@ impl<'a> JvmClassRealization<'a> {
                 .prop_origins
                 .iter()
                 .zip(&record.props)
-                .map(|(&origin, property)| self.property(origin, &property.name))
+                .map(|(&origin, _)| self.property(origin))
                 .collect(),
             functions: record
                 .method_origins
@@ -343,14 +343,18 @@ impl<'a> JvmClassRealization<'a> {
         }
     }
 
-    fn property(&self, origin: PropertyOrigin, name: &str) -> JvmPropertySignature {
+    fn property(&self, origin: PropertyOrigin) -> JvmPropertySignature {
         let (ir, c) = (self.ir, self.c);
         match origin {
             PropertyOrigin::Declared(index) => self.declared_property(index),
             // A class `const val` is its static field, read inline through its `ConstantValue`.
-            PropertyOrigin::Constant(_) => JvmPropertySignature {
+            PropertyOrigin::Constant(static_id) => JvmPropertySignature {
                 field: Some(JvmFieldSignature::default()),
-                synthetic_method: property_marker_signature(ir, c, name),
+                synthetic_method: property_marker_signature(
+                    ir,
+                    c,
+                    ir.statics[static_id as usize].source_order,
+                ),
                 ..JvmPropertySignature::default()
             },
             PropertyOrigin::MemberExtension(index) => {
@@ -358,6 +362,7 @@ impl<'a> JvmClassRealization<'a> {
             }
             PropertyOrigin::CompanionBlock(index) => companion_blocks::property_signature(
                 ir,
+                c,
                 ir.companion_blocks
                     .properties_of(c.fq_name_id())
                     .nth(index)
@@ -378,7 +383,7 @@ impl<'a> JvmClassRealization<'a> {
         let delegate = property
             .delegate_field
             .and_then(|i| c.fields.get(i as usize));
-        let hoisted = static_fields::hoisted_static_for(ir, c, property_index);
+        let hoisted = static_fields::hoisted_static_declaration_for(ir, c, property_index);
         let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
         // A getter's descriptor is its physical one: a scalar getter result over a reference-returning
         // overridden property returns the wrapper (see `jvm::override_results`).
@@ -451,11 +456,14 @@ impl<'a> JvmClassRealization<'a> {
                 .filter(|_| backing.is_some())
                 .or(property.delegate_field.filter(|_| delegate.is_some()))
                 .map(|index| instance_field_jvm_name(ir, self.run, c, index as usize))
+                .or_else(|| {
+                    hoisted.map(|(static_id, _)| ir.static_field_jvm_name(static_id).to_string())
+                })
                 .filter(|physical| *physical != property.name),
             desc: backing
-                .map(|field| field.ty)
-                .or(delegate.map(|field| field.ty))
-                .or_else(|| hoisted.map(|storage| storage.ty))
+                .map(|field| jvm_value_ty(&field.ty))
+                .or(delegate.map(|field| jvm_value_ty(&field.ty)))
+                .or_else(|| hoisted.map(|(_, storage)| jvm_value_ty(&storage.ty)))
                 .map(desc)
                 .filter(|physical| self.requires_field_signature(property.ty, physical)),
         });
@@ -466,7 +474,7 @@ impl<'a> JvmClassRealization<'a> {
             // A property-targeted annotation lives on its synthetic marker method; the record here
             // is what connects the property to it (and the marker's FINAL name, which the
             // value-class pass may have mangled with the getter's).
-            synthetic_method: property_marker_signature(ir, c, &property.name),
+            synthetic_method: property_marker_signature(ir, c, property.source_order),
             // kotlinc marks an interface companion's `@JvmField` property record: the backing
             // field was MOVED onto the interface itself.
             moved_from_interface_companion: companion_of_interface(ir, c)
@@ -484,10 +492,10 @@ impl<'a> JvmClassRealization<'a> {
             setter: ext.setter.and_then(|fid| self.accessor_signature(fid)),
             field: ext_delegate.map(|(index, field)| JvmFieldSignature {
                 name: Some(instance_field_jvm_name(ir, self.run, c, index as usize)),
-                desc: Some(crate::jvm::names::type_descriptor(field.ty))
+                desc: Some(crate::jvm::names::type_descriptor(jvm_value_ty(&field.ty)))
                     .filter(|physical| self.requires_field_signature(ext.ty, physical)),
             }),
-            synthetic_method: property_marker_signature(ir, c, &ext.name),
+            synthetic_method: property_marker_signature(ir, c, ext.source_order),
             moved_from_interface_companion: false,
         }
     }

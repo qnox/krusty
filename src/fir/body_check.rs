@@ -95,7 +95,7 @@ pub use driver::{
 };
 pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailure};
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use receiver_provenance::ReceiverFrame;
 
@@ -200,40 +200,38 @@ impl CheckedBodyReceiverShape<'_> {
     };
 }
 
+/// The transient syntax unit a body is checked in and the resolved facts it is checked against.
+#[derive(Clone, Copy)]
+pub struct BodyCheckUnit<'a> {
+    pub file: &'a File,
+    pub info: &'a TypeInfo,
+    pub source: SourceFileId,
+    pub index: &'a ResolvedModuleIndex,
+}
+
+/// The body being checked: its owner, the span that stands for it, the root expression a
+/// declaration has (a default-value fragment has none), and how that root's value is published.
+#[derive(Clone, Copy)]
+struct CheckedBodyRoot {
+    owner: BodyOwnerId,
+    span: Span,
+    expression: Option<ExprId>,
+    property_storage_type: Option<ResolvedTy>,
+    value_target: Option<ResolvedTy>,
+}
+
+/// The declared parameters a body binds, the defaults checked with them, and its receivers.
+#[derive(Clone, Copy)]
+struct CheckedBodySignature<'a, 'p> {
+    parameters: &'a [CheckedBodyParameter<'p>],
+    defaults: &'a [CheckedBodyDefault],
+    receiver_shape: CheckedBodyReceiverShape<'a>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CheckedBodyDefault {
     parameter: u32,
     expression: ExprId,
-}
-
-/// Check and route one scheduled expression body. A declaration/body-range parser supplies the
-/// transient `File` and root expression; this function validates the stable work identity, creates
-/// checked FIR, and moves it directly across the inline-or-consuming sink boundary.
-#[allow(clippy::too_many_arguments)]
-pub fn check_and_dispatch_expression_body(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
-    work: BodyWorkItem,
-    root: ExprId,
-    index: &ResolvedModuleIndex,
-    origins: &mut OriginStore,
-    inline_bodies: &mut InlineBodyStore,
-    ordinary_sink: &mut impl CheckedBodySink,
-) -> Result<(), CheckedBodyDriverFailure> {
-    if index
-        .declaration_anchor(work.declaration)
-        .is_none_or(|anchor| anchor.source != source)
-    {
-        return Err(CheckedBodyDriverFailure::SourceMismatch);
-    }
-    let callable = index
-        .callable_for_declaration(work.declaration)
-        .ok_or(CheckedBodyDriverFailure::MissingCallable)?;
-    let body = check_expression_body(file, info, source, work.owner, root, index, origins)
-        .map_err(CheckedBodyDriverFailure::Check)?;
-    dispatch_checked_body(callable, work, body, inline_bodies, ordinary_sink);
-    Ok(())
 }
 
 /// Build one checked FIR body from a transient, already-checked AST expression. The result owns no
@@ -249,102 +247,100 @@ pub fn check_expression_body(
 ) -> Result<FirBody, BodyCheckFailure> {
     let mut session = BodyCheckSession::default();
     check_expression_body_with_parameters_in_session(
-        file,
-        info,
-        source,
+        BodyCheckUnit {
+            file,
+            info,
+            source,
+            index,
+        },
         owner,
         root,
         &[],
-        index,
         origins,
         &mut session,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn check_expression_body_with_parameters(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     owner: BodyOwnerId,
     root: ExprId,
     parameters: &[CheckedBodyParameter<'_>],
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
 ) -> Result<FirBody, BodyCheckFailure> {
     let mut session = BodyCheckSession::default();
     check_expression_body_with_parameters_in_session(
-        file,
-        info,
-        source,
+        unit,
         owner,
         root,
         parameters,
-        index,
         origins,
         &mut session,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_expression_body_with_parameters_in_session(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
+    unit: BodyCheckUnit<'_>,
     owner: BodyOwnerId,
     root: ExprId,
     parameters: &[CheckedBodyParameter<'_>],
-    index: &ResolvedModuleIndex,
     origins: &mut OriginStore,
     session: &mut BodyCheckSession,
 ) -> Result<FirBody, BodyCheckFailure> {
     check_body_unit_with_parameters_and_defaults(
-        file,
-        info,
-        source,
-        owner,
-        file.expr_span(root).ok_or(BodyCheckFailure {
-            span: None,
-            kind: BodyCheckFailureKind::MissingSourceSpan,
-        })?,
-        Some(root),
-        parameters,
-        &[],
-        CheckedBodyReceiverShape::EMPTY,
-        None,
-        None,
-        index,
+        unit,
+        CheckedBodyRoot {
+            owner,
+            span: unit.file.expr_span(root).ok_or(BodyCheckFailure {
+                span: None,
+                kind: BodyCheckFailureKind::MissingSourceSpan,
+            })?,
+            expression: Some(root),
+            property_storage_type: None,
+            value_target: None,
+        },
+        CheckedBodySignature {
+            parameters,
+            defaults: &[],
+            receiver_shape: CheckedBodyReceiverShape::EMPTY,
+        },
         origins,
         session,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_body_unit_with_parameters_and_defaults(
-    file: &File,
-    info: &TypeInfo,
-    source: SourceFileId,
-    owner: BodyOwnerId,
-    root_span: Span,
-    root: Option<ExprId>,
-    parameters: &[CheckedBodyParameter<'_>],
-    defaults: &[CheckedBodyDefault],
-    receiver_shape: CheckedBodyReceiverShape<'_>,
-    property_storage_type: Option<ResolvedTy>,
-    root_value_target: Option<ResolvedTy>,
-    index: &ResolvedModuleIndex,
+    unit: BodyCheckUnit<'_>,
+    body_root: CheckedBodyRoot,
+    signature: CheckedBodySignature<'_, '_>,
     origins: &mut OriginStore,
     session: &mut BodyCheckSession,
 ) -> Result<FirBody, BodyCheckFailure> {
+    let BodyCheckUnit {
+        file,
+        info,
+        source,
+        index,
+    } = unit;
+    let CheckedBodyRoot {
+        owner,
+        span: root_span,
+        expression: root,
+        property_storage_type,
+        value_target: root_value_target,
+    } = body_root;
+    let CheckedBodySignature {
+        parameters,
+        defaults,
+        receiver_shape,
+    } = signature;
     if root.is_none() && defaults.is_empty() {
         return Err(BodyCheckFailure {
             span: Some(root_span),
             kind: BodyCheckFailureKind::MissingSourceSpan,
         });
     }
-    let mut checker = BodyFirChecker::new(
-        file, info, source, owner, root_span, index, origins, session,
-    );
+    let mut checker = BodyFirChecker::new(unit, owner, root_span, origins, session);
     if let Some(storage) = property_storage_type {
         checker
             .body
@@ -494,6 +490,8 @@ struct BodyFirChecker<'a> {
     class_capture_values: Vec<(String, ClassCaptureBinding)>,
     class_delegates: HashMap<String, LocalDelegateBinding>,
     class_receivers: Vec<ClassCaptureBinding>,
+    /// Variables of counted loops: the JVM backend steps the variable itself, so it is not immutable.
+    counted_loop_variables: HashSet<LocalValueId>,
     /// Stable property whose accessor lexically contains this body, propagated through local-class
     /// body units by [`BodyCheckSession`]. This replaces an impossible parent walk: local classifier
     /// anchors are module identities and deliberately do not retain parser-body ownership.
@@ -524,7 +522,7 @@ struct BodyFirChecker<'a> {
     /// Callables whose declaration lives in an enclosing independently streamed body. Nested
     /// lambdas/local functions retain this set so their references publish explicit closure
     /// operands instead of mistaking a streaming boundary for an ordinary nested-body scope.
-    streamed_outer_callables: crate::fx_hash::HashSet<BodyLocalCallableDeclarationId>,
+    streamed_outer_callables: HashSet<BodyLocalCallableDeclarationId>,
     nested_body_depth: u32,
     expression_depth: u32,
     owned_receiver_count: u32,
@@ -686,15 +684,18 @@ impl BodyFirChecker<'_> {
     }
 
     fn new<'a>(
-        file: &'a File,
-        info: &'a TypeInfo,
-        source: SourceFileId,
+        unit: BodyCheckUnit<'a>,
         owner: BodyOwnerId,
         root_span: Span,
-        index: &'a ResolvedModuleIndex,
         origins: &'a mut OriginStore,
         session: &'a mut BodyCheckSession,
     ) -> BodyFirChecker<'a> {
+        let BodyCheckUnit {
+            file,
+            info,
+            source,
+            index,
+        } = unit;
         let target_origin = origins.source(source, root_span);
         let mut body = FirBody::new(owner);
         let declaration = DeclarationId::from_raw(owner.raw());
@@ -765,7 +766,7 @@ impl BodyFirChecker<'_> {
                         | crate::fir::DeclarationKind::Property
                 )
             })
-            .and_then(|_| enclosing_classifier)
+            .and(enclosing_classifier)
             .map(|classifier| {
                 let transient = session
                     .active_source
@@ -815,7 +816,7 @@ impl BodyFirChecker<'_> {
                         | crate::fir::DeclarationKind::Property
                 )
             })
-            .and_then(|_| enclosing_classifier)
+            .and(enclosing_classifier)
             .and_then(|classifier| index.classifier_header(classifier.declaration))
             .map(|classifier| {
                 u32::try_from(classifier.context_parameters.len())
@@ -940,6 +941,7 @@ impl BodyFirChecker<'_> {
             class_capture_values: class_context.capture_values,
             class_delegates: class_context.delegates,
             class_receivers: class_context.receivers,
+            counted_loop_variables: HashSet::default(),
             enclosing_property,
             session,
             return_target,
@@ -1074,8 +1076,7 @@ impl BodyFirChecker<'_> {
             .chain(
                 self.outer_values
                     .get(name)
-                    .map(|(depth, binding)| (Some(*depth), *binding))
-                    .into_iter(),
+                    .map(|(depth, binding)| (Some(*depth), *binding)),
             )
             .nth(shadow_depth)
     }
@@ -2914,39 +2915,8 @@ impl BodyFirChecker<'_> {
                 indices,
                 value,
             } => {
-                let mut operand_bindings = Vec::new();
-                if self.is_compound_index_assignment(*array, indices, *value) {
-                    let operands = std::iter::once(*array)
-                        .chain(indices.iter().copied())
-                        .collect::<Vec<_>>();
-                    for operand in operands {
-                        if self.expression_substitutions.contains_key(&operand) {
-                            continue;
-                        }
-                        let initializer = self.expression(operand)?;
-                        let ty = self.expression_type(operand)?;
-                        let target = self.allocate_local();
-                        let declaration = self.body.add_statement(FirStatement {
-                            origin,
-                            kind: FirStatementKind::Local {
-                                target,
-                                ty,
-                                mutable: false,
-                                lateinit: false,
-                                deferred: false,
-                                initializer: Some(initializer),
-                                conversion: None,
-                            },
-                        });
-                        let replacement = self.body.add_expr(FirExpr {
-                            origin,
-                            ty,
-                            kind: FirExprKind::ValueRead(target),
-                        });
-                        self.expression_substitutions.insert(operand, replacement);
-                        operand_bindings.push((operand, declaration));
-                    }
-                }
+                let operand_bindings =
+                    self.bind_compound_index_operands(*array, indices, *value, origin)?;
                 let receiver_ty = self.info.semantic_ty(*array).non_null();
                 let selected_convention = ["set", "put"].into_iter().find(|convention| {
                     self.info
@@ -3045,18 +3015,18 @@ impl BodyFirChecker<'_> {
                 for (operand, _) in &operand_bindings {
                     self.expression_substitutions.remove(operand);
                 }
-                let expression = if operand_bindings.is_empty() {
+                let declarations = operand_bindings
+                    .into_iter()
+                    .filter_map(|(_, declaration)| declaration)
+                    .collect::<Vec<_>>();
+                let expression = if declarations.is_empty() {
                     expression
                 } else {
                     self.body.add_expr(FirExpr {
                         origin,
                         ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
                         kind: FirExprKind::Block {
-                            statements: operand_bindings
-                                .into_iter()
-                                .map(|(_, declaration)| declaration)
-                                .collect::<Vec<_>>()
-                                .into_boxed_slice(),
+                            statements: declarations.into_boxed_slice(),
                             result: Some(expression),
                         },
                     })
@@ -3193,6 +3163,7 @@ impl BodyFirChecker<'_> {
                 let start = self.expression(range.start)?;
                 let end = self.expression(range.end)?;
                 let variable = self.loop_variable(statement, name);
+                self.counted_loop_variables.insert(variable);
                 let body = self.checked_loop_body(
                     target,
                     label,

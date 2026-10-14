@@ -762,51 +762,40 @@ impl BodyLowering<'_> {
                 nullable,
                 primitive,
                 primitive_ty,
-                nullable_first: _,
+                nullable_first,
             } => {
-                let nullable_value = self.expression(*nullable)?;
-                let temporary = self.allocate_temporary();
-                let nullable_ty = self
-                    .body
-                    .expr(*nullable)
-                    .ok_or(FirLoweringFailure::MissingExpression(*nullable))?
-                    .ty
-                    .get();
-                let variable = self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: nullable_ty,
-                    init: Some(nullable_value),
-                    named: false,
-                });
-                let nullable_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let is_null = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: nullable_read,
-                    rhs: null,
-                });
-                let nullable_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                let unboxed = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: nullable_read,
-                    type_operand: primitive_ty.get(),
-                });
-                let primitive = self.expression(*primitive)?;
-                let compared = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                // Structural equality in source order, as kotlinc's `EQEQ` keeps it. How a primitive
+                // meets its nullable box is the target's representation choice. kotlinc compares a
+                // `Byte`/`Short` pair at the promoted `Int`, converting the nullable operand with a
+                // safe call (`e?.toInt()`).
+                let operand = primitive_ty.get();
+                let promoted =
+                    Ty::promote(operand, operand).filter(|promoted| *promoted != operand);
+                let (first, second) = if *nullable_first {
+                    (*nullable, *primitive)
+                } else {
+                    (*primitive, *nullable)
+                };
+                let mut operands = Vec::with_capacity(2);
+                for source in [first, second] {
+                    let value = self.expression(source)?;
+                    operands.push(match promoted {
+                        None => value,
+                        Some(promoted) if source == *nullable => {
+                            self.safe_numeric_conversion(source, value, operand, promoted)?
+                        }
+                        Some(promoted) => self.ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: value,
+                            type_operand: promoted,
+                        }),
+                    });
+                }
+                self.ir.add_expr(IrExpr::Equality {
                     op: lower_binary_operation(*operation),
-                    lhs: unboxed,
-                    rhs: primitive,
-                });
-                let fixed = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(
-                    *operation == FirBinaryOperation::NotEqual,
-                )));
-                let comparison = self.ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(is_null), fixed), (None, compared)],
-                });
-                self.ir.logical_types.insert(comparison, Ty::Boolean);
-                self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![variable],
-                    value: Some(comparison),
+                    mode: crate::types::EqualityMode::Structural,
+                    lhs: operands[0],
+                    rhs: operands[1],
                 })
             }
             FirExprKind::NullableNumericComparison {
@@ -1937,6 +1926,63 @@ impl BodyLowering<'_> {
             arg: expression,
             type_operand: target,
         })
+    }
+
+    /// kotlinc's safe conversion of a nullable numeric operand to its comparison type:
+    /// `{ val tmp = value; when { tmp == null -> null; else -> tmp.toInt() } }`.
+    fn safe_numeric_conversion(
+        &mut self,
+        source: FirExprId,
+        value: ExprId,
+        operand: Ty,
+        promoted: Ty,
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let nullable_ty = self
+            .body
+            .expr(source)
+            .ok_or(FirLoweringFailure::MissingExpression(source))?
+            .ty
+            .get();
+        let temporary = self.allocate_temporary();
+        let variable = self.ir.add_expr(IrExpr::Variable {
+            index: temporary,
+            ty: nullable_ty,
+            init: Some(value),
+            named: false,
+        });
+        let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Eq,
+            lhs: condition_read,
+            rhs: null,
+        });
+        let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let present = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: read,
+            type_operand: operand,
+        });
+        let converted = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: present,
+            type_operand: promoted,
+        });
+        let result_type = Ty::nullable(promoted);
+        let selector = self.coerce_result(converted, result_type);
+        let null_result = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+        let guarded = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(condition), null_result), (None, selector)],
+        });
+        self.ir.whens.exhaustive.insert(guarded, result_type);
+        self.ir.logical_types.insert(guarded, result_type);
+        self.ir.null_guards.insert(guarded);
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![variable],
+            value: Some(guarded),
+        });
+        self.ir.logical_types.insert(block, result_type);
+        Ok(block)
     }
 
     fn safe_call_expression(

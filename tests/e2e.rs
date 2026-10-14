@@ -54,6 +54,8 @@ mod abstract_member_check_e2e;
 mod abstract_member_shape_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
+#[path = "access_increment_shape_e2e.rs"]
+mod access_increment_shape_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
 mod adapted_callable_reference_equality_e2e;
 #[path = "allopen_plugin_e2e.rs"]
@@ -1333,8 +1335,6 @@ mod jvm_default_mode_e2e;
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
 mod jvm_name_toplevel_e2e;
-#[path = "jvmfield_companion_e2e.rs"]
-mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
@@ -1545,8 +1545,6 @@ mod metadata_field_signature_e2e;
 mod metadata_function_flags_e2e;
 #[path = "metadata_inline_parameter_modifiers_e2e.rs"]
 mod metadata_inline_parameter_modifiers_e2e;
-#[path = "metadata_jvm_field_e2e.rs"]
-mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]
 mod metadata_kept_params;
 #[path = "metadata_language_version_e2e.rs"]
@@ -1621,8 +1619,6 @@ mod override_formal_identity_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
-#[path = "property_accessor_annotation_e2e.rs"]
-mod property_accessor_annotation_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
@@ -2987,11 +2983,14 @@ mod reified_object_type_of_e2e;
 
 #[path = "discarded_inline_result_temporary_e2e.rs"]
 mod discarded_inline_result_temporary_e2e;
+#[path = "e2e/jvm_storage_realization.rs"]
+mod jvm_storage_realization;
+#[path = "primitive_to_object_equality_e2e.rs"]
+mod primitive_to_object_equality_e2e;
 #[path = "special_builtin_call_sites_e2e.rs"]
 mod special_builtin_call_sites_e2e;
 #[path = "type_intrinsics_e2e.rs"]
 mod type_intrinsics_e2e;
-
 #[path = "value_class_receiver_inline_only_e2e.rs"]
 mod value_class_receiver_inline_only_e2e;
 

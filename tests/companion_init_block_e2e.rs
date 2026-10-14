@@ -274,3 +274,59 @@ fn a_delegate_initializes_with_the_other_companion_properties() {
     assert_same_method(DELEGATE, "C", "<clinit>");
     assert_same_method(DELEGATE, "C$Companion", "C$Companion");
 }
+
+const DELEGATE_THEN_ORDINARY: &str = r#"
+val trace = StringBuilder()
+
+class Slot(private val value: String) {
+    operator fun getValue(owner: Any?, property: Any?): String = value
+}
+
+fun delegated(value: String): Slot {
+    trace.append(value)
+    return Slot(value)
+}
+
+fun ordinary(value: String): String {
+    trace.append(value)
+    return value
+}
+
+class Ordered {
+    companion object {
+        val first by delegated("first;")
+        internal val second = ordinary("second;")
+    }
+}
+
+fun box(): String {
+    val values = Ordered.first + Ordered.second
+    return if (trace.toString() == "first;second;" && values == "first;second;") "OK"
+        else "trace=$trace values=$values"
+}
+"#;
+
+#[test]
+fn delegate_and_ordinary_companion_initializers_keep_source_order() {
+    expect_box_same_as_kotlinc(DELEGATE_THEN_ORDINARY, "CompanionDelegateThenOrdinary");
+    assert_same_fields(DELEGATE_THEN_ORDINARY, "Ordered");
+    assert_same_method(DELEGATE_THEN_ORDINARY, "Ordered", "<clinit>");
+}
+
+const COMPANION_FIELD_COLLISION: &str = r#"
+class CompanionCollision {
+    companion object {
+        val Companion: CompanionCollision.Companion = this
+    }
+}
+
+fun box(): String =
+    if (CompanionCollision.Companion.Companion === CompanionCollision.Companion) "OK" else "fail"
+"#;
+
+#[test]
+fn an_ordinary_companion_property_does_not_shadow_the_companion_field() {
+    expect_box_same_as_kotlinc(COMPANION_FIELD_COLLISION, "CompanionFieldCollision");
+    assert_same_fields(COMPANION_FIELD_COLLISION, "CompanionCollision");
+    assert_same_method(COMPANION_FIELD_COLLISION, "CompanionCollision", "<clinit>");
+}

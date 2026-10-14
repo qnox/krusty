@@ -89,11 +89,18 @@ pub fn is_computed_member_prop(p: &PropDecl) -> bool {
 
 /// Whether this member-property declaration contributes one instance-storage slot.
 pub fn has_instance_backing_field(p: &PropDecl) -> bool {
-    !p.is_const
-        && !is_computed_member_prop(p)
+    !p.is_const && has_backing_field(p)
+}
+
+/// Whether this property declaration can own the backing field selected by an explicit `@field:`
+/// annotation. Static `const` storage counts; delegates and computed/extension/context properties
+/// have other realizations and therefore do not.
+pub fn has_backing_field(p: &PropDecl) -> bool {
+    !is_computed_member_prop(p)
         && !p.is_abstract
         && p.delegate.is_none()
         && p.receiver.is_none()
+        && p.context_params.is_empty()
 }
 
 pub fn setter_param_or_value(param: Option<&String>) -> String {
@@ -574,8 +581,14 @@ pub struct TypeRef {
 pub struct AnnotationRef {
     /// Source spelling used only as input to name resolution.
     pub name: String,
+    /// The `@` that begins this application. Target diagnostics cover the complete `@site:Name`
+    /// prefix while semantic occurrence identity remains keyed by the classifier span below.
+    pub at: u32,
     /// Exact classifier-reference span; resolved identities are keyed by this occurrence.
     pub span: Span,
+    /// An explicit property use-site target retained with the semantic annotation occurrence.
+    /// Other use-site targets belong to accessors/parameters and are stored by those declarations.
+    pub property_site: Option<crate::types::PropertyAnnotationSite>,
 }
 
 /// Source annotations on one declaration type parameter (`<@Ann("x") T>`). The parameter and every
@@ -1287,7 +1300,8 @@ pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
 }
 
-/// Where a property's accessors written with a body start and end, each a 1-based line (0 = none).
+/// Where a property's written accessor headers start, and where accessor bodies end, each a
+/// 1-based line (0 = none). A visibility-only accessor has a header and no body end.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AccessorLines {
     pub getter: u32,
@@ -1556,6 +1570,20 @@ pub struct ExpectDeclaration {
     pub keyword: Span,
 }
 
+/// A member or index `++`/`--` the parser expanded into a block. The read and the write share
+/// `operands`; lowering evaluates each runtime operand once. `value` binds the first read, the
+/// optional `original` keeps it for a postfix value, `update` applies the operator to `value` and
+/// `store` writes it back. Checked FIR rebuilds kotlinc's shape from these parts.
+#[derive(Clone, Debug)]
+pub struct IncDecAccess {
+    pub operands: Vec<ExprId>,
+    pub value: StmtId,
+    pub original: Option<StmtId>,
+    pub update: StmtId,
+    pub store: StmtId,
+    pub prefix: bool,
+}
+
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
@@ -1631,11 +1659,8 @@ pub struct File {
     pub statement_labels: crate::fx_hash::HashMap<StmtId, (String, Span)>,
     /// `@` token spans of this file's `return@label`s.
     pub(crate) return_label_spans: ReturnLabelSpans,
-    /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
-    /// shared between the read and write. Lowering spills the operands that semantic resolution
-    /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay
-    /// attached to both accesses.
-    pub incdec_access_operands: crate::fx_hash::HashMap<ExprId, Vec<ExprId>>,
+    /// Parser-desugared member/index inc/dec blocks, keyed by the block expression.
+    pub incdec_accesses: crate::fx_hash::HashMap<ExprId, IncDecAccess>,
     /// 1-based source line of each expression's start (parallel to `expr_spans`; 0 = unknown).
     /// Filled by the parser post-pass for the `LineNumberTable`.
     pub expr_lines: Vec<u32>,
@@ -1970,7 +1995,7 @@ impl File {
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
         self.init_block_keywords = Default::default();
-        self.incdec_access_operands = Default::default();
+        self.incdec_accesses = Default::default();
         self.call_arg_names = Default::default();
         self.collection_literal_calls = Default::default();
         self.call_arg_name_spans = Default::default();

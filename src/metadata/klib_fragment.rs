@@ -152,6 +152,8 @@ mod tests {
             has_backing_field: true,
             modifiers: crate::ir::IrPropertyModifiers::default(),
             setter_visibility: crate::types::Visibility::Public,
+            declares_annotations: false,
+            annotation_method: None,
             companion: false,
             accessor_annotations: Default::default(),
             field_name: None,
