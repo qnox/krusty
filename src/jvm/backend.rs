@@ -217,6 +217,12 @@ fn run_backend_passes_after_plugins(
     // A package property remains a semantic declaration plus a checked common-IR layout. Join the
     // stable identities here, where `@JvmField` becomes a JVM storage decision.
     crate::jvm::property_storage::realize_top_level_jvm_fields(ir);
+    // Some early representation decisions need to know whether an exact checked classifier is a
+    // value class. Publish that declaration inventory before the first such decision; later
+    // representation passes still own erasure, boxing and mangling.
+    if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
+        return Err(SkipReason::ValueClasses);
+    }
     // A singleton or constant delegate is evaluated in place, with no `x$delegate` storage. Before
     // companion hoisting and delegate-field naming, which then see only the storage that remains.
     crate::jvm::in_place_delegates::realize(ir);
@@ -263,6 +269,7 @@ fn run_backend_passes_after_plugins(
     // before the value-class pass (which retargets them once mangled names are known).
     // A scalar result over a reference-returning overridden slot is the wrapper; its bridges follow.
     // A bridge to a value-class override asks which dependency classes are value classes.
+    // Refresh the inventory for declarations synthesized since the first publication above.
     if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
         return Err(SkipReason::ValueClasses);
     }

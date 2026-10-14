@@ -558,3 +558,34 @@ fn value_class_delegate_methods_follow_their_mangled_getters() {
         );
     }
 }
+
+/// The value-class declaration can live in another file of the same module. Its checked module
+/// identity must be published before in-place delegation chooses whether this member-extension
+/// delegate method has an instance dispatch receiver; value-class lowering is too late to repair a
+/// static method with an extra `Host` parameter.
+#[test]
+fn sibling_value_class_member_extension_delegate_has_kotlinc_method_shape() {
+    const VALUE: &str = "package store\n\
+        \n\
+        @JvmInline value class SiblingScore(val value: Int)\n";
+    const HOST: &str = "package store\n\
+        \n\
+        import kotlin.reflect.KProperty\n\
+        \n\
+        operator fun Unit.getValue(thisRef: SiblingScore, property: KProperty<*>): Int =\n\
+        \x20   thisRef.value\n\
+        \n\
+        class SiblingExtensionHost {\n\
+        \x20   val SiblingScore.points: Int by Unit\n\
+        }\n";
+
+    let pair = common::ModuleClassPair::compile(
+        &[("Host.kt", HOST), ("Value.kt", VALUE)],
+        "store/SiblingExtensionHost",
+    );
+    assert_eq!(
+        common::member_table(&pair.krusty),
+        common::member_table(&pair.kotlinc),
+        "a sibling value class keeps the member-extension delegate method shape"
+    );
+}
