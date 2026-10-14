@@ -7426,6 +7426,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   path. Tests: `property_accessor_annotation_e2e`, `expression_line_marks_e2e` (setter
   fall-through), `types::annotation_targets` unit tests.
 
+  A retained `PROPERTY` annotation's synthetic `$annotations` method occupies the same physical JVM
+  method namespace as source declarations. When more than one independent marker collision group
+  exists in a class, kotlinc orders the groups by the earliest retained declaration source position,
+  not by hash-map iteration or lexicographic JVM signature. Only that earliest group contributes the
+  generated declaration's diagnostic at the class header; every colliding source declaration still
+  receives its own group diagnostic. The JVM signature is only a deterministic tie-breaker after
+  source provenance. Test:
+  `tests/property_accessor_annotation_e2e.rs::independent_marker_clash_groups_follow_property_source_order`.
+
 - **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
   a body.** Two independent checks, both syntactic and both measured against the reference
   compiler. (1) Without `+MultiPlatformProjects`, every `expect`/`actual` MODIFIER is an error
