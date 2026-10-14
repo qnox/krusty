@@ -5161,6 +5161,15 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         override_slots::source_slot(self, source, function)
     }
 
+    fn provider_override_result_refines(
+        &self,
+        source: &dyn crate::symbol_source::SymbolSource,
+        implementation: Ty,
+        declaration: Ty,
+    ) -> bool {
+        override_slots::result_refines(self, source, implementation, declaration)
+    }
+
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
         self.cp.type_alias_expansion(internal).and_then(
             |(target, formals, expansion, expansion_spelling)| {

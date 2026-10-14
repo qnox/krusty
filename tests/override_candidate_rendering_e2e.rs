@@ -302,6 +302,38 @@ fn a_differently_typed_member_extension_does_not_implement_a_raw_java_method() {
     );
 }
 
+/// A provider-normalized input slot is not an override verdict. The implementation result must
+/// still refine the abstract declaration's semantic result; otherwise the class would lack the
+/// method promised by the provider interface at runtime.
+#[test]
+fn a_member_extension_with_a_wider_result_does_not_implement_a_raw_java_method() {
+    let (library, _) = common::javac_compile(
+        &[(
+            "J.java".to_string(),
+            "package fixture; public abstract class J { public abstract String f(J value); }"
+                .to_string(),
+        )],
+        &[],
+    )
+    .expect("javac must build the result-covariance fixture");
+    let source = "abstract class Base : fixture.J() { fun fixture.J.f(): Any = \"wide\" }\n\
+        class Derived : Base()\n";
+    let result =
+        common::compiler_diagnostics(&[("Main.kt", source)], &[library, common::stdlib_jar()]);
+    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
+    assert_eq!(
+        expected,
+        [
+            "Main.kt:2:1: class 'Derived' is not abstract and does not implement abstract base class member:",
+            "| fun f(p0: J!): String!",
+        ]
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+}
+
 /// Unsigned and other value-class inputs may share a JVM carrier with a Java parameter, but their
 /// source declarations are name-mangled and therefore do not implement that raw Java method.
 #[test]

@@ -833,12 +833,14 @@ fn implements_abstract_function(
     {
         return false;
     }
-    (implementation.kind == declaration.kind
+    let ordinary_implementation = implementation.kind == declaration.kind
         && (crate::symbol_resolver::function_input_shapes_match(
             source,
             declaration,
             implementation,
-        ) || flexible_function_keys_match(implementation, declaration)))
+        ) || flexible_function_keys_match(implementation, declaration));
+    (ordinary_implementation
+        && crate::symbol_resolver::function_result_refines(source, implementation, declaration))
         || provider_slot_implements(
             source,
             platform,
@@ -919,5 +921,15 @@ fn provider_slot_implements(
         || hierarchy_classifiers.iter().any(|&classifier| {
             inherits(classifier, implementation_owner) && inherits(classifier, declaration_owner)
         });
-    implementation_scope.same_key(declaration_scope) && shares_provider_scope
+    if !implementation_scope.same_key(declaration_scope) || !shares_provider_scope {
+        return false;
+    }
+    let implementation_result = implementation.ret.apply(implementation.callable.ret);
+    let declaration_result = declaration.ret.apply(declaration.callable.ret);
+    crate::symbol_resolver::function_result_refines(source, implementation, declaration)
+        || platform.provider_override_result_refines(
+            source,
+            implementation_result,
+            declaration_result,
+        )
 }

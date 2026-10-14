@@ -20,14 +20,14 @@ struct JvmOverrideKey {
     inputs: Box<[JvmOverrideSlotInput]>,
 }
 
-fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> JvmOverrideSlotInput {
-    fn erased_ty(input: JvmOverrideSlotInput) -> Ty {
-        match input {
-            JvmOverrideSlotInput::Type(ty) => ty,
-            JvmOverrideSlotInput::Function(arity) => Ty::obj(&format!("kotlin/Function{arity}")),
-        }
+fn erased_type(input: JvmOverrideSlotInput) -> Ty {
+    match input {
+        JvmOverrideSlotInput::Type(ty) => ty,
+        JvmOverrideSlotInput::Function(arity) => Ty::obj(&format!("kotlin/Function{arity}")),
     }
+}
 
+fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> JvmOverrideSlotInput {
     let ty = libraries.library_value_form(ty);
     let erased = match ty {
         unsigned if unsigned.is_unsigned() => unsigned.scalar_value_repr().unwrap(),
@@ -39,7 +39,7 @@ fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> JvmOverrideSlotInput {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             Ty::obj_args(
                 "kotlin/Array",
-                &[erased_ty(normalized_input(libraries, element))],
+                &[erased_type(normalized_input(libraries, element))],
             )
         }
         Ty::Obj(name, _) => Ty::Obj(name, &[]),
@@ -52,11 +52,11 @@ fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> JvmOverrideSlotInput {
         Ty::Nullable(inner) => match *inner {
             Ty::UInt => Ty::obj("kotlin/UInt"),
             Ty::ULong => Ty::obj("kotlin/ULong"),
-            other if other.boxed_ref().is_some() => erased_ty(normalized_input(
+            other if other.boxed_ref().is_some() => erased_type(normalized_input(
                 libraries,
                 other.boxed_ref().unwrap_or(other),
             )),
-            other => erased_ty(normalized_input(libraries, other)),
+            other => erased_type(normalized_input(libraries, other)),
         },
         Ty::PlatformNullable(inner) => {
             return normalized_input(libraries, Ty::nullable(*inner));
@@ -117,4 +117,17 @@ pub(super) fn source_slot(
         function.callable.name.clone(),
         inputs,
     ))
+}
+
+pub(super) fn result_refines(
+    libraries: &JvmLibraries,
+    source: &dyn SymbolSource,
+    implementation: Ty,
+    declaration: Ty,
+) -> bool {
+    crate::symbol_resolver::resolution_subtype(
+        source,
+        erased_type(normalized_input(libraries, implementation)),
+        erased_type(normalized_input(libraries, declaration)),
+    )
 }

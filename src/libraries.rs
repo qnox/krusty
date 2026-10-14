@@ -501,6 +501,19 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// Whether two results satisfy covariance in the provider's override model. Common checking
+    /// asks this only after ordinary semantic subtyping fails for declarations that already share
+    /// a provider override slot. The provider must compare the result carriers themselves; an input
+    /// key alone is never sufficient evidence for result compatibility.
+    fn provider_override_result_refines(
+        &self,
+        _source: &dyn crate::symbol_source::SymbolSource,
+        _implementation: Ty,
+        _declaration: Ty,
+    ) -> bool {
+        false
+    }
+
     /// Convert a platform classifier name to the identity used by source resolution.
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
         internal

@@ -724,11 +724,22 @@ fn overrides_in_family(
             )
         })
         && function_input_shapes_match(source, inherited, implementation)
-        && resolution_subtype(
-            source,
-            implementation.ret.apply(implementation.callable.ret),
-            inherited.ret.apply(inherited.callable.ret),
-        )
+        && function_result_refines(source, implementation, inherited)
+}
+
+/// Whether `implementation` has a result that may override `inherited`'s result. Input-slot
+/// equivalence and result covariance are separate semantic facts: a provider-normalized input key
+/// must never by itself discharge a declaration with a narrower result.
+pub(crate) fn function_result_refines(
+    source: &dyn SymbolSource,
+    implementation: &FunctionInfo,
+    inherited: &FunctionInfo,
+) -> bool {
+    resolution_subtype(
+        source,
+        implementation.ret.apply(implementation.callable.ret),
+        inherited.ret.apply(inherited.callable.ret),
+    )
 }
 
 /// Freeze on each dependency declaration the exact identities of the declarations it overrides.
@@ -1348,7 +1359,6 @@ fn retain_covariant_inherited_overrides(
 ) {
     let mut retained: Vec<FunctionInfo> = Vec::with_capacity(functions.overloads.len());
     for candidate in functions.overloads.drain(..) {
-        let candidate_ret = candidate.ret.apply(candidate.callable.ret);
         let mut candidate_is_shadowed = false;
         let mut shadowed = Vec::new();
         for (index, existing) in retained.iter().enumerate() {
@@ -1362,16 +1372,22 @@ fn retain_covariant_inherited_overrides(
                     .classifier(function.callable.owner)
                     .is_some_and(|owner| owner.is_interface())
             };
+            let candidate_result_refines_existing =
+                function_result_refines(source, &candidate, existing);
+            let existing_result_refines_candidate =
+                function_result_refines(source, existing, &candidate);
             // A provider-normalized concrete class slot implements the matching abstract interface
             // slot even when the interface is reached at a shallower receiver depth. Keep the
             // ordinary rank rule for two classes so a nearer abstract class can still re-abstract
             // a concrete superclass member.
             let candidate_class_implements_interface = same_provider_slot
+                && candidate_result_refines_existing
                 && !candidate.flags.is_abstract
                 && existing.flags.is_abstract
                 && !owner_is_interface(&candidate)
                 && owner_is_interface(existing);
             let existing_class_implements_interface = same_provider_slot
+                && existing_result_refines_candidate
                 && !existing.flags.is_abstract
                 && candidate.flags.is_abstract
                 && !owner_is_interface(existing)
@@ -1387,9 +1403,8 @@ fn retain_covariant_inherited_overrides(
             if !function_input_shapes_match(source, existing, &candidate) {
                 continue;
             }
-            let existing_ret = existing.ret.apply(existing.callable.ret);
-            let candidate_is_subtype = resolution_subtype(source, candidate_ret, existing_ret);
-            let existing_is_subtype = resolution_subtype(source, existing_ret, candidate_ret);
+            let candidate_is_subtype = candidate_result_refines_existing;
+            let existing_is_subtype = existing_result_refines_candidate;
             let candidate_owner_overrides = candidate.callable.owner != existing.callable.owner
                 && resolution_subtype(
                     source,
