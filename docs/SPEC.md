@@ -17042,13 +17042,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Out.pair(selector: (String) -> R, printer: (R, R) -> String)` types `printer` as
   `(String, String) -> String`. Shaping from the fully instantiated candidate fixed `R` to its
   bound's stand-in (`Comparable<*>`) first and rejected `value` as a `String` result. A lambda's
-  checked result is a lower bound for the formals its declared result binds (`R :> String`).
+  checked result is a lower bound for the formals its declared result binds (`R :> String`). A
+  fixed-point recheck is driven by a changed receiver/context/value input. A lambda's own result
+  constraint changing does not contextualize that same body again, because feeding the provisional
+  result back can weaken the stable result it just published. A productive input-driven recheck
+  replaces only that argument's provisional result while preserving independent constraints.
   Signature evaluation shapes a bare or qualified call's postponed lambdas from the same member-
   extension shape, after the receiver's members and callable properties: `fun record() =
   scoped(1) { tally { 7L } }` with a member `Int.tally(selector: () -> Long)` used to leave the
   lambda without an expectation, so the module's signatures never finalized. Tests:
   `tests/member_extension_lambda_inference_e2e.rs`,
   `backend_rejection_coverage_e2e::*member_extension_value_class_receiver_specialization_runs`.
+- **A safe call lifts the selected call's result only after generic inference.** For a generic call
+  whose declaration result is `R`, `receiver?.call { ... }` contributes the outer nullable
+  expectation as `R?`; it must not first force the declaration result itself to the non-null outer
+  type. A following non-null assertion changes the whole safe-call expression back to non-null, but
+  its operand is still contextualized as nullable: `(receiver?.call { ... })!!` therefore preserves
+  the nullable evidence while the lambda is checked and removes nullability only from the completed
+  expression. Tests:
+  `tests/member_extension_lambda_inference_e2e.rs::a_member_extension_lambda_sees_a_formal_an_earlier_lambda_solved`,
+  `tests/member_extension_lambda_inference_e2e.rs::a_member_extension_lambda_sees_a_formal_an_earlier_lambda_solved_as_kotlinc_does`.
 - **A NULLABLE PRIMITIVE parameter is its BOX in the descriptor and its own name in `@Metadata`.**
   `Int?` compiles to `Ljava/lang/Integer;` while `@Metadata` keeps `kotlin/Int`, so metadata alignment
   has to relate the two. Comparing them through the classifier ERASURE GROUPS does not: those relate

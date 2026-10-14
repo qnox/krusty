@@ -132,6 +132,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
+        refresh_typed_postponed: bool,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let (qualifier, name) = spelling.rsplit_once('.').ok_or_else(Self::failure)?;
         self.with_qualified_package_resolver(scope, qualifier, |_, resolver| {
@@ -173,6 +174,7 @@ impl ProductionSignatureSemantics<'_> {
                 &parameters,
                 &selected.call_sig,
                 trailing_lambda,
+                refresh_typed_postponed,
             )
             .ok_or_else(Self::failure)
         })

@@ -1154,7 +1154,7 @@ impl ProductionSignatureSemantics<'_> {
         dispatch_receiver: Ty,
         name: &str,
         call: SignatureMemberExtensionArguments<'_>,
-        expected_result: Option<Ty>,
+        result_constraint: super::super::CallResultConstraint,
         selection: super::super::MemberExtensionSelection,
     ) -> SignatureMemberExtensionCallSelection {
         let SignatureMemberExtensionArguments {
@@ -1185,15 +1185,14 @@ impl ProductionSignatureSemantics<'_> {
                     probes,
                     super::super::MemberExtensionFunctionCall {
                         extension_receiver,
-                        result_constraint: super::super::CallResultConstraint::direct(
-                            expected_result,
-                        ),
+                        result_constraint,
                         name,
                         args: &argument_ordinals,
                         arg_tys: &arguments,
                         arg_names: names,
                         explicit_type_args: explicit_type_arguments,
                         trailing_lambda,
+                        inference_bindings: None,
                     },
                     selection,
                 )
@@ -1240,7 +1239,8 @@ impl ProductionSignatureSemantics<'_> {
             arguments,
             type_arguments,
             trailing_lambda,
-            expected,
+            result_constraint,
+            refresh_typed_postponed,
         } = call;
         let argument_kinds = arguments
             .iter()
@@ -1276,34 +1276,45 @@ impl ProductionSignatureSemantics<'_> {
         let argument_ordinals = (0..arguments.len())
             .map(|ordinal| crate::ast::ExprId(ordinal as u32))
             .collect::<Vec<_>>();
-        let shape = self
-            .signature_dispatch_receivers(scope)
-            .into_iter()
-            .find_map(|dispatch_receiver| {
-                self.with_signature_member_extension_probes(
-                    scope,
-                    dispatch_receiver,
-                    &argument_kinds,
-                    |source, oracle, receivers, probes| {
-                        super::super::member_extension_selection::member_extension_lambda_shape_with(
-                            source,
-                            oracle,
-                            receivers,
-                            probes,
-                            super::super::CallResultConstraint::direct(expected),
-                            super::super::MemberExtensionCall {
-                                extension_receiver: receiver,
-                                name: spelling,
-                                args: &argument_ordinals,
-                                partial_arg_tys: &partial_arguments,
-                                arg_names: names,
-                                explicit_type_args: type_arguments,
-                                trailing_lambda,
-                            },
-                        )
-                    },
-                )
-            })?;
+        let mut shape = None;
+        for dispatch_receiver in self.signature_dispatch_receivers(scope) {
+            match self.with_signature_member_extension_probes(
+                scope,
+                dispatch_receiver,
+                &argument_kinds,
+                |source, oracle, receivers, probes| {
+                    super::super::member_extension_selection::member_extension_lambda_shape_with(
+                        source,
+                        oracle,
+                        receivers,
+                        probes,
+                        result_constraint,
+                        refresh_typed_postponed,
+                        super::super::MemberExtensionCall {
+                            extension_receiver: receiver,
+                            name: spelling,
+                            args: &argument_ordinals,
+                            partial_arg_tys: &partial_arguments,
+                            arg_names: names,
+                            explicit_type_args: type_arguments,
+                            trailing_lambda,
+                        },
+                    )
+                },
+            ) {
+                super::super::member_extension_selection::MemberExtensionLambdaShape::Selected(
+                    selected,
+                ) => {
+                    shape = Some(selected);
+                    break;
+                }
+                super::super::member_extension_selection::MemberExtensionLambdaShape::Ambiguous => {
+                    return Some(vec![None; arguments.len()].into_boxed_slice());
+                }
+                super::super::member_extension_selection::MemberExtensionLambdaShape::Absent => {}
+            }
+        }
+        let shape = shape?;
         crate::trace_compiler!(
             "signature",
             "member extension expectations receiver={receiver:?} spelling={spelling} parameters={:?}",
@@ -1314,6 +1325,7 @@ impl ProductionSignatureSemantics<'_> {
             arguments,
             &slots,
             &shape.argument_parameters,
+            refresh_typed_postponed,
         ))
     }
 
@@ -1336,6 +1348,7 @@ impl ProductionSignatureSemantics<'_> {
                 call.arguments,
                 &slots,
                 &parameters,
+                call.refresh_typed_postponed,
             )));
         }
         Ok(self.member_extension_call_expectations(receiver, call))
@@ -1352,6 +1365,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[Ty],
         trailing_lambda: bool,
+        refresh_typed_postponed: bool,
         expected: Option<Ty>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -1364,7 +1378,8 @@ impl ProductionSignatureSemantics<'_> {
             arguments,
             type_arguments,
             trailing_lambda,
-            expected,
+            refresh_typed_postponed,
+            result_constraint: super::super::CallResultConstraint::direct(expected),
         };
         for receiver in self
             .implicit_receivers(scope)
@@ -1374,7 +1389,12 @@ impl ProductionSignatureSemantics<'_> {
             if let Some((parameters, slots)) =
                 self.receiver_member_level_expectations(receiver, call)?
             {
-                return Ok(Self::postponed_expectations(arguments, &slots, &parameters));
+                return Ok(Self::postponed_expectations(
+                    arguments,
+                    &slots,
+                    &parameters,
+                    refresh_typed_postponed,
+                ));
             }
             // At each receiver rung, callable-valued properties follow ordinary functions before
             // the tower advances outward. Reuse the property selector and invoke expectation
@@ -1383,11 +1403,12 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(callee) =
                 self.selected_member_property_type(scope, receiver, spelling, demand)?
             {
-                if let Ok(expectations) =
-                    <Self as crate::fir::SignatureSemantics>::invoke_argument_expectations(
-                        self, scope, callee, arguments,
-                    )
-                {
+                if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
+                    scope,
+                    callee,
+                    arguments,
+                    refresh_typed_postponed,
+                ) {
                     return Ok(expectations);
                 }
             }

@@ -1482,6 +1482,7 @@ impl Checker<'_> {
                         arg_names: None,
                         explicit_type_args: &[],
                         trailing_lambda: false,
+                        inference_bindings: None,
                     },
                     MemberExtensionSelection::DelegateConventions,
                 );

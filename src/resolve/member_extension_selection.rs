@@ -46,6 +46,15 @@ pub(crate) enum MemberExtensionFunctionSelection {
     Ambiguous(Vec<MemberExtensionFunctionCandidate>),
 }
 
+/// Whether this scope-tower rung owns postponed lambda shaping. An ambiguous rung deliberately
+/// carries no shape but still claims the call, preventing lower-priority sources from turning the
+/// ambiguity into a declaration-order-dependent selection.
+pub(super) enum MemberExtensionLambdaShape {
+    Absent,
+    Ambiguous,
+    Selected(crate::symbol_resolver::LambdaCallShape),
+}
+
 pub(super) fn exclude_delegate_convention(
     shape: &MemberExtensionFunctionShape,
     selection: MemberExtensionSelection,
@@ -334,6 +343,7 @@ impl Checker<'_> {
             arg_names: None,
             explicit_type_args: &[],
             trailing_lambda: false,
+            inference_bindings: None,
         };
         let candidate = match self.member_extension_function(
             scope,
@@ -447,8 +457,8 @@ mod tests {
 }
 
 /// The lambda shape a member-extension call gives its postponed arguments — the lambdas and
-/// callable references `call.partial_arg_tys` leaves untyped — from the candidate the
-/// member-extension selector would rank first among those the typed arguments admit.
+/// callable references `call.partial_arg_tys` leaves untyped — from the unique best candidate, or
+/// the common shape of equally ranked candidates, among those the typed arguments admit.
 ///
 /// The shape is the selected candidate's parameters under the call's evidence alone, with every
 /// method formal that evidence leaves open still itself and named in `generic_formals`. It is the
@@ -464,15 +474,16 @@ pub(super) fn member_extension_lambda_shape_with(
     receivers: &[ImplicitReceiver],
     probes: MemberExtensionProbes<'_>,
     result_constraint: CallResultConstraint,
+    refresh_typed_postponed: bool,
     call: MemberExtensionCall<'_>,
-) -> Option<crate::symbol_resolver::LambdaCallShape> {
+) -> MemberExtensionLambdaShape {
     let arguments = call.args.len();
     let mut plans = Vec::new();
     for shape in
         member_extension_function_shapes_in(source, receivers, call.extension_receiver, call.name)
     {
         let Some(instantiated) =
-            instantiate_member_extension_with(probes, result_constraint, &shape, call)
+            instantiate_member_extension_with(probes, result_constraint, None, &shape, call)
         else {
             continue;
         };
@@ -485,7 +496,10 @@ pub(super) fn member_extension_lambda_shape_with(
         let mut expected_types = vec![None; arguments];
         let mut lambda_receivers = vec![None; arguments];
         let mut context_counts = vec![0; arguments];
-        let mut shapes_postponed_argument = false;
+        // The evaluator's final fixed-point round retains every argument as typed. It still owns
+        // the original postponed-callable provenance, so recompute the selected parameter vector
+        // even though this boundary can no longer identify a postponed source form from `call`.
+        let mut shapes_postponed_argument = refresh_typed_postponed;
         for &(parameter_index, source_index) in &instantiated.argument_parameters {
             let Some(&parameter) = instantiated.open_visible_params.get(parameter_index) else {
                 continue;
@@ -528,8 +542,17 @@ pub(super) fn member_extension_lambda_shape_with(
         plans.push((shape.priority, instantiated.score, lambda_shape));
     }
     let maximal = maximal_member_extensions(oracle, &plans, |(priority, ..)| *priority);
-    maximal
+    let Some(best_score) = maximal.iter().map(|index| plans[*index].1).max() else {
+        return MemberExtensionLambdaShape::Absent;
+    };
+    let mut best = maximal
         .into_iter()
-        .max_by_key(|index| plans[*index].1)
-        .map(|index| plans.swap_remove(index).2)
+        .filter(|index| plans[*index].1 == best_score);
+    let Some(selected) = best.next() else {
+        return MemberExtensionLambdaShape::Absent;
+    };
+    if best.any(|index| plans[index].2 != plans[selected].2) {
+        return MemberExtensionLambdaShape::Ambiguous;
+    }
+    MemberExtensionLambdaShape::Selected(plans.swap_remove(selected).2)
 }

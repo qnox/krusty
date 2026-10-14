@@ -11034,6 +11034,7 @@ type CandidateScorer<'s> = dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallC
 fn instantiate_member_extension_with(
     probes: MemberExtensionProbes<'_>,
     result_constraint: CallResultConstraint,
+    inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
     shape: &MemberExtensionFunctionShape,
     call: MemberExtensionCall<'_>,
 ) -> Option<InstantiatedMemberExtension> {
@@ -11068,6 +11069,13 @@ fn instantiate_member_extension_with(
     let mut bindings = shape.class_bindings.clone();
     for (_, parameter) in &method_type_params {
         bindings.remove(*parameter);
+    }
+    if let Some(inference_bindings) = inference_bindings {
+        for (_, parameter) in &method_type_params {
+            if let Some(actual) = inference_bindings.get(*parameter) {
+                bindings.insert((*parameter).clone(), *actual);
+            }
+        }
     }
     for ((_, parameter), argument) in method_type_params.iter().zip(explicit_type_args) {
         bindings.insert((*parameter).clone(), *argument);
@@ -11323,7 +11331,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         result_constraint: CallResultConstraint,
         call: MemberExtensionCall<'_>,
-    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+    ) -> member_extension_selection::MemberExtensionLambdaShape {
         let receivers = member_extension_selection::ordinary_dispatch_first(
             scope,
             self.implicit_receivers(scope),
@@ -11335,6 +11343,7 @@ impl<'a> Checker<'a> {
                 &receivers,
                 probes,
                 result_constraint,
+                false,
                 call,
             )
         })
@@ -11348,6 +11357,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
+        inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
     ) -> Option<Ty> {
         self.check_member_extension_function_call_mode(
             scope,
@@ -11360,6 +11370,7 @@ impl<'a> Checker<'a> {
             name,
             (MemberExtensionSelection::All, None),
             CallResultConstraint::direct(None),
+            inference_bindings,
         )
     }
 
@@ -11379,6 +11390,7 @@ impl<'a> Checker<'a> {
         // implicit-receiver tower to search when one other than the scope's own applies.
         selection: (MemberExtensionSelection, Option<&[ImplicitReceiver]>),
         result_constraint: CallResultConstraint,
+        inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
     ) -> Option<Ty> {
         let (selection, receivers) = selection;
         let CallArgs {
@@ -11405,6 +11417,7 @@ impl<'a> Checker<'a> {
             arg_names: arg_names.as_deref(),
             explicit_type_args: &explicit_type_args,
             trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+            inference_bindings,
         };
         // `recv(args)` is the `invoke` convention and therefore admits only `operator`
         // declarations. Keep that language rule at the invoke boundary instead of storing a mode
@@ -19390,14 +19403,19 @@ impl<'a> Checker<'a> {
                     && top_level_functions
                         .top_level()
                         .any(|o| o.flags.inline.must_inline());
-                let this_member_partial = if args
-                    .iter()
-                    .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. }))
-                {
+                let this_member_partial = if has_lambda_argument {
                     Some(
                         args.iter()
                             .map(|argument| {
-                                if matches!(self.file.expr(*argument), Expr::Lambda { .. }) {
+                                // Member-extension shaping owns the same postponed argument forms
+                                // as top-level shaping above. Resolving a callable reference here
+                                // would publish an ambiguity before a productive sibling can
+                                // specialize its expected function type and trigger the shared
+                                // refinement pass.
+                                if matches!(
+                                    self.file.expr(*argument),
+                                    Expr::Lambda { .. } | Expr::CallableRef { .. }
+                                ) {
                                     None
                                 } else {
                                     Some(self.expr(scope, *argument))
@@ -19411,9 +19429,7 @@ impl<'a> Checker<'a> {
                 let implicit_member_lambda_enabled = !self
                     .lexical_value_claims_call_with_arguments(scope, &fname, args)
                     && known_sig.is_none()
-                    && args
-                        .iter()
-                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }));
+                    && has_lambda_argument;
                 let ordinary_this_member_lambda_shape: Option<MemberLambdaShape> =
                     if implicit_member_lambda_enabled {
                         let partial = this_member_partial.as_deref().unwrap_or_default();
@@ -20139,8 +20155,9 @@ impl<'a> Checker<'a> {
                                 if let Some(&declared) = selected_lambda_shape
                                     .and_then(|shape| shape.argument_parameters.get(i))
                                 {
-                                    postponed_constraints.constrain_lambda_result(
+                                    postponed_constraints.constrain_function_result(
                                         &self.fed_source(),
+                                        a,
                                         &postponed_formals,
                                         declared,
                                         checked,
@@ -20243,11 +20260,28 @@ impl<'a> Checker<'a> {
                             .and_then(|parameter| self.functional_parameter_shape(parameter));
                         if matches!(self.file.expr(a), Expr::CallableRef { .. }) {
                             if let Some(Ty::Fun(_)) = expected_callable {
+                                let postponed_reference =
+                                    sig.generic_sig.as_ref().is_some_and(|generic| {
+                                        generic.formals.iter().any(|formal| {
+                                            !known_generic_bindings.contains_key(formal)
+                                                && ty_mentions_param(
+                                                    expected_callable
+                                                        .expect("callable expectation"),
+                                                    std::slice::from_ref(formal),
+                                                )
+                                        })
+                                    });
+                                let diagnostic_mark =
+                                    postponed_reference.then_some(self.diags.diags.len());
                                 let checked = self.expr_expected(
                                     scope,
                                     a,
                                     expected_callable.expect("callable expectation"),
                                 );
+                                if let Some(mark) = diagnostic_mark {
+                                    self.postponed_diagnostics
+                                        .capture_since(a, self.diags, mark);
+                                }
                                 let semantic_checked = self
                                     .expression_function_type(scope, a, checked)
                                     .unwrap_or(checked);
@@ -20605,7 +20639,30 @@ impl<'a> Checker<'a> {
                     {
                         return Ty::Error;
                     }
-                    self.expr(scope, a)
+                    let postponed_reference_mark =
+                        matches!(self.file.expr(a), Expr::CallableRef { .. })
+                            .then(|| {
+                                let shape = selected_lambda_shape?;
+                                let declared = *shape.argument_parameters.get(i)?;
+                                shape
+                                    .generic_formals
+                                    .iter()
+                                    .any(|formal| {
+                                        !known_generic_bindings.contains_key(formal)
+                                            && ty_mentions_param(
+                                                declared,
+                                                std::slice::from_ref(formal),
+                                            )
+                                    })
+                                    .then_some(self.diags.diags.len())
+                            })
+                            .flatten();
+                    let checked = self.expr(scope, a);
+                    if let Some(mark) = postponed_reference_mark {
+                        self.postponed_diagnostics
+                            .capture_since(a, self.diags, mark);
+                    }
+                    checked
                 };
                 {
                     let mut type_argument = type_argument;
@@ -20654,122 +20711,20 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let mut postponed_solutions = crate::symbol_resolver::GSigBinds::default();
-                // PCLA checks each lambda once to collect constraints, then solves the shared
-                // callable variables. A solution can make an earlier lambda's parameter concrete
-                // from a later lambda (`T` becomes `TargetBase`); mechanically substituting only
-                // the lambda's outer `Fun` type leaves its already-checked body bound to symbolic
-                // `T`. Recheck every affected literal against the solved semantic parameter and
-                // publish its now-concrete result constraints. Those constraints can solve another
-                // formal consumed by a third lambda, so continue until a round changes no callable
-                // variable's solution. A later recheck may add evidence to an already-solved
-                // formal, so every constrained formal remains eligible: the monotone constraint
-                // set reaches its fixed point when solving it reproduces every prior solution.
-                loop {
-                    let constrained_formals = postponed_constraints
-                        .lower
-                        .keys()
-                        .chain(postponed_constraints.upper.keys())
-                        .cloned()
-                        .collect::<crate::fx_hash::HashSet<_>>();
-                    let mut newly_solved = Vec::new();
-                    for formal in constrained_formals {
-                        let Some(solution) =
-                            self.postponed_solution(&postponed_constraints, &formal)
-                        else {
-                            continue;
-                        };
-                        crate::trace_compiler!(
-                            "lambda_apply",
-                            "call={fname} postponed solution formal={formal} solution={solution:?} lower={:?} upper={:?}",
-                            postponed_constraints.lower.get(&formal),
-                            postponed_constraints.upper.get(&formal),
-                        );
-                        if postponed_solutions.get(&formal) == Some(&solution) {
-                            continue;
-                        }
-                        known_generic_bindings.insert(formal.clone(), solution);
-                        postponed_solutions.insert(formal.clone(), solution);
-                        newly_solved.push(formal);
-                    }
-                    if newly_solved.is_empty() {
-                        break;
-                    }
-                    for (argument_index, &argument) in args.iter().enumerate() {
-                        if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
-                            continue;
-                        }
-                        let selected_parameter = selected_lambda_shape.and_then(|shape| {
-                            let declared = *shape.argument_parameters.get(argument_index)?;
-                            let has_receiver = selected_lambda_shape
-                                .and_then(|shape| shape.receivers.as_ref())
-                                .and_then(|receivers| receivers.get(argument_index))
-                                .copied()
-                                .flatten()
-                                .is_some();
-                            let inline = selected_lambda_shape
-                                .and_then(|shape| shape.inlines_argument(argument_index))
-                                .unwrap_or(false);
-                            Some((
-                                declared,
-                                has_receiver,
-                                inline,
-                                shape.generic_formals.as_slice(),
-                            ))
-                        });
-                        let known_parameter = || {
-                            let signature = known_sig.as_ref()?;
-                            let generic = signature.generic_sig.as_ref()?;
-                            let parameter = known_argument_parameters
-                                .as_ref()
-                                .and_then(|parameters| parameters.get(argument_index))
-                                .copied()
-                                .unwrap_or(argument_index);
-                            Some((
-                                *generic.params.get(parameter)?,
-                                signature
-                                    .lambda_recv
-                                    .get(parameter)
-                                    .copied()
-                                    .unwrap_or(false),
-                                signature.inlines_lambda_for(parameter),
-                                generic.formals.as_slice(),
-                            ))
-                        };
-                        let Some((declared, has_receiver, inline, result_formals)) =
-                            selected_parameter.or_else(known_parameter)
-                        else {
-                            continue;
-                        };
-                        if !newly_solved
-                            .iter()
-                            .any(|formal| ty_mentions_param(declared, std::slice::from_ref(formal)))
-                        {
-                            continue;
-                        }
-                        let solved = postponed_constraints
-                            .refinement_lambda_expectation(declared, &known_generic_bindings);
-                        if !matches!(solved.non_null(), Ty::Fun(_)) {
-                            continue;
-                        }
-                        let checked = self.with_argument_lambda(argument, inline, |checker| {
-                            checker.check_argument_expected(
-                                scope,
-                                argument,
-                                solved,
-                                has_receiver,
-                                call_fn_name.as_deref(),
-                            )
-                        });
-                        arg_tys[argument_index] = checked;
-                        postponed_constraints.constrain_lambda_result(
-                            &self.fed_source(),
-                            result_formals,
-                            declared,
-                            checked,
-                        );
-                    }
-                }
+                let postponed_solutions = self.refine_postponed_function_arguments(
+                    postponed_constraints::PostponedRefinementSite {
+                        scope,
+                        call_name: &fname,
+                        call_label: call_fn_name.as_deref(),
+                        arguments: args,
+                        selected_shape: selected_lambda_shape,
+                        known_signature: known_sig.as_ref(),
+                        parameter_by_argument: known_argument_parameters.as_deref(),
+                    },
+                    &mut arg_tys,
+                    &mut known_generic_bindings,
+                    &mut postponed_constraints,
+                );
                 if let Some(generic) = known_sig
                     .as_ref()
                     .and_then(|signature| signature.generic_sig.as_ref())
@@ -21165,7 +21120,13 @@ impl<'a> Checker<'a> {
                     // an enclosing receiver. Imported extensions remain behind an applicable
                     // receiver-less declaration and are evaluated by the later shared rung.
                     if let Some(ret) = self.check_member_extension_function_call(
-                        scope, call, receiver, &fname, args, &arg_tys,
+                        scope,
+                        call,
+                        receiver,
+                        &fname,
+                        args,
+                        &arg_tys,
+                        Some(&postponed_solutions),
                     ) {
                         self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
@@ -21289,6 +21250,7 @@ impl<'a> Checker<'a> {
                                 &fname,
                                 (MemberExtensionSelection::All, Some(&receivers)),
                                 CallResultConstraint::direct(expected),
+                                Some(&postponed_solutions),
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
                                 if let Some(receiver) = receivers.into_iter().find(|receiver| {
@@ -32714,6 +32676,7 @@ pub(crate) fn member_extension_function_with(
         arg_names,
         explicit_type_args,
         trailing_lambda,
+        inference_bindings,
     } = call;
     let (mut candidates, mut excluded) = (Vec::new(), Vec::new());
     let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -32725,6 +32688,7 @@ pub(crate) fn member_extension_function_with(
         let Some(instantiated) = instantiate_member_extension_with(
             probes,
             result_constraint,
+            inference_bindings,
             &shape,
             MemberExtensionCall {
                 extension_receiver,
@@ -35277,6 +35241,7 @@ pub(crate) struct MemberExtensionFunctionCall<'a> {
     arg_names: Option<&'a [Option<String>]>,
     explicit_type_args: &'a [Ty],
     trailing_lambda: bool,
+    inference_bindings: Option<&'a crate::symbol_resolver::GSigBinds>,
 }
 
 #[derive(Clone, Copy)]
@@ -56130,7 +56095,7 @@ impl<'a> Checker<'a> {
             arg_names,
             trailing_lambda,
             type_args: explicit_type_args,
-            expected,
+            expected: _,
         } = untyped;
         let method_sig = module_member.map(|(member, _)| member);
         let generic_member = module_member.and_then(|(_, plan)| plan);
@@ -56191,7 +56156,7 @@ impl<'a> Checker<'a> {
             });
         let consider_extension =
             shapeable && method_sig.is_none() && (provider.is_none() || provider_needs_sam);
-        let extension = consider_extension
+        let member_extension = consider_extension
             .then(|| {
                 self.member_extension_lambda_shape(
                     scope,
@@ -56207,9 +56172,18 @@ impl<'a> Checker<'a> {
                     },
                 )
             })
-            .flatten();
+            .unwrap_or(member_extension_selection::MemberExtensionLambdaShape::Absent);
+        let member_extension_claimed = !matches!(
+            &member_extension,
+            member_extension_selection::MemberExtensionLambdaShape::Absent
+        );
+        let extension = match member_extension {
+            member_extension_selection::MemberExtensionLambdaShape::Selected(shape) => Some(shape),
+            member_extension_selection::MemberExtensionLambdaShape::Absent
+            | member_extension_selection::MemberExtensionLambdaShape::Ambiguous => None,
+        };
         let extension = extension.or_else(|| {
-            consider_extension
+            (consider_extension && !member_extension_claimed)
                 .then(|| self.extension_lambda_shape(scope, receiver, name, untyped))
                 .flatten()
         });
@@ -56219,7 +56193,7 @@ impl<'a> Checker<'a> {
         // decision: the selector's `it` comes from the receiver's element type, at the lambda's own
         // argument position.
         let extension = extension.or_else(|| {
-            if !consider_extension {
+            if !consider_extension || member_extension_claimed {
                 return None;
             }
             let params = self.lambda_return_overload_param_types(receiver, name)?;
@@ -56245,7 +56219,7 @@ impl<'a> Checker<'a> {
         // The same fitness rule, applied to the other carrier. See
         // [`Self::shape_fits_written_lambdas`] for why the two count parameters differently.
         let extension = extension.filter(|shape| self.shape_fits_written_lambdas(args, shape));
-        let provider = (extension.is_none() || !provider_needs_sam)
+        let provider = (!member_extension_claimed && (extension.is_none() || !provider_needs_sam))
             .then_some(provider)
             .flatten();
         CallLambdaShaping {
@@ -57534,6 +57508,7 @@ impl<'a> Checker<'a> {
                     // this selection's result; it is threadable, but `get` seeding is its own
                     // change with its own fixtures.
                     CallResultConstraint::direct(None),
+                    None,
                 ) {
                     return self.set(e, ret);
                 }
@@ -64668,6 +64643,7 @@ impl<'a> Checker<'a> {
                 arg_names: None,
                 explicit_type_args: &[],
                 trailing_lambda: false,
+                inference_bindings: None,
             },
             MemberExtensionSelection::All,
         ) {
@@ -67580,7 +67556,7 @@ impl<'a> Checker<'a> {
         result_constraint: CallResultConstraint,
     ) -> Option<InstantiatedMemberExtension> {
         self.with_member_extension_probes(scope, call.args, |probes| {
-            instantiate_member_extension_with(probes, result_constraint, shape, call)
+            instantiate_member_extension_with(probes, result_constraint, None, shape, call)
         })
     }
 

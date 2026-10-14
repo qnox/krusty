@@ -7,10 +7,12 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 mod cast_narrowing;
 mod constructor_expectations;
 mod result_approximation;
-mod scoped_constraint_frames;
+mod result_constraints;
+pub(super) mod scoped_constraint_frames;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
 use result_approximation::denotable_signature_result;
+use result_constraints::signature_call_result_constraint;
 
 /// Select the language-defined SAM construction for a classifier call. Qualified and unqualified
 /// classifier spellings share this path; the qualifier affects only how the classifier was found,
@@ -810,6 +812,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
+        refresh_typed_postponed: bool,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let resolved_type_arguments = type_arguments
             .iter()
@@ -869,8 +872,14 @@ impl ProductionSignatureSemantics<'_> {
                 selected.call_sig,
             ))
         })?;
-        Self::postponed_call_expectations(arguments, &parameters, &call_sig, trailing_lambda)
-            .ok_or_else(Self::failure)
+        Self::postponed_call_expectations(
+            arguments,
+            &parameters,
+            &call_sig,
+            trailing_lambda,
+            refresh_typed_postponed,
+        )
+        .ok_or_else(Self::failure)
     }
 
     fn select_classifier_call(
@@ -942,6 +951,100 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::ResolvedTy::new(member.ret)
             .map(Some)
             .map_err(|_| Self::failure())
+    }
+
+    pub(super) fn invoke_argument_expectations_for_refresh(
+        &self,
+        scope: crate::fir::SignatureScope,
+        callee: crate::fir::ResolvedTy,
+        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
+        refresh_typed_postponed: bool,
+    ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
+        if !refresh_typed_postponed
+            && arguments
+                .iter()
+                .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)))
+        {
+            return Ok(vec![None; arguments.len()].into_boxed_slice());
+        }
+        let callable = match callee.get().non_null() {
+            Ty::Fun(_) => Some(callee.get().non_null()),
+            nominal => crate::symbol_resolver::classifier_callable_signature(
+                &*self.table.libraries,
+                nominal,
+            ),
+        };
+        let signature = match callable {
+            Some(Ty::Fun(signature)) => signature,
+            _ => {
+                let (parameters, slots) = self.with_resolver(scope, |resolver| {
+                    let (mut functions, properties) = resolver
+                        .receiver_callables(callee.get(), "invoke")
+                        .into_parts();
+                    functions
+                        .overloads
+                        .retain(|candidate| candidate.flags.operator);
+                    let callables = crate::libraries::Callables::from_parts(functions, properties);
+                    let (kinds, slots) =
+                        Self::probe_call_arguments(callables.functions(), arguments, false)?;
+                    resolver
+                        .select_receiver_function_with_params(
+                            callee.get(),
+                            "invoke",
+                            &kinds,
+                            &[],
+                            &callables,
+                        )
+                        .map(|(_, parameters)| (parameters, slots))
+                })?;
+                return Ok(Self::postponed_expectations(
+                    arguments,
+                    &slots,
+                    &parameters,
+                    refresh_typed_postponed,
+                ));
+            }
+        };
+        if arguments.iter().any(|argument| match argument {
+            crate::fir::SigCallArgumentProbe::Typed(argument) => {
+                argument.name.is_some() || argument.spread
+            }
+            crate::fir::SigCallArgumentProbe::PostponedLambda { name, spread, .. }
+            | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
+                name, spread, ..
+            } => name.is_some() || *spread,
+        }) {
+            return Err(Self::failure());
+        }
+        let implicit_prefix = signature
+            .context_count
+            .saturating_add(usize::from(signature.has_receiver))
+            .min(signature.params.len());
+        let parameters = if signature.params.len() == arguments.len() {
+            &signature.params[..]
+        } else if signature.params.len() - implicit_prefix == arguments.len() {
+            &signature.params[implicit_prefix..]
+        } else {
+            return Err(Self::failure());
+        };
+        parameters
+            .iter()
+            .copied()
+            .map(|parameter| {
+                let expectation = match parameter.non_null() {
+                    Ty::Fun(_) => Some(parameter.non_null()),
+                    nominal => crate::symbol_resolver::classifier_callable_signature(
+                        &*self.table.libraries,
+                        nominal,
+                    ),
+                };
+                expectation
+                    .map(crate::fir::ResolvedTy::new)
+                    .transpose()
+                    .map_err(|_| Self::failure())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Vec::into_boxed_slice)
     }
 }
 
@@ -1350,7 +1453,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             arguments,
                             type_arguments,
                             trailing_lambda,
-                            expected,
+                            expected.map(crate::fir::SignatureCallResultConstraint::Direct),
                             demand,
                         )
                         .and_then(|selection| selection.ty.ok_or_else(Self::failure));
@@ -1768,7 +1871,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         explicit_type_arguments: &resolved_type_arguments,
                         trailing_lambda,
                     },
-                    expected.map(crate::fir::ResolvedTy::get),
+                    super::super::CallResultConstraint::direct(
+                        expected.map(crate::fir::ResolvedTy::get),
+                    ),
                     super::super::MemberExtensionSelection::All,
                 );
                 let (result, declaration) = match selected {
@@ -2237,6 +2342,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
         qualified: bool,
+        refresh_typed_postponed: bool,
         expected: Option<crate::fir::ResolvedTy>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -2252,18 +2358,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // after materialization. Repeating a partial lookup here both wastes work and can reject a
         // valid later tower rung (callable properties, member extensions, header-only declarations)
         // which final selection already handles through the shared resolver.
-        let all_typed = arguments
-            .iter()
-            .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)));
         // A nested generic call is typed provisionally before its selected outer parameter is
-        // known. Only a structurally qualified namespace call reaches this operation with every
-        // argument typed but still needing contextual re-entry; value-root calls are represented
-        // by `MemberCall` and use `member_call_argument_expectations` directly.
-        let has_contextual_call = arguments.iter().any(|argument| {
-            matches!(argument, crate::fir::SigCallArgumentProbe::Typed(argument)
-                if argument.contextual_call)
-        });
-        if all_typed && !(qualified && has_contextual_call) {
+        // known. This includes an unqualified outer call whose argument wraps the nested call
+        // (`consume(value?.choose { ... })`), as well as qualified and receiver call shapes.
+        if !super::postponed_calls::call_expectation_lookup_required(
+            arguments,
+            refresh_typed_postponed,
+            qualified,
+        ) {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         }
         if qualified {
@@ -2273,6 +2375,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments,
                 type_arguments,
                 trailing_lambda,
+                refresh_typed_postponed,
             ) {
                 return Ok(expectations);
             }
@@ -2477,9 +2580,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?
                         }
                     };
-                    if let Ok(expectations) =
-                        self.invoke_argument_expectations(scope, callee, arguments)
-                    {
+                    if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
+                        scope,
+                        callee,
+                        arguments,
+                        refresh_typed_postponed,
+                    ) {
                         return Ok(expectations);
                     }
                 }
@@ -2493,6 +2599,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         arguments,
                         type_arguments,
                         trailing_lambda,
+                        refresh_typed_postponed,
                     ) {
                         return Ok(expectations);
                     }
@@ -2516,6 +2623,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         arguments,
                         &resolved_type_arguments,
                         trailing_lambda,
+                        refresh_typed_postponed,
                     ) {
                         return Ok(expectations);
                     }
@@ -2528,9 +2636,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     if let Some(value) = self.classifier_value_type(internal) {
                         let callee =
                             crate::fir::ResolvedTy::new(value).map_err(|_| Self::failure())?;
-                        if let Ok(expectations) =
-                            self.invoke_argument_expectations(scope, callee, arguments)
-                        {
+                        if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
+                            scope,
+                            callee,
+                            arguments,
+                            refresh_typed_postponed,
+                        ) {
                             return Ok(expectations);
                         }
                     }
@@ -2549,6 +2660,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             arguments,
                             type_arguments,
                             trailing_lambda,
+                            refresh_typed_postponed,
                         );
                         crate::trace_compiler!(
                             "signature",
@@ -2568,7 +2680,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         arguments,
                         type_arguments,
                         trailing_lambda,
-                        expected,
+                        refresh_typed_postponed,
+                        expected.map(crate::fir::SignatureCallResultConstraint::Direct),
                         demand,
                     );
                 }
@@ -2578,6 +2691,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     arguments,
                     &resolved_type_arguments,
                     trailing_lambda,
+                    refresh_typed_postponed,
                     expected.map(crate::fir::ResolvedTy::get),
                     demand,
                 ) {
@@ -2597,6 +2711,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             arguments,
                             type_arguments,
                             trailing_lambda,
+                            refresh_typed_postponed,
                         ) {
                             return Ok(expectations);
                         }
@@ -2609,10 +2724,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             && call_sig.param_defaults.is_empty()
             && call_sig.vararg_index.is_none()
         {
-            return Ok(Self::postponed_expectations(arguments, &slots, &parameters));
+            return Ok(Self::postponed_expectations(
+                arguments,
+                &slots,
+                &parameters,
+                refresh_typed_postponed,
+            ));
         }
-        Self::postponed_call_expectations(arguments, &parameters, &call_sig, trailing_lambda)
-            .ok_or_else(Self::failure)
+        Self::postponed_call_expectations(
+            arguments,
+            &parameters,
+            &call_sig,
+            trailing_lambda,
+            refresh_typed_postponed,
+        )
+        .ok_or_else(Self::failure)
     }
 
     fn select_callable_reference(
@@ -3855,13 +3981,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
-        expected: Option<crate::fir::ResolvedTy>,
+        signature_result_constraint: Option<crate::fir::SignatureCallResultConstraint>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         crate::trace_compiler!("signature", "select_member_call spelling={spelling}");
+        let result_constraint = signature_call_result_constraint(signature_result_constraint);
+        let expected =
+            signature_result_constraint.map(crate::fir::SignatureCallResultConstraint::expected);
         let ordinary_argument_types = arguments
             .iter()
             .map(|argument| argument.ty.get())
@@ -4051,7 +4180,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             arguments,
                             &[],
                             trailing_lambda,
-                            expected,
+                            signature_result_constraint,
                             demand,
                         );
                     }
@@ -4080,7 +4209,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             explicit_type_arguments: &type_arguments,
                             trailing_lambda,
                         },
-                        expected.map(crate::fir::ResolvedTy::get),
+                        result_constraint,
                         super::super::MemberExtensionSelection::All,
                     );
                     let (result, declaration) = match selected {
@@ -4296,27 +4425,31 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
-        expected: Option<crate::fir::ResolvedTy>,
+        refresh_typed_postponed: bool,
+        signature_result_constraint: Option<crate::fir::SignatureCallResultConstraint>,
         _demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         if spelling == "invoke" && type_arguments.is_empty() {
-            if let Ok(expectations) = self.invoke_argument_expectations(scope, receiver, arguments)
-            {
+            if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
+                scope,
+                receiver,
+                arguments,
+                refresh_typed_postponed,
+            ) {
                 return Ok(expectations);
             }
         }
         // A nested generic call (`s returns emptyList()`) is typed by its probe with its
         // formals defaulted (`List<Any>`); only the selected parameter can specialize it, so it
         // is postponed like a lambda rather than counted as already typed.
-        if arguments.iter().all(|argument| {
-            matches!(
-                argument,
-                crate::fir::SigCallArgumentProbe::Typed(argument) if !argument.contextual_call
-            )
-        }) {
+        if !super::postponed_calls::call_expectation_lookup_required(
+            arguments,
+            refresh_typed_postponed,
+            true,
+        ) {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         }
         let type_arguments = type_arguments
@@ -4329,7 +4462,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             arguments,
             type_arguments: &type_arguments,
             trailing_lambda,
-            expected: expected.map(crate::fir::ResolvedTy::get),
+            refresh_typed_postponed,
+            result_constraint: signature_call_result_constraint(signature_result_constraint),
         };
         self.qualified_receiver_call_expectations(receiver.get(), call)?
             .ok_or_else(Self::failure)
@@ -4572,7 +4706,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     names: argument_names,
                     ..Default::default()
                 },
-                None,
+                super::super::CallResultConstraint::None,
                 super::super::MemberExtensionSelection::Operators,
             );
             let (result, declaration) = match selected {
@@ -4605,85 +4739,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         callee: crate::fir::ResolvedTy,
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
-        if arguments
-            .iter()
-            .all(|argument| matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_)))
-        {
-            return Ok(vec![None; arguments.len()].into_boxed_slice());
-        }
-        let callable = match callee.get().non_null() {
-            Ty::Fun(_) => Some(callee.get().non_null()),
-            nominal => crate::symbol_resolver::classifier_callable_signature(
-                &*self.table.libraries,
-                nominal,
-            ),
-        };
-        let signature = match callable {
-            Some(Ty::Fun(signature)) => signature,
-            _ => {
-                let (parameters, slots) = self.with_resolver(scope, |resolver| {
-                    let (mut functions, properties) = resolver
-                        .receiver_callables(callee.get(), "invoke")
-                        .into_parts();
-                    functions
-                        .overloads
-                        .retain(|candidate| candidate.flags.operator);
-                    let callables = crate::libraries::Callables::from_parts(functions, properties);
-                    let (kinds, slots) =
-                        Self::probe_call_arguments(callables.functions(), arguments, false)?;
-                    resolver
-                        .select_receiver_function_with_params(
-                            callee.get(),
-                            "invoke",
-                            &kinds,
-                            &[],
-                            &callables,
-                        )
-                        .map(|(_, parameters)| (parameters, slots))
-                })?;
-                return Ok(Self::postponed_expectations(arguments, &slots, &parameters));
-            }
-        };
-        if arguments.iter().any(|argument| match argument {
-            crate::fir::SigCallArgumentProbe::Typed(argument) => {
-                argument.name.is_some() || argument.spread
-            }
-            crate::fir::SigCallArgumentProbe::PostponedLambda { name, spread, .. }
-            | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
-                name, spread, ..
-            } => name.is_some() || *spread,
-        }) {
-            return Err(Self::failure());
-        }
-        let implicit_prefix = signature
-            .context_count
-            .saturating_add(usize::from(signature.has_receiver))
-            .min(signature.params.len());
-        let parameters = if signature.params.len() == arguments.len() {
-            &signature.params[..]
-        } else if signature.params.len() - implicit_prefix == arguments.len() {
-            &signature.params[implicit_prefix..]
-        } else {
-            return Err(Self::failure());
-        };
-        parameters
-            .iter()
-            .copied()
-            .map(|parameter| {
-                let expectation = match parameter.non_null() {
-                    Ty::Fun(_) => Some(parameter.non_null()),
-                    nominal => crate::symbol_resolver::classifier_callable_signature(
-                        &*self.table.libraries,
-                        nominal,
-                    ),
-                };
-                expectation
-                    .map(crate::fir::ResolvedTy::new)
-                    .transpose()
-                    .map_err(|_| Self::failure())
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Vec::into_boxed_slice)
+        self.invoke_argument_expectations_for_refresh(scope, callee, arguments, false)
     }
 
     fn make_function_type(

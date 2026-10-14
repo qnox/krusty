@@ -43,6 +43,14 @@ class Seed {
     fun result(): String = "1"
 }
 
+open class Base {
+    open fun value(): Any = 0
+}
+
+class Derived : Base() {
+    override fun value(): String = "OK"
+}
+
 fun <T> build(block: Out.() -> T): String {
     val out = Out()
     out.block()
@@ -52,6 +60,20 @@ fun <T> build(block: Out.() -> T): String {
 fun <R> render(first: String, second: String, selector: (String) -> R, printer: (R, R) -> String) =
     printer(selector(first), selector(second))
 
+fun consume(value: Int?): Int? = value
+fun uniqueSeed(value: String): Int = value.length
+fun seed(value: String): Int = value.length
+fun seed(value: Int): String = value.toString()
+fun convert(value: Int): String = value.toString()
+fun convert(value: String): Int = value.length
+fun concreteSiblings(
+    value: Int,
+    predicate: (Int) -> Boolean,
+    transform: (Int) -> Int,
+): Int = if (predicate(value)) transform(value) else value
+fun <T> fixedSiblings(value: T, predicate: (T) -> Boolean, transform: (T) -> T): T =
+    if (predicate(value)) transform(value) else value
+
 class Pick {
     @Suppress("UNCHECKED_CAST")
     fun <T> String.choose(block: (T) -> String): T {
@@ -60,8 +82,49 @@ class Pick {
         return value
     }
 
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Any> String.chooseNonNull(block: (T) -> String): T {
+        val value = length as T
+        if (block(value) != (length + 1).toString()) error("block")
+        return value
+    }
+
+    fun <R> String.choose(selector: () -> R, use: (R) -> String): R {
+        val value = selector()
+        if (use(value) != length.toString()) error("use")
+        return value
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T, R> String.link(first: (T) -> R, seed: (R) -> T): String {
+        first(seed("x" as R))
+        return "OK"
+    }
+
+    fun <T, R> String.linkReference(first: (T) -> R, seed: () -> T): R = first(seed())
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Base, R> String.specialize(first: (T) -> R, seed: (R) -> T): R =
+        first(seed("x" as R))
+
     fun expected(): Int = "x".choose { it.inc().toString() }
-    fun safeExpected(value: String?): Int? = value?.choose { it.inc().toString() }
+    fun safeExpected(value: String?): Int? = value?.chooseNonNull { it.inc().toString() }
+    fun assertedSafe(value: String?): Int = (value?.chooseNonNull { it.inc().toString() })!!
+    fun nestedSafe(value: String?) = consume(value?.chooseNonNull { it.inc().toString() })
+    fun reversedOrder() = "xx".choose(use = { it.length.toString() }, selector = { "OK" })
+    fun fallbackOrder() = "".link(first = { it.inc().toString() }, seed = { _: String -> 1 })
+    fun referenceOrder() = "".link(first = { it.inc().toString() }, seed = ::uniqueSeed)
+    fun String.postponedReferenceOrder() = linkReference(first = ::convert, seed = { 1 })
+    fun referenceAfterSeed() = "".postponedReferenceOrder()
+    fun failedProbeRollback() =
+        "".specialize(
+            first = { it.value().length },
+            seed = { value: Int -> if (value > 0) Derived() else Derived() },
+        )
+    fun inferredLambdaResultCall() = "41".let { it.toInt() + 1 }
+    fun concreteSiblingLambdas() = concreteSiblings(1, { it > 0 }, { it + 1 })
+    fun <T> fixedCallerTypeParameter(value: T) =
+        fixedSiblings(value, { it == value }, { it })
 
     fun <R : Comparable<R>> Out.pair(
         first: String,
@@ -135,13 +198,15 @@ class Pick {
         add(use(transform(seed())))
     }
 
-    fun revised(): String = build {
-        revise(
-            first = { 1 },
-            transform = { it.result() },
-            seed = { Seed() },
-            use = { it.toString() },
-        )
+    fun revised(): String {
+        return build {
+            revise(
+                first = { 1 },
+                transform = { it.result() },
+                seed = { Seed() },
+                use = { it.toString() },
+            )
+        }
     }
 }
 
@@ -149,6 +214,15 @@ fun box(): String {
     val pick = Pick()
     if (pick.expected() != 1) return "expected"
     if (pick.safeExpected("xx") != 2 || pick.safeExpected(null) != null) return "safeExpected"
+    if (pick.assertedSafe("xxx") != 3) return "assertedSafe"
+    if (pick.nestedSafe("xxx") != 3 || pick.nestedSafe(null) != null) return "nestedSafe"
+    if (pick.reversedOrder() != "OK") return "reversedOrder"
+    if (pick.fallbackOrder() != "OK") return "fallbackOrder"
+    if (pick.referenceOrder() != "OK") return "referenceOrder"
+    if (pick.referenceAfterSeed() != "1") return "postponedReferenceOrder"
+    if (pick.inferredLambdaResultCall() != 42) return "inferredLambdaResultCall"
+    if (pick.concreteSiblingLambdas() != 2) return "concreteSiblingLambdas"
+    if (pick.fixedCallerTypeParameter("OK") != "OK") return "fixedCallerTypeParameter"
     if (pick.first() != "O") return "first"
     if (pick.inferred() != "K") return "inferred"
     if (pick.reversed() != "2") return "reversed"
@@ -189,6 +263,58 @@ class Pick {
 fun box(): String = Pick().run()
 "#;
 
+const NESTED_SAFE_EXPECTATION: &str = r#"fun consume(value: Int?): Int? = value
+
+class Pick {
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Any> String.choose(block: (T) -> String): T {
+        val value = length as T
+        block(value)
+        return value
+    }
+
+    fun nested(value: String?) = consume(value?.choose { it.inc().toString() })
+}
+
+fun box(): String {
+    val pick = Pick()
+    return if (pick.nested("xx") == 2 && pick.nested(null) == null) "OK" else "nested"
+}
+"#;
+
+const POSTPONED_REFERENCE_ORDER: &str = r#"fun convert(value: Int): String = value.toString()
+fun convert(value: String): Int = value.length
+
+class Pick {
+    fun <T, R> String.link(first: (T) -> R, seed: () -> T): R = first(seed())
+    fun String.postponed() = link(first = ::convert, seed = { 1 })
+    fun result() = "".postponed()
+}
+
+fun box(): String = if (Pick().result() == "1") "OK" else "reference"
+"#;
+
+const FAILED_PROBE_ROLLBACK: &str = r#"open class Base {
+    open fun value(): Any = 0
+}
+
+class Derived : Base() {
+    override fun value(): String = "OK"
+}
+
+class Pick {
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Base, R> String.specialize(first: (T) -> R, seed: (R) -> T): R =
+        first(seed("x" as R))
+
+    fun compileOnly() =
+        "".specialize(
+            first = { it.value().length },
+            seed = { value: Int -> if (value > 0) Derived() else Derived() },
+        )
+}
+"#;
+
 const CONTEXTUAL_MEMBER_EXTENSION: &str = r#"class Ctx
 
 class Host {
@@ -204,38 +330,109 @@ fun box(): String = context(Ctx()) {
 }
 "#;
 
+const NESTED_SCOPE_EFFECT: &str = r#"class Ctx
+class Extended
+
+class Host {
+    context(_: Ctx)
+    fun Extended.touch() {}
+}
+
+fun box(): String {
+    with(Host()) {
+        with(Ctx()) {
+            Extended().touch()
+        }
+    }
+    return "OK"
+}
+"#;
+
+const REVISED_RESULT_BOUND: &str = r#"class Seed {
+    fun result(): String = "1"
+}
+
+class Out {
+    var text = ""
+    fun add(part: String) { text += part }
+}
+
+fun <T> build(block: Out.() -> T): String {
+    val out = Out()
+    out.block()
+    return out.text
+}
+
+class Pick {
+    fun <T, R> Out.revise(
+        first: () -> R,
+        transform: (T) -> R,
+        seed: () -> T,
+        use: (R) -> String,
+    ) {
+        add(use(first()))
+        add(use(transform(seed())))
+    }
+
+    fun revised(): String = build {
+        revise(
+            first = { 1 },
+            transform = { it.result() },
+            seed = { Seed() },
+            use = { it.toString() },
+        )
+    }
+}
+
+fun box(): String {
+    val result = Pick().revised()
+    return if (result == "11") "OK" else result
+}
+"#;
+
 #[test]
 fn a_member_extension_lambda_in_an_inferred_result_compiles_as_kotlinc_does() {
-    let classes = common::classes_against_kotlinc_module(&[("Infer.kt", INFERRED_RESULT)]);
-    assert_eq!(classes.differences(), Vec::<String>::new());
+    common::assert_accepted_like_kotlinc(INFERRED_RESULT);
 }
 
 #[test]
 fn a_member_extension_lambda_in_an_inferred_result_runs() {
-    common::expect_box_ok_with_stdlib(INFERRED_RESULT, "member extension lambda inferred result");
+    common::expect_box_same_as_kotlinc(INFERRED_RESULT, "member extension lambda inferred result");
 }
 
 #[test]
 fn a_member_extension_lambda_sees_a_formal_an_earlier_lambda_solved_as_kotlinc_does() {
-    let classes = common::classes_against_kotlinc_module(&[("Shape.kt", DEPENDENT_LAMBDAS)]);
-    assert_eq!(classes.differences(), Vec::<String>::new());
+    common::assert_accepted_like_kotlinc(DEPENDENT_LAMBDAS);
 }
 
 #[test]
 fn a_member_extension_lambda_sees_a_formal_an_earlier_lambda_solved() {
-    common::expect_box_ok_with_stdlib(DEPENDENT_LAMBDAS, "member extension dependent lambdas");
+    common::expect_box_same_as_kotlinc(DEPENDENT_LAMBDAS, "member extension dependent lambdas");
+}
+
+#[test]
+fn a_safe_call_carries_an_outer_parameter_expectation_to_its_member_extension() {
+    common::expect_box_same_as_kotlinc(NESTED_SAFE_EXPECTATION, "nested safe expectation");
+}
+
+#[test]
+fn an_independent_seed_disambiguates_an_earlier_callable_reference() {
+    common::expect_box_same_as_kotlinc(POSTPONED_REFERENCE_ORDER, "postponed reference order");
+}
+
+#[test]
+fn a_failed_postponed_probe_keeps_the_productive_siblings_constraints() {
+    common::assert_accepted_like_kotlinc(FAILED_PROBE_ROLLBACK);
 }
 
 #[test]
 fn a_member_extension_projects_an_earlier_lambda_result_as_kotlinc_does() {
-    let classes =
-        common::classes_against_kotlinc_module(&[("Projected.kt", PROJECTED_LAMBDA_RESULT)]);
-    assert_eq!(classes.differences(), Vec::<String>::new());
+    common::assert_accepted_like_kotlinc(PROJECTED_LAMBDA_RESULT);
 }
 
 #[test]
 fn a_member_extension_projects_an_earlier_lambda_result() {
-    common::expect_box_ok_with_stdlib(
+    common::expect_box_same_as_kotlinc(
         PROJECTED_LAMBDA_RESULT,
         "member extension projected lambda result",
     );
@@ -243,17 +440,33 @@ fn a_member_extension_projects_an_earlier_lambda_result() {
 
 #[test]
 fn a_contextual_member_extension_lambda_in_an_inferred_result_compiles_as_kotlinc_does() {
-    let classes = common::classes_against_kotlinc_module(&[(
-        "ContextualMemberExtension.kt",
-        CONTEXTUAL_MEMBER_EXTENSION,
-    )]);
-    assert_eq!(classes.differences(), Vec::<String>::new());
+    common::assert_accepted_like_kotlinc(CONTEXTUAL_MEMBER_EXTENSION);
 }
 
 #[test]
 fn a_contextual_member_extension_lambda_in_an_inferred_result_runs() {
-    common::expect_box_ok_with_stdlib(
+    common::expect_box_same_as_kotlinc(
         CONTEXTUAL_MEMBER_EXTENSION,
         "contextual member extension lambda inferred result",
     );
+}
+
+#[test]
+fn a_nested_scope_lambda_is_not_rechecked_from_its_own_result_as_in_kotlinc() {
+    common::assert_accepted_like_kotlinc(NESTED_SCOPE_EFFECT);
+}
+
+#[test]
+fn a_nested_scope_lambda_is_not_rechecked_from_its_own_result() {
+    common::expect_box_same_as_kotlinc(NESTED_SCOPE_EFFECT, "nested scope effect result");
+}
+
+#[test]
+fn a_productive_recheck_revises_an_already_solved_result_as_in_kotlinc() {
+    common::assert_accepted_like_kotlinc(REVISED_RESULT_BOUND);
+}
+
+#[test]
+fn a_productive_recheck_revises_an_already_solved_result() {
+    common::expect_box_same_as_kotlinc(REVISED_RESULT_BOUND, "revised result bound");
 }
