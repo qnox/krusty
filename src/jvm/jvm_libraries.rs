@@ -5153,14 +5153,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         super::jvm_class_map::to_jvm_type_name(internal)
     }
 
-    fn source_override_slot(
-        &self,
-        source: &dyn crate::symbol_source::SymbolSource,
-        function: &crate::libraries::FunctionInfo,
-    ) -> Option<crate::libraries::ProviderOverrideSlot> {
-        override_slots::source_slot(self, source, function)
-    }
-
     fn provider_override_result_refines(
         &self,
         source: &dyn crate::symbol_source::SymbolSource,

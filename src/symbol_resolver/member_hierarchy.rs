@@ -141,6 +141,26 @@ pub(crate) fn function_input_shapes_match(
     )
 }
 
+/// Whether two declarations occupy the same semantic or provider-normalized override input slot.
+///
+/// Dependency providers may publish an opaque slot when their source-language view cannot express
+/// the declaration relation directly (for example, a Java collection class method whose erased
+/// input implements an applied Kotlin collection interface method). Common hierarchy code may
+/// compare those identities, but cannot inspect or reconstruct their target representation.
+pub(crate) fn function_override_input_slots_match(
+    source: &dyn SymbolSource,
+    inherited: &FunctionInfo,
+    implementation: &FunctionInfo,
+) -> bool {
+    inherited.kind == implementation.kind
+        && (function_input_shapes_match(source, inherited, implementation)
+            || inherited
+                .provider_override_slot
+                .as_ref()
+                .zip(implementation.provider_override_slot.as_ref())
+                .is_some_and(|(inherited, implementation)| inherited.same_key(implementation)))
+}
+
 /// A declaration overrides only one whose type parameters carry the same upper bounds, compared
 /// after alpha-renaming both sides' formals: `fun <S : B> foo(s: S)` does not override
 /// `fun <S : A> foo(s: S)`, although both take one type-parameter value.
@@ -524,13 +544,11 @@ fn members_in_hierarchy_for(
                 .cloned()
                 .map(|member| {
                     let extension_receiver = member
-                        .generic_sig
-                        .as_ref()
-                        .and_then(|signature| signature.receiver)
-                        .or_else(|| member.params.get(member.context_count).copied());
+                        .semantic_extension_receiver()
+                        .expect("a member-extension declaration publishes its semantic receiver");
                     let mut function =
                         FunctionInfo::classifier_member(FnKind::Extension, internal, member);
-                    function.receiver = extension_receiver;
+                    function.receiver = Some(extension_receiver);
                     function
                 })
                 .collect::<Vec<_>>();
@@ -723,7 +741,7 @@ fn overrides_in_family(
                 inherited.callable.owner,
             )
         })
-        && function_input_shapes_match(source, inherited, implementation)
+        && function_override_input_slots_match(source, inherited, implementation)
         && function_result_refines(source, implementation, inherited)
 }
 
@@ -737,8 +755,42 @@ pub(crate) fn function_result_refines(
 ) -> bool {
     resolution_subtype(
         source,
-        implementation.ret.apply(implementation.callable.ret),
-        inherited.ret.apply(inherited.callable.ret),
+        normalized_function_result(implementation),
+        normalized_function_result(inherited),
+    )
+}
+
+/// A result under alpha-normalized declaration variables and their complete declared bounds.
+/// Override input matching has already established that the declarations have the same generic
+/// shape; result covariance must therefore compare their variables by ordinal, not by source or
+/// metadata spelling (`fun <T> f(): T` and `fun <U> f(): U` are the same contract).
+fn normalized_function_result(function: &FunctionInfo) -> Ty {
+    let result = function.ret.apply(function.callable.ret);
+    let Some(signature) = function.generic_sig.as_ref() else {
+        return result;
+    };
+    let default_bound = Ty::nullable(Ty::obj("kotlin/Any"));
+    let bounds = signature
+        .formals
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            let declared = signature
+                .formal_bounds
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let bound = match declared {
+                [] => default_bound,
+                [bound] => *bound,
+                bounds => Ty::intersection(bounds),
+            };
+            (formal.clone(), bound)
+        })
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+    crate::types::ty_canonicalize_params(
+        crate::types::ty_with_transitive_param_bounds(result, &bounds),
+        &signature.formals,
     )
 }
 
@@ -828,7 +880,6 @@ pub(crate) fn property_declaration_identity(
             .then(|| {
                 generic
                     .and_then(|signature| signature.receiver)
-                    .or_else(|| declared_params.get(property.context_count).copied())
                     .or(property.receiver)
             })
             .flatten(),
@@ -902,12 +953,7 @@ fn record_overridden_property_declarations(
     let recorded = declarations
         .iter()
         .map(|implementation| {
-            let mut overridden = implementation
-                .getter
-                .overridden_declarations
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut overridden = implementation.getter.overridden_declarations.to_vec();
             if implementation.getter.external_identity.is_none() {
                 return overridden.into_boxed_slice();
             }
@@ -1258,16 +1304,14 @@ pub(crate) fn imported_object_member_symbols(
             .cloned()
             .map(|member| {
                 let receiver = member
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|signature| signature.receiver)
-                    .or_else(|| member.params.get(member.context_count).copied());
+                    .semantic_extension_receiver()
+                    .expect("an imported member extension publishes its semantic receiver");
                 let mut function = crate::libraries::FunctionInfo::classifier_member(
                     FnKind::Extension,
                     current_owner,
                     member,
                 );
-                function.receiver = receiver;
+                function.receiver = Some(receiver);
                 function.receiver_rank = depth;
                 function.callable.singleton_dispatch = Some(Box::new(singleton));
                 function
@@ -1717,6 +1761,66 @@ mod tests {
         assert!(function_input_shapes_match(&source, &member, &member));
         assert!(!function_input_shapes_match(&source, &member, &top_level));
         assert!(!function_input_shapes_match(&source, &top_level, &member));
+    }
+
+    #[test]
+    fn provider_override_slot_matches_opaque_inputs_but_not_callable_kind() {
+        let source = crate::libraries::EmptySymbolSource;
+        let slot = |owner| crate::libraries::ProviderOverrideSlot::new(owner, 17_u8);
+        let mut inherited = member("sample/Interface", 1, vec![Ty::String], None);
+        inherited.provider_override_slot = Some(slot(inherited.callable.owner));
+        let mut implementation = member(
+            "sample/Implementation",
+            0,
+            vec![Ty::obj("kotlin/Any")],
+            None,
+        );
+        implementation.provider_override_slot = Some(slot(implementation.callable.owner));
+
+        assert!(function_override_input_slots_match(
+            &source,
+            &inherited,
+            &implementation,
+        ));
+
+        implementation.kind = crate::libraries::FnKind::TopLevel;
+        assert!(!function_override_input_slots_match(
+            &source,
+            &inherited,
+            &implementation,
+        ));
+    }
+
+    #[test]
+    fn generic_result_covariance_compares_declaration_variables_by_ordinal() {
+        let generic = |formal: &str| {
+            let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+            let result = Ty::ty_param(formal, bound);
+            let mut function = member("sample/Owner", 0, vec![result], None);
+            function.callable.ret = result;
+            function.generic_sig = Some(crate::libraries::GenericSig {
+                formals: vec![formal.to_string()],
+                formal_bounds: vec![Vec::new()],
+                receiver: None,
+                params: vec![result],
+                ret: result,
+                return_policy: crate::libraries::GenericReturnPolicy::Exact,
+            });
+            function
+        };
+        let inherited = generic("T");
+        let implementation = generic("U");
+
+        assert!(function_result_refines(
+            &crate::libraries::EmptySymbolSource,
+            &implementation,
+            &inherited,
+        ));
+        assert!(function_result_refines(
+            &crate::libraries::EmptySymbolSource,
+            &inherited,
+            &implementation,
+        ));
     }
 
     #[test]

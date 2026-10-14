@@ -885,6 +885,12 @@ fn provider_slot_implements(
     implementation: &FunctionInfo,
     declaration: &FunctionInfo,
 ) -> bool {
+    // Provider slots normalize a declaration's input representation; they do not change its
+    // Kotlin callable kind. In particular, a member-extension receiver must never satisfy an
+    // ordinary member parameter merely because both happen to occupy one provider ABI slot.
+    if implementation.kind != declaration.kind {
+        return false;
+    }
     let Some(declaration_scope) = declaration.provider_override_slot.as_ref() else {
         return false;
     };
@@ -897,15 +903,12 @@ fn provider_slot_implements(
                 Ty::obj_name(owner),
             )
     };
-    let source_slot;
-    let implementation_scope = if let Some(scope) = implementation.provider_override_slot.as_ref() {
-        scope
-    } else {
-        source_slot = platform.source_override_slot(source, implementation);
-        let Some(scope) = source_slot.as_ref() else {
-            return false;
-        };
-        scope
+    // Provider slots normalize dependency declarations at their provider boundary. A source
+    // declaration has already been resolved in Kotlin's semantic model and must never be
+    // reinterpreted here through a target representation (for example, by treating a member
+    // extension receiver as an ordinary JVM parameter).
+    let Some(implementation_scope) = implementation.provider_override_slot.as_ref() else {
+        return false;
     };
     let implementation_owner = implementation_scope.owner();
     // One provider scope can itself be the join. A mapped semantic hierarchy can expose a

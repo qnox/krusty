@@ -62,6 +62,10 @@ pub(crate) struct ParsedTypeNode<'a> {
     pub(crate) suspend: bool,
     pub(crate) flexible_upper_bound: Option<&'a [u8]>,
     pub(crate) flexible_upper_bound_id: Option<u64>,
+    /// An inner classifier's applied enclosing type. Its arguments are declaration-owned semantic
+    /// inputs, not recoverable from the nested classifier spelling.
+    pub(crate) outer_type: Option<&'a [u8]>,
+    pub(crate) outer_type_id: Option<u64>,
     pub(crate) arguments: Vec<ParsedTypeArgument<'a>>,
     pub(crate) annotations: Vec<TypeAnnotation>,
 }
@@ -93,6 +97,8 @@ pub(crate) fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
         suspend: false,
         flexible_upper_bound: None,
         flexible_upper_bound_id: None,
+        outer_type: None,
+        outer_type_id: None,
         arguments: Vec::new(),
         annotations: Vec::new(),
     };
@@ -113,6 +119,11 @@ pub(crate) fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
             (7, 0) => node.type_parameter_id = Some(protobuf.varint()?),
             (8, 0) => node.flexible_upper_bound_id = Some(protobuf.varint()?),
             (9, 0) => node.type_parameter_name_id = Some(protobuf.varint()?),
+            (10, 2) => {
+                let length = protobuf.varint()? as usize;
+                node.outer_type = Some(protobuf.bytes(length)?);
+            }
+            (11, 0) => node.outer_type_id = Some(protobuf.varint()?),
             (12, 0) => node.type_alias_id = Some(protobuf.varint()?),
             (2, 2) => {
                 let length = protobuf.varint()? as usize;

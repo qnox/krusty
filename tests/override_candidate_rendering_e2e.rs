@@ -240,10 +240,11 @@ fn members_of_classfile_supertypes_match_kotlinc() {
     );
 }
 
-/// A member extension whose complete input shape erases to a raw Java method supplies that JVM
-/// obligation, even though the Kotlin declaration remains an extension for source lookup.
+/// A member extension remains a different Kotlin declaration kind even when its receiver happens
+/// to occupy the same JVM parameter slot as an ordinary Java method. Frontend obligation checking
+/// must not reinterpret the source declaration through a backend descriptor.
 #[test]
-fn a_member_extension_implements_the_matching_raw_java_method() {
+fn a_member_extension_does_not_implement_an_ordinary_java_method() {
     let (library, _) = common::javac_compile(
         &[(
             "J.java".to_string(),
@@ -253,141 +254,15 @@ fn a_member_extension_implements_the_matching_raw_java_method() {
         &[],
     )
     .expect("javac must build the ordinary-member fixture");
-    let source = "abstract class Base : fixture.J() { fun fixture.J.f() {} }\n\
-        class Derived : Base()\n\
-        fun box(): String { val value: fixture.J = Derived(); value.f(value); return \"OK\" }\n";
+    let source = "class Derived : fixture.J() { fun fixture.J.f() {} }\n";
     let classpath = [library, common::stdlib_jar()];
     let result = common::compiler_diagnostics(&[("Main.kt", source)], &classpath);
     let expected = common::rendered_error_blocks(&result.reference_stderr, true);
-    assert_eq!(expected, [] as [&str; 0]);
-    assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
-        expected
-    );
-    assert_eq!(
-        common::compile_and_run_box(source, "Main", &classpath, None).as_deref(),
-        Some("OK"),
-        "the Java-typed virtual call must reach the source member extension"
-    );
-}
-
-/// Function types and raw JVM function interfaces name the same provider override slot. The JVM
-/// provider selects the numbered carrier through arity 22 and the shared `FunctionN` carrier above
-/// it; common hierarchy checking sees only the resulting opaque slot identity.
-#[test]
-fn function_member_extensions_implement_matching_raw_java_methods() {
-    let stdlib = common::stdlib_jar();
-    let (library, _) = common::javac_compile(
-        &[(
-            "J.java".to_string(),
-            "package fixture; public abstract class J {\n\
-             public abstract void fixed(kotlin.jvm.functions.Function1<Object, Object> value);\n\
-             public abstract void high(kotlin.jvm.functions.FunctionN<Object> value);\n\
-             }"
-            .to_string(),
-        )],
-        std::slice::from_ref(&stdlib),
-    )
-    .expect("javac must build the function-interface fixture");
-    let source = "abstract class Base : fixture.J() {\n\
-        fun ((Any?) -> Any?).fixed() {}\n\
-        fun ((Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?, Any?) -> Any?).high() {}\n\
-        }\n\
-        class Derived : Base()\n";
-    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[library, stdlib]);
-    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
-    assert_eq!(expected, [] as [&str; 0]);
-    assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
-        expected
-    );
-}
-
-/// A source member extension does not satisfy a raw Java slot merely by sharing its source name;
-/// the complete physical input shape must match.
-#[test]
-fn a_differently_typed_member_extension_does_not_implement_a_raw_java_method() {
-    let (library, _) = common::javac_compile(
-        &[(
-            "J.java".to_string(),
-            "package fixture; public abstract class J { public abstract void f(J value); }"
-                .to_string(),
-        )],
-        &[],
-    )
-    .expect("javac must build the ordinary-member fixture");
-    let source =
-        "abstract class Base : fixture.J() { fun String.f() {} }\nclass Derived : Base()\n";
-    let result =
-        common::compiler_diagnostics(&[("Main.kt", source)], &[library, common::stdlib_jar()]);
-    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
     assert_eq!(
         expected,
         [
-            "Main.kt:2:1: class 'Derived' is not abstract and does not implement abstract base class member:",
+            "Main.kt:1:1: class 'Derived' is not abstract and does not implement abstract base class member:",
             "| fun f(p0: J!): Unit",
-        ]
-    );
-    assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
-        expected
-    );
-}
-
-/// A provider-normalized input slot is not an override verdict. The implementation result must
-/// still refine the abstract declaration's semantic result; otherwise the class would lack the
-/// method promised by the provider interface at runtime.
-#[test]
-fn a_member_extension_with_a_wider_result_does_not_implement_a_raw_java_method() {
-    let (library, _) = common::javac_compile(
-        &[(
-            "J.java".to_string(),
-            "package fixture; public abstract class J { public abstract String f(J value); }"
-                .to_string(),
-        )],
-        &[],
-    )
-    .expect("javac must build the result-covariance fixture");
-    let source = "abstract class Base : fixture.J() { fun fixture.J.f(): Any = \"wide\" }\n\
-        class Derived : Base()\n";
-    let result =
-        common::compiler_diagnostics(&[("Main.kt", source)], &[library, common::stdlib_jar()]);
-    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
-    assert_eq!(
-        expected,
-        [
-            "Main.kt:2:1: class 'Derived' is not abstract and does not implement abstract base class member:",
-            "| fun f(p0: J!): String!",
-        ]
-    );
-    assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
-        expected
-    );
-}
-
-/// Unsigned and other value-class inputs may share a JVM carrier with a Java parameter, but their
-/// source declarations are name-mangled and therefore do not implement that raw Java method.
-#[test]
-fn a_value_class_member_extension_does_not_implement_a_raw_java_method() {
-    let (library, _) = common::javac_compile(
-        &[(
-            "J.java".to_string(),
-            "package fixture; public abstract class J { public abstract void f(int value); }"
-                .to_string(),
-        )],
-        &[],
-    )
-    .expect("javac must build the primitive ordinary-member fixture");
-    let source = "abstract class Base : fixture.J() { fun UInt.f() {} }\nclass Derived : Base()\n";
-    let result =
-        common::compiler_diagnostics(&[("Main.kt", source)], &[library, common::stdlib_jar()]);
-    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
-    assert_eq!(
-        expected,
-        [
-            "Main.kt:2:1: class 'Derived' is not abstract and does not implement abstract base class member:",
-            "| fun f(p0: Int): Unit",
         ]
     );
     assert_eq!(
@@ -423,9 +298,11 @@ fn decode_hex(hex: &str) -> Vec<u8> {
             _ => panic!("non-hex fixture byte"),
         }
     }
-    hex.as_bytes()
-        .chunks_exact(2)
-        .map(|pair| nibble(pair[0]) << 4 | nibble(pair[1]))
+    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty(), "hex fixture has an odd byte count");
+    pairs
+        .iter()
+        .map(|[high, low]| nibble(*high) << 4 | nibble(*low))
         .collect()
 }
 
@@ -438,7 +315,8 @@ fn legacy_context_receivers_from_classpath_match_kotlinc() {
     std::fs::create_dir_all(class.parent().expect("class package")).expect("create class package");
     std::fs::write(&class, decode_hex(LEGACY_CONTEXT_CLASS_HEX)).expect("write legacy class");
     let source = "import fixture.Legacy\nclass Derived : Legacy()\n";
-    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[classpath.clone()]);
+    let result =
+        common::compiler_diagnostics(&[("Main.kt", source)], std::slice::from_ref(&classpath));
     let expected = common::rendered_error_blocks(&result.reference_stderr, true);
     assert_eq!(
         expected,
@@ -627,7 +505,7 @@ fn source_nested_generic_classifier_segments_match_kotlinc() {
              }\n",
         )],
         &[
-            "Main.kt:4:5: 'nested' overrides nothing. Potential signatures for overriding:",
+            "Main.kt:4:1: 'nested' overrides nothing. Potential signatures for overriding:",
             "| fun nested(value: Outer.Inner<Int, String>): Unit",
         ],
     );

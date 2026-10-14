@@ -4,7 +4,7 @@
 //! Common hierarchy code consumes only [`ProviderOverrideSlot`] identity and ownership.
 
 use super::JvmLibraries;
-use crate::libraries::{FunctionInfo, ProviderOverrideSlot, SemanticPlatform};
+use crate::libraries::{ProviderOverrideSlot, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
@@ -27,7 +27,10 @@ fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> Ty {
             Ty::obj_args("kotlin/Array", &[normalized_input(libraries, element)])
         }
         Ty::Obj(name, _) => Ty::Obj(name, &[]),
-        Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
+        Ty::Null | Ty::Nothing => Ty::obj("kotlin/Any"),
+        // An unresolved frontend type is not a valid provider declaration fact. Preserve the
+        // sentinel in the opaque key so it cannot accidentally match a real `Any` slot.
+        Ty::Error => Ty::Error,
         Ty::Fun(signature) => Ty::obj(&crate::jvm::names::function_interface_internal_name(
             signature.params.len() + usize::from(signature.suspend),
         )),
@@ -61,38 +64,6 @@ pub(super) fn slot(
                 .collect(),
         },
     )
-}
-
-pub(super) fn source_slot(
-    libraries: &JvmLibraries,
-    source: &dyn SymbolSource,
-    function: &FunctionInfo,
-) -> Option<ProviderOverrideSlot> {
-    function.stable_declaration?;
-    let inputs = function
-        .is_extension()
-        .then(|| function.semantic_receiver())
-        .flatten()
-        .into_iter()
-        .chain(function.semantic_params().iter().copied())
-        .collect::<Vec<_>>();
-    if inputs.iter().copied().any(|input| {
-        let input = input.non_null();
-        input.is_unsigned()
-            || input.kotlin_class_internal().is_some_and(|classifier| {
-                source
-                    .classifier(classifier)
-                    .is_some_and(|classifier| classifier.value_underlying.is_some())
-            })
-    }) {
-        return None;
-    }
-    Some(slot(
-        libraries,
-        crate::jvm::jvm_class_map::to_jvm_type_name(function.callable.owner),
-        function.callable.name.clone(),
-        inputs,
-    ))
 }
 
 pub(super) fn result_refines(
@@ -142,6 +113,17 @@ mod tests {
                 Ty::fun(vec![Ty::obj("kotlin/Any"); 23], Ty::Unit)
             ),
             normalized_input(&libraries, Ty::obj("kotlin/jvm/functions/FunctionN"))
+        );
+    }
+
+    #[test]
+    fn an_unresolved_input_never_matches_a_real_any_slot() {
+        let Some(libraries) = libraries() else {
+            return;
+        };
+        assert_ne!(
+            normalized_input(&libraries, Ty::Error),
+            normalized_input(&libraries, Ty::obj("kotlin/Any"))
         );
     }
 }

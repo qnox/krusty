@@ -489,18 +489,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             .unwrap_or(internal)
     }
 
-    /// Publish the provider-normalized override slot, if any, for a current-module declaration.
-    /// The provider owns target-language compatibility and representation rules; common hierarchy
-    /// code consumes only the returned semantic slot and never reconstructs one from physical
-    /// names, descriptors, or declaration origin.
-    fn source_override_slot(
-        &self,
-        _source: &dyn crate::symbol_source::SymbolSource,
-        _function: &FunctionInfo,
-    ) -> Option<ProviderOverrideSlot> {
-        None
-    }
-
     /// Whether two results satisfy covariance in the provider's override model. Common checking
     /// asks this only after ordinary semantic subtyping fails for declarations that already share
     /// a provider override slot. The provider must compare the result carriers themselves; an input
@@ -720,6 +708,18 @@ impl LibraryMember {
     #[inline]
     pub fn is_member_extension(&self) -> bool {
         self.flags.has(LmFlags::IS_EXTENSION)
+    }
+    /// The semantic extension receiver published by this declaration. Generic signatures retain
+    /// the declaration-owned receiver; non-generic members carry it in the logical parameter list
+    /// after the context prefix. Physical parameters and descriptors are deliberately irrelevant.
+    pub fn semantic_extension_receiver(&self) -> Option<Ty> {
+        if !self.is_member_extension() {
+            return None;
+        }
+        self.generic_sig
+            .as_ref()
+            .and_then(|signature| signature.receiver)
+            .or_else(|| self.params.get(self.context_count).copied())
     }
     #[inline]
     pub fn is_primary_constructor(&self) -> bool {
