@@ -7,9 +7,9 @@
 //! inside its own class hierarchy.
 
 use super::{erased_type_key, Checker, ErasedTypeKey};
-use crate::libraries::{FunctionInfo, LibraryType, PropertyInfo};
+use crate::libraries::{FnKind, FunctionInfo, LibraryType, Origin, PropertyInfo};
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName};
+use crate::types::{SemanticCallableOwner, Ty, TypeName};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -823,36 +823,37 @@ fn declared_property(
         ),
         None => (classifiers.len(), false, 0, 0),
     };
-    // Source FIR retains the abstract class that owns a fake override, while dependency metadata
-    // contains only the interface declarations that feed it. If such a class lies before the
-    // recovered declaration, kotlinc attributes the obligation to that base class. This is a
-    // diagnostic provenance fact only: slot identity and declaration rendering above remain based
-    // on the exact normalized declarations.
-    let source_abstract_class_presents_slot = classifier_receivers
+    // Source FIR can retain a missing accessor through a class fake override even when only an
+    // interface contributes the declaration used for readable rendering. Dependency metadata does
+    // not publish that source-only presentation. Attribute the diagnostic to the source class only
+    // when its applied hierarchy presents the exact abstract accessor; a shape-equivalent concrete
+    // `val` must not claim an unrelated interface's missing setter.
+    let abstract_class_presents_accessor = classifier_receivers
         .iter()
         .copied()
         .zip(classifiers)
-        .take(place)
+        .take(place.saturating_add(1))
         .any(|(receiver, classifier)| {
             !classifier.is_interface()
                 && classifier.inheritance.is_abstract
-                && classifier.stable_declaration.is_some()
+                && classifier.source_file.is_some()
                 && crate::symbol_resolver::member_declarations_in_hierarchy(source, receiver, name)
                     .properties()
                     .iter()
-                    .any(|property| same_slot_and_result(property))
+                    .any(|property| {
+                        abstract_property(property)
+                            && super::declaration_rendering::property_declares_obligation(
+                                property,
+                                exact_obligation,
+                            )
+                    })
         });
     UnimplementedMember {
         declaration: UnimplementedDeclaration::Property(Box::new(declaration)),
-        // A fake override can be presented on an abstract class even though the declaration we
-        // recover for readable rendering originated in an interface. Prefer the obligation's exact
-        // owner when it carries that fact; source FIR additionally retains the class-side applied
-        // slot checked above. Classpath metadata without either fact keeps the interface owner and
-        // therefore retains kotlinc's `abstract member`.
-        in_interface: !source_abstract_class_presents_slot
-            && source
-                .classifier(obligation.owner)
-                .map_or(declaring_interface, |owner| owner.is_interface()),
+        // The nearest declaration/accessor decides the ordinary owner. An earlier abstract class
+        // with the exact missing accessor claims a recovered interface declaration as its fake
+        // override; unrelated abstract classes do not.
+        in_interface: declaring_interface && !abstract_class_presents_accessor,
         order: (place, true, position, overload),
     }
 }
@@ -868,15 +869,12 @@ fn implements_abstract_function(
 ) -> bool {
     if implementation.flags.suspend != declaration.flags.suspend
         || implementation.context_count != declaration.context_count
+        || implementation.kind != declaration.kind
     {
         return false;
     }
-    (implementation.is_extension() == declaration.is_extension()
-        && (crate::symbol_resolver::function_input_shapes_match(
-            source,
-            declaration,
-            implementation,
-        ) || flexible_function_keys_match(implementation, declaration)))
+    (crate::symbol_resolver::function_input_shapes_match(source, declaration, implementation)
+        || flexible_function_keys_match(implementation, declaration))
         || java_scope_implements(source, java_classifiers, implementation, declaration)
 }
 
@@ -917,12 +915,20 @@ fn java_scope_implements(
     implementation: &FunctionInfo,
     declaration: &FunctionInfo,
 ) -> bool {
-    // A member is specialized against the hierarchy rung that declares it; its callable owner is
-    // the dispatch owner, which for a mapped builtin is the JVM class rather than the declaration.
-    let declaring = |function: &FunctionInfo| {
-        function
+    if implementation.kind != FnKind::Member || declaration.kind != FnKind::Member {
+        return false;
+    }
+    // Dependency providers publish exact semantic declaration ownership. Current-module ordinary
+    // members have not crossed that provider boundary yet, so their resolved member receiver is the
+    // declaration classifier. Extensions and provider-invalid dependency facts never use it as a
+    // fallback.
+    let declaring = |function: &FunctionInfo| match function.callable.declaration_owner {
+        Some(SemanticCallableOwner::Classifier(owner)) => Some(owner),
+        Some(SemanticCallableOwner::Package(_)) => None,
+        None if matches!(function.callable.origin, Origin::Module { .. }) => function
             .receiver
-            .and_then(|receiver| receiver.kotlin_class_internal())
+            .and_then(|receiver| receiver.kotlin_class_internal()),
+        None => None,
     };
     let (Some(implementation_owner), Some(declaration_owner)) =
         (declaring(implementation), declaring(declaration))

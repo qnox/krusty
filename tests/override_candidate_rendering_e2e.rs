@@ -240,6 +240,37 @@ fn members_of_classfile_supertypes_match_kotlinc() {
     );
 }
 
+/// A member extension and an ordinary Java member can erase to the same JVM parameter list, but
+/// they remain different Kotlin callable kinds. The extension must not discharge the Java method.
+#[test]
+fn a_member_extension_does_not_implement_an_ordinary_java_method() {
+    let (library, _) = common::javac_compile(
+        &[(
+            "J.java".to_string(),
+            "package fixture; public abstract class J { public abstract void f(J value); }"
+                .to_string(),
+        )],
+        &[],
+    )
+    .expect("javac must build the ordinary-member fixture");
+    let source =
+        "abstract class Base : fixture.J() { fun fixture.J.f() {} }\nclass Derived : Base()\n";
+    let result =
+        common::compiler_diagnostics(&[("Main.kt", source)], &[library, common::stdlib_jar()]);
+    let expected = common::rendered_error_blocks(&result.reference_stderr, true);
+    assert_eq!(
+        expected,
+        [
+            "Main.kt:2:1: class 'Derived' is not abstract and does not implement abstract base class member:",
+            "| fun f(p0: J!): Unit",
+        ]
+    );
+    assert_eq!(
+        common::rendered_error_blocks(&result.krusty_stderr, false),
+        expected
+    );
+}
+
 /// `fixture.Legacy`, compiled by kotlinc 1.7.22 with `-Xcontext-receivers`. Keeping the tiny class
 /// inline makes the regression deterministic now that kotlinc 2.4 rejects legacy receiver source.
 /// Its metadata carries typed legacy-receiver roles rather than named or anonymous parameters.

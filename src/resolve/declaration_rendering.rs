@@ -507,12 +507,10 @@ fn classifier_display(
     {
         return classifier_segment_display(source, collection, arguments, false);
     }
-    let classifier = source.classifier(name);
     if name.nested_owner().is_some()
-        || classifier.as_ref().is_some_and(|classifier| {
-            classifier.outer_instance.is_some()
-                || classifier.is_nested && name.source_nested_segments().len() > 1
-        })
+        || source
+            .classifier(name)
+            .is_some_and(|classifier| classifier.outer_instance.is_some())
     {
         return nested_classifier_display(source, name, arguments);
     }
@@ -550,31 +548,6 @@ fn nested_classifier_display(
             .map(|classifier| classifier.own_type_parameter_count)
             .unwrap_or(0);
         let remaining = arguments.len().saturating_sub(argument);
-        // A dependency metadata identity can retain `Outer.Inner` in one final name-tree segment
-        // before `Outer` is interned as an exact owner node. The classifier still publishes both
-        // that it is nested and how many parameters it owns. Put its own argument prefix on the
-        // innermost source segment and the captured suffix on the outermost one; intermediate
-        // segments have no independently loaded declaration from which an arity could be claimed.
-        if enclosing.is_none()
-            && segments.is_empty()
-            && classifier
-                .as_ref()
-                .is_some_and(|classifier| classifier.is_nested)
-        {
-            let source_segments = classifier_name.source_nested_segments();
-            if let [outer, middle @ .., inner] = source_segments.as_slice() {
-                let count = own_arity.min(remaining);
-                segments.push((inner, &arguments[argument..argument + count]));
-                argument += count;
-                for segment in middle.iter().rev() {
-                    segments.push((segment, &[]));
-                }
-                segments.push((outer, &arguments[argument..]));
-                argument = arguments.len();
-                current = None;
-                continue;
-            }
-        }
         // The final enclosing segment can be absent from a lazy federated source even though the
         // inner declaration published its stable identity. Arguments are stored innermost-out, so
         // after every inner segment has consumed its declaration-owned prefix, the remaining suffix
@@ -590,13 +563,20 @@ fn nested_classifier_display(
         argument += count;
         current = enclosing;
     }
-    // A provider that publishes more arguments than the complete semantic owner chain declares is
-    // malformed. Keep every supplied type visible on the innermost segment rather than discarding
-    // diagnostic evidence.
+    // Metadata can omit the innermost declaration's own arity while still publishing the complete
+    // captured argument list and enclosing chain. The enclosing classifiers' recorded slices remain
+    // authoritative; assign only the unclaimed prefix to the innermost segment, then rebuild every
+    // slice in semantic innermost-to-outermost order.
     if argument < arguments.len() {
-        segments[0].1 = arguments;
-        for (_, arguments) in &mut segments[1..] {
-            *arguments = &[];
+        let mut counts = segments
+            .iter()
+            .map(|(_, arguments)| arguments.len())
+            .collect::<Vec<_>>();
+        counts[0] += arguments.len() - argument;
+        let mut offset = 0;
+        for ((_, segment_arguments), count) in segments.iter_mut().zip(counts) {
+            *segment_arguments = &arguments[offset..offset + count];
+            offset += count;
         }
     }
     segments
@@ -668,6 +648,26 @@ mod tests {
             std::rc::Rc::new(ResolvedSymbols {
                 classifier_name: (requested == Some(self.identity)).then_some(self.identity),
                 classifier: (requested == Some(self.identity)).then(|| self.classifier.clone()),
+                ..ResolvedSymbols::default()
+            })
+        }
+    }
+
+    struct NestedRoleSource {
+        classifiers: [(TypeName, std::sync::Arc<LibraryType>); 2],
+    }
+
+    impl SymbolSource for NestedRoleSource {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+            let requested = namespace.existing_classifier(name);
+            let classifier = requested.and_then(|requested| {
+                self.classifiers
+                    .iter()
+                    .find(|(identity, _)| *identity == requested)
+            });
+            std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: classifier.map(|(identity, _)| *identity),
+                classifier: classifier.map(|(_, classifier)| classifier.clone()),
                 ..ResolvedSymbols::default()
             })
         }
@@ -756,23 +756,27 @@ mod tests {
     }
 
     #[test]
-    fn nested_display_partitions_a_single_metadata_name_segment() {
+    fn nested_display_assigns_only_unclaimed_arguments_to_the_innermost_segment() {
         let empty = EmptySymbolSource;
-        let identity =
-            crate::types::type_name_child(type_name("diag_flat_2245"), "Envelope.Member");
-        let mut classifier = (*empty
+        let outer = type_name("diag_2245/Envelope");
+        let inner = crate::types::type_name_nested_child(outer, "Member");
+        let mut outer_classifier = (*empty
             .classifier(crate::types::wk::any())
             .expect("core Any classifier"))
         .clone();
-        classifier.is_nested = true;
-        classifier.own_type_parameter_count = 1;
-        let source = RoleSource {
-            identity,
-            classifier: std::sync::Arc::new(classifier),
+        outer_classifier.own_type_parameter_count = 1;
+        let mut inner_classifier = outer_classifier.clone();
+        inner_classifier.outer_instance = Some(outer);
+        inner_classifier.own_type_parameter_count = 0;
+        let source = NestedRoleSource {
+            classifiers: [
+                (outer, std::sync::Arc::new(outer_classifier)),
+                (inner, std::sync::Arc::new(inner_classifier)),
+            ],
         };
 
         assert_eq!(
-            readable_type(&source, Ty::obj_args_name(identity, &[Ty::Int, Ty::String])),
+            readable_type(&source, Ty::obj_args_name(inner, &[Ty::Int, Ty::String])),
             "Envelope<String>.Member<Int>"
         );
     }
