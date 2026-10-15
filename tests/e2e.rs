@@ -1659,6 +1659,8 @@ mod serialization_explicit_companion_e2e;
 mod setter_return_line_e2e;
 #[path = "source_map_annotation_parts_e2e.rs"]
 mod source_map_annotation_parts_e2e;
+#[path = "special_collection_bridge_e2e.rs"]
+mod special_collection_bridge_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "super_delegation_line_e2e.rs"]

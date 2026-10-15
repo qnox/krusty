@@ -15,23 +15,41 @@ use super::{
 use crate::ir::IrFile;
 use crate::types::Ty;
 
+struct BridgeMethodHeader<'a> {
+    bridge: &'a crate::ir::Bridge,
+    packs_arguments: bool,
+    entry: Option<&'a EntryHeader>,
+    signature: Option<&'a str>,
+    owner_is_interface: bool,
+}
+
 fn finish_bridge(
     cw: &mut ClassWriter,
     desc: &str,
     code: &mut CodeBuilder,
     locals: u16,
-    bridge: &crate::ir::Bridge,
-    packs_arguments: bool,
-    entry: Option<&EntryHeader>,
+    header: BridgeMethodHeader<'_>,
 ) {
+    let BridgeMethodHeader {
+        bridge,
+        packs_arguments,
+        entry,
+        signature,
+        owner_is_interface,
+    } = header;
     let name = bridge.name.as_str();
     if let Some(entry) = entry {
         finish_code_sig::<0x0001>(cw, name, desc, code, locals, entry.signature.as_deref());
         cw.set_method_parameters(name, desc, &entry.reflected);
     } else if packs_arguments {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
+    } else if owner_is_interface && (bridge.special || bridge.collection_barrier.is_some()) {
+        // A special collection bridge is a concrete JVM default even when its Kotlin member is
+        // abstract. Interfaces cannot make it final, and kotlinc leaves it non-synthetic. This
+        // includes mapped property entries such as `Collection.size`, which have no type barrier.
+        finish_code_sig::<{ 0x0001 | 0x0040 }>(cw, name, desc, code, locals, signature);
     } else if bridge.special {
-        finish_code::<{ 0x0001 | 0x0010 | 0x0040 }>(cw, name, desc, code, locals);
+        finish_code_sig::<{ 0x0001 | 0x0010 | 0x0040 }>(cw, name, desc, code, locals, signature);
     } else {
         finish_code::<{ 0x0001 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
     }
@@ -192,6 +210,7 @@ struct ClassBridges<'a> {
     argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     override_results: &'a crate::jvm::override_results::OverrideResults,
     run: &'a EmitRun,
+    signature_symbols: &'a dyn crate::backend::BackendClassifierSource,
 }
 
 impl<'a> ClassBridges<'a> {
@@ -203,6 +222,7 @@ impl<'a> ClassBridges<'a> {
             argument_arrays: env.function_argument_arrays,
             override_results: env.override_results,
             run: env.run,
+            signature_symbols: env.signature_symbols,
         }
     }
 }
@@ -222,6 +242,7 @@ fn emit_bridge(
         argument_arrays,
         override_results,
         run,
+        signature_symbols,
     } = *class;
     let packs_arguments = argument_arrays.packs(c.fq_name_id(), b);
     let adapter = adaptations.get(
@@ -252,12 +273,30 @@ fn emit_bridge(
         |(function, _)| jvm_declared_ty(&override_results.physical_result(ir, function)),
     );
     let erased_desc = method_descriptor(&ep, er);
+    let signature = (b.special && b.collection_barrier.is_some())
+        .then(|| {
+            let formatter = JvmSignatureFormatter::with_symbols(ir, signature_symbols, run);
+            if b.concrete_ret.mentions_ty_param()
+                || b.erased_params.iter().any(|ty| ty.mentions_ty_param())
+            {
+                formatter.method_positions(&b.erased_params, &b.concrete_ret)
+            } else {
+                super::method_parameterized_sig(&formatter, &b.erased_params, &b.concrete_ret)
+            }
+        })
+        .flatten()
+        .filter(|signature| signature != &erased_desc);
     // A bridge whose (name, descriptor) already names a REAL method on this class would be a
     // duplicate (`ClassFormatError`) — e.g. an interface getter `getX()T` overridden with the SAME
     // type differs from the impl only by a spurious nullability/representation detail. Skip it; the
     // real method already satisfies the interface. (Real methods are emitted before `emit_bridges`.)
     if cw.has_method(&b.name, &erased_desc) {
         return;
+    }
+    if let Some(signature) = signature.as_deref() {
+        // The method header precedes its body in ASM's visit order. Reserve the generic signature
+        // before an `instanceof`/delegate body can claim those constant-pool slots.
+        cw.reserve_method_pool(&b.name, &erased_desc, Some(signature), &[]);
     }
     let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
     let mut code = CodeBuilder::new(1 + pw);
@@ -374,7 +413,11 @@ fn emit_bridge(
         || method_descriptor(&cp, tr),
         |parameters| method_descriptor(parameters, tr),
     );
-    let m = cw.methodref(&owner, target, &target_desc);
+    let m = if c.is_interface {
+        cw.interface_methodref(&owner, target, &target_desc)
+    } else {
+        cw.methodref(&owner, target, &target_desc)
+    };
     if let Some(parameters) = &target_parameters {
         let static_argw = parameters
             .iter()
@@ -382,7 +425,11 @@ fn emit_bridge(
             .sum();
         code.invokestatic(m, static_argw, slot_words(tr) as i32);
     } else {
-        code.invokevirtual(m, argw, slot_words(tr) as i32);
+        if c.is_interface {
+            code.invokeinterface(m, argw, slot_words(tr) as i32);
+        } else {
+            code.invokevirtual(m, argw, slot_words(tr) as i32);
+        }
     }
     if b.target_ret.is_some() && tr != cr {
         // A CPS target returns Object while this bridge must recover a reference value-class
@@ -409,9 +456,13 @@ fn emit_bridge(
             &erased_desc,
             &mut code,
             1 + pw,
-            b,
-            packs_arguments,
-            entry,
+            BridgeMethodHeader {
+                bridge: b,
+                packs_arguments,
+                entry,
+                signature: signature.as_deref(),
+                owner_is_interface: c.is_interface,
+            },
         );
         attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
@@ -431,9 +482,13 @@ fn emit_bridge(
             &erased_desc,
             &mut code,
             1 + pw,
-            b,
-            packs_arguments,
-            entry,
+            BridgeMethodHeader {
+                bridge: b,
+                packs_arguments,
+                entry,
+                signature: signature.as_deref(),
+                owner_is_interface: c.is_interface,
+            },
         );
         attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
         return;
@@ -527,9 +582,13 @@ fn emit_bridge(
         &erased_desc,
         &mut code,
         1 + pw,
-        b,
-        packs_arguments,
-        entry,
+        BridgeMethodHeader {
+            bridge: b,
+            packs_arguments,
+            entry,
+            signature: signature.as_deref(),
+            owner_is_interface: c.is_interface,
+        },
     );
     attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
 }
@@ -773,6 +832,15 @@ fn emit_inherited_collection_bridge(
             for check in checks {
                 let pass = code.new_label();
                 let slot = parameter_slot(&params, usize::from(check.parameter));
+                // A nullable `Any?` check accepts every reference. Kotlinc still retains its
+                // degenerate branch, with the target immediately following the branch, so keep
+                // that bytecode shape without introducing an `instanceof Object` pool entry.
+                if check.nullable && check.class_name == "java/lang/Object" {
+                    code.aload(slot);
+                    code.ifnonnull(pass);
+                    code.bind(pass);
+                    continue;
+                }
                 if check.nullable {
                     code.aload(slot);
                     code.ifnull(pass);

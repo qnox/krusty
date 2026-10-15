@@ -82,8 +82,9 @@ pub struct Bridge {
     /// Collection guard selected for this bridge. Absent until the JVM pass records one.
     pub barrier_plan: Option<CollectionBarrierPlan>,
     /// kotlinc's `BRIDGE_SPECIAL`: the bridge a builtin member gets under the JVM name it maps to
-    /// (`size()` for `Collection.size`). It is final and not synthetic, so a subclass inherits it
-    /// rather than declaring it again.
+    /// (`size()` for `Collection.size`) or under a type-safe collection member's erased root
+    /// signature (`contains(Object)`). It is final, so a subclass inherits it rather than declaring
+    /// it again. Unlike an ordinary erasure bridge it is not synthetic.
     pub special: bool,
     /// This bridge publishes an `internal` member's JVM slot. Its name still matches the
     /// implementation when it is recorded, because the module suffix is applied later; the
