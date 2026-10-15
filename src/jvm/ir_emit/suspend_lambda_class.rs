@@ -295,24 +295,6 @@ pub(super) fn emit_suspend_lambda_class(
         true,
         env,
     );
-    // A lambda value created inside this state machine may retain a standalone implementation.
-    // Placement attaches that private static to this exact class so its metafactory handle has
-    // legal access. Emit those attached helpers beside invokeSuspend; a continuation generated
-    // while emitting one re-enters through the access bridge emitted on this same writer.
-    for &method in &c.methods {
-        if method != lambda.invoke_suspend {
-            emit_method(
-                ir,
-                method,
-                StaticOwner::Class(c.fq_name),
-                &shape.class,
-                facade,
-                &mut cw,
-                false,
-                env,
-            );
-        }
-    }
     cw.set_method_debug(
         "invokeSuspend",
         INVOKE_SUSPEND_DESC,
@@ -334,6 +316,30 @@ pub(super) fn emit_suspend_lambda_class(
         &result,
         env.java_parameters,
     );
+    // The local functions and lambdas the body declares are lifted out of `invokeSuspend` into
+    // this class, after the members the class was declared with and before the bridge a later
+    // lowering adds: private statics, in kotlinc's lifting order. A lambda's metafactory handle
+    // names its method here; a continuation generated while emitting one re-enters through the
+    // access bridge emitted on this same writer.
+    let mut lifted = c
+        .methods
+        .iter()
+        .copied()
+        .filter(|&method| method != lambda.invoke_suspend)
+        .collect::<Vec<_>>();
+    super::member_schedule::order_lifted_functions(ir, &mut lifted);
+    for method in lifted {
+        emit_method(
+            ir,
+            method,
+            StaticOwner::Class(c.fq_name),
+            &shape.class,
+            facade,
+            &mut cw,
+            false,
+            env,
+        );
+    }
     emit_bridge(ir, &mut cw, &shape, lambda);
     // A continuation may have been built before JVM lambda placement attached its private static
     // helper to this class. Its exact function identity now resolves through the physical-owner
