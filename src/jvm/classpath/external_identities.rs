@@ -70,6 +70,7 @@ impl Classpath {
             parameter_identities: Box::new([]),
             declaration_signature: None,
             dependency_callable: None,
+            direct_c_function: None,
             klib_body_companion_receiver: None,
         });
         self.external_callable_ids

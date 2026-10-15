@@ -65,6 +65,7 @@ pub(super) fn sign_package_classes(
     internal_friend: bool,
     compiler_builtin_owner: bool,
     module: Option<&str>,
+    native_interop_library: bool,
 ) -> Result<Vec<(TypeName, SignedClassifier)>, KlibLibraryError> {
     let prefix = if package.is_empty() {
         String::new()
@@ -129,7 +130,7 @@ pub(super) fn sign_package_classes(
         let around = MetadataContainer {
             package,
             classes: outer,
-            native_interop_library: false,
+            native_interop_library,
         };
         let signature = metadata_class_signature(around, *own);
         let identities = type_parameter_identities(
