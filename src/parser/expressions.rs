@@ -1518,13 +1518,16 @@ impl Parser<'_> {
         let span = Span::new(start.lo, end.hi);
         let when_expr = self.file.add_expr(Expr::When { subject, arms }, span);
         match subject_var {
-            Some((stmt, _)) => self.file.add_expr(
-                Expr::Block {
-                    stmts: vec![stmt],
-                    trailing: Some(when_expr),
-                },
-                span,
-            ),
+            Some((stmt, _)) => {
+                self.file.when_subject_variables.insert(when_expr.0);
+                self.file.add_expr(
+                    Expr::Block {
+                        stmts: vec![stmt],
+                        trailing: Some(when_expr),
+                    },
+                    span,
+                )
+            }
             None => when_expr,
         }
     }

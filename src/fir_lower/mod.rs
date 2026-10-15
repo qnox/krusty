@@ -404,10 +404,40 @@ fn root_scope_block(body: &FirBody) -> Option<FirExprId> {
     loop {
         match &body.expr(expression)?.kind {
             crate::fir::FirExprKind::ImplicitConversion { value, .. } => expression = *value,
+            // An expression body made from `when (val subject = value)` evaluates the subject's
+            // own block. That nested block is not the callable's root lexical scope.
+            crate::fir::FirExprKind::Block {
+                statements,
+                result: Some(result),
+            } if is_declared_when_subject_block(body, statements, *result) => {
+                return None;
+            }
             crate::fir::FirExprKind::Block { .. } => return Some(expression),
             _ => return None,
         }
     }
+}
+
+fn is_declared_when_subject_block(
+    body: &FirBody,
+    statements: &[FirStatementId],
+    result: FirExprId,
+) -> bool {
+    let [statement] = statements else {
+        return false;
+    };
+    let Some(crate::fir::FirStatementKind::Local { target, .. }) =
+        body.statement(*statement).map(|statement| &statement.kind)
+    else {
+        return false;
+    };
+    matches!(
+        body.expr(result).map(|result| &result.kind),
+        Some(crate::fir::FirExprKind::When {
+            subject_variable: Some(subject),
+            ..
+        }) if subject == target
+    )
 }
 
 /// The declaration whose executable scope owns a root body or default-argument fragment.

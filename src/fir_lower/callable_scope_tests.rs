@@ -44,3 +44,15 @@ fn a_callable_body_block_is_its_scope_and_a_nested_block_is_not() {
     // callable's scope: its locals cover the `return`, not only the block.
     assert_eq!(declaring_blocks(&ir, "held"), [true, false]);
 }
+
+#[test]
+fn an_expression_body_when_subject_variable_owns_a_nested_scope() {
+    let ir = lower_single_source(
+        "fun select(value: Int): Int = when (val subject = value) {\n\
+         \x20   0 -> subject\n\
+         \x20   else -> subject + 1\n\
+         }\n",
+        "WhenSubjectVariableScope",
+    );
+    assert_eq!(declaring_blocks(&ir, "subject"), [false]);
+}

@@ -81,6 +81,23 @@ impl BodyFirChecker<'_> {
         let subject = subject_syntax
             .map(|subject| self.expression(subject))
             .transpose()?;
+        let subject_variable = if self.file.when_subject_variables.contains(&expression.0) {
+            let variable = subject
+                .and_then(|subject| self.body.expr(subject))
+                .and_then(|subject| match &subject.kind {
+                    FirExprKind::ValueRead(variable) => Some(*variable),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        super::BodyCheckFailureKind::MalformedWhenSubjectVariable,
+                    )
+                })?;
+            Some(variable)
+        } else {
+            None
+        };
 
         // `is`/`!is` and `in`/`!in` conditions contain the subject syntax as an operand. Check
         // every one against the already-published subject rather than publishing another copy.
@@ -181,6 +198,7 @@ impl BodyFirChecker<'_> {
             };
         Ok(FirExprKind::When {
             subject,
+            subject_variable,
             branches: branches.into_boxed_slice(),
             deeply_exhaustive,
         })

@@ -1664,6 +1664,10 @@ pub struct File {
     /// at Kotlin's operator location without retaining source text or adding a span field to every AST
     /// node. Keyed by the value expression's `ExprId`; absent for expression bodies and synthetic values.
     pub value_operator_spans: crate::fx_hash::HashMap<u32, Span>,
+    /// `when` expressions whose subject is the variable declared in their parentheses
+    /// (`when (val subject = value)`). The marker follows the `when`, not the surrounding block,
+    /// so checked FIR can publish the declaration's resolved local identity.
+    pub when_subject_variables: crate::fx_hash::HashSet<u32>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
@@ -2022,6 +2026,7 @@ impl File {
         self.stmt_lines = Vec::new();
         self.assignment_target_lines = Default::default();
         self.value_operator_spans = Default::default();
+        self.when_subject_variables = Default::default();
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
