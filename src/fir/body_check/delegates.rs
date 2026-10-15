@@ -856,6 +856,7 @@ fn selected_delegate_call(
             Ok(FirDelegateCall {
                 target: FirCallTarget::External {
                     declaration,
+                    singleton_dispatch: None,
                     default_provider: *external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: None,
@@ -955,6 +956,10 @@ fn selected_delegate_call(
             Ok(FirDelegateCall {
                 target: FirCallTarget::External {
                     declaration,
+                    singleton_dispatch: callable
+                        .singleton_dispatch
+                        .as_deref()
+                        .map(|singleton| singleton.classifier),
                     default_provider: callable.external_default_provider,
                     receiver: Some(receiver),
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
@@ -1059,6 +1064,10 @@ fn selected_delegate_call(
                 (
                     FirCallTarget::External {
                         declaration,
+                        singleton_dispatch: dispatch_receiver
+                            .singleton
+                            .as_ref()
+                            .map(|singleton| singleton.classifier),
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,

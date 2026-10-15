@@ -2,6 +2,7 @@
 
 mod backend_handoff;
 mod declaration_metadata;
+mod dependency_body_emission;
 mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
@@ -30,6 +31,7 @@ pub fn emit_analyzed<B: Backend>(
     diags: &mut DiagSink,
 ) -> Vec<Artifact> {
     let mut state = B::State::default();
+    let mut dependency_support = dependency_body_emission::DependencySupportState::default();
     let mut outputs = emit_analyzed_into(
         analysis,
         stems,
@@ -37,6 +39,7 @@ pub fn emit_analyzed<B: Backend>(
         &mut state,
         module_name,
         diags,
+        &mut dependency_support,
         &mut |_, _| {},
     );
     if !diags.has_errors() {
@@ -60,6 +63,7 @@ fn emit_analyzed_into<B: Backend>(
     state: &mut B::State,
     module_name: &str,
     diags: &mut DiagSink,
+    dependency_support: &mut dependency_body_emission::DependencySupportState,
     before_target: &mut impl FnMut(&mut CheckedIrFile<'_>, &mut DiagSink),
 ) -> Vec<Artifact> {
     let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
@@ -318,6 +322,18 @@ fn emit_analyzed_into<B: Backend>(
             continue;
         };
         before_target(&mut file, diags);
+        if diags.has_errors() {
+            continue;
+        }
+        outputs.extend(dependency_body_emission::emit_intrinsic_dependencies(
+            &file,
+            &symbols,
+            &backend_module_facts,
+            backend,
+            state,
+            dependency_support,
+            diags,
+        ));
         if diags.has_errors() {
             continue;
         }

@@ -28,6 +28,34 @@ pub(super) struct ReceiverFrame {
 }
 
 impl BodyFirChecker<'_> {
+    /// Authenticate a checked receiver as the exact singleton value of `expected`.
+    ///
+    /// This runs while checked FIR still owns the resolved receiver identity. Later inline
+    /// staging may turn the value into a local read, so consumers must use the published
+    /// classifier rather than recover singleton authority from expression syntax.
+    pub(super) fn authenticated_singleton_receiver(
+        &self,
+        receiver: Option<&FirReceiver>,
+        expected: Ty,
+    ) -> Option<crate::types::TypeName> {
+        let FirReceiver {
+            value,
+            conversion: None,
+        } = receiver?
+        else {
+            return None;
+        };
+        let FirExpr {
+            ty,
+            kind: FirExprKind::SingletonValue { classifier },
+            ..
+        } = self.body.expr(*value)?
+        else {
+            return None;
+        };
+        (ty.get() == Ty::Obj(*classifier, &[]) && expected == ty.get()).then_some(*classifier)
+    }
+
     /// Semantic receiver frame exposed to a nested callable. Direct callable receivers are ordinary
     /// slots. A non-local member body can additionally expose outer instances through an `inner`
     /// classifier chain; publish the exact declaration path for each such coordinate so a nested
@@ -370,5 +398,63 @@ impl BodyFirChecker<'_> {
             path.push(classifier);
             classifier = outer;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{
+        checked_function_body_with_platform, root_expression, singleton_extension_source,
+    };
+    use super::super::*;
+
+    #[test]
+    fn external_extension_on_a_singleton_publishes_the_exact_call_edge_classifier() {
+        let singleton = crate::types::type_name("Token");
+        let (body, index) = checked_function_body_with_platform(
+            "object Token\nfun box(): Int = Token.read()\n",
+            "box",
+            singleton_extension_source(),
+        );
+        let call = body
+            .expr(root_expression(&body))
+            .expect("singleton extension call");
+        let FirExprKind::Call(call) = &call.kind else {
+            panic!("the selected external extension must remain a checked call")
+        };
+        let FirCallTarget::External {
+            singleton_dispatch, ..
+        } = &call.target
+        else {
+            panic!("the provider extension must keep its external identity")
+        };
+        assert_eq!(*singleton_dispatch, Some(singleton));
+        let receiver = call
+            .extension_receiver
+            .expect("the object value is the extension receiver");
+        assert!(matches!(
+            body.expr(receiver.value).map(|expression| &expression.kind),
+            Some(FirExprKind::SingletonValue { classifier }) if *classifier == singleton
+        ));
+
+        let mut ir = crate::ir::IrFile::default();
+        crate::fir_lower::lower_body(body, &index, &mut ir).expect("checked body lowers");
+        let singleton_edges = ir
+            .external_singleton_dispatches
+            .iter()
+            .map(|(&expression, &selected)| (expression, selected))
+            .collect::<Vec<_>>();
+        let [(expression, selected)] = singleton_edges.as_slice() else {
+            panic!("one exact singleton call edge must be published")
+        };
+        assert_eq!(*selected, singleton);
+        assert!(matches!(
+            ir.expr(*expression),
+            crate::ir::IrExpr::Call {
+                callee: crate::ir::Callee::External { target, .. },
+                dispatch_receiver: Some(_),
+                ..
+            } if *target == crate::fir::ExternalCallableId::from_raw(702)
+        ));
     }
 }

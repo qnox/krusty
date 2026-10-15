@@ -1,8 +1,109 @@
 use super::test_support::{
     checked_function_body, checked_function_body_with_platform, jvm_semantics,
-    jvm_stdlib_semantics, root_expression,
+    jvm_stdlib_semantics, root_expression, singleton_extension_source,
 };
 use super::*;
+
+#[test]
+fn bound_external_extension_reference_on_a_singleton_publishes_the_exact_edge_classifier() {
+    let singleton = crate::types::type_name("Token");
+    let (body, index) = checked_function_body_with_platform(
+        "object Token\nfun reference(): () -> Int = Token::read\n",
+        "reference",
+        singleton_extension_source(),
+    );
+    let FirExprKind::CallableReference {
+        target: FirCallableReferenceTarget::External {
+            singleton_dispatch, ..
+        },
+        binding,
+        extension_receiver: Some(receiver),
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("bound singleton extension reference")
+        .kind
+    else {
+        panic!("the provider extension must remain a bound external reference")
+    };
+    assert_eq!(*binding, FirCallableReferenceBinding::Bound);
+    assert_eq!(*singleton_dispatch, Some(singleton));
+    assert!(matches!(
+        body.expr(receiver.value).map(|expression| &expression.kind),
+        Some(FirExprKind::SingletonValue { classifier }) if *classifier == singleton
+    ));
+
+    let mut ir = crate::ir::IrFile::default();
+    let lowered =
+        crate::fir_lower::lower_body(body, &index, &mut ir).expect("checked reference lowers");
+    assert_eq!(
+        ir.external_singleton_dispatches
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        [singleton]
+    );
+    let generated_calls = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, expression)| {
+            matches!(
+                expression,
+                crate::ir::IrExpr::Call {
+                    callee: crate::ir::Callee::External { .. },
+                    ..
+                }
+            )
+            .then_some(id as crate::ir::ExprId)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(generated_calls.len(), 1, "{generated_calls:?}");
+    let call = generated_calls[0];
+    assert_eq!(ir.checked_type(call), Some(crate::types::Ty::Int));
+    let (_, _, inline_template, _) = ir
+        .callable_reference_inline_template(lowered.roots[0])
+        .expect("external callable reference has an inline invocation template");
+    let (_, copies) = crate::ir::clone_expression_dag(&mut ir, inline_template);
+    assert_eq!(
+        ir.checked_type(copies[&call]),
+        Some(crate::types::Ty::Int),
+        "the inlined adapter call retains the selected result type"
+    );
+}
+
+#[test]
+fn bound_external_extension_reference_on_a_local_does_not_publish_singleton_authority() {
+    let (body, index) = checked_function_body_with_platform(
+        "class Token\nfun reference(token: Token): () -> Int = token::read\n",
+        "reference",
+        singleton_extension_source(),
+    );
+    let FirExprKind::CallableReference {
+        target: FirCallableReferenceTarget::External {
+            singleton_dispatch, ..
+        },
+        binding,
+        extension_receiver: Some(receiver),
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("bound local extension reference")
+        .kind
+    else {
+        panic!("the provider extension must remain a bound external reference")
+    };
+    assert_eq!(*binding, FirCallableReferenceBinding::Bound);
+    assert_eq!(*singleton_dispatch, None);
+    assert!(matches!(
+        body.expr(receiver.value).map(|expression| &expression.kind),
+        Some(FirExprKind::ValueRead(_))
+    ));
+
+    let mut ir = crate::ir::IrFile::default();
+    crate::fir_lower::lower_body(body, &index, &mut ir).expect("checked reference lowers");
+    assert!(ir.external_singleton_dispatches.is_empty());
+}
 
 #[test]
 fn overloaded_source_reference_keeps_the_selected_stable_callable() {

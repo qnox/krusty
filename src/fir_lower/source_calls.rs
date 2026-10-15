@@ -95,6 +95,7 @@ pub(super) struct ExternalPropertyRequest<'a> {
 
 pub(super) struct ExternalCallRequest<'a> {
     pub(super) target: ExternalCallableId,
+    pub(super) singleton_dispatch: Option<TypeName>,
     pub(super) default_provider: Option<ExternalCallableId>,
     pub(super) receiver_ty: Option<ResolvedTy>,
     pub(super) declared_receiver: Option<ResolvedTy>,
@@ -345,6 +346,7 @@ impl BodyLowering<'_> {
     pub(super) fn external_call(&mut self, request: ExternalCallRequest<'_>) -> Option<ExprId> {
         let ExternalCallRequest {
             target,
+            singleton_dispatch,
             default_provider,
             receiver_ty,
             declared_receiver,
@@ -434,6 +436,16 @@ impl BodyLowering<'_> {
             dispatch_receiver: receiver,
             args,
         });
+        // This is the selected callable's checked result, not a type recovered from the eventual
+        // dependency ABI. Ordinary source expressions publish the same fact at the outer lowering
+        // boundary, but generated consumers (notably callable-reference adapters) invoke this
+        // operation directly and therefore need the call node itself to carry it.
+        self.ir.logical_types.insert(call, result.get());
+        if let Some(singleton) = singleton_dispatch {
+            self.ir
+                .external_singleton_dispatches
+                .insert(call, singleton);
+        }
         argument_boundaries::record(self.ir, call, &boundary_parameters, &boundary_defaults);
         if let Some(role) = semantic_role {
             self.ir.semantic_call_roles.insert(call, role);

@@ -152,6 +152,11 @@ impl BodyFirChecker<'_> {
                     })?;
                     FirCallTarget::External {
                         declaration,
+                        singleton_dispatch: member
+                            .member
+                            .singleton_dispatch
+                            .as_deref()
+                            .map(|singleton| singleton.classifier),
                         default_provider: member.member.external_default_provider,
                         receiver: Some(resolved(member.receiver)?),
                         declared_receiver: None,
@@ -221,6 +226,10 @@ impl BodyFirChecker<'_> {
                         declaration: callable.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        singleton_dispatch: callable
+                            .singleton_dispatch
+                            .as_deref()
+                            .map(|singleton| singleton.classifier),
                         default_provider: callable.external_default_provider,
                         receiver: Some(resolved(extension.receiver)?),
                         declared_receiver: callable.source_receiver.map(resolved).transpose()?,
@@ -290,6 +299,10 @@ impl BodyFirChecker<'_> {
             } if context_args.is_empty() && vararg_index.is_none() => {
                 let origin = self.statement_origin(statement)?;
                 let dispatch_ty = dispatch_receiver.ty;
+                let singleton_dispatch = dispatch_receiver
+                    .singleton
+                    .as_ref()
+                    .map(|singleton| singleton.classifier);
                 let dispatch_receiver = self
                     .materialize_implicit_receiver(origin, span, &dispatch_receiver)?
                     .ok_or_else(|| {
@@ -310,6 +323,7 @@ impl BodyFirChecker<'_> {
                     parameters.insert(0, declared_extension_receiver);
                     FirCallTarget::External {
                         declaration,
+                        singleton_dispatch,
                         default_provider: external_default_provider,
                         receiver: Some(resolved(dispatch_ty)?),
                         declared_receiver: None,

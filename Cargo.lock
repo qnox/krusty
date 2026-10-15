@@ -823,6 +823,7 @@ dependencies = [
  "object 0.40.0",
  "pprof",
  "rayon",
+ "sha2",
  "stacker",
  "syn 3.0.6",
  "target-lexicon",

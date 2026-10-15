@@ -74,6 +74,74 @@ fn a_call_of_a_dependency_function_lowers_its_callee_into_the_unit() {
 }
 
 #[test]
+fn overlapping_roots_share_their_transitive_callee_when_selected_in_reverse_order() {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let mut unit = DependencyBodyUnit::default();
+    let b = demo
+        .lower(&mut unit, "b", &["a", "b"])
+        .expect("the callee root lowers first");
+    let expressions_after_b = unit.ir().exprs.len();
+    let a = demo
+        .lower(&mut unit, "a", &["a", "b"])
+        .expect("the caller root reuses its callee");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 2);
+    assert!(unit.ir().exprs.len() > expressions_after_b);
+    let calls = unit
+        .ir()
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            crate::ir::IrExpr::Call {
+                callee: crate::ir::Callee::Local(callee),
+                ..
+            } => Some(*callee),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls, [b]);
+    assert_ne!(a, b);
+}
+
+#[test]
+fn a_later_support_unit_links_an_exact_callee_emitted_by_an_earlier_unit() {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let b = demo.callable("b");
+    let external = crate::fir::ExternalCallableId::from_raw(17);
+    let emitted = [(
+        b.identity().clone(),
+        super::super::EmittedDependencyCallable::new(external, None, None),
+    )]
+    .into_iter()
+    .collect();
+    let callees = demo.callees(&["a", "b"]);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        demo.callable("a"),
+        &demo.bodies,
+        &callees,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &emitted,
+    )
+    .expect("the later root links its already-emitted callee");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 1, "the callee is not re-emitted");
+    let calls = unit
+        .ir()
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            crate::ir::IrExpr::Call {
+                callee: crate::ir::Callee::External { target, .. },
+                ..
+            } => Some(*target),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls, [external]);
+}
+
+#[test]
 fn a_call_cycle_links_back_to_the_declared_function() {
     let shapes: [Shape; 2] = [("a", &[T::Int], T::Int), ("b", &[T::Int], T::Int)];
     let demo = demo(&shapes, |name, body| {
@@ -158,10 +226,22 @@ fn a_callee_without_a_body_declines_by_its_own_reason() {
 #[test]
 fn a_callee_two_frozen_selections_describe_declines_by_name() {
     let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let mut conflicting = demo.facts["b"].clone();
+    conflicting.name = "different-provider-shape".to_owned();
+    let callees = KlibCalleeFacts::new([
+        demo.callable("b"),
+        conflicting
+            .klib_body_callable()
+            .expect("the conflicting record retains the exact identity"),
+    ]);
+    let mut unit = DependencyBodyUnit::default();
     assert_eq!(
-        demo.declined("a", &["b", "b"]),
+        unit.lower_function(demo.callable("a"), &demo.bodies, &callees)
+            .expect_err("two incompatible records claim the callee identity")
+            .to_string(),
         "the KLIB body of `demo.a` (it calls `demo.b`, which two selected declarations describe)"
     );
+    assert_unit_is_empty(&unit);
 }
 
 #[test]
@@ -183,8 +263,16 @@ fn a_call_of_an_already_lowered_function_follows_the_active_selection() {
     demo.lower(&mut unit, "a", &["b"]).expect("lowers");
     let functions = unit.ir().functions.len();
     let expressions = unit.ir().exprs.len();
+    let mut conflicting = demo.facts["b"].clone();
+    conflicting.name = "different-provider-shape".to_owned();
+    let ambiguous = KlibCalleeFacts::new([
+        demo.callable("b"),
+        conflicting
+            .klib_body_callable()
+            .expect("the conflicting record retains the exact identity"),
+    ]);
     assert_eq!(
-        demo.lower(&mut unit, "c", &["b", "b"])
+        unit.lower_function(demo.callable("c"), &demo.bodies, &ambiguous)
             .expect_err("`b` is ambiguous for this lowering")
             .to_string(),
         "the KLIB body of `demo.c` (it calls `demo.b`, which two selected declarations describe)"
@@ -743,7 +831,8 @@ fn stdlib_structural_equality_lowers_as_its_source_does() {
     let Some(root) = distribution_root() else {
         return;
     };
-    let (libraries, bodies) = stdlib(&root);
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
     let any = kotlin("Any");
     let fact = frozen_function(
         &libraries,
@@ -756,7 +845,7 @@ fn stdlib_structural_equality_lowers_as_its_source_does() {
     let function = unit
         .lower_function(
             fact.klib_body_callable().expect("signed"),
-            &bodies,
+            bodies,
             &KlibCalleeFacts::default(),
         )
         .unwrap_or_else(|decline| panic!("{decline}"));
@@ -779,7 +868,8 @@ fn stdlib_unsigned_max_declines_through_its_callee() {
     let Some(root) = distribution_root() else {
         return;
     };
-    let (libraries, bodies) = stdlib(&root);
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
     let unsigned = kotlin("ULong");
     let max = frozen_function(
         &libraries,
@@ -798,21 +888,28 @@ fn stdlib_unsigned_max_declines_through_its_callee() {
     let callable = max.klib_body_callable().expect("signed");
     let mut unit = DependencyBodyUnit::default();
     let selected = KlibCalleeFacts::new([max_of.klib_body_callable().expect("signed")]);
+    let callee_reason =
+        if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
+            "it uses an inline argument container of another shape"
+        } else {
+            "it uses a block of a compiler-introduced form"
+        };
+    let expected = format!(
+        "the KLIB body of `kotlin.math.max` \
+         (it reaches the KLIB body of `kotlin.comparisons.maxOf` ({callee_reason}))"
+    );
     assert_eq!(
-        unit.lower_function(callable, &bodies, &selected)
+        unit.lower_function(callable, bodies, &selected)
             .expect_err("the callee declines")
             .to_string(),
-        "the KLIB body of `kotlin.math.max` \
-         (it reaches the KLIB body of `kotlin.comparisons.maxOf` (it uses a block of a compiler-introduced form))"
+        expected
     );
     assert_unit_is_empty(&unit);
     assert_eq!(
-        unit.lower_function(callable, &bodies, &KlibCalleeFacts::default())
+        unit.lower_function(callable, bodies, &KlibCalleeFacts::default())
             .expect_err("the callee declines")
             .to_string(),
-        "the KLIB body of `kotlin.math.max` \
-         (it reaches the KLIB body of `kotlin.comparisons.maxOf` \
-         (it uses a block of a compiler-introduced form))"
+        expected
     );
     assert_unit_is_empty(&unit);
 }
@@ -860,6 +957,9 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                 super::super::ir_builtins::BuiltinOperator::Ieee754Equals { operand } => {
                     ("ieee754equals", Some(operand))
                 }
+                super::super::ir_builtins::BuiltinOperator::IsNan { operand } => {
+                    ("isNaN", Some(operand))
+                }
                 super::super::ir_builtins::BuiltinOperator::Not => ("not", Some(Ty::Boolean)),
                 super::super::ir_builtins::BuiltinOperator::Equals => ("EQEQ", None),
                 super::super::ir_builtins::BuiltinOperator::Identical => ("EQEQEQ", None),
@@ -872,7 +972,14 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
             *checked.entry(kind).or_default() += 1;
         }
     }
-    for kind in ["relation", "ieee754equals", "not", "EQEQ", "EQEQEQ"] {
+    for kind in [
+        "relation",
+        "ieee754equals",
+        "isNaN",
+        "not",
+        "EQEQ",
+        "EQEQEQ",
+    ] {
         assert!(
             checked.get(kind).copied().unwrap_or(0) > 0,
             "no {kind} call: {checked:?}"

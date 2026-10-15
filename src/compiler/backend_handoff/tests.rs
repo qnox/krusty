@@ -124,6 +124,20 @@ fun properties(): Int {
 /// Every callable fact of the file, with its identity, in identity order.
 type Recorded = Vec<(ExternalCallableId, BackendCallableFact)>;
 
+struct SingleCallableProvider {
+    identity: ExternalCallableId,
+    realization: crate::libraries::ExternalCallableRealization,
+}
+
+impl crate::symbol_source::SymbolSource for SingleCallableProvider {
+    fn external_callable(
+        &self,
+        identity: ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        (identity == self.identity).then(|| self.realization.clone())
+    }
+}
+
 /// Each non-ordinary-call source of a dependency identity, read straight off the checked IR the
 /// backend receives, and the identities it carries.
 fn dependency_identity_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, ExternalCallableId)> {
@@ -710,6 +724,92 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
 }
 
 #[test]
+fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record() {
+    let target = ExternalCallableId::from_raw(3);
+    let singleton = type_name("kotlin/Float$Companion");
+    let inherited_singleton = type_name("fixture/InheritedCompanion");
+    let mut ir = crate::ir::IrFile::default();
+    let receiver = ir.add_expr(crate::ir::IrExpr::SingletonValue {
+        classifier: singleton,
+    });
+    let call = ir.add_expr(crate::ir::IrExpr::Call {
+        callee: crate::ir::Callee::External {
+            target,
+            default_provider: None,
+            params: vec![Ty::Int],
+            ret: Ty::Float,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        },
+        dispatch_receiver: Some(receiver),
+        args: Vec::new(),
+    });
+    ir.external_singleton_dispatches.insert(call, singleton);
+    let inherited_receiver = ir.add_expr(crate::ir::IrExpr::SingletonValue {
+        classifier: inherited_singleton,
+    });
+    let inherited_call = ir.add_expr(crate::ir::IrExpr::Call {
+        callee: crate::ir::Callee::External {
+            target,
+            default_provider: None,
+            params: vec![Ty::Int],
+            ret: Ty::Float,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        },
+        dispatch_receiver: Some(inherited_receiver),
+        args: Vec::new(),
+    });
+    ir.external_singleton_dispatches
+        .insert(inherited_call, inherited_singleton);
+
+    let declaration = crate::libraries::LibraryCallable::library(
+        singleton,
+        "fromBits",
+        vec![Ty::Int],
+        Ty::Float,
+        Ty::Float,
+        "(I)F",
+    );
+    assert!(declaration.singleton_dispatch.is_none());
+    let provider = SingleCallableProvider {
+        identity: target,
+        realization: crate::libraries::ExternalCallableRealization {
+            callable: declaration,
+            kind: ExternalCallableKind::Member,
+            declaration_owner: None,
+            parameter_identities: Box::new([]),
+            declaration_signature: None,
+            dependency_callable: None,
+            klib_body_companion_receiver: None,
+        },
+    };
+
+    let facts = CheckedBackendCallables::freeze(&ir, &provider)
+        .expect("the selected dependency call freezes its declaration");
+    assert!(facts
+        .callable(target)
+        .expect("the call has a frozen fact")
+        .singleton_dispatch
+        .is_none());
+    assert_eq!(
+        facts.singleton_dispatch(call),
+        Some(crate::libraries::SingletonDispatch {
+            classifier: singleton
+        })
+    );
+    assert_eq!(
+        facts.singleton_dispatch(inherited_call),
+        Some(crate::libraries::SingletonDispatch {
+            classifier: inherited_singleton
+        }),
+        "two inherited object selections sharing a declaration retain distinct call-edge facts"
+    );
+}
+
+#[test]
 fn a_klib_declaration_signature_is_frozen_with_its_callable() {
     use crate::metadata::semantic::{
         KotlinFunction, KotlinFunctionTypeShape, KotlinPackage, KotlinType,
@@ -743,6 +843,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        annotation_applications: Vec::new(),
         return_value_status: Default::default(),
         contract: None,
     };
@@ -850,6 +951,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         parameter_identities: Box::new([]),
         declaration_signature: None,
         dependency_callable: None,
+        klib_body_companion_receiver: None,
     };
     let queries = std::cell::Cell::new(0);
     facts

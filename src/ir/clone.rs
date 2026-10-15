@@ -383,6 +383,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(reified_catch_markers);
     copy_map!(inline_call_type_arguments);
     copy_map!(ext_call_source_receiver);
+    copy_map!(external_singleton_dispatches);
     copy_map!(dispatch_classes);
     copy_map!(call_declared_ret);
     copy_map!(synthesized_accessor_calls);
@@ -418,6 +419,13 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.destructuring_containers.contains(&source) {
         ir.destructuring_containers.insert(target);
+    }
+    if ir
+        .inline_callable_reference_receiver_bindings
+        .contains(&source)
+    {
+        ir.inline_callable_reference_receiver_bindings
+            .insert(target);
     }
     if ir.inline_synthetic_lines.contains(&source) {
         ir.inline_synthetic_lines.insert(target);
@@ -740,10 +748,9 @@ mod tests {
     }
 
     #[test]
-    fn expression_clone_keeps_the_selected_dependency_declaration() {
-        // An inlined copy of a dependency call reaches its backend through the callee alone: the
-        // selected declaration identity is part of the node, so no call-site side table has to be
-        // copied for a target to realize the copy exactly as it realizes the original.
+    fn expression_clone_keeps_the_selected_dependency_edge() {
+        // An inlined dependency call keeps both its declaration handle and the per-edge singleton
+        // dispatch which distinguishes inherited selections sharing that declaration.
         let mut ir = IrFile::default();
         let receiver = ir.add_expr(super::super::IrExpr::UnitInstance);
         let callee = super::super::Callee::External {
@@ -760,6 +767,8 @@ mod tests {
             dispatch_receiver: Some(receiver),
             args: Vec::new(),
         });
+        let singleton = crate::types::type_name("demo/Singleton");
+        ir.external_singleton_dispatches.insert(source, singleton);
 
         let (target, copies) = clone_expression_dag(&mut ir, source);
 
@@ -775,6 +784,10 @@ mod tests {
         assert_eq!(copied, &callee);
         assert_eq!(Some(copied_receiver), copies.get(&receiver));
         assert!(args.is_empty());
+        assert_eq!(
+            ir.external_singleton_dispatches,
+            crate::fx_hash::HashMap::from_iter([(source, singleton), (target, singleton)])
+        );
     }
 
     #[test]

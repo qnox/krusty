@@ -310,13 +310,19 @@ fn package_exports(
                 return None;
             }
         };
-        exports.record_callable(
-            source.function,
-            crate::libraries::KlibDependencyCallable {
-                module: module_name.to_owned(),
-                declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
-            },
-        );
+        // Metadata retains inline templates and bodyless declarations because a dependent
+        // frontend needs their semantic declarations (and, for an inline function, its KLIB
+        // body). The target registry is narrower: it may publish only code this source unit
+        // actually emits.
+        if crate::backend::has_standalone_dependency_code(ir, source.function) {
+            exports.record_callable(
+                source.function,
+                crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+                },
+            );
+        }
     }
     for (source, declaration) in ir.package_properties.iter().zip(&decoded.properties) {
         if source.visibility == crate::types::Visibility::Private {
@@ -355,13 +361,17 @@ fn package_exports(
                         return None;
                     }
                 };
-            exports.record_callable(
-                callable,
-                crate::libraries::KlibDependencyCallable {
-                    module: module_name.to_owned(),
-                    declaration: crate::libraries::KlibDeclarationSignature::Accessor(signature),
-                },
-            );
+            if crate::backend::has_standalone_dependency_code(ir, callable) {
+                exports.record_callable(
+                    callable,
+                    crate::libraries::KlibDependencyCallable {
+                        module: module_name.to_owned(),
+                        declaration: crate::libraries::KlibDeclarationSignature::Accessor(
+                            signature,
+                        ),
+                    },
+                );
+            }
         }
     }
     Some(exports)

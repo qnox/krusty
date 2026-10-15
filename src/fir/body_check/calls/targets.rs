@@ -17,6 +17,7 @@ pub(in crate::fir::body_check) struct MemberExtensionFirTarget {
 
 pub(super) struct ExternalCallTarget<'a> {
     pub(super) declaration: ExternalCallableId,
+    pub(super) singleton_dispatch: Option<crate::types::TypeName>,
     pub(super) receiver: Option<Ty>,
     pub(super) declared_receiver: Option<Ty>,
     pub(super) parameters: Vec<Ty>,

@@ -15492,9 +15492,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the callee (`KlibCalleeFacts`, built from the backend handoff's `KlibBodyCallable` views), the two
   views must agree in name, parameter types and identities, context count and result, or the call
   declines as an internal inconsistency; the same check runs when a function already in the unit is
-  reached, or lowered as a root, under a selection. A signature two selections describe declines.
-  The KLIB IR header is therefore the description of a dependency-only callee: nothing is frozen
-  for it in advance, and only reached bodies are read. A body-local declaration wins. Otherwise,
+  reached, or lowered as a root, under a selection. Multiple checked call edges may carry distinct
+  singleton dispatch classifiers for the same declaration contract. They remain variants of that
+  one declaration: lowering authenticates the unique variant whose receiver agrees with the
+  serialized header and, for a cross-unit call, the receiver contract published by the unit which
+  emitted it. Conflicting declaration contracts, or zero or multiple matching variants, decline;
+  input order never selects one.
+  An executable dependency-support root is selected only when its own serialized body directly
+  calls an intrinsic declaration authenticated from the same selected inputs, or when one exact
+  immediate callee makes that direct call, and its serialized boundary is exactly one supported
+  scalar reinterpret pair (`Float`/`Int` or `Double`/`Long`) after an authenticated inert companion
+  receiver is removed. An ordinary member or a collection operation cannot become support merely
+  because its implementation happens to inspect floating-point bits. This single admitted wrapper
+  layer lets a target
+  stdlib's semantic wrapper close over its instruction wrapper without making the support relation
+  transitive. A caller two edges away remains owned by its ordinary target realization; common
+  lowering never tries its larger body graph as a fallback. Tests
+  `klib_lowering::tests::wasm_to_bits_closes_its_exact_semantic_wrapper_unit` and
+  `intrinsic_support_roots_exclude_ordinary_callers_of_bit_wrappers` pin the positive one-wrapper
+  boundary and its negative `hashCode` case. The KLIB IR header is therefore the description of a
+  dependency-only callee of an admitted root: nothing is frozen for it in advance, and only
+  reached bodies are read. A reached declaration intentionally serialized without a body remains
+  joined by that same exact producer identity; the compiler freezes its provider handle and the
+  target realizes it through the ordinary dependency registry only when that backend explicitly
+  owns such a realization; a backend without that capability declines before support IR is
+  constructed rather than inventing a body or retrying another declaration. A body-local
+  declaration wins. Otherwise,
   the exact declaring module is the sole loaded module which both serializes the signature and is
   reachable through the producing KLIB's transitive manifest `depends` graph. The roles the current
   compilation assigned its inputs are not producer edges; input/manifest order and an unrelated
@@ -15505,11 +15528,47 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The callee is declared in the same
   `DependencyBodyUnit` and the call lowers as a same-file call of it, with the callee's declared
   parameter types as the expected argument types. Each module-qualified identity is lowered once, a
-  call cycle links back to the function already declared, and the callee's body is lowered after its caller's. A
-  call of a member function (a declaration with a dispatch receiver) declines by that form, since
-  member dispatch is not modelled; a call of a signature no producer-reachable library serializes
-  declines by its identity (`which no reachable library serializes its declaration`). A callee whose
-  own body declines makes the whole
+  call cycle links back to the function already declared, and the callee's body is lowered after its
+  caller's. A member function normally declines because general member dispatch is not modelled.
+  One exact selected member body may erase its dispatch slot only when the serialized body never
+  reads that receiver; an executable target accepts its source edge only from the exact singleton
+  dispatch selected by the provider. That dispatch can differ from the declaration owner: a
+  companion member can be named through its enclosing classifier while dispatching on the
+  companion object. The exact export records whether that singleton's first access can initialize
+  it. The source receiver expression is evaluated before the erased-slot call unless the same
+  provider proof used for unread extension receivers establishes that the exact serialized object
+  has no initialization work; that proof may erase the complete generated callable-reference
+  receiver expression, not merely its final local read. An ordinary instance, inherited fake
+  override, or body that reads `this` still declines. Every serialized extension body that never reads its exact
+  extension-receiver parameter publishes that receiver type as an effect under the exact
+  module-qualified export. A target may substitute an inert ABI carrier only when the checked
+  source receiver is an exact singleton of that type. An ordinary singleton expression is still
+  evaluated once, at the receiver's source-order coordinate, so first-access initialization remains
+  observable; only its value in the unread dependency slot is replaced. Evaluation may be omitted
+  only under a second provider proof: the checked call supplies an exact singleton value, and
+  exactly one module in the callable producer's manifest dependency graph serializes that class
+  with exactly one empty constructor delegating to `kotlin.Any`, no other supertype, only literal
+  field initialization, and empty anonymous initializers. Absence, ambiguous ownership,
+  inheritance, or any effectful initialization work preserves evaluation. A non-singleton or
+  differently typed receiver follows ordinary extension lowering. A serialized top-level extension
+  carrying Kotlin's exact `companionExtensionClass` marker has the narrower classifier-associated
+  form: its qualifier is not a source value access and does not initialize the companion, so Wasm
+  may fill the retained reference slot with inert null without a preceding evaluation. Header-only
+  transitive callees validate the marker's qualified classifier against their extension receiver
+  before publishing the effect; a malformed or mismatched marker cannot gain authority in a later
+  module. A body that reads the receiver publishes no substitution contract. This covers marker-less
+  Wasm `fromBits` while avoiding invented target storage for `Float.Companion` and
+  `Double.Companion`, preserving serialized parameter coordinates and source side effects.
+  Tests:
+  `klib_lowering::tests::an_unread_ordinary_extension_receiver_is_published_as_a_body_effect`,
+  `klib_lowering::tests::an_unread_companion_extension_receiver_is_published_for_target_support`,
+  `a_header_only_companion_marker_must_match_its_extension_receiver`,
+  `a_read_companion_extension_receiver_is_not_published_as_unread`,
+  `companion_block_members_e2e::block_property_initializes_with_its_class_not_the_file`, and
+  `kotlin_box_wasm_conformance::wasm_reinterpretation_runs_through_emitted_stdlib_extension_bodies`.
+  A call of a signature no producer-reachable library
+  serializes declines by its identity (`which no reachable library serializes its declaration`). A
+  callee whose own body declines makes the whole
   lowering decline with that reason, and every function and expression the attempt added is
   removed. Tests:
   `klib_lowering::tests::body_forms::a_call_of_a_dependency_function_lowers_its_callee_into_the_unit`,
@@ -15530,6 +15589,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_local_body_declaration_wins_over_an_incompatible_dependency_duplicate`,
   `duplicate_producer_edges_still_select_one_dependency_origin`,
   `a_body_call_reaches_a_transitive_producer_dependency`.
+
+- **A target KLIB intrinsic is authenticated once at the provider boundary.** Only the archive the
+  compilation selected as its platform stdlib may contribute these facts. The provider retains a
+  function annotation's qualified identity and typed arguments, validates the declaration's full
+  semantic receiver/parameter/result and modifier shape, and records the operation under the exact
+  KLIB module plus serialized identity. An intrinsic declaration must carry a public `IdSignature`
+  whose package proves the platform-owned namespace. A file-local `(file, signature slot)` identity
+  does not carry that package evidence and is rejected rather than gaining authority from its
+  annotation alone. Native's scalar bit reinterpretations require the exact string-valued
+  `kotlin.native.internal.TypedIntrinsic(kind = "REINTERPRET")` application; Wasm's require the exact
+  `kotlin.wasm.internal.WasmOp` string operation. Native also authenticates the bodyless floating
+  predicates whose exact `kotlin.native.internal.GCUnsafeCall(callee = …)` entry is one of
+  `Kotlin_Float_isNaN`, `Kotlin_Double_isNaN`, `Kotlin_Float_isInfinite`, or
+  `Kotlin_Double_isInfinite`. Such a declaration must be an external package extension in exactly
+  `kotlin`, have no value parameters, have the `Float` or `Double` extension receiver named by the
+  entry, and return `Boolean`. An unknown runtime entry, a mismatched receiver, a different package,
+  or any other declaration shape receives no predicate operation. Callable spelling is not
+  evidence. A serialized
+  body first resolves a public callee through the producing module's dependency graph, then consults
+  this exact intrinsic table before requiring an ordinary body. Dependency body lowering rejects a
+  file-local callee: its local identity neither authenticates an intrinsic operation nor falls back
+  to spelling or an ordinary public declaration. A same-signature declaration from
+  another module, an unselected lookalike archive, a mismatched annotation payload, or a mismatched
+  semantic signature receives no operation and a bodyless declaration still declines. The four
+  authenticated Native predicates are deliberately retained on the selected provider callable,
+  not admitted as body-lowering operations: a serialized wrapper links their bodyless declarations
+  through the exact provider handle, and Native's ordinary external-call boundary consumes the
+  predicate fact plus the recorded extension-receiver coordinate. They therefore never become
+  dependency-support exports with invented bodies, and no target recovers them from the callable or
+  runtime-entry spelling. Checked FIR/IR carries both reinterpretation endpoint types; Native and
+  Wasm alone choose their physical bitcast instruction. Tests:
+  `metadata::semantic::klib::tests::function_annotations_keep_string_arguments_on_both_declaration_views`,
+  `klib_libraries::target_intrinsics::tests::wasm_reinterpret_operations_require_authority_package_payload_and_signature`,
+  `native_reinterpret_declarations_have_their_exact_receiver_or_parameter_shape`,
+  `native_gc_unsafe_floating_predicates_require_the_exact_entry_and_extension_shape`,
+  `klib_lowering::tests::wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity`,
+  `kotlin_box_wasm_conformance::wasm_reinterpretation_runs_through_emitted_stdlib_extension_bodies`,
+  and the Native `fp/toBitsZeroAndNanFloat.kt` / `fp/toBitsZeroAndNanDouble.kt` corpus cases.
 
 - **A KLIB body's local variables are the source declarations.** A local `val`/`var` (origin
   `DEFINED`) lowers to a named variable in the next value slot after the parameters, reads of a

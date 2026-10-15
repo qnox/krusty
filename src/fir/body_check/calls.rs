@@ -75,86 +75,6 @@ fn type_references_recursive_bound(
     })
 }
 
-fn intrinsic_binary_operation(
-    intrinsic: crate::libraries::CompilerIntrinsic,
-) -> Option<FirBinaryOperation> {
-    Some(match intrinsic {
-        crate::libraries::CompilerIntrinsic::PrimitiveBinary(operation) => match operation {
-            crate::libraries::PrimitiveBinaryIntrinsic::Add => FirBinaryOperation::Add,
-            crate::libraries::PrimitiveBinaryIntrinsic::Subtract => FirBinaryOperation::Subtract,
-            crate::libraries::PrimitiveBinaryIntrinsic::Multiply => FirBinaryOperation::Multiply,
-            crate::libraries::PrimitiveBinaryIntrinsic::Divide => FirBinaryOperation::Divide,
-            crate::libraries::PrimitiveBinaryIntrinsic::Remainder => FirBinaryOperation::Remainder,
-        },
-        crate::libraries::CompilerIntrinsic::PrimitiveBitAnd => FirBinaryOperation::BitwiseAnd,
-        crate::libraries::CompilerIntrinsic::PrimitiveBitOr => FirBinaryOperation::BitwiseOr,
-        crate::libraries::CompilerIntrinsic::PrimitiveBitXor => FirBinaryOperation::BitwiseXor,
-        crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft => FirBinaryOperation::ShiftLeft,
-        crate::libraries::CompilerIntrinsic::PrimitiveShiftRight => FirBinaryOperation::ShiftRight,
-        crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight => {
-            FirBinaryOperation::UnsignedShiftRight
-        }
-        crate::libraries::CompilerIntrinsic::ArrayFactory(_)
-        | crate::libraries::CompilerIntrinsic::ArrayGet
-        | crate::libraries::CompilerIntrinsic::ArraySet
-        | crate::libraries::CompilerIntrinsic::ArraySize
-        | crate::libraries::CompilerIntrinsic::CharCode
-        | crate::libraries::CompilerIntrinsic::StringLength
-        | crate::libraries::CompilerIntrinsic::StringGet
-        | crate::libraries::CompilerIntrinsic::StringPlus
-        | crate::libraries::CompilerIntrinsic::NullableAnyToString
-        | crate::libraries::CompilerIntrinsic::NumericConversion
-        | crate::libraries::CompilerIntrinsic::PrimitiveUnary(_)
-        | crate::libraries::CompilerIntrinsic::PrimitiveCompare
-        | crate::libraries::CompilerIntrinsic::BooleanNot
-        | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
-        | crate::libraries::CompilerIntrinsic::PrimitiveEquals
-        | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
-        | crate::libraries::CompilerIntrinsic::Assert
-        | crate::libraries::CompilerIntrinsic::AssertFailsWith
-        | crate::libraries::CompilerIntrinsic::Print
-        | crate::libraries::CompilerIntrinsic::Println
-        | crate::libraries::CompilerIntrinsic::StartCoroutine
-        | crate::libraries::CompilerIntrinsic::CoroutineContext
-        | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-        | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
-        | crate::libraries::CompilerIntrinsic::EnumValues
-        | crate::libraries::CompilerIntrinsic::EnumValueOf
-        | crate::libraries::CompilerIntrinsic::EnumEntries
-        | crate::libraries::CompilerIntrinsic::EnumName
-        | crate::libraries::CompilerIntrinsic::TypeOf
-        | crate::libraries::CompilerIntrinsic::IsEmpty
-        | crate::libraries::CompilerIntrinsic::IsNotEmpty
-        | crate::libraries::CompilerIntrinsic::Count
-        | crate::libraries::CompilerIntrinsic::TrimIndent
-        | crate::libraries::CompilerIntrinsic::TrimMargin
-        | crate::libraries::CompilerIntrinsic::FloatingRangeMembership
-        | crate::libraries::CompilerIntrinsic::ClosedRangeContains
-        | crate::libraries::CompilerIntrinsic::RangeDownTo
-        | crate::libraries::CompilerIntrinsic::RangeUntil
-        | crate::libraries::CompilerIntrinsic::ProgressionStep
-        | crate::libraries::CompilerIntrinsic::ProgressionReversed
-        | crate::libraries::CompilerIntrinsic::WithIndex
-        | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. }
-        | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext => return None,
-    })
-}
-
-/// Operation and operand types of an exact compiler-supplied primitive binary declaration. The
-/// operand carriers are the provider-owned rule shared with target realization of references.
-fn intrinsic_binary_semantics(
-    intrinsic: crate::libraries::CompilerIntrinsic,
-    parameter: Ty,
-    result: Ty,
-) -> Option<(FirBinaryOperation, Ty, Ty)> {
-    let operation = intrinsic_binary_operation(intrinsic)?;
-    let (receiver, argument) =
-        crate::libraries::builtin_member_realization::primitive_binary_operands(
-            intrinsic, parameter, result,
-        )?;
-    Some((operation, receiver, argument))
-}
-
 impl BodyFirChecker<'_> {
     fn primitive_compare_operand(selected: &crate::symbol_resolver::ResolvedMember) -> Option<Ty> {
         if selected.member.realization
@@ -315,7 +235,7 @@ impl BodyFirChecker<'_> {
         else {
             return None;
         };
-        intrinsic_binary_semantics(
+        super::compiler_intrinsics::binary_semantics(
             intrinsic,
             *selected.member.params.first()?,
             selected.member.ret,
@@ -661,6 +581,10 @@ impl BodyFirChecker<'_> {
                     declaration: member.external_identity.ok_or_else(|| {
                         self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                     })?,
+                    singleton_dispatch: member
+                        .singleton_dispatch
+                        .as_deref()
+                        .map(|singleton| singleton.classifier),
                     receiver: member
                         .singleton_dispatch
                         .as_deref()
@@ -724,6 +648,22 @@ impl BodyFirChecker<'_> {
         let parameters =
             self.selected_call_parameters(expression, extension.stable_declaration, &parameters)?;
         let (mut target, substitutions) = self.extension_call_target(expression, &extension)?;
+        // A classifier-associated extension is exposed to source as an ordinary extension call:
+        // its explicit receiver is the resolved singleton value, while the declaration itself has
+        // no singleton dispatch. Publish that exact checked edge on the external target before
+        // common lowering can stage the receiver through a local. Backends consume the frozen
+        // classifier; they never recover singleton authority from the eventual receiver syntax.
+        if let FirCallTarget::External {
+            singleton_dispatch, ..
+        } = &mut target
+        {
+            if singleton_dispatch.is_none() {
+                *singleton_dispatch = self.authenticated_singleton_receiver(
+                    extension_receiver.as_ref(),
+                    extension.receiver,
+                );
+            }
+        }
         if let Some(body_plan @ crate::libraries::InlineBodyPlan::Iteration { .. }) =
             extension.callable.inline_body_plan.as_deref()
         {
@@ -943,6 +883,7 @@ impl BodyFirChecker<'_> {
                     expression,
                     ExternalCallTarget {
                         declaration,
+                        singleton_dispatch: Some(singleton.classifier),
                         receiver: Some(singleton.ty()),
                         declared_receiver: None,
                         parameters: target_parameters,
@@ -1135,6 +1076,11 @@ impl BodyFirChecker<'_> {
                         declaration: selected.member.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        singleton_dispatch: selected
+                            .member
+                            .singleton_dispatch
+                            .as_deref()
+                            .map(|singleton| singleton.classifier),
                         default_provider: selected.member.external_default_provider,
                         receiver: Some(resolved(selected.receiver)?),
                         declared_receiver: None,
@@ -1220,6 +1166,11 @@ impl BodyFirChecker<'_> {
                         declaration: selected.callable.external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        singleton_dispatch: selected
+                            .callable
+                            .singleton_dispatch
+                            .as_deref()
+                            .map(|singleton| singleton.classifier),
                         default_provider: selected.callable.external_default_provider,
                         receiver: Some(resolved(selected.receiver)?),
                         declared_receiver: selected
@@ -1334,6 +1285,10 @@ impl BodyFirChecker<'_> {
                         declaration: external_identity.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
                         })?,
+                        singleton_dispatch: dispatch_receiver
+                            .singleton
+                            .as_ref()
+                            .map(|singleton| singleton.classifier),
                         default_provider: *external_default_provider,
                         receiver: Some(resolved(dispatch_receiver.ty)?),
                         declared_receiver: None,
@@ -1492,6 +1447,10 @@ impl BodyFirChecker<'_> {
             expression,
             ExternalCallTarget {
                 declaration,
+                singleton_dispatch: callable
+                    .singleton_dispatch
+                    .as_deref()
+                    .map(|singleton| singleton.classifier),
                 receiver,
                 declared_receiver: callable.source_receiver,
                 parameters: parameters.into_iter().collect(),
@@ -1625,6 +1584,10 @@ impl BodyFirChecker<'_> {
             expression,
             ExternalCallTarget {
                 declaration,
+                singleton_dispatch: dispatch_receiver
+                    .singleton
+                    .as_ref()
+                    .map(|singleton| singleton.classifier),
                 receiver: Some(dispatch_receiver.ty),
                 declared_receiver: None,
                 parameters: target_parameters,
@@ -1700,6 +1663,7 @@ impl BodyFirChecker<'_> {
     ) -> Result<(FirCallTarget, Box<[FirTypeSubstitution]>), BodyCheckFailure> {
         let ExternalCallTarget {
             declaration,
+            singleton_dispatch,
             receiver,
             declared_receiver,
             parameters,
@@ -1775,6 +1739,7 @@ impl BodyFirChecker<'_> {
         Ok((
             FirCallTarget::External {
                 declaration,
+                singleton_dispatch,
                 default_provider: None,
                 receiver: receiver.map(resolved).transpose()?,
                 declared_receiver: declared_receiver.map(resolved).transpose()?,
@@ -1887,24 +1852,21 @@ impl BodyFirChecker<'_> {
             selected.callable.compiler_intrinsic,
             selected.callable.ret,
         );
-        let selected_intrinsic = match selected.callable.compiler_intrinsic {
-            Some(crate::libraries::CompilerIntrinsic::Assert) => {
-                let mode = if self.file.assert_always_disabled {
-                    crate::types::AssertionMode::AlwaysDisabled
-                } else if self.file.assert_always_enabled {
-                    crate::types::AssertionMode::AlwaysEnabled
-                } else {
-                    crate::types::AssertionMode::Runtime
-                };
-                Some(FirIntrinsic::Assert { mode })
-            }
-            Some(crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn) => {
-                Some(FirIntrinsic::SuspendCoroutineUninterceptedOrReturn {
-                    callee: selected.callable.name.as_str().into(),
-                })
-            }
-            _ => None,
+        let assertion_mode = if self.file.assert_always_disabled {
+            crate::types::AssertionMode::AlwaysDisabled
+        } else if self.file.assert_always_enabled {
+            crate::types::AssertionMode::AlwaysEnabled
+        } else {
+            crate::types::AssertionMode::Runtime
         };
+        let selected_intrinsic = super::compiler_intrinsics::selected_top_level(
+            selected.callable.compiler_intrinsic,
+            &selected.callable.params,
+            selected.callable.ret,
+            assertion_mode,
+            selected.callable.name.as_str(),
+        )
+        .map_err(|kind| self.failure(self.file.expr_span(expression), kind))?;
         let (target, substitutions) =
             if let Some((classifier, operation)) = selected_classifier_intrinsic {
                 if dispatch_receiver.is_some() {
@@ -2077,7 +2039,9 @@ impl BodyFirChecker<'_> {
             | crate::libraries::MemberRealization::Direct { .. }
             | crate::libraries::MemberRealization::RangeConstruction { .. } => None,
         };
-        if let Some(operation) = primitive_operation.and_then(intrinsic_binary_operation) {
+        if let Some(operation) =
+            primitive_operation.and_then(super::compiler_intrinsics::binary_operation)
+        {
             let [argument] = arguments else {
                 return Err(self.failure(
                     self.file.expr_span(expression),
@@ -2090,7 +2054,7 @@ impl BodyFirChecker<'_> {
             // primitive operands; publish both representation boundaries in FIR so common lowering
             // never has to infer an unbox from the eventual arithmetic instruction.
             let cause = self.expression_origin(expression)?;
-            let (_, lhs_target, rhs_target) = intrinsic_binary_semantics(
+            let (_, lhs_target, rhs_target) = super::compiler_intrinsics::binary_semantics(
                 primitive_operation.expect("primitive binary operation"),
                 selected.member.params[0],
                 selected.member.ret,
@@ -2202,12 +2166,16 @@ impl BodyFirChecker<'_> {
                 crate::libraries::CompilerIntrinsic::StringPlus
                     | crate::libraries::CompilerIntrinsic::StringGet
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString
+                    | crate::libraries::CompilerIntrinsic::ReinterpretBits
             )
         ) {
-            let expected_arguments = usize::from(
-                primitive_operation
-                    != Some(crate::libraries::CompilerIntrinsic::NullableAnyToString),
-            );
+            let expected_arguments = usize::from(!matches!(
+                primitive_operation,
+                Some(
+                    crate::libraries::CompilerIntrinsic::NullableAnyToString
+                        | crate::libraries::CompilerIntrinsic::ReinterpretBits
+                )
+            ));
             if arguments.len() != expected_arguments {
                 return Err(self.failure(
                     self.file.expr_span(expression),
@@ -2229,6 +2197,12 @@ impl BodyFirChecker<'_> {
                         crate::libraries::CompilerIntrinsic::StringGet => FirIntrinsic::StringGet,
                         crate::libraries::CompilerIntrinsic::NullableAnyToString => {
                             FirIntrinsic::NullableAnyToString
+                        }
+                        crate::libraries::CompilerIntrinsic::ReinterpretBits => {
+                            FirIntrinsic::ReinterpretBits {
+                                from: resolved(selected.receiver)?,
+                                to: resolved(selected.ret)?,
+                            }
                         }
                         _ => unreachable!(),
                     },
@@ -2448,6 +2422,11 @@ impl BodyFirChecker<'_> {
             expression,
             ExternalCallTarget {
                 declaration,
+                singleton_dispatch: selected
+                    .member
+                    .singleton_dispatch
+                    .as_deref()
+                    .map(|singleton| singleton.classifier),
                 receiver: Some(selected.receiver),
                 declared_receiver: None,
                 parameters: selected.member.params.clone(),

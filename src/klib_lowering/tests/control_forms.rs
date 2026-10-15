@@ -887,7 +887,8 @@ fn a_nullability_smart_cast_lowers_as_the_source_smart_cast_does() {
 /// parameters, lowered on its own.
 fn lowered_stdlib(package: &str, name: &str, receiver: Option<T>, params: &[T]) -> Option<String> {
     let root = distribution_root()?;
-    let (libraries, bodies) = stdlib(&root);
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
     let params = params
         .iter()
         .map(|param| param.semantic())
@@ -903,7 +904,7 @@ fn lowered_stdlib(package: &str, name: &str, receiver: Option<T>, params: &[T]) 
     let function = unit
         .lower_function(
             fact.klib_body_callable().expect("signed"),
-            &bodies,
+            bodies,
             &KlibCalleeFacts::default(),
         )
         .unwrap_or_else(|decline| panic!("{decline}"));

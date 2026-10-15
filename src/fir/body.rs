@@ -237,6 +237,10 @@ pub enum FirCallArgument {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirIntrinsic {
+    ReinterpretBits {
+        from: ResolvedTy,
+        to: ResolvedTy,
+    },
     /// The exact `kotlin.assert` declaration selected by resolution. Its operands remain lazy until
     /// target realization: a disabled assertion evaluates neither the condition nor its message.
     Assert {
@@ -297,6 +301,10 @@ pub enum FirCallTarget {
     Module(CallableId),
     External {
         declaration: ExternalCallableId,
+        /// Exact singleton receiver selected for this call. This is a checked call-site fact: the
+        /// provider's base declaration record predates companion/object selection and therefore
+        /// cannot be used to reconstruct it at the backend handoff.
+        singleton_dispatch: Option<crate::types::TypeName>,
         /// Exact dependency declaration supplying inherited defaults. The selected implementation
         /// remains `declaration`; this provider is consulted only for checked omitted arguments.
         default_provider: Option<ExternalCallableId>,
@@ -838,6 +846,9 @@ pub enum FirCallableReferenceTarget {
     },
     External {
         declaration: ExternalCallableId,
+        /// Exact singleton receiver selected for the referenced callable. Like the corresponding
+        /// call-target field, this is a checked call-site fact rather than provider reconstruction.
+        singleton_dispatch: Option<crate::types::TypeName>,
         default_provider: Option<ExternalCallableId>,
         receiver: Option<ResolvedTy>,
         /// The provider's declared extension receiver before call-site substitution, exactly as an

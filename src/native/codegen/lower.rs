@@ -199,11 +199,15 @@ pub struct FileInput<'a> {
     /// include it because stable callable/source ids restart for every independently analyzed
     /// module in one emission session.
     pub module_name: &'a str,
+    /// Support units expose only their exact dependency exports; their internal functions are
+    /// object-local and never enter the source module's C ABI.
+    pub unit_kind: crate::backend::CheckedIrUnitKind,
     /// Stable dependency symbols this file must export, keyed by its common-IR callable identity.
     pub dependency_exports: &'a HashMap<FunId, String>,
-    /// Stable dependency symbols already exported by preceding source modules, keyed by the exact
+    /// Stable dependency exports already published by preceding source modules, keyed by the exact
     /// KLIB identity the dependency provider attaches to `Callee::External`.
-    pub dependency_symbols: &'a HashMap<crate::backend::KlibDependencyCallable, String>,
+    pub dependency_symbols:
+        &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::native::dependency_references`].
     pub dependency_properties:
@@ -229,6 +233,7 @@ pub fn lower_file(
         abi_symbols,
         source,
         module_name,
+        unit_kind,
         dependency_exports,
         dependency_symbols,
         value_classes,
@@ -244,11 +249,35 @@ pub fn lower_file(
     .map_err(|error| format!("object builder ({error})"))?;
     let mut module = ObjectModule::new(builder);
 
+    let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
+        ir,
+        |expression| {
+            callables
+                .singleton_dispatch(expression)
+                .map(|dispatch| dispatch.classifier)
+        },
+        |target, classifier| {
+            let Some(export) = callables
+                .callable(target)
+                .and_then(|callable| callable.dependency_callable.as_ref())
+                .and_then(|identity| dependency_symbols.get(identity))
+            else {
+                return false;
+            };
+            export.singleton_member_receiver.is_some_and(|effect| {
+                effect.classifier() == classifier && !effect.evaluate_source()
+            }) || export.singleton_extension_receiver.is_some_and(|effect| {
+                effect.semantic_type() == Ty::Obj(classifier, &[]) && !effect.evaluate_source()
+            })
+        },
+    );
+
     let mut lowering = FileLowering {
         ir,
         source,
         classifiers,
         callables,
+        inert_singleton_bindings,
         values: value_classes,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
@@ -281,6 +310,7 @@ pub fn lower_file(
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
         module_name,
+        unit_kind,
         dependency_symbols,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -307,8 +337,15 @@ pub fn lower_file(
     lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
-    let file_init = lowering.define_file_init(source, statics_init)?;
-    let selected = entry.selected(ir);
+    let file_init_linkage = match unit_kind {
+        crate::backend::CheckedIrUnitKind::Source => Linkage::Hidden,
+        crate::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
+    };
+    let file_init = lowering.define_file_init(source, statics_init, file_init_linkage)?;
+    let selected = match unit_kind {
+        crate::backend::CheckedIrUnitKind::Source => entry.selected(ir),
+        crate::backend::CheckedIrUnitKind::DependencySupport => None,
+    };
     for index in 0..ir.functions.len() {
         lowering.define_function(index)?;
         if let Some((_, parameters)) = selected.filter(|(function, _)| *function == index as u32) {
@@ -325,7 +362,12 @@ pub fn lower_file(
     lowering.define_constructor_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
     let defines_entry = selected.is_some();
-    let abi = super::super::c_abi::file_records(ir, abi_symbols);
+    let abi = match unit_kind {
+        crate::backend::CheckedIrUnitKind::Source => {
+            super::super::c_abi::file_records(ir, abi_symbols)
+        }
+        crate::backend::CheckedIrUnitKind::DependencySupport => Vec::new(),
+    };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
 
@@ -347,6 +389,8 @@ struct FileLowering<'a> {
     source: crate::fir::SourceFileId,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     callables: &'a crate::backend::CheckedBackendCallables,
+    /// Staged bound singleton accesses proven inert by the exact checked call and export effect.
+    inert_singleton_bindings: crate::fx_hash::HashSet<crate::ir::ExprId>,
     /// Which classifiers are value classes, and which occurrences travel unboxed.
     values: &'a super::super::value_classes::NativeValueClasses,
     module: &'a mut ObjectModule,
@@ -429,8 +473,11 @@ struct FileLowering<'a> {
     declares_its_own_comparable: bool,
     /// Exact source-module identity used only for collision-free target symbol realization.
     module_name: &'a str,
-    /// Exact declaration-identity join to code emitted for preceding source modules.
-    dependency_symbols: &'a HashMap<crate::backend::KlibDependencyCallable, String>,
+    unit_kind: crate::backend::CheckedIrUnitKind,
+    /// Exact declaration-identity join to code and retained ABI facts emitted for preceding source
+    /// modules.
+    dependency_symbols:
+        &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -513,10 +560,14 @@ impl<'a> FileLowering<'a> {
             let signature = self.function_signature(index as crate::ir::FunId)?;
             // A file-level function is reached across the module by its `kt_mod_` symbol, which
             // stays hidden. The public C name, when there is one, is a separate export.
-            let linkage = if super::super::c_abi::is_file_level(self.ir, index) {
-                Linkage::Hidden
-            } else {
-                Linkage::Export
+            let linkage = match self.unit_kind {
+                crate::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
+                crate::backend::CheckedIrUnitKind::Source
+                    if super::super::c_abi::is_file_level(self.ir, index) =>
+                {
+                    Linkage::Hidden
+                }
+                crate::backend::CheckedIrUnitKind::Source => Linkage::Export,
             };
             let id = self
                 .module
@@ -1160,6 +1211,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // erased zero; Native stores the specialized value directly, so seed the SSA
                     // variable with this target's zero instead of trying to unbox the placeholder
                     // `null` into a specialized primitive.
+                    let zero = self.zero_of(ty);
+                    self.builder.def_var(variable, zero);
+                } else if self.file.inert_singleton_bindings.contains(&id) {
+                    // Every read is erased by an authenticated dependency-export call and the
+                    // exact singleton access has no initialization effect, so no source value is
+                    // needed in this SSA slot.
                     let zero = self.zero_of(ty);
                     self.builder.def_var(variable, zero);
                 } else if let Some(init) = init {

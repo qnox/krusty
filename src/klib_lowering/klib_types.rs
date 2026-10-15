@@ -82,7 +82,9 @@ pub(super) fn semantic_type(
 /// Intern a classifier identity one signature segment at a time. Package segments are namespace
 /// children; declaration segments after the first are nested classifiers. No qualified spelling is
 /// rendered and parsed back into the name tree.
-fn classifier_name(signature: &KlibPublicIdSignature) -> Result<TypeName, KlibBodyDeclineReason> {
+pub(super) fn classifier_name(
+    signature: &KlibPublicIdSignature,
+) -> Result<TypeName, KlibBodyDeclineReason> {
     let valid = |segment: &String| !segment.is_empty() && !segment.contains('/');
     if !signature.package().segments().iter().all(valid)
         || !signature.declaration().segments().iter().all(valid)

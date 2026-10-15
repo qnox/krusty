@@ -20,6 +20,7 @@ mod inventory;
 mod lookup;
 pub(crate) mod parameter_defaults;
 mod platform;
+mod target_intrinsics;
 #[cfg(test)]
 mod tests;
 
@@ -27,10 +28,11 @@ use crate::metadata::semantic::KotlinPackage;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
-pub use archives::{KlibLibrariesOpenError, KlibLibraryInput};
+pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub(crate) use declaration_bodies::KlibCalleeOrigin;
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
+pub use target_intrinsics::{KlibIntrinsicCallable, KlibIntrinsicFacts};
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.
 ///
@@ -39,6 +41,8 @@ pub use declaration_signatures::KlibLibraryError;
 /// without decoding or signing them again.
 pub struct KlibLibraries {
     inventory: std::rc::Rc<inventory::PackageInventory>,
+    bodies: std::rc::Rc<KlibDeclarationBodies>,
+    body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     identities: external_identities::ExternalIdentities,
     lookups: lookup::SymbolLookups,
 }
@@ -82,15 +86,55 @@ impl KlibLibraries {
 
     /// The same declarations, for another compilation with no selected identities yet.
     pub fn for_compilation(&self) -> Self {
-        Self::over(std::rc::Rc::clone(&self.inventory))
+        Self::over_with_bodies_and_snapshot(
+            std::rc::Rc::clone(&self.inventory),
+            std::rc::Rc::clone(&self.bodies),
+            self.body_snapshot.clone(),
+        )
     }
 
     fn over(inventory: std::rc::Rc<inventory::PackageInventory>) -> Self {
+        Self::over_with_bodies(
+            inventory,
+            std::rc::Rc::new(KlibDeclarationBodies::default()),
+        )
+    }
+
+    fn over_with_bodies(
+        inventory: std::rc::Rc<inventory::PackageInventory>,
+        bodies: std::rc::Rc<KlibDeclarationBodies>,
+    ) -> Self {
+        Self::over_with_bodies_and_snapshot(inventory, bodies, None)
+    }
+
+    fn over_with_bodies_and_snapshot(
+        inventory: std::rc::Rc<inventory::PackageInventory>,
+        bodies: std::rc::Rc<KlibDeclarationBodies>,
+        body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
+    ) -> Self {
         Self {
             inventory,
+            bodies,
+            body_snapshot,
             identities: external_identities::ExternalIdentities::default(),
             lookups: lookup::SymbolLookups::default(),
         }
+    }
+
+    /// Intrinsic declarations authenticated from the compilation-selected target stdlib.
+    pub fn intrinsic_facts(&self) -> &KlibIntrinsicFacts {
+        self.inventory.intrinsic_facts()
+    }
+
+    /// Exact serialized bodies indexed from the same compilation inputs as the declarations.
+    pub fn declaration_bodies(&self) -> &KlibDeclarationBodies {
+        &self.bodies
+    }
+
+    pub(crate) fn dependency_body_snapshot(
+        &self,
+    ) -> Option<&crate::libraries::DependencyBodySnapshot> {
+        self.body_snapshot.as_ref()
     }
 }
 
@@ -114,6 +158,31 @@ impl SymbolSource for KlibLibraries {
         identity: crate::fir::ExternalCallableId,
     ) -> Option<crate::libraries::ExternalCallableRealization> {
         self.identities.realization(identity)
+    }
+
+    fn external_callable_by_dependency(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        crate::fir::ExternalCallableId,
+        crate::libraries::ExternalCallableRealization,
+    )> {
+        let (placement, signed) = self.inventory.dependency_function(identity)?;
+        let function =
+            lookup::published_function(&self.identities, signed, placement, &Default::default());
+        let external = function.callable.external_identity?;
+        let realization = self.identities.realization(external)?;
+        (realization.dependency_callable.as_ref() == Some(identity))
+            .then_some((external, realization))
+    }
+
+    fn is_platform_stdlib_dependency(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> bool {
+        self.inventory
+            .dependency_function(identity)
+            .is_some_and(|(_, function)| function.compiler_builtin_owner)
     }
 
     fn external_property(

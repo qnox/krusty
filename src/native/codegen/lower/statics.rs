@@ -153,12 +153,13 @@ impl<'a> FileLowering<'a> {
         &mut self,
         source: crate::fir::SourceFileId,
         statics: Option<FuncId>,
+        linkage: Linkage,
     ) -> Result<FuncId, Unsupported> {
         let void = Signature::new(CallConv::SystemV);
         let symbol = super::super::super::symbols::file_init_symbol(self.module_name, source);
         let id = self
             .module
-            .declare_function(&symbol, Linkage::Hidden, &void)
+            .declare_function(&symbol, linkage, &void)
             .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
         let flag_name = format!("kt_fileinit_done_{}", source.raw());
         let flag = self

@@ -24,5 +24,6 @@ mod tests;
 
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
+pub(crate) use body_unit::EmittedDependencyCallable;
 pub use callee_facts::KlibCalleeFacts;
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};

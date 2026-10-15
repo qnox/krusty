@@ -19,8 +19,9 @@ use std::collections::hash_map::Entry;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 use crate::libraries::{
-    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, KlibDeclarationSignature,
-    KlibDependencyCallable, MemberRealization, NonvirtualCallRealization,
+    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind,
+    KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable, MemberRealization,
+    NonvirtualCallRealization, SingletonDispatch,
 };
 use crate::symbol_source::SymbolSource;
 pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
@@ -43,6 +44,11 @@ pub struct BackendCallableFact {
     pub visibility: crate::types::Visibility,
     /// Exact semantic declaration namespace, independent of the physical realization kind.
     pub declaration_owner: Option<SemanticCallableOwner>,
+    /// Exact singleton value checked call selection chose as this callable's implicit dispatch
+    /// receiver. This is distinct from `declaration_owner`: a companion member may be named through
+    /// its enclosing classifier while dispatching on the companion object. The backend handoff
+    /// freezes this from FIR because the provider's base declaration record predates selection.
+    pub singleton_dispatch: Option<SingletonDispatch>,
     pub kind: ExternalCallableKind,
     pub owner_is_interface: bool,
     pub compiler_intrinsic: Option<BackendCompilerIntrinsic>,
@@ -82,6 +88,8 @@ pub struct BackendCallableFact {
     /// Exact KLIB module and declaration identity for target linkage, if this declaration came
     /// from a KLIB provider.
     pub dependency_callable: Option<KlibDependencyCallable>,
+    /// Frozen KLIB-only receiver contract for an associated companion extension body.
+    pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
 }
 
 impl BackendCallableFact {
@@ -100,8 +108,111 @@ impl BackendCallableFact {
         )
     }
 
+    /// Whether this selected callable is a receiver-less top-level or associated declaration.
+    ///
+    /// The provider's kind remains behind the checked handoff; a backend asks only for the exact
+    /// declaration shape it can emit.
+    pub fn is_top_level_function(&self) -> bool {
+        self.kind == ExternalCallableKind::TopLevel
+    }
+
+    /// Whether this selected callable has a source extension receiver parameter.
+    pub fn is_extension(&self) -> bool {
+        self.kind == ExternalCallableKind::Extension
+    }
+
+    /// Whether this exact dependency declaration is an instance member.
+    pub fn is_member_function(&self) -> bool {
+        self.kind == ExternalCallableKind::Member
+    }
+
+    /// The serialized receiver coordinate retained by an associated companion extension body.
+    /// Source calls have no receiver operand; a target may insert an inert reference only when
+    /// this exact provider contract and the lowered body's receiver effect are both present.
+    pub(crate) fn klib_body_companion_receiver_position(&self) -> Option<usize> {
+        self.klib_body_companion_receiver
+            .as_ref()
+            .map(|_| self.context_count)
+    }
+
+    /// Authenticate a serialized associated-extension call whose dependency body already carries
+    /// the retained companion receiver in `call_params`. This is a provider-owned callable-shape
+    /// check, so target registries do not need to import the compiler type model to repeat it.
+    pub(crate) fn serialized_companion_receiver_position(
+        &self,
+        call_params: &[Ty],
+        extension_receiver_parameter: Option<u32>,
+        has_dispatch_receiver: bool,
+        emitted_receiver_ty: Option<Ty>,
+    ) -> Option<usize> {
+        if has_dispatch_receiver || !self.is_top_level_function() {
+            return None;
+        }
+        let position = usize::try_from(extension_receiver_parameter?).ok()?;
+        if self.klib_body_companion_receiver_position() != Some(position)
+            || position > self.params.len()
+            || call_params.len() != self.params.len() + 1
+            || call_params[..position] != self.params[..position]
+            || call_params.get(position).copied() != emitted_receiver_ty
+            || call_params[position + 1..] != self.params[position..]
+        {
+            return None;
+        }
+        Some(position)
+    }
+
+    /// Whether `classifier` is the exact singleton declaration owner of this selected member.
+    /// This authenticates an already-lowered dependency support call; it does not discover a
+    /// callable or infer singleton semantics from a name.
+    pub fn is_singleton_member_of(&self, classifier: TypeName) -> bool {
+        self.is_member_function()
+            && self
+                .singleton_dispatch
+                .is_some_and(|dispatch| dispatch.classifier == classifier)
+    }
+
+    /// Whether one checked call supplies exactly the source/serialized receiver shape of this
+    /// dependency declaration's emitted KLIB body.
+    ///
+    /// Source extension calls carry their receiver separately. Calls lowered from serialized KLIB
+    /// bodies already carry it at the provider-recorded context coordinate. Keeping that semantic
+    /// comparison on the frozen fact prevents a backend from depending on the compiler type model.
+    pub fn matches_dependency_body_call(
+        &self,
+        call_params: &[Ty],
+        extension_receiver_parameter: Option<u32>,
+        has_dispatch_receiver: bool,
+    ) -> bool {
+        match (
+            self.is_top_level_function(),
+            self.is_extension(),
+            extension_receiver_parameter,
+            has_dispatch_receiver,
+        ) {
+            (true, false, None, false) => true,
+            (false, true, None, true) => true,
+            (false, false, None, true) if self.is_member_function() => true,
+            (false, true, Some(position), false) => {
+                usize::try_from(position).ok().is_some_and(|position| {
+                    position == self.context_count
+                        && self.params == call_params
+                        && self.source_receiver.is_some()
+                        && call_params.get(position) == self.source_receiver.as_ref()
+                })
+            }
+            _ => false,
+        }
+    }
+
     /// The target-free declaration view used when a selected KLIB body is lowered to common IR.
     pub fn klib_body_callable(&self) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        self.klib_body_callable_with_singleton(self.singleton_dispatch)
+    }
+
+    fn klib_body_callable_with_singleton(
+        &self,
+        singleton_dispatch: Option<SingletonDispatch>,
+    ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
         crate::libraries::KlibBodyCallable::new(
             &self.name,
             self.kind,
@@ -109,8 +220,109 @@ impl BackendCallableFact {
             self.ret,
             &self.parameter_identities,
             self.context_count,
+            self.compiler_intrinsic,
+            singleton_dispatch.map(SingletonDispatch::ty),
+            singleton_dispatch.map(|dispatch| dispatch.classifier),
+            self.klib_body_companion_receiver.as_ref(),
             self.dependency_callable.as_ref(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_serialized_extension_call_keeps_its_provider_receiver_coordinate() {
+        let params = vec![Ty::String, Ty::Float, Ty::Int];
+        let fact = BackendCallableFact {
+            name: "sample".to_string(),
+            physical_name: None,
+            reflection_name: None,
+            physical_owner: TypeName::ROOT,
+            visibility: crate::types::Visibility::Public,
+            declaration_owner: None,
+            singleton_dispatch: None,
+            kind: ExternalCallableKind::Extension,
+            owner_is_interface: false,
+            compiler_intrinsic: None,
+            semantic_role: None,
+            overridden_declarations: Box::new([]),
+            member_realization: MemberRealization::Dispatch,
+            params: params.clone(),
+            physical_params: params.clone(),
+            parameter_identities: Box::new([]),
+            physical_parameter_plan: None,
+            ret: Ty::Unit,
+            physical_ret: Ty::Unit,
+            descriptor: String::new(),
+            inline: InlineKind::None,
+            source_receiver: Some(Ty::Float),
+            context_count: 1,
+            declared_params: None,
+            declared_ret: None,
+            inline_modifiers: Box::new([]),
+            default_realization: None,
+            nonvirtual_realization: None,
+            overridden_call_realizations: Box::new([]),
+            generic_sig: None,
+            declaration_signature: None,
+            dependency_callable: None,
+            klib_body_companion_receiver: None,
+        };
+        assert!(fact.matches_dependency_body_call(&params, Some(1), false));
+        assert!(!fact.matches_dependency_body_call(&params, Some(0), false));
+        assert!(!fact.matches_dependency_body_call(&params, Some(1), true));
+    }
+
+    #[test]
+    fn a_member_shape_requires_its_exact_provider_selected_singleton() {
+        let owner = crate::types::type_name("kotlin/Float$Companion");
+        let mut fact = BackendCallableFact {
+            name: "fromBits".to_string(),
+            physical_name: None,
+            reflection_name: None,
+            physical_owner: owner,
+            visibility: crate::types::Visibility::Public,
+            declaration_owner: Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+                "kotlin/Float",
+            ))),
+            singleton_dispatch: Some(SingletonDispatch { classifier: owner }),
+            kind: ExternalCallableKind::Member,
+            owner_is_interface: false,
+            compiler_intrinsic: None,
+            semantic_role: None,
+            overridden_declarations: Box::new([]),
+            member_realization: MemberRealization::Dispatch,
+            params: vec![Ty::Int],
+            physical_params: vec![Ty::Int],
+            parameter_identities: Box::new([]),
+            physical_parameter_plan: None,
+            ret: Ty::Float,
+            physical_ret: Ty::Float,
+            descriptor: String::new(),
+            inline: InlineKind::None,
+            source_receiver: None,
+            context_count: 0,
+            declared_params: None,
+            declared_ret: None,
+            inline_modifiers: Box::new([]),
+            default_realization: None,
+            nonvirtual_realization: None,
+            overridden_call_realizations: Box::new([]),
+            generic_sig: None,
+            declaration_signature: None,
+            dependency_callable: None,
+            klib_body_companion_receiver: None,
+        };
+        assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
+        assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
+        assert!(fact.is_singleton_member_of(owner));
+        fact.singleton_dispatch = Some(SingletonDispatch {
+            classifier: crate::types::type_name("kotlin/Double$Companion"),
+        });
+        assert!(!fact.is_singleton_member_of(owner));
     }
 }
 
@@ -140,6 +352,7 @@ pub enum DependencyFactError {
     UnknownCallable(ExternalCallableId),
     UnknownProperty(ExternalPropertyId),
     InvalidPropertyConstant(ExternalPropertyId),
+    InvalidSingletonDispatch(crate::ir::ExprId),
 }
 
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
@@ -148,9 +361,36 @@ pub enum DependencyFactError {
 pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
+    singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
+    singleton_selections: HashMap<ExternalCallableId, Vec<SingletonDispatch>>,
 }
 
 impl CheckedBackendCallables {
+    /// Selected KLIB callables in provider-identity order. Dependency-body lowering consumes this
+    /// frozen semantic view; deterministic ordering keeps generated support-unit symbols stable.
+    pub(crate) fn klib_body_callables(&self) -> Vec<crate::libraries::KlibBodyCallable<'_>> {
+        let mut callables = self.callables.iter().collect::<Vec<_>>();
+        callables.sort_unstable_by_key(|(identity, _)| identity.raw());
+        let mut selected = Vec::new();
+        for (identity, callable) in callables {
+            match self.singleton_selections.get(identity) {
+                Some(singletons) => selected.extend(singletons.iter().filter_map(|singleton| {
+                    callable.klib_body_callable_with_singleton(Some(*singleton))
+                })),
+                None => selected.extend(callable.klib_body_callable()),
+            }
+        }
+        selected
+    }
+
+    /// Exact singleton dispatch chosen for this checked call edge, if it has one.
+    pub(crate) fn singleton_dispatch(
+        &self,
+        expression: crate::ir::ExprId,
+    ) -> Option<SingletonDispatch> {
+        self.singleton_dispatches.get(&expression).copied()
+    }
+
     /// Copy the provider's facts for every dependency identity `ir` references.
     pub(crate) fn freeze(
         ir: &crate::ir::IrFile,
@@ -201,6 +441,30 @@ impl CheckedBackendCallables {
             );
         }
         facts.freeze_callables(referenced.callables, callable)?;
+        let mut singleton_dispatches = ir
+            .external_singleton_dispatches
+            .iter()
+            .map(|(&expression, &classifier)| (expression, classifier))
+            .collect::<Vec<_>>();
+        singleton_dispatches.sort_unstable_by_key(|(expression, _)| *expression);
+        for (expression, classifier) in singleton_dispatches {
+            let crate::ir::IrExpr::Call {
+                callee: crate::ir::Callee::External { target, .. },
+                ..
+            } = ir.expr(expression)
+            else {
+                return Err(DependencyFactError::InvalidSingletonDispatch(expression));
+            };
+            if !facts.callables.contains_key(target) {
+                return Err(DependencyFactError::UnknownCallable(*target));
+            }
+            let dispatch = SingletonDispatch { classifier };
+            facts.singleton_dispatches.insert(expression, dispatch);
+            let selections = facts.singleton_selections.entry(*target).or_default();
+            if !selections.contains(&dispatch) {
+                selections.push(dispatch);
+            }
+        }
         for (identity, overridden) in &ir.external_overridden_declarations {
             if let Some(fact) = facts.callables.get_mut(identity) {
                 fact.overridden_declarations = overridden.clone();
@@ -253,6 +517,7 @@ impl CheckedBackendCallables {
                 let parameter_identities = realization.parameter_identities;
                 let declaration_signature = realization.declaration_signature;
                 let dependency_callable = realization.dependency_callable;
+                let klib_body_companion_receiver = realization.klib_body_companion_receiver;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -261,6 +526,7 @@ impl CheckedBackendCallables {
                     physical_owner: callable.owner,
                     visibility: callable.visibility,
                     declaration_owner: realization.declaration_owner,
+                    singleton_dispatch: None,
                     kind: realization.kind,
                     owner_is_interface: callable.owner_is_interface,
                     compiler_intrinsic: callable.compiler_intrinsic,
@@ -286,6 +552,7 @@ impl CheckedBackendCallables {
                     generic_sig: callable.generic_sig,
                     declaration_signature,
                     dependency_callable,
+                    klib_body_companion_receiver,
                 })
             }
         };

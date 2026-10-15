@@ -18,7 +18,14 @@ pub use dependency_facts::{
     CheckedBackendCallables, DependencyFactError,
 };
 pub(crate) use dependency_metadata::KlibDependencyCallable;
-pub use dependency_metadata::{DependencyExportSignatures, DependencyMetadata};
+pub(crate) use dependency_metadata::{
+    authenticated_singleton_receiver, has_standalone_dependency_code,
+    inert_staged_singleton_bindings,
+};
+pub use dependency_metadata::{
+    DependencyExportSignatures, DependencyMetadata, SingletonExtensionUnreadReceiver,
+    SingletonMemberReceiver,
+};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub(crate) use crate::ir::MainEntryParameters;
@@ -33,10 +40,22 @@ use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
 use crate::ir::IrFile;
 
+/// Whether a checked IR unit is a source file or compiler-owned dependency support code.
+///
+/// Support code is closed over its internal calls and publishes only the exact dependency exports
+/// recorded beside it. Backends must not expose its declaration spellings through their ordinary
+/// source ABI or let those internal spellings enter a process-wide symbol namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckedIrUnitKind {
+    Source,
+    DependencySupport,
+}
+
 /// One streamed common-IR unit plus the compact module facts a backend may use for physical
 /// realization. No syntax from another source unit is reachable through this view.
 pub struct CheckedIrFile<'a> {
     pub ir: IrFile,
+    pub kind: CheckedIrUnitKind,
     pub source: crate::fir::SourceFileId,
     /// Frozen classifier facts. Callables and properties are already selected in checked IR;
     /// exposing the frontend symbol table here would permit lookup and provisional local
@@ -80,6 +99,19 @@ pub trait Backend {
     /// The platform this backend emits for. The analysis it consumes must have been checked under
     /// the same platform's rules.
     fn compilation_target(&self) -> CompilationTarget;
+
+    /// Whether this backend emits compiler-owned executable bodies selected from dependencies.
+    /// Metadata writers leave this disabled: their output describes the source module only.
+    fn emits_dependency_support(&self) -> bool {
+        false
+    }
+
+    /// Whether a dependency-support body may call an exact provider declaration which has no
+    /// serialized KLIB body. Such a call is admitted only when the target's ordinary dependency
+    /// registry can realize the frozen provider handle directly.
+    fn realizes_bodyless_dependency_support(&self) -> bool {
+        false
+    }
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR

@@ -44,6 +44,7 @@ fn function(name: &str, receiver: Option<KotlinType>, params: Vec<KotlinType>) -
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        annotation_applications: Vec::new(),
         return_value_status: Default::default(),
         contract: None,
     }
@@ -231,6 +232,42 @@ fn expected_signature(package: &[&str], declaration: &KotlinFunction) -> KlibDec
     KlibDeclarationSignature::Public(
         package_function_signature(container, declaration).expect("fixture is signable"),
     )
+}
+
+#[test]
+fn a_companion_extension_reverse_joins_by_its_exact_module_and_signature() {
+    let mut from_bits = function(
+        "fromBits",
+        Some(class("kotlin/Float", false)),
+        vec![class("kotlin/Int", false)],
+    );
+    from_bits.is_static = true;
+    let identity = crate::libraries::KlibDependencyCallable {
+        module: "stdlib".to_owned(),
+        declaration: expected_signature(&["kotlin"], &from_bits),
+    };
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![(
+        segments(&["kotlin"]),
+        package_of(vec![from_bits]),
+        true,
+        false,
+        Some(identity.module.clone()),
+    )])
+    .expect("the companion extension is signable");
+
+    let (placement, signed) = inventory
+        .dependency_function(&identity)
+        .expect("the exact companion extension identity reverse-joins");
+    assert_eq!(
+        placement,
+        crate::libraries::CallablePlacement::Associated {
+            classifier: type_name("kotlin/Float"),
+            declaration_owner: SemanticCallableOwner::Package(type_name("kotlin")),
+            access_owner: None,
+        }
+    );
+    assert!(signed.compiler_builtin_owner);
+    assert_eq!(signed.module.as_deref(), Some("stdlib"));
 }
 
 fn single_function(libraries: &KlibLibraries, package: &str, name: &str) -> FunctionInfo {
@@ -561,6 +598,24 @@ fn write_closed_range_contains_klib(
     ret: Ty,
     defaulted: bool,
 ) -> std::path::PathBuf {
+    write_closed_range_contains_klib_with_shadowed_declarations(
+        label,
+        unique_name,
+        operator,
+        ret,
+        defaulted,
+        false,
+    )
+}
+
+fn write_closed_range_contains_klib_with_shadowed_declarations(
+    label: &str,
+    unique_name: &str,
+    operator: bool,
+    ret: Ty,
+    defaulted: bool,
+    shadowed_declarations: bool,
+) -> std::path::PathBuf {
     let mut declaration = crate::metadata::builder::FnMeta::plain(
         "contains",
         vec![("value".to_string(), Ty::Char)],
@@ -571,16 +626,64 @@ fn write_closed_range_contains_klib(
     declaration.param_modifiers = vec![crate::metadata::DeclaredValueParameter::defaulted(
         defaulted,
     )];
+    let properties = shadowed_declarations
+        .then(|| crate::metadata::builder::PropMeta {
+            name: "dependencyOnlyProperty".to_owned(),
+            ty: Ty::String,
+            is_var: false,
+            type_params: Vec::new(),
+            semantic_type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            receiver: None,
+            context_params: Vec::new(),
+            getter: None,
+            setter: None,
+            setter_parameter_name: None,
+            is_const: false,
+            has_constant: false,
+            decl_order: 1,
+            visibility: Visibility::Public,
+            spellings: Default::default(),
+            has_backing_field: true,
+            modifiers: Default::default(),
+            setter_visibility: Visibility::Public,
+            declares_annotations: false,
+            annotation_method: None,
+            companion: false,
+            accessor_annotations: Default::default(),
+            field_name: None,
+            field_desc: None,
+            delegate_method: None,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let class_tail = crate::metadata::class_builder::ClassTail::default();
+    let dependency_only_class = crate::metadata::class_builder::ClassDeclaration {
+        name: type_name("kotlin/ranges/DependencyOnlyClass"),
+        ctor_params: &[],
+        props: &[],
+        methods: &[],
+        enum_entries: &[],
+        tail: &class_tail,
+    };
+    let classes = shadowed_declarations
+        .then(|| crate::metadata::klib_fragment::KlibClass {
+            declaration: dependency_only_class,
+            constants: &[],
+            in_source_file: true,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
     let fragment = crate::metadata::klib_fragment::package_fragment(
         &["kotlin", "ranges"],
         &crate::metadata::klib_fragment::KlibFileMembers {
             file_name: "dependency.kt".to_string(),
             functions: vec![declaration],
-            properties: Vec::new(),
-            constants: Vec::new(),
+            constants: vec![None; properties.len()],
+            properties,
             aliases: Vec::new(),
         },
-        &[],
+        &classes,
         true,
     );
     let mut writer = crate::klib::write::KlibWriter::native_test_fixture(unique_name);
@@ -657,6 +760,138 @@ fn a_dependency_cannot_claim_stdlib_authority_from_its_manifest() {
 }
 
 #[test]
+fn a_platform_body_snapshot_canonicalizes_equivalent_archive_paths() {
+    let directory =
+        write_closed_range_contains_klib("canonical-stdlib", "stdlib", true, Ty::Boolean, false);
+    let direct = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+        directory.clone(),
+        KlibStdlibSemantics::Native,
+    )])
+    .expect("the direct platform path opens");
+    let dotted = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+        directory.join("."),
+        KlibStdlibSemantics::Native,
+    )])
+    .expect("the equivalent dotted platform path opens");
+
+    assert_eq!(
+        direct.dependency_body_snapshot(),
+        dotted.dependency_body_snapshot()
+    );
+
+    drop(direct);
+    drop(dotted);
+    std::fs::remove_dir_all(directory).expect("remove canonical stdlib fixture");
+}
+
+#[test]
+fn a_platform_body_snapshot_changes_when_the_archive_is_rebuilt_in_place() {
+    let directory = write_empty_klib("rebuilt-stdlib", "stdlib");
+    let first = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+        directory.clone(),
+        KlibStdlibSemantics::Native,
+    )])
+    .expect("the first archive generation opens");
+
+    let manifest_path = directory.join("default/manifest");
+    let mut manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    manifest.push_str("generation=second\n");
+    std::fs::write(&manifest_path, manifest).expect("replace archive contents in place");
+    let second = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+        directory.clone(),
+        KlibStdlibSemantics::Native,
+    )])
+    .expect("the second archive generation opens");
+
+    assert_ne!(
+        first.dependency_body_snapshot(),
+        second.dependency_body_snapshot(),
+        "equal paths and version stamps cannot hide changed archive contents"
+    );
+
+    drop(first);
+    drop(second);
+    std::fs::remove_dir_all(directory).expect("remove rebuilt stdlib fixture");
+}
+
+#[test]
+fn publication_rejects_a_generation_replaced_after_its_bytes_were_frozen() {
+    let directory = write_empty_klib("changed-during-open", "stdlib");
+    let opened =
+        crate::klib::KlibArchive::open(&directory).expect("freeze the initial archive generation");
+
+    let manifest_path = directory.join("default/manifest");
+    let mut manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    manifest.push_str("generation=replaced-before-publication\n");
+    std::fs::write(&manifest_path, manifest).expect("replace the selected generation");
+
+    assert!(
+        !super::archives::opened_generation_is_current(&directory, &opened)
+            .expect("compare the selected semantic generations"),
+        "a provider may decode its frozen bytes but must not publish them under a replaced path"
+    );
+
+    std::fs::remove_dir_all(directory).expect("remove generation-publication fixture");
+}
+
+fn write_empty_klib(label: &str, unique_name: &str) -> std::path::PathBuf {
+    let writer = crate::klib::write::KlibWriter::native_test_fixture(unique_name);
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    writer
+        .write_directory(&directory)
+        .expect("write empty KLIB");
+    directory
+}
+
+#[test]
+fn a_metadata_only_producer_edge_is_part_of_the_body_snapshot() {
+    let platform = write_empty_klib("edge-platform", "stdlib");
+    let platform_manifest = platform.join("default/manifest");
+    let mut manifest = std::fs::read_to_string(&platform_manifest).expect("read platform manifest");
+    manifest.push_str("depends=bridge\n");
+    std::fs::write(&platform_manifest, manifest).expect("record bridge dependency");
+
+    let first_bridge = write_empty_klib("edge-bridge-first", "bridge");
+    let second_bridge = write_empty_klib("edge-bridge-second", "bridge");
+    let second_manifest = second_bridge.join("default/manifest");
+    let manifest = std::fs::read_to_string(&second_manifest)
+        .expect("read second bridge manifest")
+        .replace("compiler_version=2.4.20", "compiler_version=2.4.21");
+    assert!(manifest.contains("compiler_version=2.4.21"));
+    std::fs::write(&second_manifest, manifest).expect("change bridge version");
+
+    let first = KlibLibraries::open(&[
+        KlibLibraryInput::platform_stdlib(platform.clone(), KlibStdlibSemantics::Native),
+        KlibLibraryInput::dependency(first_bridge.clone()),
+    ])
+    .expect("the first producer graph opens");
+    let second = KlibLibraries::open(&[
+        KlibLibraryInput::platform_stdlib(platform.clone(), KlibStdlibSemantics::Native),
+        KlibLibraryInput::dependency(second_bridge.clone()),
+    ])
+    .expect("the changed producer graph opens");
+
+    assert_ne!(
+        first.dependency_body_snapshot(),
+        second.dependency_body_snapshot(),
+        "an edge-only archive can change the reachable body graph"
+    );
+
+    drop(first);
+    drop(second);
+    std::fs::remove_dir_all(platform).expect("remove edge platform fixture");
+    std::fs::remove_dir_all(first_bridge).expect("remove first bridge fixture");
+    std::fs::remove_dir_all(second_bridge).expect("remove second bridge fixture");
+}
+
+#[test]
 fn a_dependency_first_duplicate_cannot_hide_the_designated_stdlib_role() {
     // Public KLIB signatures intentionally omit result type and source modifiers. Give the
     // dependency the same serialized identity but incompatible metadata so this proves the full
@@ -672,7 +907,7 @@ fn a_dependency_first_duplicate_cannot_hide_the_designated_stdlib_role() {
         write_closed_range_contains_klib("designated-stdlib", "stdlib", true, Ty::Boolean, false);
     let libraries = KlibLibraries::open(&[
         KlibLibraryInput::dependency(dependency.clone()),
-        KlibLibraryInput::platform_stdlib(stdlib.clone()),
+        KlibLibraryInput::platform_stdlib(stdlib.clone(), KlibStdlibSemantics::Native),
     ])
     .expect("the duplicate dependency and designated stdlib open");
 
@@ -702,7 +937,7 @@ fn a_later_dependency_with_the_same_module_name_cannot_replace_the_designated_st
     let dependency =
         write_closed_range_contains_klib("later-dependency", "shared", false, Ty::String, false);
     let libraries = KlibLibraries::open(&[
-        KlibLibraryInput::platform_stdlib(stdlib.clone()),
+        KlibLibraryInput::platform_stdlib(stdlib.clone(), KlibStdlibSemantics::Native),
         KlibLibraryInput::dependency(dependency.clone()),
     ])
     .expect("the designated stdlib and same-name dependency open");
@@ -719,10 +954,65 @@ fn a_later_dependency_with_the_same_module_name_cannot_replace_the_designated_st
 }
 
 #[test]
+fn a_same_module_dependency_publishes_no_declarations_beside_the_designated_stdlib() {
+    let stdlib =
+        write_closed_range_contains_klib("authority-stdlib", "shared", true, Ty::Boolean, false);
+    let dependency = write_closed_range_contains_klib_with_shadowed_declarations(
+        "authority-dependency",
+        "shared",
+        false,
+        Ty::String,
+        false,
+        true,
+    );
+
+    for dependency_first in [true, false] {
+        let inputs = if dependency_first {
+            [
+                KlibLibraryInput::dependency(dependency.clone()),
+                KlibLibraryInput::platform_stdlib(stdlib.clone(), KlibStdlibSemantics::Native),
+            ]
+        } else {
+            [
+                KlibLibraryInput::platform_stdlib(stdlib.clone(), KlibStdlibSemantics::Native),
+                KlibLibraryInput::dependency(dependency.clone()),
+            ]
+        };
+        let libraries = KlibLibraries::open(&inputs)
+            .expect("the designated stdlib exclusively owns its module record");
+
+        let contains = single_function(&libraries, "kotlin/ranges", "contains");
+        assert!(contains.flags.operator);
+        assert_eq!(contains.callable.ret, Ty::Boolean);
+        assert_eq!(
+            contains.callable.compiler_intrinsic,
+            Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
+        );
+        let property = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/ranges")),
+            "dependencyOnlyProperty",
+        );
+        assert!(property.callables.properties().is_empty());
+        assert!(property.callables.functions().is_empty());
+        assert!(property.classifier.is_none());
+        let classifier = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/ranges")),
+            "DependencyOnlyClass",
+        );
+        assert!(classifier.classifier.is_none());
+        assert!(classifier.classifier_declaration.is_none());
+        assert!(classifier.is_empty());
+    }
+
+    std::fs::remove_dir_all(stdlib).expect("remove authority stdlib");
+    std::fs::remove_dir_all(dependency).expect("remove authority dependency");
+}
+
+#[test]
 fn multiple_typed_platform_stdlibs_are_rejected_before_archive_decoding() {
     let error = KlibLibraries::open(&[
-        KlibLibraryInput::platform_stdlib("first-stdlib.klib".into()),
-        KlibLibraryInput::platform_stdlib("second-stdlib.klib".into()),
+        KlibLibraryInput::platform_stdlib("first-stdlib.klib".into(), KlibStdlibSemantics::Native),
+        KlibLibraryInput::platform_stdlib("second-stdlib.klib".into(), KlibStdlibSemantics::Native),
     ])
     .err()
     .expect("multiple selected platform stdlibs are invalid");

@@ -10,11 +10,12 @@
 //! ([`loops`]), string templates ([`string_templates`]) and type operators
 //! ([`type_operators`]).
 
-use crate::fx_hash::HashSet;
+use crate::fx_hash::{HashMap, HashSet};
 
 mod blocks;
 mod calls;
 mod conditionals;
+mod inline_containers;
 mod loops;
 mod string_templates;
 mod type_operators;
@@ -26,24 +27,27 @@ use super::ir_builtins::IrBuiltinOperators;
 use super::klib_types::semantic_type;
 use super::local_values::LocalValues;
 use crate::ir::{
-    complete_bottom_value, ExprId, FunId, IrBindingStability, IrConst, IrExpr, IrFile,
+    complete_bottom_value, Callee, ExprId, FunId, IrBindingStability, IrConst, IrExpr, IrFile,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
     KlibIrVariableId,
 };
 use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSymbol};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 type Lowered<T> = Result<T, KlibBodyDeclineReason>;
 
 /// The unit function a call of a dependency declaration invokes, with its declared parameters
 /// and result.
 pub(super) struct LinkedCallee {
-    pub(super) function: FunId,
+    pub(super) callee: Callee,
+    pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
     pub(super) ret: Ty,
     pub(super) context_count: usize,
+    /// Exact classifier of an external singleton dispatch selected by an earlier support unit.
+    pub(super) singleton_dispatch: Option<TypeName>,
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -63,6 +67,9 @@ pub(super) struct BodyLowering<'a, 'l, 's> {
     ir: &'a mut IrFile,
     linker: &'a mut Linker<'l, 's>,
     locals: LocalValues,
+    /// Compiler aliases admitted only by an exact inline-container shape. They are substituted
+    /// while that container's value is lowered and removed before lowering continues.
+    compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
     /// The loops enclosing the expression being lowered, innermost last: each serialized loop
     /// identity with the label its `break`s and `continue`s name.
     loops: Vec<(u32, String)>,
@@ -87,6 +94,7 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
             ir,
             linker,
             locals: LocalValues::after(header.parameter_count()),
+            compiler_aliases: HashMap::default(),
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
         }
@@ -187,6 +195,13 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
                 // A block's type is its source block's, which checked FIR lowering records itself.
                 self.ty(expression, "block")?;
                 return self.block(statements);
+            }
+            KlibIrExprKind::Block {
+                statements,
+                origin: Some(origin),
+            } if origin == "INLINE_ARGS_CONTAINER" => {
+                let ty = self.ty(expression, "inline argument container")?;
+                return self.inline_argument_container(statements, ty);
             }
             KlibIrExprKind::Block { .. } => {
                 return unsupported("a block of a compiler-introduced form")
@@ -313,6 +328,9 @@ impl<'a, 'l, 's> BodyLowering<'a, 'l, 's> {
     }
 
     fn read(&mut self, symbol: &KlibIrSymbol) -> Lowered<ExprId> {
+        if let Some(alias) = self.compiler_aliases.get(symbol).copied() {
+            return self.expression(alias);
+        }
         let (index, stability) = if let Some(local) = self.locals.get(symbol) {
             (local.index, Some(local.stability()))
         } else {

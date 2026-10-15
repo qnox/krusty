@@ -1,8 +1,9 @@
 //! Every `external` function of each target's stdlib KLIB has a compiler operation.
 //!
-//! An `external` declaration has no IR body: the target supplies it. Its operation is attached by
-//! the shared builtin rules, by exact declaration, never from the target's own intrinsic
-//! annotation. A declaration the rules do not name yet is listed in
+//! An `external` declaration has no IR body: the target supplies it. Its operation is attached
+//! either by a shared exact-declaration rule or by an authenticated target-stdlib annotation whose
+//! payload and full semantic signature match the compiler contract. A declaration not covered yet
+//! is listed in
 //! `tests/klib_uncovered_externals/<target>/<version>.txt`. The list may only shrink: a newly
 //! uncovered declaration fails, and so does a listed one that is now covered or no longer exists.
 //! With `KRUSTY_SHRINK_UNCOVERED_EXTERNALS` set, the test rewrites a list without the entries it
@@ -166,7 +167,15 @@ fn check_target(target: CompilationTarget, list: &str) {
         );
         return;
     };
-    let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib)])
+    let semantics = match target {
+        CompilationTarget::Native => super::super::KlibStdlibSemantics::Native,
+        CompilationTarget::WasmJs | CompilationTarget::WasmWasi => {
+            super::super::KlibStdlibSemantics::Wasm
+        }
+        CompilationTarget::Js => super::super::KlibStdlibSemantics::Plain,
+        CompilationTarget::Jvm => panic!("JVM does not consume a KLIB stdlib"),
+    };
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib, semantics)])
         .unwrap_or_else(|error| panic!("{error}"));
     let uncovered = uncovered_externals(&libraries);
     let path = list_path(list);
