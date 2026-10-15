@@ -73,6 +73,8 @@ pub(crate) struct BackendPassFacts {
     /// Physical constructions selected for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: crate::jvm::sam_wrappers::SamWrapperRealizations,
     local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
+    /// The lifted names of the callables suspend lambdas declare, within their classes.
+    suspend_lambda_scoped_names: crate::jvm::lifted_names::SuspendLambdaScopedNames,
     lambda_methods: crate::jvm::lambda_classes::LambdaMethods,
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
@@ -326,7 +328,8 @@ fn run_backend_passes_after_plugins(
     // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
     // pass has named the functions kotlinc names their lifted callables after: name those callables
     // before any pass renders a debug name from them.
-    crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
+    facts.suspend_lambda_scoped_names =
+        crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
     // Generic erasure and value-class projection have now fixed every declaration parameter's JVM
     // carrier. Consume and retarget the exact call-owned adapters before default/suspend/inline
     // transforms clone or wrap those calls; the provenance is a one-shot representation contract.
@@ -390,7 +393,12 @@ fn run_backend_passes_after_plugins(
     })?;
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
-    crate::jvm::lifted_names::realize(ir, &facts.override_results);
+    crate::jvm::lifted_names::realize(
+        ir,
+        &facts.override_results,
+        &facts.suspend_lambda_scoped_names,
+        &facts.emit_time_machines,
+    );
     // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
     // names those from the value-class spelling and only then appends `$<module>` to the member.
     crate::jvm::internal_names::mangle_internal_members(ir, module_name, facade);

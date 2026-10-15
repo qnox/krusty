@@ -2668,6 +2668,8 @@ mod suspend_invoke_reference_e2e;
 mod suspend_lambda_class_e2e;
 #[path = "suspend_lambda_metadata_e2e.rs"]
 mod suspend_lambda_metadata_e2e;
+#[path = "suspend_lambda_nested_declarations_e2e.rs"]
+mod suspend_lambda_nested_declarations_e2e;
 #[path = "suspend_lambda_sites_e2e.rs"]
 mod suspend_lambda_sites_e2e;
 #[path = "suspend_lambda_unit_tail_e2e.rs"]
