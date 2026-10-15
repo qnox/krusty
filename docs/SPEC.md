@@ -845,9 +845,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   passed beside the lambda (`repeat(n) { … }` stored `n` before the loop). The JVM
   splice then reads a constructor call or `Unit` in place too, so `x.resume(P("OK"))` stores no
   local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`,
-  `jvm/ir_emit/bytecode_inline_call.rs`). Tests:
+  `jvm/ir_emit/bytecode_inline_call.rs`). kotlinc refuses the move only for an argument that
+  stores a local or jumps out of itself, so a field read, a property getter's invoke and a `!!`
+  check stay in place as well: `h.items += F("x")` loads the receiver, builds the element and calls
+  `add` with no temporary. Tests:
   `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
-  `tests/inline_format_arguments_e2e.rs`.
+  `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`.
 - **An inlined lambda's body locals include the brace `nop` and follow its marker.** The lambda's
   inline template is the source block's statements, not a second block wrapped around that block,
   and a `Unit` coercion around the block is not another scope (`fir_lower/local_callables.rs`).
