@@ -37,6 +37,16 @@ fn evaluates_without_local_writes(
         {
             arguments_movable(ir, args, plain_construction)
         }
+        // `getfield`, a property accessor's invoke and a `!!` check store nothing and stay in place:
+        // kotlinc's `h.items += F()` evaluates the receiver where `plusAssign`'s body loads it. A
+        // `lateinit` field read's guard branches only within the argument, which kotlinc moves too.
+        IrExpr::GetField { receiver, .. }
+        | IrExpr::NotNullAssert {
+            operand: receiver, ..
+        } => evaluates_without_local_writes(ir, *receiver, plain_construction),
+        IrExpr::PropertyRead { receiver, .. } => receiver.is_none_or(|receiver| {
+            evaluates_without_local_writes(ir, receiver, plain_construction)
+        }),
         IrExpr::TypeOp {
             op: IrTypeOp::Cast | IrTypeOp::ImplicitCoercion,
             arg,
