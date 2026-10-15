@@ -66,9 +66,17 @@ impl BodyLowering<'_> {
                         let subject = subject.ok_or(FirLoweringFailure::MissingWhenSubject {
                             origin: branch.origin,
                         })?;
-                        let subject = self.ir.add_expr(IrExpr::GetValue(subject));
+                        let read = self.ir.add_expr(IrExpr::GetValue(subject));
+                        // The read has the subject's checked type, as fir2ir's `irGet` of the
+                        // subject variable does; a backend's dispatch on it reads that type.
+                        if let Some(subject_ty) = subject_expression
+                            .and_then(|subject| self.body.expr(subject))
+                            .map(|subject| subject.ty.get())
+                        {
+                            self.ir.logical_types.insert(read, subject_ty);
+                        }
                         let (subject, candidate) =
-                            self.when_subject_equality_operands(subject, candidate, numeric);
+                            self.when_subject_equality_operands(read, candidate, numeric);
                         let comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                             op: IrBinOp::Eq,
                             lhs: subject,
