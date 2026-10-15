@@ -3,6 +3,9 @@
 use super::common;
 use krusty::jvm::classreader::parse_class;
 
+#[path = "class_literal_array_of_nothing_e2e.rs"]
+mod array_of_nothing;
+
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }

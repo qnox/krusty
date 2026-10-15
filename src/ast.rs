@@ -1946,6 +1946,9 @@ pub struct File {
     /// `+BareArrayClassLiteral`: permit builtin `Array` without explicit type arguments on the
     /// left of `::class`; semantic resolution supplies its star projection.
     pub bare_array_class_literal: bool,
+    /// `+ForbidArrayOfNothingInLhsOfClassLiteral`: a class literal of `Array<Nothing>` or
+    /// `Array<Nothing?>` is an error rather than a warning.
+    pub forbid_array_of_nothing_in_lhs_of_class_literal: bool,
     /// `+EnumEntries`: expose the synthetic classifier property `E.entries` on enum classes.
     pub enum_entries_enabled: bool,
     /// `+PrioritizedEnumEntries`: the synthetic enum property wins over a same-named companion

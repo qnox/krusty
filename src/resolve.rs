@@ -70,6 +70,7 @@ mod callable_reference_lhs;
 mod callable_reference_prefilter;
 mod callable_reference_selection;
 mod candidate_display;
+mod class_literal_array_of_nothing;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
     inaccessible_classifier_message,
@@ -62245,6 +62246,9 @@ impl<'a> Checker<'a> {
                     unbound.map(|ty| self.validate_class_literal_type_arguments(e, recv, ty));
                 if unbound == Some(Ty::Error) {
                     return self.set(e, Ty::Error);
+                }
+                if let Some(ty) = unbound {
+                    self.check_array_of_nothing_class_literal(recv, ty);
                 }
                 let mut bound_represented = None;
                 if unbound.is_none() {
