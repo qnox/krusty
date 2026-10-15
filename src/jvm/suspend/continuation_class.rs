@@ -158,12 +158,13 @@ pub(super) fn build_continuation_class(
     let ret = ir.add_expr(IrExpr::Return(Some(call_outer)));
     // The function returns a value class's carrier where kotlinc's value-class ABI says so; its
     // completion takes the value as `Any?`, so the carrier goes on as its box.
-    if let Some((classifier, carrier)) = completion_box(ir, outer_fid) {
+    if let Some((classifier, carrier, nullable)) = completion_box(ir, outer_fid) {
         suspended_result_returns.insert(
             ret,
             SuspendedResultReturn::ValueClassBox {
                 classifier,
                 carrier,
+                nullable,
             },
         );
     }
