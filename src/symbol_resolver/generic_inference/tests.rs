@@ -40,6 +40,23 @@ fn identity_evidence_does_not_bind_a_different_declaration_variable() {
 }
 
 #[test]
+fn a_type_parameter_is_not_rebound_to_its_own_definitely_non_null_face() {
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let formal = Ty::ty_param("scope-a:R", any);
+    let same_face = formal.contributed_through_nullable_formal();
+    let different_face = Ty::ty_param("scope-b:R", any).contributed_through_nullable_formal();
+
+    assert!(matches!(same_face, Ty::DefinitelyNotNull(_)));
+    let mut same_identity = GSigBinds::default();
+    unify_inferred_ty(formal, same_face, &mut same_identity);
+    assert!(same_identity.is_empty());
+
+    let mut different_identity = GSigBinds::default();
+    unify_inferred_ty(formal, different_face, &mut different_identity);
+    assert_eq!(different_identity.get("scope-a:R"), Some(&different_face));
+}
+
+#[test]
 fn provisional_error_result_does_not_bind_a_generic_formal() {
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
     let t = Ty::ty_param("T", any);

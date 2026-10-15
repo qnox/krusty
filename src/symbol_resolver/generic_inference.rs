@@ -1074,7 +1074,14 @@ pub(super) fn unify_inferred_ty_impl(
             // constraints for (`FT` against `FT`). That is an identity, not evidence. Recording it
             // makes the later useful constraint (`FT` against `UserKlass`) join with a symbolic
             // self-reference and collapse to `Any`.
-            if matches!(actual, Ty::TyParam(actual_name, _) if actual_name == name) {
+            // The variable's definitely-non-null face is the same identity: shaping `T!` against
+            // `T!` reaches this collector as `T` against `T & Any`. Binding `T` to that face turns
+            // the flexible identity into a new constraint and can later widen the result to `Any`.
+            if matches!(
+                actual,
+                Ty::TyParam(actual_name, _) | Ty::DefinitelyNotNull(&Ty::TyParam(actual_name, _))
+                    if actual_name == name
+            ) {
                 return;
             }
             match binds.entry(name.to_string()) {

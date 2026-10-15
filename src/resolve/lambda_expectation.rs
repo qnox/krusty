@@ -160,13 +160,29 @@ pub(super) struct FunctionalArgumentExpectation {
     /// The selected parameter inlines a lambda into the caller's frame: the callable is inline and
     /// the parameter is neither `crossinline` nor `noinline`.
     pub(super) inlined: bool,
+    /// Stable identities of the selected callable's own type parameters. A result that mentions one
+    /// remains open until this call's inference solves it. Other type parameters belong to an
+    /// enclosing declaration and are fixed inside the body being checked.
+    callee_formals: Vec<String>,
+}
+
+impl FunctionalArgumentExpectation {
+    /// The result the lambda body is checked against once the selected declaration has fixed it.
+    pub(super) fn fixed_result(&self) -> Option<Ty> {
+        self.result.filter(|result| {
+            !result.mentions_error()
+                && !result.mentions_pending()
+                && !crate::types::ty_mentions_param(*result, &self.callee_formals)
+        })
+    }
 }
 
 /// Derive the expected shape of a lambda argument from its selected candidate parameter. Kotlin
 /// function types contribute context, receiver, value, and result types; Java SAMs contribute their
 /// single abstract method, its first parameter as the receiver under kotlinc's sam-with-receiver
 /// convention, which `sam_source` (the federated module and dependency providers) carries. Any
-/// other parameter gives no expectation.
+/// other parameter gives no expectation. `callee` is the selected callable's own generic signature;
+/// only its formals remain open in the expected result.
 pub(super) fn functional_argument_expectation(
     platform: &dyn SemanticPlatform,
     sam_source: &dyn crate::symbol_source::SymbolSource,
@@ -174,7 +190,9 @@ pub(super) fn functional_argument_expectation(
     inline: bool,
     index: usize,
     param: Ty,
+    callee: Option<&crate::libraries::GenericSig>,
 ) -> Option<FunctionalArgumentExpectation> {
+    let callee_formals = callee.map_or_else(Vec::new, |signature| signature.formals.clone());
     let inlined = inline
         && crate::types::InlineParameterModifier::runs_parameter_in_caller_frame(
             &call_sig.inline_modifiers,
@@ -211,6 +229,7 @@ pub(super) fn functional_argument_expectation(
                 callable_type: Some(Ty::Fun(signature)),
                 sam_conversion: false,
                 inlined,
+                callee_formals,
             })
         }
         param if has_receiver => {
@@ -245,6 +264,7 @@ pub(super) fn functional_argument_expectation(
                 callable_type: None,
                 sam_conversion: false,
                 inlined,
+                callee_formals,
             })
         }
         param => crate::symbol_resolver::semantic_sam_signature(sam_source, param).map(|sam| {
@@ -271,7 +291,65 @@ pub(super) fn functional_argument_expectation(
                 callable_type: Some(callable_type),
                 sam_conversion: true,
                 inlined,
+                callee_formals,
             }
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expectation(result: Ty, callee_formals: &[&str]) -> FunctionalArgumentExpectation {
+        FunctionalArgumentExpectation {
+            context_types: Vec::new(),
+            value_params: Vec::new(),
+            receiver: None,
+            result: Some(result),
+            callable_type: None,
+            sam_conversion: false,
+            inlined: false,
+            callee_formals: callee_formals
+                .iter()
+                .map(|formal| (*formal).to_string())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_enclosing_declarations_type_parameter_is_a_fixed_lambda_result() {
+        let enclosing = "\0tp:enclosing:T";
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let result = Ty::obj_args(
+            "kotlin/collections/MutableList",
+            &[Ty::ty_param(enclosing, any)],
+        );
+
+        assert_eq!(
+            expectation(result, &["\0tp:callee:R"]).fixed_result(),
+            Some(result)
+        );
+    }
+
+    #[test]
+    fn the_selected_callables_own_type_parameter_keeps_the_lambda_result_open() {
+        let callee = "\0tp:callee:R";
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let result = Ty::obj_args(
+            "kotlin/collections/MutableList",
+            &[Ty::ty_param(callee, any)],
+        );
+
+        assert_eq!(expectation(result, &[callee]).fixed_result(), None);
+    }
+
+    #[test]
+    fn unresolved_markers_keep_the_lambda_result_open() {
+        let pending = Ty::obj_args("kotlin/collections/List", &[Ty::Pending]);
+        let error = Ty::obj_args("kotlin/collections/List", &[Ty::Error]);
+
+        assert_eq!(expectation(pending, &[]).fixed_result(), None);
+        assert_eq!(expectation(error, &[]).fixed_result(), None);
     }
 }
