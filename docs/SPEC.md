@@ -9207,6 +9207,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unresolved. The remaining bounds are kept beside the erasure and retried when the lookup fails; the
   erasure itself is untouched, so descriptors still match kotlinc. Test:
   `tests/feature_coverage_n_e2e.rs::where_clause_two_bounds`.
+- **A type variable is a SUBTYPE of the intersection of all its bounds.** Member lookup already saw
+  every bound, but assignability walked only the one `Ty::TyParam` carries, so an argument whose type
+  is the variable was rejected for a parameter of a later bound (`takeCs(a)` with
+  `where T : Comparable<T>, T : CharSequence`), also through a chained bound (`<T : X, X>` with
+  `where X : CharSequence`) and when selecting an operator (`(1U..10U).contains(a)`). Assignability
+  now asks the oracle for all the variable's declared bounds (`type_variable_bounds`) and
+  compares the source as the intersection of all of them, so a variable meets a target exactly when
+  that intersection does; there is no per-bound retry. An inferred binding still replaces the bounds.
+  The same identity-backed query feeds source-constructor matching, nested `in`/`out` argument
+  checks, and common-type validation; a `Nothing` branch remains bottom and cannot widen the
+  bounded variable. A definitely-non-null `T & Any` meets the intersection of all of `T`'s bounds
+  made non-null, so `where T : A?, T : B?` makes `T & Any` an argument for both `A` and `B`.
+  The variable carries one bound, and which one varies: a signature moves a class bound first for
+  JVM erasure (`X : Comparable<Int>, X : Int` erases to `int`), so oracles report every declared
+  bound and assignability intersects them with the carried one. That reordering also re-carries the
+  class bound in every reference to the parameter in the signature, including one nested in another
+  parameter's bound (`T : X`); a stale `Comparable` there made a call site box and cast the argument
+  that the callee's descriptor takes as `int` (a `VerifyError`). Test:
+  `tests/where_bound_arguments_e2e.rs::a_chained_variable_meets_a_class_bound_written_after_an_interface`.
+  Pass 1 infers an expression-bodied result before the type-parameter headers are published, so the
+  symbol table indexes every source type parameter's later bounds by identity (classifiers as they
+  are inserted, callables once collection is done) and the module provider answers from that index.
+  The Pass-1 bound index and source-constructor oracle are isolated ownership modules rather than
+  additional responsibilities in the resolver facade. Test: `tests/where_bound_arguments_e2e.rs`.
 - **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
   candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
   `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver

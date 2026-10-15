@@ -241,6 +241,14 @@ impl ResolvedModuleIndex {
         })
     }
 
+    /// Every declared upper bound of the type parameter with semantic identity `semantic_name`,
+    /// in declaration order, or `None` when no published parameter has that identity.
+    pub(crate) fn type_parameter_declared_bounds(&self, semantic_name: &str) -> Option<Vec<Ty>> {
+        let parameter = self.type_parameter_by_semantic_name(semantic_name)?;
+        let header = self.type_parameter_header(parameter)?;
+        Some(header.bounds.iter().map(|bound| bound.ty.get()).collect())
+    }
+
     /// Bind a selected declaration's normalized type-variable identity to its stable parameter.
     /// The declaration and its lexical owners form one scope tower: callable parameters shadow
     /// enclosing classifier/function parameters, while an unrelated declaration never participates.

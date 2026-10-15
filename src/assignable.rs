@@ -53,6 +53,51 @@ pub trait TypeOracle {
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         lower
     }
+
+    /// Every declared upper bound of type variable `name` (`where T : A, T : B` declares both),
+    /// in no particular order. `Ty::TyParam` carries one of them, which need not be the first a
+    /// declaration lists. Empty when the oracle does not know the variable. A variable is a
+    /// subtype of every one of its bounds.
+    fn type_variable_bounds(&self, _name: &str) -> Vec<Ty> {
+        Vec::new()
+    }
+}
+
+/// Whether the source type variable `name` meets `sup`: through its inferred binding when it has
+/// one, otherwise through its upper bound. A variable with several declared bounds is bounded by
+/// their intersection, so it meets `sup` exactly when that intersection does.
+fn variable_bound_assignable(
+    cx: &TyCtx,
+    oracle: &dyn TypeOracle,
+    sub: Ty,
+    name: &str,
+    bound: Ty,
+    sup: Ty,
+) -> bool {
+    let upper = cx
+        .lookup(name)
+        .unwrap_or_else(|| declared_upper_bound(oracle, name, bound, |bound| bound));
+    upper != sub && assignable_inner(cx, oracle, upper, sup)
+}
+
+/// The intersection of type variable `name`'s bounds: `bound`, which `Ty::TyParam` carries, and
+/// every bound the oracle reports as declared, each passed through `shape`. The carried bound is
+/// one of the declared ones, and the canonical intersection keeps one copy of each.
+fn declared_upper_bound(
+    oracle: &dyn TypeOracle,
+    name: &str,
+    bound: Ty,
+    shape: impl Fn(Ty) -> Ty,
+) -> Ty {
+    let declared = oracle.type_variable_bounds(name);
+    if declared.is_empty() {
+        return shape(bound);
+    }
+    let bounds = std::iter::once(bound)
+        .chain(declared)
+        .map(shape)
+        .collect::<Vec<_>>();
+    Ty::intersection(&bounds)
 }
 
 /// Target-independent upper shape of a flexible type whose lower bound is retained in [`Ty`].
@@ -156,15 +201,16 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if matches!((sub, sup), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b) {
         return true;
     }
-    // `T & Any` is a subtype of the original parameter and of that parameter's non-null upper
-    // bound (`T : Any?` satisfies `Any`; `T : Throwable?` satisfies `Throwable`). It does not
-    // satisfy an unrelated non-null bound.
+    // `T & Any` is a subtype of the original parameter and of the non-null intersection of that
+    // parameter's upper bounds (`T : Any?` satisfies `Any`; `T : Throwable?` satisfies
+    // `Throwable`; `where T : A?, T : B?` satisfies both `A` and `B`). It does not satisfy an
+    // unrelated non-null bound.
     if let Ty::DefinitelyNotNull(original) = sub {
         if assignable_inner(cx, oracle, *original, sup) {
             return true;
         }
-        if let Ty::TyParam(_, bound) = *original {
-            let tightened = bound.non_null();
+        if let Ty::TyParam(name, bound) = *original {
+            let tightened = declared_upper_bound(oracle, name, *bound, Ty::non_null);
             if tightened != *original && assignable_inner(cx, oracle, tightened, sup) {
                 return true;
             }
@@ -226,8 +272,8 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         {
             return true;
         }
-        if let Ty::TyParam(_, bound) = sub {
-            return *bound != sub && assignable_inner(cx, oracle, *bound, sup);
+        if let Ty::TyParam(name, bound) = sub {
+            return variable_bound_assignable(cx, oracle, sub, name, *bound, sup);
         }
         return is_assignable(cx, oracle, sub.non_null(), *inner);
     }
@@ -241,8 +287,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     // the target arm hides the only declared proof of that relation.
     if let (Ty::TyParam(source_name, source_bound), Ty::TyParam(target_name, _)) = (sub, sup) {
         if source_name != target_name {
-            let source = cx.lookup(source_name).unwrap_or(*source_bound);
-            return source != sub && assignable_inner(cx, oracle, source, sup);
+            return variable_bound_assignable(cx, oracle, sub, source_name, *source_bound, sup);
         }
     }
 
@@ -256,8 +301,7 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
             .is_some_and(|target| target != sup && assignable_inner(cx, oracle, sub, target));
     }
     if let Ty::TyParam(name, bound) = sub {
-        let source = cx.lookup(name).unwrap_or(*bound);
-        return source != sub && assignable_inner(cx, oracle, source, sup);
+        return variable_bound_assignable(cx, oracle, sub, name, *bound, sup);
     }
 
     // Everything (a boxed primitive included) is assignable to `Any`/`Object`.

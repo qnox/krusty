@@ -3721,6 +3721,9 @@ pub(crate) fn finalized_streamed_signature_index(
         !class.full_value
     }
 
+    // A body inferred below may pass a value of a type variable with several bounds; the module
+    // provider answers those bounds from this index.
+    table.index_callable_type_parameter_bounds();
     let (graph, extraction_failures) = extracted.into_parts();
     let mut required = Vec::new();
     let mut explicit = Vec::new();
