@@ -328,12 +328,10 @@ fn attach_property_metadata(
     ir: &mut IrFile,
 ) {
     let annotations = super::declaration_metadata::accessor_annotations(property, info);
+    attach_accessor_annotations(annotations, declaration, index, ir);
     let Some(property_id) = index.property_for_declaration(declaration) else {
         return;
     };
-    if annotations.declares_annotations() {
-        ir.accessor_annotations.insert(property_id, annotations);
-    }
     let header = index
         .declaration_header(declaration)
         .expect("a checked property retains its declaration header");
@@ -387,6 +385,22 @@ fn attach_property_metadata(
                 property, info,
             );
     }
+}
+
+/// Record checked accessor annotations on the stable property declaration lowering consumes.
+fn attach_accessor_annotations(
+    annotations: crate::ir::AccessorAnnotations,
+    declaration: DeclarationId,
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+) {
+    if !annotations.declares_annotations() {
+        return;
+    }
+    let Some(property_id) = index.property_for_declaration(declaration) else {
+        return;
+    };
+    ir.accessor_annotations.insert(property_id, annotations);
 }
 
 pub(super) fn attach_checked_declaration_metadata(
@@ -509,12 +523,15 @@ pub(super) fn attach_checked_declaration_metadata(
                 .insert((classifier, source_order), spelling.clone());
         }
     };
+    let constructor_property_declaration = |property_index: usize| {
+        active.constructor_property_declaration(
+            source_class,
+            u32::try_from(property_index).expect("too many constructor properties"),
+        )
+    };
     for (property_index, property) in class.props.iter().enumerate() {
         if property.is_property {
-            attach_property_spelling(active.constructor_property_declaration(
-                source_class,
-                u32::try_from(property_index).expect("too many constructor properties"),
-            ));
+            attach_property_spelling(constructor_property_declaration(property_index));
         }
     }
     let body_property_declaration = |property_index: usize| {
@@ -525,6 +542,17 @@ pub(super) fn attach_checked_declaration_metadata(
     };
     for property_index in 0..class.body_props.len() {
         attach_property_spelling(body_property_declaration(property_index));
+    }
+    for (property_index, property) in class.props.iter().enumerate() {
+        if !property.is_property {
+            continue;
+        }
+        let Some(declaration) = constructor_property_declaration(property_index) else {
+            continue;
+        };
+        let annotations =
+            super::declaration_metadata::constructor_property_accessor_annotations(property, info);
+        attach_accessor_annotations(annotations, declaration, index, ir);
     }
     for (property_index, property) in class.body_props.iter().enumerate() {
         if let Some(declaration) = body_property_declaration(property_index) {
