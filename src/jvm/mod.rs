@@ -48,6 +48,7 @@ pub(crate) mod inliner;
 mod inner_classes;
 mod internal_names;
 pub mod ir_emit;
+mod java_nullability_qualifiers;
 pub mod java_stub;
 pub mod jvm_class_map;
 pub mod jvm_libraries;
@@ -104,6 +105,7 @@ mod value_class_declarations;
 pub mod value_classes;
 
 pub use backend::{prepare_module_symbols, JvmBackend};
+pub use java_nullability_qualifiers::JavaNullability;
 #[cfg(test)]
 pub(crate) use ranges::COUNTED_LOOPS;
 // Public JVM clients should not need to reach through the compiler's semantic-platform ownership

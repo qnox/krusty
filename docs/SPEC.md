@@ -2628,6 +2628,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/symbol_resolver/callable_shapes.rs` (plain, nullable, and platform function classifiers
   versus a nominal callable object); `tests/platform_function_type_argument_e2e.rs` (platform and
   nullable acceptance against kotlinc, and the complete non-null rejection diagnostic).
+- **A Java `TYPE_USE` nullability qualifier fixes the member type it annotates.** A
+  `@NonNull`/`@Nullable` type-use annotation on the outermost type of a Java method return, formal
+  parameter, or field states the same fact as a declaration `@NotNull`/`@Nullable`: the type is `T`
+  or `T?`, not `T!`. When reading a classfile, Kotlin flattens a qualifier on any nested class
+  segment onto the member type; paths containing zero or more `INNER_TYPE` steps therefore qualify
+  it alike, while paths containing `ARRAY_ELEMENT`, `WILDCARD_BOUND`, or `TYPE_ARGUMENT` do not.
+  Kotlinc's Java-source provider differs for a three-level nested type: qualifiers on the outermost
+  or final class segment qualify the member, but one on an intermediate segment does not. Krusty's
+  Java-source provider preserves that observed policy after resolving the segment structure rather
+  than branching in the resolver. A classfile formal-parameter index addresses source parameters,
+  not a non-static inner constructor's leading enclosing-instance descriptor parameter. When
+  `MethodParameters` is absent, the `InnerClasses` self entry and matching outer descriptor type
+  provide that one structural offset. The provider uses it both to align parameter qualifiers and
+  to exclude the enclosing instance from the Java constructor's source value parameters, while the
+  JVM physical parameter vector retains the slot; encoded class-name spelling is not consulted.
+  `@NotNull T` on a type parameter is `T & Any`, so `Api<String?>.required()` is `String`. The
+  recognized qualifiers are
+  `org.jetbrains.annotations` and `org.checkerframework.checker.nullness.qual`; kotlinc's other
+  nullability annotation families are not read yet. Tests: `tests/java_type_use_nullability_e2e.rs`
+  (classfile and Java-source APIs, the complete diagnostics against kotlinc).
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +

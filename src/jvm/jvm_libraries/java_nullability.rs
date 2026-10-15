@@ -4,7 +4,7 @@
 //! A Java result additionally records how kotlinc's signature enhancement may treat it
 //! ([`ResultEnhancement`]).
 
-use super::super::classreader::JavaNullability;
+use super::super::JavaNullability;
 use crate::libraries::ResultEnhancement;
 use crate::types::{Ty, TypeName};
 
@@ -61,7 +61,8 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
         .map(super::super::classpath::kotlin_name_to_ty)
         .unwrap_or(ty);
     match nullability {
-        Some(JavaNullability::NotNull) => ty.non_null(),
+        // `@NotNull T` is `T & Any`: a nullable argument substituted for `T` stays non-null.
+        Some(JavaNullability::NotNull) => ty.definitely_non_null(),
         Some(JavaNullability::Nullable) => Ty::nullable(ty),
         None => Ty::platform_nullable(ty),
     }
