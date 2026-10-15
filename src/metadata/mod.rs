@@ -12,6 +12,8 @@ pub(crate) mod declaration_flags;
 pub(crate) mod declaration_records;
 pub(crate) mod decode;
 pub mod encoding;
+#[cfg(test)]
+pub(crate) mod fragment_text;
 pub mod id_signature;
 pub mod klib_fragment;
 pub mod klib_ir;
@@ -24,7 +26,7 @@ pub mod protobuf;
 pub mod semantic;
 mod value_parameter_flags;
 pub use value_parameter_flags::DeclaredValueParameter;
-mod type_encoder;
+pub(crate) mod type_encoder;
 pub mod version_requirements;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags

@@ -4737,6 +4737,41 @@ code is the one the code generator already names: provider-owned bodies through 
   That needs a KLIB writer whose output this decoder reads back, and lands with lowering, the first
   consumer of the trees.
 
+## Native cinterop — C headers to an interop library  ◐
+
+A Kotlin/Native program reaches a C library through an interop KLIB that `cinterop` builds from a
+`.def` file and the library's headers. krusty builds that KLIB itself, so a C library needs no
+Kotlin/Native toolchain: `src/native/cinterop/` preprocesses the headers (`preprocessor`), parses
+their declarations into an index-based model (`declarations`, `model`), lays records out per target
+(`layout`), and `library` maps them to Kotlin declarations and writes the KLIB.
+
+- **Format (done for linux_x64).** The library is what Kotlin/Native 2.4.20's `cinterop
+  -Xccall-mode direct` writes: metadata only, no bridges or IR, every function `external` with a
+  `@CCall.Direct` symbol. The manifest repeats the `.def` file's properties (except `depends`) and
+  adds the forward declarations, the included headers (sysroot-relative path, or the SHA-256 of a
+  header outside the sysroot), `interop=true` and `ir_provider=kotlin.native.cinterop`. Fragments
+  hold 64 classifiers or 128 callables, in cinterop's order. Unit tests in
+  `library/tests.rs` build libraries from inline headers and compare them, decoded field by
+  field, with renderings of Kotlin/Native's own output; the expected renderings are checked in,
+  never Kotlin/Native-built KLIBs. A one-off comparison of the platform zlib definition against the
+  glibc 2.19 sysroot rendered identically.
+- **Writer boundary.** `klib::write::KlibWriter` gained manifest properties, empty parent packages
+  and empty directories. Fragments are encoded with the shared `Pb`/`StringTable` and
+  `metadata::type_encoder`; `library/emit.rs` adds only the annotation-argument encoding with the
+  unsigned flag cinterop sets on unsigned constants.
+- **`.def` keys.** `headers`, `headerFilter`, `compilerOpts` (`-D`, `-U`, `-I`), `package`,
+  `excludedFunctions`, `strictEnums`, `nonStrictEnums`, the code section, and `linkerOpts` and other
+  keys carried into the manifest.
+- **Open.** Platform libraries as dependencies (today a type from a system header is declared in
+  the library itself, as `cinterop -no-default-libs` does); linux_arm64 output is unverified
+  against Kotlin/Native; riscv64 has no Kotlin/Native target and is refused; aliases for duplicate
+  strict-enum values, wide-string and struct-typed macro values, and vector types.
+- **Driver (done).** `krusty cinterop` takes Kotlin/Native's `cinterop` options and writes the
+  library packed or unpacked, with the link facts of the `linkerOpts` libraries under
+  `default/targets/<target>/imports`.
+- **Next.** Building Native programs against these libraries: publishing their declarations to
+  the frontend beside the platform's, and reading their link facts back into the program's link.
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how

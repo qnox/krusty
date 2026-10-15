@@ -187,7 +187,8 @@ mod tests {
         // `plugins` is the compiler-plugin surface, in budget as `features` is: the CLI reads
         // kotlinc's `-Xplugin`/`-P` switches and resolves them against the extension registry.
         // `language_version` and `language_settings` are the public language and API version
-        // surface, the same kind of boundary as `kotlin_version`.
+        // surface, the same kind of boundary as `kotlin_version`. `native` is in budget as `jvm`
+        // is: `krusty cinterop` builds a Native interop library through `native::cinterop`.
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-cli/src",
             &[
@@ -199,6 +200,7 @@ mod tests {
                 "kotlin_version",
                 "language_settings",
                 "language_version",
+                "native",
                 "plugins",
                 "source",
             ],

@@ -85,6 +85,17 @@ impl ImportLibrary {
         self.exports.get(name)
     }
 
+    /// Every symbol the library exports, in name order.
+    pub fn exports(&self) -> Vec<(&str, &Export)> {
+        let mut exports: Vec<(&str, &Export)> = self
+            .exports
+            .iter()
+            .map(|(name, export)| (name.as_str(), export))
+            .collect();
+        exports.sort_unstable_by_key(|(name, _)| *name);
+        exports
+    }
+
     /// Read an ELF shared object for `arch`; `what` names it in errors (usually its path).
     ///
     /// The loader name is the library's `DT_SONAME`. A library without one is found by whatever

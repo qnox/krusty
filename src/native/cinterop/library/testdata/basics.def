@@ -1,0 +1,4 @@
+headers = basics.h
+package = basics
+compilerOpts = -I.
+linkerOpts = -lsmall
