@@ -96,7 +96,8 @@ pub const LOCAL_FUNCTION_SYMBOLS: Case = Case {
 
 pub const DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS: Case = Case {
     stem: "multimoduleDependencyFunctionImplementationMarkers",
-    source: "// MODULE: lib\n\
+    source: "// TARGET_BACKEND: NATIVE\n\
+             // MODULE: lib\n\
              interface ExternalFn : (Int) -> Int\n\
              // MODULE: main(lib)\n\
              interface LocalFn : ExternalFn\n\
