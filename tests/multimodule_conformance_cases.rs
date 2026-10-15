@@ -108,6 +108,49 @@ pub const LOCAL_INCREMENT_SHAPES: Case = Case {
              fun box() = exerciseUpdates()\n",
 };
 
+/// The consumer's `accept` signature requires both the outer `Any` and inner `String` arguments
+/// reconstructed from dependency metadata; `innerValue` also exercises the latter through the
+/// dependency's emitted member body. Both arguments are references because primitive boxing is a
+/// separate backend representation concern, not part of this metadata regression.
+pub const INNER_CLASS_OUTER_TYPE: Case = Case {
+    stem: "multimoduleInnerClassOuterType",
+    source: "// MODULE: lib\n\
+             class Outer<T>(private val outer: T) {\n\
+             \x20   inner class Inner<U>(private val inner: U) {\n\
+             \x20       fun innerValue(): U = inner\n\
+             \x20   }\n\
+             }\n\
+             fun value(): Outer<Any>.Inner<String> {\n\
+             \x20   val outer = Outer<Any>(\"O\")\n\
+             \x20   return outer.Inner(\"K\")\n\
+             }\n\
+             // MODULE: main(lib)\n\
+             fun accept(value: Outer<Any>.Inner<String>): String = value.innerValue()\n\
+             fun box(): String {\n\
+             \x20   val inner: String = accept(value())\n\
+             \x20   return if (inner == \"K\") \"OK\" else \"fail $inner\"\n\
+             }\n",
+};
+
+/// A member extension has two independent receivers across the KLIB boundary: the imported class
+/// instance dispatches the member from the consumer's extension body, while the source extension
+/// receiver remains in the function parameters. The library constructs its own class so this case
+/// isolates receiver ABI from cross-KLIB constructor support.
+pub const MEMBER_EXTENSION_RECEIVERS: Case = Case {
+    stem: "multimoduleMemberExtensionReceivers",
+    source: "// MODULE: lib\n\
+             class Host(private val prefix: String) {\n\
+             \x20   fun String.decorate(suffix: String): String = prefix + this + suffix\n\
+             }\n\
+             fun host(): Host = Host(\"O\")\n\
+             // MODULE: main(lib)\n\
+             fun Host.decorateOk(): String = \"K\".decorate(\"!\")\n\
+             fun box(): String {\n\
+             \x20   val decorated = host().decorateOk()\n\
+             \x20   return if (decorated == \"OK!\") \"OK\" else decorated\n\
+             }\n",
+};
+
 pub const DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS: Case = Case {
     stem: "multimoduleDependencyFunctionImplementationMarkers",
     source: "// TARGET_BACKEND: NATIVE\n\
@@ -201,6 +244,8 @@ pub const ALL: &[Case] = &[
     FORWARD_PROPERTY_IDS,
     LOCAL_FUNCTION_SYMBOLS,
     LOCAL_INCREMENT_SHAPES,
+    INNER_CLASS_OUTER_TYPE,
+    MEMBER_EXTENSION_RECEIVERS,
     DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS,
     NATIVE_ABI_SYMBOLS,
     FLOATING_BITS,

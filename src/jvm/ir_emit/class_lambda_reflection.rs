@@ -110,6 +110,7 @@ pub(super) fn reflect(
         &local_classifiers,
     );
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
+    let inner_classifier = |classifier| formatter.inner_classifier(classifier);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
             function_name: crate::metadata::lambda_function::function_name(origin.form),
@@ -125,6 +126,7 @@ pub(super) fn reflect(
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &enum_entry_bodies,
             intersection_approximation: &approximate_intersection,
+            inner_classifiers: &inner_classifier,
         },
     )?;
     let arity = usize::from(receiver.is_some()) + values.len();

@@ -13,12 +13,48 @@ impl<'a> FileLowering<'a> {
     pub(super) fn define_dependency_exports(
         &mut self,
         file_init: FuncId,
-        exports: &HashMap<FunId, String>,
+        exports: &HashMap<FunId, super::super::DependencyExportDefinition>,
     ) -> Result<(), Unsupported> {
-        for (&function, symbol) in exports {
-            self.define_export(file_init, function, symbol)?;
+        for (&function, export) in exports {
+            self.define_dependency_export(
+                file_init,
+                function,
+                &export.symbol,
+                export
+                    .member_receiver
+                    .map(|receiver| receiver.semantic_type()),
+            )?;
         }
         Ok(())
+    }
+
+    /// Export a source-module dependency body under its exact KLIB identity. Unlike a C source
+    /// export, an instance member keeps its dispatch receiver as the first ABI operand.
+    fn define_dependency_export(
+        &mut self,
+        file_init: FuncId,
+        function: u32,
+        symbol: &str,
+        member_receiver: Option<Ty>,
+    ) -> Result<(), Unsupported> {
+        let declared = &self.ir.functions[function as usize];
+        let mut params =
+            Vec::with_capacity(declared.params.len() + usize::from(member_receiver.is_some()));
+        match (member_receiver, declared.dispatch_receiver) {
+            (Some(Ty::Obj(receiver, arguments)), Some(owner))
+                if receiver == owner && arguments.is_empty() =>
+            {
+                params.push(member_receiver.expect("matched a member receiver"));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(declined!(
+                    "a dependency export whose member receiver disagrees with its body"
+                ))
+            }
+        }
+        params.extend(declared.params.iter().copied());
+        self.define_export_with_params(file_init, function, symbol, params)
     }
 
     pub(super) fn define_c_exports(
@@ -46,6 +82,17 @@ impl<'a> FileLowering<'a> {
     ) -> Result<(), Unsupported> {
         let declared = &self.ir.functions[function as usize];
         let params = declared.params.clone();
+        self.define_export_with_params(file_init, function, symbol, params)
+    }
+
+    fn define_export_with_params(
+        &mut self,
+        file_init: FuncId,
+        function: u32,
+        symbol: &str,
+        params: Vec<Ty>,
+    ) -> Result<(), Unsupported> {
+        let declared = &self.ir.functions[function as usize];
         let ret = declared.ret;
         let signature = self.signature_of(&params, ret)?;
         let id = self

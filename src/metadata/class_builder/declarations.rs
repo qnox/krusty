@@ -227,6 +227,8 @@ pub struct ClassTail<'a> {
     /// Checked approximation of a non-denotable intersection at the metadata boundary. The
     /// serializer has no declaration source and must never guess a classifier's variance.
     pub intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    /// Checked lookup of inner classifiers named by this declaration's metadata types.
+    pub inner_classifiers: crate::metadata::InnerClassifiers<'a>,
     /// How SOURCE spelled the CLASS HEADER's types: primary-constructor parameters and
     /// type-parameter bounds. Members carry their own on [`FnMeta`]/[`PropMeta`].
     pub spellings: crate::spelling::DeclaredSpellings,
@@ -260,7 +262,7 @@ pub struct ClassTail<'a> {
     /// `inlineClassUnderlyingType` (f18, an inline `Type`). kotlinc records the type only when the
     /// property is not public API, since a reader otherwise finds it on the property itself, so
     /// the type is `None` for a public or protected property. `None` for an ordinary class.
-    pub inline_underlying: Option<(&'a str, Option<Ty>)>,
+    pub inline_underlying: Option<(&'a str, Option<(Ty, &'a crate::spelling::Spelled)>)>,
     /// A compiler-version requirement attached to the class. `-jvm-default=no-compatibility`
     /// requires compiler 1.4.0 so older consumers do not interpret the interface under the legacy
     /// `$DefaultImpls` rules.
@@ -317,6 +319,7 @@ impl Default for ClassTail<'_> {
     fn default() -> Self {
         ClassTail {
             intersection_approximation: None,
+            inner_classifiers: crate::metadata::MetadataTypeLookups::default().inner_classifiers,
             supertype_spellings: &[],
             spellings: crate::spelling::DeclaredSpellings::default(),
             flags: DEFAULT_CLASS_FLAGS,

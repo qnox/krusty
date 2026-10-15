@@ -946,11 +946,6 @@ impl Body<'_> {
     fn primary_constructor(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = self.ir.classes[class as usize].clone();
         let name = declaration.fq_name();
-        if !declaration.pre_super_param_fields.is_empty() {
-            return Err(format!(
-                "a store before the superclass constructor (`{name}`)"
-            ));
-        }
         if self
             .ir
             .super_constructor_default_arguments
@@ -964,6 +959,31 @@ impl Body<'_> {
         for &statement in &declaration.super_arg_prelude {
             self.statement(statement)?;
         }
+        // These exact parameter-to-field pairs are semantic constructor-order metadata. In
+        // particular, an inner class must expose its enclosing instance before a superclass
+        // constructor can call an override which reads it.
+        let structure = self.file_classes()?.structure(class);
+        for &(parameter, field) in &declaration.pre_super_param_fields {
+            let argument = declaration
+                .ctor_args
+                .get(parameter as usize)
+                .ok_or_else(|| format!("a pre-super store from an unknown parameter (`{name}`)"))?;
+            let stored = declaration
+                .fields
+                .get(field as usize)
+                .ok_or_else(|| format!("a pre-super store to an unknown field (`{name}`)"))?;
+            if argument.field_index != Some(field) || carrier(argument.ty)? != carrier(stored.ty)? {
+                return Err(format!(
+                    "a pre-super constructor parameter stored at another field (`{name}`)"
+                ));
+            }
+            let slot = self.file_classes()?.field(class, field);
+            self.code
+                .local_get(0)
+                .ref_cast(false, HeapType::Concrete(structure))
+                .local_get(parameter + 1)
+                .struct_set(structure, slot);
+        }
         match self.file_classes()?.tables.table(class).superclass {
             Some(parent) => {
                 let (constructor, params) =
@@ -976,7 +996,6 @@ impl Body<'_> {
             None => {}
         }
         if !declaration.explicit_param_stores {
-            let structure = self.file_classes()?.structure(class);
             let mut next_field = 0;
             for (index, argument) in declaration.ctor_args.iter().enumerate() {
                 if !argument.is_field {
@@ -984,6 +1003,12 @@ impl Body<'_> {
                 }
                 let field = argument.field_index.unwrap_or(next_field);
                 next_field = field + 1;
+                if declaration
+                    .pre_super_param_fields
+                    .contains(&(index as u32, field))
+                {
+                    continue;
+                }
                 if carrier(argument.ty)? != carrier(declaration.fields[field as usize].ty)? {
                     return Err(format!(
                         "a constructor parameter stored at another type (`{name}`)"
