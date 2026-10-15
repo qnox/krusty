@@ -3070,6 +3070,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does not change the constraint; the box covers it. Tests:
   `tests/delegate_initializer_constraint_e2e.rs`; box:
   `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
+- **A builder receiver that flows into a fixed type constrains the builder's variable.** kotlinc
+  accepts `fun <R> f(action: W<R>.(Int) -> Unit) = build { W(this).action(1) }` with
+  `fun <E> build(block: Chan<E>.() -> Unit): List<E>` and `class W<R>(val ch: Chan<R>)`, and
+  infers `List<R>`: PCLA relates `W<E> <: W<R>` at the function value's invocation. The same holds
+  when the receiver reaches a typed local (`val c: Chan<String> = this`), a function value's
+  parameter (`f(this)`, `action(W(this), 3)`), or its extension receiver, explicit (`this.f()`) or
+  implicit (`f()`). krusty's body check already related them, but the pass that infers an
+  unannotated declaration's result recorded builder constraints only for selected generic calls
+  and their arguments. With no other evidence it published `List<Any?>`, and the body check then
+  re-solved the builder against that expected result and reported `unresolved reference 'action'
+  on receiver of type 'W<Any?>'`, `no value passed for parameter 'p1'`, or an argument or
+  initializer mismatch naming `Any?`. Signature evaluation now records a typed local's
+  initializer against its declared type, and every argument of an invoked function value against
+  its parameter. A function value's implicit extension receiver is the innermost implicit receiver
+  whose type reaches the declared receiver's classifier, the receiver the body check selects. The
+  case comes from IntelliJ's coroutine utilities (`channelFlow { CTC(channel).action(x) }`). Test:
+  `tests/builder_inference_receivers_e2e.rs`.
 - **A builder type variable's lower bounds join to their nearest common supertype.**
   `Shape.Group(buildMap { put("a", Dot(1)); put("b", Line("x")); if (flag) put("c", extra) })`,
   with `class Group(val entries: Map<String, Shape>)` and `Dot`, `Line`, `Group` subclasses of the
