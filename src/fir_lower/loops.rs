@@ -667,6 +667,7 @@ impl BodyLowering<'_> {
                 .unwrap_or(Err(FirLoweringFailure::MissingCallable(*target))),
             crate::fir::FirCallTarget::External {
                 declaration,
+                singleton_dispatch,
                 default_provider,
                 receiver,
                 declared_receiver,
@@ -683,6 +684,7 @@ impl BodyLowering<'_> {
             } => self
                 .external_call(super::source_calls::ExternalCallRequest {
                     target: *declaration,
+                    singleton_dispatch: *singleton_dispatch,
                     default_provider: *default_provider,
                     receiver_ty: *receiver,
                     declared_receiver: *declared_receiver,

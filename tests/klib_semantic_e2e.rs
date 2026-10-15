@@ -29,6 +29,60 @@ fn shaped_function_type(ty: &KotlinType) -> bool {
 }
 
 #[test]
+fn wasm_float_from_bits_retains_its_companion_extension_receiver() {
+    let Some(stdlib) = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::WasmJs,
+    ) else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "KRUSTY_REQUIRE_KLIB is set but no Wasm/JS stdlib KLIB is provisioned"
+        );
+        return;
+    };
+    let archive = KlibArchive::open(&stdlib)
+        .unwrap_or_else(|error| panic!("open {}: {error}", stdlib.display()));
+    let mut matches = Vec::new();
+    for fragment in archive
+        .package_fragments()
+        .into_iter()
+        .filter(|fragment| fragment.package_fqname == "kotlin")
+    {
+        let bytes = archive
+            .read(&fragment.entry)
+            .unwrap_or_else(|error| panic!("read {}: {error}", fragment.entry));
+        let package = semantic::parse_package_fragment_checked(&bytes)
+            .unwrap_or_else(|error| panic!("decode {}: {error:?}", fragment.entry));
+        matches.extend(
+            package
+                .functions
+                .into_iter()
+                .filter(|function| function.name == "fromBits")
+                .filter(|function| {
+                    function.ret.internal() == Some("kotlin/Float")
+                        && function.params.len() == 1
+                        && function.params[0].internal() == Some("kotlin/Int")
+                }),
+        );
+    }
+
+    let [from_bits] = matches.as_slice() else {
+        panic!(
+            "expected one Wasm kotlin.Float.fromBits(Int), found {}",
+            matches.len()
+        );
+    };
+    assert!(
+        !from_bits.is_static,
+        "the selected Wasm artifact encodes fromBits as an ordinary extension; associated source lookup is normalized separately"
+    );
+    assert_eq!(
+        from_bits.receiver.as_ref().and_then(KotlinType::internal),
+        Some("kotlin/Float.Companion"),
+        "the selected Wasm artifact's ordinary extension retains its exact companion-object receiver"
+    );
+}
+
+#[test]
 fn kotlin_native_stdlib_fragments_publish_complete_common_semantics() {
     let Some(root) = distribution_root() else {
         eprintln!("KLIB semantic integration requires `just klib-semantics`");

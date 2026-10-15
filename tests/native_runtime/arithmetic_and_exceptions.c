@@ -9,12 +9,27 @@
    declared divergences. */
 #include "transcript.h"
 
+#include <string.h>
+
 #define INT_MIN_VALUE ((kt_int)0x80000000u)
 #define LONG_MIN_VALUE ((kt_long)0x8000000000000000ull)
 
 static KRef int_(kt_int value) { return kt_box_int(value); }
 static KRef long_(kt_long value) { return kt_box_long(value); }
 static KRef boolean_(kt_boolean value) { return kt_box_boolean(value); }
+
+static kt_long raw_double_bits(kt_double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return (kt_long)bits;
+}
+
+static kt_double double_from_bits(kt_long bits) {
+    uint64_t raw = (uint64_t)bits;
+    kt_double value;
+    memcpy(&value, &raw, sizeof value);
+    return value;
+}
 
 __attribute__((noinline)) static void integers(void) {
     say_line("Int.MIN_VALUE / -1", int_(kt_div_int(INT_MIN_VALUE, -1)));
@@ -36,7 +51,7 @@ __attribute__((noinline)) static void integers(void) {
     say_line("Long.MIN_VALUE shr 63", long_(kt_shr_long(LONG_MIN_VALUE, 63)));
     say_line("abs(Int.MIN_VALUE)", int_(kt_abs_int(INT_MIN_VALUE)));
     say_line("abs(-5L)", long_(kt_abs_long(-5)));
-    say_line("abs(-0.0).toRawBits()", long_(kt_double_to_raw_bits(kt_abs_double(-0.0))));
+    say_line("abs(-0.0).toRawBits()", long_(raw_double_bits(kt_abs_double(-0.0))));
 }
 
 __attribute__((noinline)) static void unsigned_integers(void) {
@@ -49,8 +64,8 @@ __attribute__((noinline)) static void unsigned_integers(void) {
 }
 
 __attribute__((noinline)) static void floating_order(void) {
-    kt_double nan = kt_double_from_bits(0x7FF8000000000000ll);
-    kt_double infinity = kt_double_from_bits(0x7FF0000000000000ll);
+    kt_double nan = double_from_bits(0x7FF8000000000000ll);
+    kt_double infinity = double_from_bits(0x7FF0000000000000ll);
     say_line("(-0.0).compareTo(0.0)", int_(kt_compare_double(-0.0, 0.0)));
     say_line("NaN.compareTo(POSITIVE_INFINITY)", int_(kt_compare_double(nan, infinity)));
     say_line("NaN.compareTo(NaN)", int_(kt_compare_double(nan, nan)));

@@ -1099,8 +1099,9 @@ impl BodyLowering<'_> {
         if operands.is_empty() {
             return Some(());
         }
+        let bound = usize::from(callable.bound_receiver.is_some());
         let mut staged = Vec::with_capacity(operands.len());
-        for value in operands {
+        for (ordinal, value) in operands.into_iter().enumerate() {
             if matches!(self.ir.expr(value), IrExpr::GetValue(_)) {
                 staged.push(value);
                 continue;
@@ -1114,11 +1115,15 @@ impl BodyLowering<'_> {
                 named: false,
             });
             declarations.push(declaration);
+            if ordinal < bound {
+                self.ir
+                    .inline_callable_reference_receiver_bindings
+                    .insert(declaration);
+            }
             let read = self.ir.add_expr(IrExpr::GetValue(slot));
             self.ir.logical_types.insert(read, ty);
             staged.push(read);
         }
-        let bound = usize::from(callable.bound_receiver.is_some());
         if bound == 1 {
             callable.bound_receiver = Some(staged[0]);
         }
@@ -1736,6 +1741,10 @@ fn specialize_checked_argument(argument: &mut IrCheckedArgument, bindings: &Hash
 
 fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, Ty>) {
     match operation {
+        IrIntrinsic::ReinterpretBits { from, to } => {
+            specialize_ty(from, bindings);
+            specialize_ty(to, bindings);
+        }
         IrIntrinsic::PrimitiveCompare { operand, .. }
         | IrIntrinsic::UnsignedCompare { operand }
         | IrIntrinsic::UnsignedToString { source: operand }

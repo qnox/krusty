@@ -11,10 +11,12 @@ mod demo_package;
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
 use crate::fir::SourceFileId;
-use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
-use crate::klib::KlibArchive;
+use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile, IrIntrinsic};
 use crate::klib_libraries::{KlibDeclarationBodies, KlibLibraries};
-use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
+use crate::libraries::{
+    ExternalCallableKind, FnKind, KlibBodyCompanionReceiver, KlibDeclarationSignature,
+    KlibDependencyCallable,
+};
 use crate::metadata::id_signature::{
     callable_signature, metadata_class_signature, CallableShape, DeclarationContainer,
     KlibPublicIdSignature, MetadataClass, MetadataContainer, Placement,
@@ -25,13 +27,13 @@ use crate::metadata::klib_ir::tree::{
     KlibIrParameter, KlibIrStatement, KlibIrSyntheticBody, KlibIrType, KlibIrTypeId,
 };
 use crate::metadata::klib_ir::{
-    read_declaration_trees, KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees,
-    KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
+    KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol,
+    KlibIrSymbolKind,
 };
 use crate::metadata::semantic::{KotlinFunction, KotlinPackage};
 use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, Ty, Visibility};
+use crate::types::{type_name, Ty, TypeName, Visibility};
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
@@ -54,33 +56,87 @@ pub(super) fn frozen_function(
     receiver: Option<Ty>,
     params: &[Ty],
 ) -> BackendCallableFact {
-    let symbols = libraries.symbols(SymbolNamespace::Package(type_name(package)), name);
-    let selected = symbols
-        .callables
-        .functions()
-        .iter()
-        .filter(|function| {
+    frozen_in_namespace(
+        libraries,
+        SymbolNamespace::Package(type_name(package)),
+        name,
+        receiver,
+        params,
+    )
+}
+
+/// The fact for an associated declaration named through `classifier` without a value operand.
+fn frozen_associated_function(
+    libraries: &KlibLibraries,
+    classifier: &str,
+    name: &str,
+    params: &[Ty],
+) -> BackendCallableFact {
+    frozen_in_namespace(
+        libraries,
+        SymbolNamespace::Classifier(type_name(classifier)),
+        name,
+        None,
+        params,
+    )
+}
+
+fn frozen_in_namespace(
+    libraries: &KlibLibraries,
+    namespace: SymbolNamespace,
+    name: &str,
+    receiver: Option<Ty>,
+    params: &[Ty],
+) -> BackendCallableFact {
+    frozen_in_namespaces(libraries, &[namespace], name, receiver, params)
+}
+
+/// Freeze one exact semantic callable from the serialized namespaces in which different KLIB
+/// producers may publish that declaration. The combined set must still name one provider identity:
+/// this test fixture models normalized candidate collection, not an ordered lookup fallback.
+fn frozen_in_namespaces(
+    libraries: &KlibLibraries,
+    namespaces: &[SymbolNamespace],
+    name: &str,
+    receiver: Option<Ty>,
+    params: &[Ty],
+) -> BackendCallableFact {
+    let mut selected = Vec::new();
+    for &namespace in namespaces {
+        let symbols = libraries.symbols(namespace, name);
+        for function in symbols.callables.functions().iter().filter(|function| {
             function.semantic_receiver() == receiver
                 && function.semantic_params().as_ref() == params
-        })
-        .collect::<Vec<_>>();
-    let [function] = selected.as_slice() else {
+        }) {
+            let target = function
+                .callable
+                .external_identity
+                .expect("a KLIB function carries its provider identity");
+            if !selected
+                .iter()
+                .any(|(candidate, _, _)| *candidate == target)
+            {
+                selected.push((
+                    target,
+                    function.callable.params.clone(),
+                    function.callable.ret,
+                ));
+            }
+        }
+    }
+    let [(target, callable_params, ret)] = selected.as_slice() else {
         panic!(
             "expected one `{name}` on {receiver:?}, found {}",
             selected.len()
         );
     };
-    let target = function
-        .callable
-        .external_identity
-        .expect("a KLIB function carries its provider identity");
     let mut ir = IrFile::default();
     ir.add_expr(IrExpr::Call {
         callee: Callee::External {
-            target,
+            target: *target,
             default_provider: None,
-            params: function.callable.params.clone(),
-            ret: function.callable.ret,
+            params: callable_params.clone(),
+            ret: *ret,
             substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
@@ -90,7 +146,92 @@ pub(super) fn frozen_function(
     });
     CheckedBackendCallables::freeze(&ir, libraries)
         .expect("the provider answers for its identity")
-        .callable(target)
+        .callable(*target)
+        .expect("the selected call is frozen")
+        .clone()
+}
+
+/// Freeze the ordinary floating-point `hashCode` declaration from either KLIB representation used
+/// by the supported distributions. Older stdlibs publish it as a package extension; newer ones as
+/// an instance member in the classifier's declaration record. These are two serialized shapes of
+/// the same source-call candidate, combined before the exact provider identity is selected rather
+/// than tried as ordered fallbacks.
+fn frozen_floating_hash_code(
+    libraries: &KlibLibraries,
+    classifier: TypeName,
+    receiver: Ty,
+) -> BackendCallableFact {
+    let mut selected = Vec::new();
+    let package = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "hashCode");
+    for function in package.callables.functions().iter().filter(|function| {
+        function.kind == FnKind::Extension
+            && function.semantic_receiver() == Some(receiver)
+            && function.semantic_params().is_empty()
+    }) {
+        let target = function
+            .callable
+            .external_identity
+            .expect("a KLIB function carries its provider identity");
+        if !selected
+            .iter()
+            .any(|(candidate, _, _)| *candidate == target)
+        {
+            selected.push((
+                target,
+                function.callable.params.clone(),
+                function.callable.ret,
+            ));
+        }
+    }
+    if let Some(record) = libraries.classifier(classifier) {
+        for function in record
+            .declared_callables
+            .get("hashCode")
+            .into_iter()
+            .flat_map(|callables| callables.functions().iter())
+            .filter(|function| {
+                function.kind == FnKind::Member && function.semantic_params().is_empty()
+            })
+        {
+            let target = function
+                .callable
+                .external_identity
+                .expect("a KLIB function carries its provider identity");
+            if !selected
+                .iter()
+                .any(|(candidate, _, _)| *candidate == target)
+            {
+                selected.push((
+                    target,
+                    function.callable.params.clone(),
+                    function.callable.ret,
+                ));
+            }
+        }
+    }
+    let [(target, callable_params, ret)] = selected.as_slice() else {
+        panic!(
+            "expected one ordinary `hashCode` declaration for {classifier:?}, found {}",
+            selected.len()
+        );
+    };
+    let mut ir = IrFile::default();
+    ir.add_expr(IrExpr::Call {
+        callee: Callee::External {
+            target: *target,
+            default_provider: None,
+            params: callable_params.clone(),
+            ret: *ret,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        },
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    CheckedBackendCallables::freeze(&ir, libraries)
+        .expect("the provider answers for its identity")
+        .callable(*target)
         .expect("the selected call is frozen")
         .clone()
 }
@@ -380,6 +521,7 @@ fn coerce_declaration() -> KotlinFunction {
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        annotation_applications: Vec::new(),
         return_value_status: Default::default(),
         contract: None,
     }
@@ -528,6 +670,13 @@ impl Parts {
 fn coerce_fixture(
     body: impl FnOnce(&Parts, &mut KlibIrArena) -> Option<KlibIrBody>,
 ) -> (BackendCallableFact, KlibDeclarationBodies) {
+    coerce_fixture_with_companion_marker(None, body)
+}
+
+fn coerce_fixture_with_companion_marker(
+    companion_extension: Option<&str>,
+    body: impl FnOnce(&Parts, &mut KlibIrArena) -> Option<KlibIrBody>,
+) -> (BackendCallableFact, KlibDeclarationBodies) {
     let libraries = KlibLibraries::from_named_packages(
         "fixture",
         vec![(
@@ -539,19 +688,40 @@ fn coerce_fixture(
         )],
     )
     .expect("the declaration is signable");
-    let fact = frozen(
+    let mut fact = frozen(
         &libraries,
         "kotlin/ranges",
         "coerceAtLeast",
         Ty::Int,
         &[Ty::Int],
     );
+    if companion_extension.is_some() {
+        assert_eq!(fact.params, [Ty::Int, Ty::Int]);
+        assert_eq!(
+            *fact.parameter_identities,
+            [
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+                crate::fir::ResolvedParameterIdentity::Source("minimumValue".into()),
+            ]
+        );
+        fact.kind = ExternalCallableKind::TopLevel;
+        fact.params.remove(fact.context_count);
+        fact.parameter_identities = fact
+            .parameter_identities
+            .into_vec()
+            .into_iter()
+            .skip(1)
+            .collect();
+        fact.source_receiver = None;
+        fact.klib_body_companion_receiver =
+            Some(KlibBodyCompanionReceiver::new(type_name("kotlin/Int")));
+    }
     let Some(KlibDeclarationSignature::Public(signature)) = fact.declaration_signature.clone()
     else {
         panic!("a top-level KLIB function freezes its public signature");
     };
     let mut arena = KlibIrArena::default();
-    let class = |name| {
+    let class_symbol = |name| {
         let kotlin = ["kotlin".to_owned()];
         let signature = metadata_class_signature(
             MetadataContainer {
@@ -565,13 +735,14 @@ fn coerce_fixture(
                 expect: false,
             },
         );
-        KlibIrType::Simple {
-            classifier: public_symbol(KlibIrSymbolKind::Class, signature),
-            nullability: KlibIrNullability::NotSpecified,
-            arguments: Vec::new(),
-            annotations: Vec::new(),
-            abbreviation: None,
-        }
+        public_symbol(KlibIrSymbolKind::Class, signature)
+    };
+    let class = |name| KlibIrType::Simple {
+        classifier: class_symbol(name),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: Vec::new(),
+        annotations: Vec::new(),
+        abbreviation: None,
     };
     let parts = Parts {
         int: arena.push_type(class("Int")),
@@ -599,7 +770,7 @@ fn coerce_fixture(
         regular_parameters: vec![parameter(&parts.value, "minimumValue")],
         return_type: parts.int,
         overridden: Vec::new(),
-        companion_extension_class: None,
+        companion_extension_class: companion_extension.map(class_symbol),
         prepared_inline_file: None,
         body: body(&parts, &mut arena),
     };
@@ -612,6 +783,129 @@ fn coerce_fixture(
     let bodies = KlibDeclarationBodies::from_libraries(vec![("fixture".to_owned(), trees)])
         .expect("one library");
     (fact, bodies)
+}
+
+#[test]
+fn an_unread_ordinary_extension_receiver_is_published_as_a_body_effect() {
+    let (fact, bodies) = coerce_fixture(|parts, arena| {
+        let value = parts.read(arena, &parts.value);
+        Some(KlibIrBody::Block(vec![parts.return_from(
+            arena,
+            parts.function.clone(),
+            value,
+        )]))
+    });
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &bodies,
+            &KlibCalleeFacts::default(),
+        )
+        .expect("the unread extension lowers");
+
+    assert_eq!(
+        unit.ir().singleton_extension_unread_receivers[&function],
+        Ty::Int
+    );
+}
+
+#[test]
+fn an_unread_companion_extension_receiver_is_published_for_target_support() {
+    let (fact, bodies) = coerce_fixture_with_companion_marker(Some("Int"), |parts, arena| {
+        let value = parts.read(arena, &parts.value);
+        Some(KlibIrBody::Block(vec![parts.return_from(
+            arena,
+            parts.function.clone(),
+            value,
+        )]))
+    });
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &bodies,
+            &KlibCalleeFacts::default(),
+        )
+        .expect("the unread companion extension lowers");
+
+    assert_eq!(
+        unit.ir().singleton_extension_unread_receivers[&function],
+        Ty::Int
+    );
+    assert_eq!(
+        unit.ir().functions[function as usize].params,
+        [Ty::Int, Ty::Int]
+    );
+    assert_eq!(
+        unit.ir().fn_params[&function].identities,
+        [
+            crate::ir::IrParameterIdentity::extension_receiver(),
+            crate::ir::IrParameterIdentity::source("minimumValue"),
+        ]
+    );
+}
+
+#[test]
+fn a_companion_extension_body_requires_its_exact_classifier_marker() {
+    let (mut fact, bodies) =
+        coerce_fixture_with_companion_marker(Some("Int"), |parts, arena| parts.stdlib_body(arena));
+    fact.klib_body_companion_receiver =
+        Some(KlibBodyCompanionReceiver::new(type_name("kotlin/Double")));
+    let mut unit = DependencyBodyUnit::default();
+    let decline = unit
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &bodies,
+            &KlibCalleeFacts::default(),
+        )
+        .expect_err("a different companion classifier declines");
+    assert_eq!(
+        decline.to_string(),
+        "the KLIB body of `kotlin.ranges.coerceAtLeast` (its serialized declaration disagrees \
+         with the selected one: the serialized companion extension classifier disagrees with \
+         the selected one)"
+    );
+    assert!(unit.ir().functions.is_empty());
+}
+
+#[test]
+fn a_header_only_companion_marker_must_match_its_extension_receiver() {
+    let (fact, bodies) = coerce_fixture_with_companion_marker(Some("Double"), |parts, arena| {
+        parts.stdlib_body(arena)
+    });
+    let (arena, function) = bodies
+        .function(fact.klib_body_callable().expect("signed").identity())
+        .expect("the exact declaration has a body");
+    let decline = match super::function_lowering::function_header(None, arena, function) {
+        Ok(_) => panic!("a transitive header cannot publish an effect from a mismatched marker"),
+        Err(decline) => decline,
+    };
+    assert_eq!(
+        decline,
+        super::KlibBodyDeclineReason::SignatureMismatch(
+            "the serialized companion extension classifier disagrees with its receiver".to_owned()
+        )
+    );
+}
+
+#[test]
+fn a_read_companion_extension_receiver_is_not_published_as_unread() {
+    let (fact, bodies) =
+        coerce_fixture_with_companion_marker(Some("Int"), |parts, arena| parts.stdlib_body(arena));
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            &bodies,
+            &KlibCalleeFacts::default(),
+        )
+        .expect("the used companion extension still lowers");
+
+    assert!(!unit
+        .ir()
+        .singleton_extension_unread_receivers
+        .contains_key(&function));
 }
 
 /// The complete decline message of lowering `coerceAtLeast` with the body `body` builds, and
@@ -1137,22 +1431,14 @@ pub(super) fn distribution_root() -> Option<PathBuf> {
     root
 }
 
-/// The common stdlib KLIB's declarations and their bodies.
-pub(super) fn stdlib(root: &std::path::Path) -> (KlibLibraries, KlibDeclarationBodies) {
+/// The common stdlib KLIB's declarations and their provider-owned bodies.
+pub(super) fn stdlib(root: &std::path::Path) -> KlibLibraries {
     let path = root.join("klib/common/stdlib");
-    let libraries =
-        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
-            path.clone(),
-        )])
-        .unwrap_or_else(|error| panic!("{error}"));
-    let archive =
-        KlibArchive::open(&path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
-    let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");
-    let manifest = archive.manifest().expect("stdlib manifest reads");
-    let library = crate::klib_libraries::KlibBodyLibrary::from_manifest(&manifest, trees)
-        .expect("stdlib has a unique_name");
-    let bodies = KlibDeclarationBodies::from_body_libraries(vec![library]).expect("one library");
-    (libraries, bodies)
+    KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+        path,
+        crate::klib_libraries::KlibStdlibSemantics::Native,
+    )])
+    .unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn lowered_stdlib_body(
@@ -1178,7 +1464,8 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
     let Some(root) = distribution_root() else {
         return;
     };
-    let (libraries, bodies) = stdlib(&root);
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
     let mut unit = DependencyBodyUnit::default();
     for (name, relation, parameter) in [
         ("coerceAtLeast", "<", "minimumValue"),
@@ -1196,7 +1483,7 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
                  return if (this {relation} {parameter}) {parameter} else this\n}}\n"
             );
             assert_eq!(
-                lowered_stdlib_body(&libraries, &bodies, &mut unit, name, ty),
+                lowered_stdlib_body(&libraries, bodies, &mut unit, name, ty),
                 source_body(&source, name),
                 "{name} on {receiver}"
             );
@@ -1205,11 +1492,11 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
     validated(unit.ir());
     assert_eq!(unit.ir().functions.len(), 8);
     assert_eq!(
-        lowered_stdlib_body(&libraries, &bodies, &mut unit, "coerceAtLeast", Ty::Int),
+        lowered_stdlib_body(&libraries, bodies, &mut unit, "coerceAtLeast", Ty::Int),
         LOWERED_INT_COERCE_AT_LEAST
     );
     assert_eq!(
-        lowered_stdlib_body(&libraries, &bodies, &mut unit, "coerceAtMost", Ty::Double),
+        lowered_stdlib_body(&libraries, bodies, &mut unit, "coerceAtMost", Ty::Double),
         "scope {scope {return@Some(0) when[Gt(v0: Double, v1!: Double): Boolean -> v1!: Double, \
          else -> v0: Double]: Double: Nothing}: Nothing}"
     );
@@ -1221,7 +1508,8 @@ fn stdlib_coerce_in_declines_by_its_exception_construction() {
     let Some(root) = distribution_root() else {
         return;
     };
-    let (libraries, bodies) = stdlib(&root);
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
     let fact = frozen(
         &libraries,
         "kotlin/ranges",
@@ -1233,7 +1521,7 @@ fn stdlib_coerce_in_declines_by_its_exception_construction() {
     let decline = unit
         .lower_function(
             fact.klib_body_callable().expect("signed"),
-            &bodies,
+            bodies,
             &KlibCalleeFacts::default(),
         )
         .expect_err("coerceIn constructs the exception it throws on an empty range");
@@ -1242,4 +1530,433 @@ fn stdlib_coerce_in_declines_by_its_exception_construction() {
         "the KLIB body of `kotlin.ranges.coerceIn` (it uses a constructor call)"
     );
     assert!(unit.ir().exprs.is_empty());
+}
+
+#[test]
+fn native_to_bits_erases_the_producer_inline_container_and_keeps_the_intrinsic() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+    for (operand, result) in [(Ty::Float, Ty::Int), (Ty::Double, Ty::Long)] {
+        let fact = frozen(&libraries, "kotlin", "toBits", operand, &[]);
+        assert!(
+            bodies.is_supported_intrinsic_root(
+                fact.dependency_callable
+                    .as_ref()
+                    .expect("toBits has an exact KLIB identity"),
+                libraries.intrinsic_facts(),
+            ),
+            "toBits on {operand:?} directly calls its authenticated reinterpret declaration"
+        );
+        let mut unit = DependencyBodyUnit::default();
+        unit.lower_function_with_intrinsics(
+            fact.klib_body_callable().expect("signed"),
+            bodies,
+            &KlibCalleeFacts::default(),
+            libraries.intrinsic_facts(),
+        )
+        .unwrap_or_else(|decline| panic!("toBits on {operand:?}: {decline}"));
+        validated(unit.ir());
+        assert_eq!(unit.ir().functions.len(), 1, "toBits on {operand:?}");
+        assert_eq!(
+            unit.ir()
+                .exprs
+                .iter()
+                .filter(|expression| matches!(expression, IrExpr::Variable { .. }))
+                .count(),
+            0,
+            "producer aliases are not source locals for toBits on {operand:?}"
+        );
+        assert_eq!(
+            unit.ir()
+                .exprs
+                .iter()
+                .filter(|expression| matches!(
+                    expression,
+                    IrExpr::Call {
+                        callee: Callee::Intrinsic {
+                            operation: IrIntrinsic::ReinterpretBits { from, to },
+                            ret,
+                        },
+                        ..
+                    } if *from == operand && *to == result && *ret == result
+                ))
+                .count(),
+            2,
+            "the canonical-NaN and ordinary branches each reinterpret once"
+        );
+        assert_eq!(
+            unit.ir()
+                .exprs
+                .iter()
+                .filter(|expression| matches!(
+                    expression,
+                    IrExpr::Equality {
+                        mode: crate::types::EqualityMode::Ieee754,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "toBits keeps its NaN canonicalization guard"
+        );
+    }
+}
+
+#[test]
+fn intrinsic_support_roots_exclude_ordinary_callers_of_bit_wrappers() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+
+    for (classifier, receiver) in [("kotlin/Float", Ty::Float), ("kotlin/Double", Ty::Double)] {
+        let fact = frozen_floating_hash_code(&libraries, type_name(classifier), receiver);
+        let identity = fact
+            .dependency_callable
+            .as_ref()
+            .expect("hashCode has an exact KLIB identity");
+        let callable = fact.klib_body_callable().expect("signed");
+        let has_reinterpret_reachability =
+            bodies.is_supported_intrinsic_root(identity, libraries.intrinsic_facts());
+        let has_reinterpret_boundary =
+            DependencyBodyUnit::is_reinterpret_root_candidate(callable, bodies);
+        if callable.is_member() {
+            assert!(
+                !has_reinterpret_boundary,
+                "a member cannot become reinterpret support from its scalar result shape"
+            );
+        } else {
+            assert!(
+                has_reinterpret_boundary,
+                "the package-extension representation has the exact scalar wrapper boundary"
+            );
+            assert!(
+                !has_reinterpret_reachability,
+                "the package-extension representation is an ordinary caller, not intrinsic support"
+            );
+        }
+        assert!(
+            !(has_reinterpret_reachability && has_reinterpret_boundary),
+            "{classifier}.hashCode is an ordinary target realization, not an intrinsic support root; reachability={has_reinterpret_reachability}, boundary={has_reinterpret_boundary}"
+        );
+    }
+}
+
+#[test]
+fn native_to_raw_bits_is_a_supported_root_and_lowers_its_authenticated_intrinsic() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+
+    for (operand, result) in [(Ty::Float, Ty::Int), (Ty::Double, Ty::Long)] {
+        let fact = frozen(&libraries, "kotlin", "toRawBits", operand, &[]);
+        let identity = fact
+            .dependency_callable
+            .as_ref()
+            .expect("toRawBits has an exact KLIB identity");
+        assert!(
+            bodies.is_supported_intrinsic_root(identity, libraries.intrinsic_facts()),
+            "toRawBits on {operand:?} directly calls its authenticated reinterpret declaration"
+        );
+        assert!(
+            DependencyBodyUnit::is_reinterpret_root_candidate(
+                fact.klib_body_callable().expect("signed"),
+                bodies,
+            ),
+            "toRawBits on {operand:?} has the exact scalar reinterpret boundary"
+        );
+        let mut unit = DependencyBodyUnit::default();
+        unit.lower_function_with_intrinsics(
+            fact.klib_body_callable().expect("signed"),
+            bodies,
+            &KlibCalleeFacts::default(),
+            libraries.intrinsic_facts(),
+        )
+        .unwrap_or_else(|decline| panic!("toRawBits on {operand:?}: {decline}"));
+        validated(unit.ir());
+        assert_eq!(unit.ir().functions.len(), 1, "toRawBits on {operand:?}");
+        assert_eq!(
+            unit.ir()
+                .exprs
+                .iter()
+                .filter(|expression| matches!(
+                    expression,
+                    IrExpr::Call {
+                        callee: Callee::Intrinsic {
+                            operation: IrIntrinsic::ReinterpretBits { from, to },
+                            ret,
+                        },
+                        ..
+                    } if *from == operand && *to == result && *ret == result
+                ))
+                .count(),
+            1,
+            "toRawBits on {operand:?} lowers exactly one reinterpret"
+        );
+    }
+}
+
+#[test]
+fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity() {
+    let Some(path) =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::WasmJs)
+    else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "KRUSTY_REQUIRE_KLIB is set but no Wasm/JS stdlib KLIB is provisioned"
+        );
+        return;
+    };
+    let libraries =
+        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            path.clone(),
+            crate::klib_libraries::KlibStdlibSemantics::Wasm,
+        )])
+        .unwrap_or_else(|error| panic!("{error}"));
+    let bodies = libraries.declaration_bodies();
+
+    for (name, owner, receiver, parameters, operand, result) in [
+        (
+            "toRawBits",
+            None,
+            Some(Ty::Float),
+            vec![],
+            Ty::Float,
+            Ty::Int,
+        ),
+        (
+            "toRawBits",
+            None,
+            Some(Ty::Double),
+            vec![],
+            Ty::Double,
+            Ty::Long,
+        ),
+        (
+            "fromBits",
+            None,
+            Some(Ty::obj("kotlin/Float$Companion")),
+            vec![Ty::Int],
+            Ty::Int,
+            Ty::Float,
+        ),
+        (
+            "fromBits",
+            None,
+            Some(Ty::obj("kotlin/Double$Companion")),
+            vec![Ty::Long],
+            Ty::Long,
+            Ty::Double,
+        ),
+    ] {
+        let fact = match owner {
+            Some(owner) => frozen_associated_function(&libraries, owner, name, &parameters),
+            None => frozen_function(&libraries, "kotlin", name, receiver, &parameters),
+        };
+        let callable = fact.klib_body_callable().expect("signed");
+        assert!(
+            libraries.is_platform_stdlib_dependency(callable.identity()),
+            "{name} on {operand:?} reverse-joins through its exact placement"
+        );
+        let (arena, selected) = bodies
+            .function(callable.identity())
+            .expect("the exact selected declaration has a body");
+        let body_calls = arena.call_symbols_in_body(selected).collect::<Vec<_>>();
+        let authenticated_calls = body_calls
+            .iter()
+            .filter(|symbol| {
+                let facts = libraries.intrinsic_facts();
+                match &symbol.signature {
+                    KlibIrSignature::FileLocal { .. } => false,
+                    KlibIrSignature::Public(signature) => {
+                        let intrinsic = facts.get(&KlibDependencyCallable {
+                            module: callable.identity().module.clone(),
+                            declaration: KlibDeclarationSignature::Public(signature.clone()),
+                        });
+                        if intrinsic.is_some() {
+                            assert_eq!(
+                                signature.declaration().segments().len(),
+                                1,
+                                "an authenticated Wasm operation is top-level"
+                            );
+                            assert!(
+                                signature.member_id().is_some(),
+                                "a public callable IdSignature carries its mangled member id"
+                            );
+                        }
+                        intrinsic.is_some()
+                    }
+                    KlibIrSignature::Accessor(_) => false,
+                }
+            })
+            .count();
+        assert_eq!(
+            authenticated_calls,
+            1,
+            "{name} on {operand:?}; body calls: {body_calls:#?}; authenticated facts: {}",
+            libraries.intrinsic_facts().len()
+        );
+        assert!(
+            bodies.is_supported_intrinsic_root(callable.identity(), libraries.intrinsic_facts()),
+            "{name} on {operand:?} is an authenticated Wasm intrinsic root"
+        );
+        let mut unit = DependencyBodyUnit::default();
+        let function = unit
+            .lower_function_with_intrinsics(
+                callable,
+                bodies,
+                &KlibCalleeFacts::default(),
+                libraries.intrinsic_facts(),
+            )
+            .unwrap_or_else(|decline| panic!("{name} on {operand:?}: {decline}"));
+        validated(unit.ir());
+        assert_eq!(unit.ir().functions.len(), 1);
+        assert_eq!(unit.ir().functions[function as usize].ret, result);
+        if name == "fromBits" {
+            let Ty::Obj(receiver, arguments) =
+                fact.source_receiver.expect("fromBits is an extension")
+            else {
+                panic!("fromBits has a singleton classifier receiver")
+            };
+            assert!(arguments.is_empty());
+            assert!(
+                bodies.singleton_initialization_is_inert(&callable.identity().module, receiver),
+                "the exact platform companion has no serialized initialization work"
+            );
+            assert!(
+                !bodies.singleton_initialization_is_inert(
+                    &callable.identity().module,
+                    type_name("fixture/ObservableSingleton")
+                ),
+                "an absent classifier cannot grant inert-initialization authority"
+            );
+            assert_eq!(
+                unit.ir().singleton_extension_unread_receivers[&function],
+                fact.source_receiver.expect("fromBits is an extension")
+            );
+        }
+        let calls = unit
+            .ir()
+            .exprs
+            .iter()
+            .filter(|expression| {
+                matches!(
+                    expression,
+                    IrExpr::Call {
+                        callee: Callee::Intrinsic {
+                            operation: IrIntrinsic::ReinterpretBits { from, to },
+                            ret,
+                        },
+                        ..
+                    } if *from == operand && *to == result && *ret == result
+                )
+            })
+            .count();
+        assert_eq!(calls, 1, "{name} on {operand:?}");
+    }
+}
+
+#[test]
+fn wasm_to_bits_closes_its_exact_semantic_wrapper_unit() {
+    let Some(path) =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::WasmJs)
+    else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "KRUSTY_REQUIRE_KLIB is set but no Wasm/JS stdlib KLIB is provisioned"
+        );
+        return;
+    };
+    let libraries =
+        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            path,
+            crate::klib_libraries::KlibStdlibSemantics::Wasm,
+        )])
+        .unwrap_or_else(|error| panic!("{error}"));
+    let bodies = libraries.declaration_bodies();
+
+    for (operand, result) in [(Ty::Float, Ty::Int), (Ty::Double, Ty::Long)] {
+        let fact = frozen_function(&libraries, "kotlin", "toBits", Some(operand), &[]);
+        let callable = fact.klib_body_callable().expect("signed");
+        assert!(
+            bodies.is_supported_intrinsic_root(callable.identity(), libraries.intrinsic_facts()),
+            "toBits on {operand:?} is the one exact wrapper layer above the Wasm operation"
+        );
+        let mut unit = DependencyBodyUnit::default();
+        let function = unit
+            .lower_function_with_intrinsics(
+                callable,
+                bodies,
+                &KlibCalleeFacts::default(),
+                libraries.intrinsic_facts(),
+            )
+            .unwrap_or_else(|decline| panic!("toBits on {operand:?}: {decline}"));
+        validated(unit.ir());
+        assert_eq!(unit.ir().functions[function as usize].ret, result);
+        assert_eq!(
+            unit.ir()
+                .exprs
+                .iter()
+                .filter(|expression| matches!(
+                    expression,
+                    IrExpr::Call {
+                        callee: Callee::Intrinsic {
+                            operation: IrIntrinsic::ReinterpretBits { from, to },
+                            ret,
+                        },
+                        ..
+                    } if *from == operand && *to == result && *ret == result
+                ))
+                .count(),
+            1,
+            "toBits on {operand:?} closes through exactly one authenticated reinterpret"
+        );
+
+        let nan = frozen_function(&libraries, "kotlin", "isNaN", Some(operand), &[]);
+        let nan_callable = nan.klib_body_callable().expect("isNaN is signed");
+        let selected = KlibCalleeFacts::new([nan_callable]);
+        let mut selected_unit = DependencyBodyUnit::default();
+        selected_unit
+            .lower_function_with_intrinsics(
+                callable,
+                bodies,
+                &selected,
+                libraries.intrinsic_facts(),
+            )
+            .unwrap_or_else(|decline| panic!("selected isNaN on {operand:?}: {decline}"));
+        validated(selected_unit.ir());
+        let closed = selected_unit
+            .callable_functions()
+            .map(|(identity, _)| identity)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected_unit.ir().functions.len(),
+            3,
+            "the 2.4.20 Wasm wrapper closes through its selected isNaN body and one exact transitive wrapper"
+        );
+        assert!(closed.contains(&callable.identity()));
+        assert!(closed.contains(&nan_callable.identity()));
+        assert_eq!(
+            selected_unit
+                .ir()
+                .exprs
+                .iter()
+                .filter(|expression| matches!(
+                    expression,
+                    IrExpr::Equality {
+                        mode: crate::types::EqualityMode::Ieee754,
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the selected isNaN body remains the exact IEEE predicate on {operand:?}"
+        );
+    }
 }

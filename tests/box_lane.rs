@@ -225,6 +225,7 @@ impl Libraries {
                     libraries.push(krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
                         krusty::toolchain::kotlin_stdlib_klib(target)
                             .expect("checked by `Libraries::available`"),
+                        klib_stdlib_semantics(target),
                     ));
                     return krusty::klib_libraries::KlibLibraries::open(&libraries).unwrap_or_else(
                         |error| panic!("opening the {target:?} dependency KLIBs: {error}"),
@@ -237,7 +238,10 @@ impl Libraries {
                 let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
                     .expect("checked by `Libraries::available`");
                 let libraries = krusty::klib_libraries::KlibLibraries::open(&[
-                    krusty::klib_libraries::KlibLibraryInput::platform_stdlib(stdlib),
+                    krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                        stdlib,
+                        klib_stdlib_semantics(target),
+                    ),
                 ])
                 .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
                 let compilation = libraries.for_compilation();
@@ -245,6 +249,20 @@ impl Libraries {
                 compilation
             })),
         }
+    }
+}
+
+fn klib_stdlib_semantics(
+    target: krusty::compilation_target::CompilationTarget,
+) -> krusty::klib_libraries::KlibStdlibSemantics {
+    use krusty::compilation_target::CompilationTarget;
+    use krusty::klib_libraries::KlibStdlibSemantics;
+
+    match target {
+        CompilationTarget::Native => KlibStdlibSemantics::Native,
+        CompilationTarget::WasmJs | CompilationTarget::WasmWasi => KlibStdlibSemantics::Wasm,
+        CompilationTarget::Js => KlibStdlibSemantics::Plain,
+        CompilationTarget::Jvm => panic!("JVM box libraries cannot ingest a KLIB stdlib"),
     }
 }
 

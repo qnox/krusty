@@ -1,6 +1,6 @@
 //! Whole source sets analyzed against the Kotlin/Native stdlib KLIB as their platform.
 
-use super::super::{KlibLibraries, KlibLibraryInput};
+use super::super::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 use crate::diag::DiagSink;
 
 pub(super) fn target_stdlib(
@@ -8,8 +8,19 @@ pub(super) fn target_stdlib(
 ) -> Option<KlibLibraries> {
     let stdlib = crate::toolchain::kotlin_stdlib_klib(target)?;
     Some(
-        KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(stdlib)])
-            .unwrap_or_else(|error| panic!("{error}")),
+        KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+            stdlib,
+            match target {
+                crate::compilation_target::CompilationTarget::Native => KlibStdlibSemantics::Native,
+                crate::compilation_target::CompilationTarget::WasmJs
+                | crate::compilation_target::CompilationTarget::WasmWasi => {
+                    KlibStdlibSemantics::Wasm
+                }
+                crate::compilation_target::CompilationTarget::Js => KlibStdlibSemantics::Plain,
+                crate::compilation_target::CompilationTarget::Jvm => return None,
+            },
+        )])
+        .unwrap_or_else(|error| panic!("{error}")),
     )
 }
 

@@ -17,8 +17,73 @@ impl BodyLowering<'_, '_, '_> {
         intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
         receiver: Option<u32>,
         args: &[u32],
+        extension_receiver_parameter: Option<u32>,
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        if intrinsic == Some(crate::backend::BackendCompilerIntrinsic::ReinterpretBits) {
+            let operand = match (receiver, args) {
+                (Some(receiver), []) => receiver,
+                (None, [argument]) => *argument,
+                _ => {
+                    return Some(Err(
+                        "an exact scalar reinterpretation with malformed operands".into(),
+                    ))
+                }
+            };
+            let from = match self.checked_type(operand) {
+                Some(from) => from.non_null(),
+                None => {
+                    return Some(Err(
+                        "an exact scalar reinterpretation without a checked operand type".into(),
+                    ))
+                }
+            };
+            return Some(self.intrinsic(
+                IrIntrinsic::ReinterpretBits { from, to: ret },
+                ret,
+                receiver,
+                args,
+            ));
+        }
+        let floating_extension_operand = |operand: Ty| {
+            let value = exact_extension_operand(receiver, args, extension_receiver_parameter)?;
+            (self.checked_type(value).map(Ty::non_null) == Some(operand)).then_some(value)
+        };
+        match intrinsic {
+            Some(crate::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
+                let Some(value) = floating_extension_operand(operand) else {
+                    return Some(Err(
+                        "an exact floating-point `isNaN` with malformed operands".into(),
+                    ));
+                };
+                if ret != Ty::Boolean {
+                    return Some(Err(
+                        "an exact floating-point `isNaN` with a non-Boolean result".into(),
+                    ));
+                }
+                return Some(self.float_predicate(
+                    super::super::super::intrinsics::FloatPredicate::IsNaN,
+                    value,
+                ));
+            }
+            Some(crate::backend::BackendCompilerIntrinsic::FloatingIsInfinite { operand }) => {
+                let Some(value) = floating_extension_operand(operand) else {
+                    return Some(Err(
+                        "an exact floating-point `isInfinite` with malformed operands".into(),
+                    ));
+                };
+                if ret != Ty::Boolean {
+                    return Some(Err(
+                        "an exact floating-point `isInfinite` with a non-Boolean result".into(),
+                    ));
+                }
+                return Some(self.float_predicate(
+                    super::super::super::intrinsics::FloatPredicate::IsInfinite,
+                    value,
+                ));
+            }
+            _ => {}
+        }
         let operation = match intrinsic {
             Some(crate::backend::BackendCompilerIntrinsic::ArrayGet) => Some(IrIntrinsic::ArrayGet),
             Some(crate::backend::BackendCompilerIntrinsic::ArraySet) => Some(IrIntrinsic::ArraySet),
@@ -68,6 +133,21 @@ impl BodyLowering<'_, '_, '_> {
     }
 }
 
+/// The two common-IR representations of one exact top-level extension receiver. A checked source
+/// edge carries it separately from value arguments. A serialized KLIB support body retains it at
+/// its authenticated parameter coordinate. No other coordinate is an extension operand.
+fn exact_extension_operand(
+    receiver: Option<u32>,
+    args: &[u32],
+    extension_receiver_parameter: Option<u32>,
+) -> Option<u32> {
+    match (receiver, args, extension_receiver_parameter) {
+        (Some(value), [], None) => Some(value),
+        (None, [value], Some(0)) => Some(*value),
+        _ => None,
+    }
+}
+
 pub(super) fn console_intrinsic(
     intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
 ) -> Option<super::super::super::intrinsics::ConsoleIntrinsic> {
@@ -78,5 +158,21 @@ pub(super) fn console_intrinsic(
         Some(BackendCompilerIntrinsic::Print) => Some(ConsoleIntrinsic::Print),
         Some(BackendCompilerIntrinsic::Println) => Some(ConsoleIntrinsic::Println),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exact_extension_operand;
+
+    #[test]
+    fn a_floating_extension_accepts_only_its_two_authenticated_receiver_coordinates() {
+        assert_eq!(exact_extension_operand(Some(3), &[], None), Some(3));
+        assert_eq!(exact_extension_operand(None, &[5], Some(0)), Some(5));
+
+        assert_eq!(exact_extension_operand(None, &[5], None), None);
+        assert_eq!(exact_extension_operand(None, &[5], Some(1)), None);
+        assert_eq!(exact_extension_operand(Some(3), &[5], None), None);
+        assert_eq!(exact_extension_operand(Some(3), &[], Some(0)), None);
     }
 }

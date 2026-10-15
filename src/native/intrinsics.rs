@@ -784,49 +784,6 @@ pub(super) fn is_collections_facade(owner: DeclarationOwner) -> bool {
 pub(super) fn is_ranges_facade(owner: DeclarationOwner) -> bool {
     owner.package_is(crate::types::wk::kotlin_ranges_package())
 }
-/// `Float.fromBits(n)` / `Double.fromBits(n)`, as (runtime symbol, operand, answer).
-///
-/// An EXTENSION of the companion object, declared in `kotlin`, so the receiver is that object and
-/// nothing reads it — which is why this is not [`scalar_member`]: that table evaluates a receiver
-/// and crosses it as a reference, and there is no object here to make. The operand's width is what
-/// says which of the two this is.
-pub(super) fn bits_to_float(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-) -> Option<(&'static str, Ty, Ty)> {
-    if !owner.package_matches("kotlin") || name != "fromBits" {
-        return None;
-    }
-    match params {
-        [Ty::Int] => Some(("kt_float_from_bits", Ty::Int, Ty::Float)),
-        [Ty::Long] => Some(("kt_double_from_bits", Ty::Long, Ty::Double)),
-        _ => None,
-    }
-}
-
-/// `x.toBits()` / `x.toRawBits()`, as (runtime symbol, answer), for a receiver of `receiver`.
-///
-/// Also an extension declared in `kotlin`, and its RECEIVER is a machine value — so, like
-/// [`floor_mod`], it takes that receiver at its own width rather than through a box. The receiver's
-/// type is what says which width, because the declaration takes no parameter to read it from.
-pub(super) fn float_to_bits(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-    receiver: Ty,
-) -> Option<(&'static str, Ty)> {
-    if !owner.package_matches("kotlin") || !params.is_empty() {
-        return None;
-    }
-    match (name, receiver.non_null()) {
-        ("toRawBits", Ty::Float) => Some(("kt_float_to_raw_bits", Ty::Int)),
-        ("toRawBits", Ty::Double) => Some(("kt_double_to_raw_bits", Ty::Long)),
-        ("toBits", Ty::Float) => Some(("kt_float_to_bits", Ty::Int)),
-        ("toBits", Ty::Double) => Some(("kt_double_to_bits", Ty::Long)),
-        _ => None,
-    }
-}
 
 /// Whether this is the selected `Comparable.compareTo` declaration.
 ///

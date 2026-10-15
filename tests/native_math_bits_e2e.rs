@@ -10,7 +10,8 @@
 //! - A BUILDER is walkable text, and the chars iterator re-reads its length every step. That is
 //!   what lets a loop which shortens the builder stop where Kotlin's stops.
 //!
-//! Every expectation is kotlinc's, taken by running the same program under it.
+//! Every expectation is kotlinc's, taken by running the same program under it. Portable
+//! Native/Wasm coverage belongs to the shared real-KLIB conformance inventory.
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
@@ -36,11 +37,9 @@ fn abs_wraps_at_the_integral_minimum_and_clears_the_floating_sign() {
 }
 
 /// The bits of a floating-point value, with the one respect `toBits` and `toRawBits` differ in.
-///
-/// `fromBits` is deliberately absent. It is an extension of the COMPANION object, and while a klib
-/// call reaches it with that object unread, a jar call materializes the object first — which this
-/// target cannot yet do for a type declared in no file. So `fromBits` is answered in one lane only,
-/// and a test pinning it would pass for a reason that is not the one it claims.
+/// The shared multimodule conformance inventory exercises both directions against each selected
+/// target's real stdlib artifact. This focused source-language cross-check remains JVM-only so it
+/// cannot accidentally validate Native against a JVM jar.
 #[test]
 fn the_bit_conversions_round_trip_and_to_bits_canonicalizes_nan() {
     let source = "fun box(): String {\n\
@@ -53,10 +52,13 @@ fn the_bit_conversions_round_trip_and_to_bits_canonicalizes_nan() {
          \x20   if (Double.NaN.toBits() != 9221120237041090560L) return \"fail nan canonical\"\n\
          \x20   if (Float.NaN.toBits() != 2143289344) return \"fail nan canonical float\"\n\
          \x20   if (1.5.toRawBits() != 4609434218613702656L) return \"fail one and a half\"\n\
+         \x20   if (Float.fromBits(1065353216) != 1.0f) return \"fail float from bits\"\n\
+         \x20   if (Double.fromBits(4607182418800017408L) != 1.0) return \"fail double from bits\"\n\
+         \x20   if (1.0f.toRawBits().let(Float::fromBits) != 1.0f) return \"fail float reference\"\n\
+         \x20   if (1.0.toRawBits().let(Double::fromBits) != 1.0) return \"fail double reference\"\n\
          \x20   return \"OK\"\n\
          }\n";
     expect_box_ok_with_stdlib(source, "FloatingBits");
-    expect_native_box(source, "FloatingBits", "OK");
 }
 
 /// `assertSame` is IDENTITY where `assertEquals` is equality.

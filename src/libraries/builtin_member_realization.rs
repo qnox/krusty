@@ -135,6 +135,20 @@ fn conversion_result(name: &str) -> Option<Ty> {
     })
 }
 
+/// An unsigned value class' conversion to its signed physical carrier. The normalized provider
+/// declaration owns this fact: the exact builtin classifier, empty parameter list and signed
+/// result all participate, so an equal source spelling on another class remains ordinary.
+fn unsigned_carrier_conversion(facts: &BuiltinMemberDeclaration<'_>) -> bool {
+    if !facts.params.is_empty() {
+        return false;
+    }
+    match (facts.owner, facts.name, facts.ret) {
+        (owner, "toInt", Ty::Int) => owner == crate::types::wk::uint(),
+        (owner, "toLong", Ty::Long) => owner == crate::types::wk::ulong(),
+        _ => false,
+    }
+}
+
 fn primitive_binary(facts: &BuiltinMemberDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if !facts.is_operator || facts.params.len() != 1 {
         return None;
@@ -513,6 +527,9 @@ pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealizat
     {
         return MemberRealization::Intrinsic(CompilerIntrinsic::NumericConversion);
     }
+    if unsigned_carrier_conversion(&facts) {
+        return MemberRealization::Intrinsic(CompilerIntrinsic::NumericConversion);
+    }
 
     if facts.name == "hashCode"
         && facts.params.is_empty()
@@ -791,6 +808,28 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn unsigned_carrier_conversion_requires_the_exact_builtin_signature() {
+        for declaration in [
+            facts("kotlin/UInt", "toInt", &[], Ty::Int),
+            facts("kotlin/ULong", "toLong", &[], Ty::Long),
+        ] {
+            assert_eq!(
+                realization(declaration),
+                MemberRealization::Intrinsic(CompilerIntrinsic::NumericConversion)
+            );
+        }
+
+        for declaration in [
+            facts("sample/UInt", "toInt", &[], Ty::Int),
+            facts("kotlin/UInt", "toInt", &[Ty::Int], Ty::Int),
+            facts("kotlin/UInt", "toLong", &[], Ty::Long),
+            facts("kotlin/ULong", "toLong", &[], Ty::Int),
+        ] {
+            assert_eq!(realization(declaration), MemberRealization::Dispatch);
+        }
     }
 
     #[test]

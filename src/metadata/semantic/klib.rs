@@ -276,9 +276,9 @@ fn annotation_application(
     })
 }
 
-/// `Annotation.Argument.Value`: `type` (1) ENUM = 10 names `class_id` (6) and `enum_value_id` (7);
-/// ARRAY = 12 repeats `array_element` (9). [`validate_annotation_value`] has already checked the
-/// rest of the shape.
+/// `Annotation.Argument.Value`: `type` (1) STRING = 8 names `string_value` (5), ENUM = 10 names
+/// `class_id` (6) and `enum_value_id` (7), and ARRAY = 12 repeats `array_element` (9).
+/// [`validate_annotation_value`] has already checked the rest of the shape.
 fn annotation_argument(
     body: &[u8],
     strings: &[String],
@@ -286,6 +286,7 @@ fn annotation_argument(
 ) -> Result<metadata::AnnotationArgument, PackageFragmentDecodeError> {
     let mut cursor = Cursor::new(body, 0);
     let mut kind = None;
+    let mut string = None;
     let mut class = None;
     let mut entry = None;
     let mut elements = Vec::new();
@@ -293,6 +294,10 @@ fn annotation_argument(
         let (number, wire) = field(&mut cursor, "annotation value")?;
         match (number, wire) {
             (1, 0) => kind = Some(cursor.varint("annotation value kind")?),
+            (5, 0) => {
+                let id = cursor.varint("annotation string value")?;
+                string = Some(semantic_string(strings, id, "annotation string value")?);
+            }
             (6, 0) => {
                 let id = cursor.varint("annotation class value")?;
                 class = Some(semantic_qname(
@@ -313,17 +318,21 @@ fn annotation_argument(
             (_, wire) => cursor.skip(wire, "annotation value")?,
         }
     }
-    Ok(match (kind, class, entry) {
-        (Some(10), Some(class), Some(entry)) => metadata::AnnotationArgument::Enum {
+    Ok(match (kind, string, class, entry) {
+        (Some(8), Some(value), _, _) => metadata::AnnotationArgument::String(value),
+        (Some(8), None, _, _) => {
+            return Err(semantic_error("string annotation value has no value"))
+        }
+        (Some(10), _, Some(class), Some(entry)) => metadata::AnnotationArgument::Enum {
             class: crate::types::type_name(&class),
             entry,
         },
-        (Some(10), _, _) => {
+        (Some(10), _, _, _) => {
             return Err(semantic_error(
                 "enum annotation value has no class or entry",
             ))
         }
-        (Some(12), _, _) => metadata::AnnotationArgument::Array(elements),
+        (Some(12), _, _, _) => metadata::AnnotationArgument::Array(elements),
         _ => metadata::AnnotationArgument::Other,
     })
 }
@@ -901,6 +910,8 @@ struct SemanticFunctionShape {
     return_type_id: Option<u64>,
     receiver_body: Option<Vec<u8>>,
     receiver_type_id: Option<u64>,
+    companion_receiver_body: Option<Vec<u8>>,
+    companion_receiver_type_id: Option<u64>,
     context_receiver_bodies: Vec<Vec<u8>>,
     context_receiver_type_ids: Vec<u64>,
     context_params: Vec<ParsedValueParam>,
@@ -933,6 +944,8 @@ fn semantic_function_shape(
     let mut return_type_id = None;
     let mut receiver_body = None;
     let mut receiver_type_id = None;
+    let mut companion_receiver_body = None;
+    let mut companion_receiver_type_id = None;
     let mut context_receiver_bodies = Vec::new();
     let mut context_receiver_type_ids = Vec::new();
     let mut context_params = Vec::new();
@@ -995,6 +1008,28 @@ fn semantic_function_shape(
                         .map_err(|error| parameter_error("function context parameter", error))?,
                 );
             }
+            (14, 2) => {
+                if companion_receiver_body.is_some() {
+                    return Err(semantic_error(
+                        "function companion extension receiver has duplicate inline forms",
+                    ));
+                }
+                companion_receiver_body = Some(
+                    cursor
+                        .length_delimited("function companion extension receiver")?
+                        .0
+                        .to_vec(),
+                );
+            }
+            (15, 0) => {
+                if companion_receiver_type_id.is_some() {
+                    return Err(semantic_error(
+                        "function companion extension receiver has duplicate table forms",
+                    ));
+                }
+                companion_receiver_type_id =
+                    Some(cursor.varint("function companion extension receiver type id")?);
+            }
             (_, wire) => cursor.skip(wire, "function declaration")?,
         }
     }
@@ -1008,6 +1043,8 @@ fn semantic_function_shape(
         return_type_id,
         receiver_body,
         receiver_type_id,
+        companion_receiver_body,
+        companion_receiver_type_id,
         context_receiver_bodies,
         context_receiver_type_ids,
         context_params,
@@ -1047,13 +1084,17 @@ fn semantic_function(
     let contract_type_table = type_table_bodies(body, "function declaration")?;
     // Metadata's own annotation fields, `.kotlin_builtins`' `BuiltInsProtoBuf.functionAnnotation`
     // (150), and the KLIB extensions (170, 171).
-    let annotations = annotation_identities(
+    let annotation_applications = annotation_applications(
         body,
         &[12, 34, 150, 170, 171],
         tables.strings,
         tables.qnames,
         "function declaration",
     )?;
+    let annotations = annotation_applications
+        .iter()
+        .map(|annotation| annotation.identity)
+        .collect::<Vec<_>>();
     let function = semantic_function_shape(body)?;
     let type_parameter_bodies = message_bodies(body, 4, "function declaration")?;
     if function.type_params.len() != type_parameter_bodies.len() {
@@ -1110,33 +1151,6 @@ fn semantic_function(
     } else {
         None
     };
-    let mut extras = Cursor::new(body, 0);
-    while !extras.at_end() {
-        let (number, wire) = field(&mut extras, "function declaration")?;
-        match (number, wire) {
-            (14, 2) => {
-                let body = extras
-                    .length_delimited("function companion extension receiver")?
-                    .0;
-                tables.ty(
-                    body,
-                    &type_parameters,
-                    0,
-                    "function companion extension receiver",
-                )?;
-            }
-            (15, 0) => {
-                let id = extras.varint("function companion extension receiver type id")?;
-                tables.ty_by_id(
-                    id,
-                    &type_parameters,
-                    0,
-                    "function companion extension receiver",
-                )?;
-            }
-            (_, wire) => extras.skip(wire, "function declaration")?,
-        }
-    }
     let name = semantic_string(tables.strings, function.name_id, "function declaration")?;
     let ret = tables.type_ref(
         function.return_body.as_deref(),
@@ -1228,6 +1242,13 @@ fn semantic_function(
         param_names.push(parameter.name);
         param_defaults.push(parameter.has_default);
     }
+    let has_companion_receiver =
+        function.companion_receiver_body.is_some() || function.companion_receiver_type_id.is_some();
+    if function.has_receiver && has_companion_receiver {
+        return Err(semantic_error(
+            "function has both ordinary and companion extension receivers",
+        ));
+    }
     let receiver = if function.has_receiver {
         Some(tables.type_ref(
             function.receiver_body.as_deref(),
@@ -1235,9 +1256,20 @@ fn semantic_function(
             &type_parameters,
             "function receiver",
         )?)
+    } else if has_companion_receiver {
+        Some(tables.type_ref(
+            function.companion_receiver_body.as_deref(),
+            function.companion_receiver_type_id,
+            &type_parameters,
+            "function companion extension receiver",
+        )?)
     } else {
         None
     };
+    // Function 14/15 is itself the canonical companion-extension placement fact. Some KLIB
+    // producers do not redundantly set the modern static flag, so normalizing only from that bit
+    // would publish this declaration as an ordinary package extension.
+    let is_static = function.is_static || has_companion_receiver;
     let written = member_params.len();
     let leading = top_params.len() - written;
     let member = metadata::KotlinMember {
@@ -1253,7 +1285,7 @@ fn semantic_function(
         is_operator: function.is_operator,
         is_infix: function.is_infix,
         is_abstract: function.modality == metadata::KotlinModality::Abstract,
-        is_static: function.is_static,
+        is_static,
         return_value_status: function.return_value_status,
         formals: formals.clone(),
         ret_nullable,
@@ -1262,6 +1294,7 @@ fn semantic_function(
         param_defaults: param_defaults[param_defaults.len() - written..].to_vec(),
         vararg: vararg.and_then(|index| index.checked_sub(leading)),
         annotations: annotations.clone(),
+        annotation_applications: annotation_applications.clone(),
         contract: contract.clone(),
     };
     let declaration = metadata::KotlinFunction {
@@ -1285,10 +1318,11 @@ fn semantic_function(
         is_infix: function.is_infix,
         is_expect: function.is_expect,
         is_external: function.is_external,
-        is_static: function.is_static,
+        is_static,
         context_count: context_types.len(),
         context_kinds,
         annotations,
+        annotation_applications,
         return_value_status: function.return_value_status,
         contract,
     };
@@ -1311,13 +1345,17 @@ fn semantic_property(
     // `BuiltInsProtoBuf.propertyAnnotation` (field 150), the same extension number a function uses,
     // and a KLIB to `KlibMetadataProtoBuf.propertyAnnotation` (170). The other annotation fields
     // above are accessor, backing-field and delegate annotations.
-    let annotations = annotation_identities(
+    let annotation_applications = annotation_applications(
         body,
         &[150, 170],
         tables.strings,
         tables.qnames,
         "property declaration",
     )?;
+    let annotations = annotation_applications
+        .iter()
+        .map(|annotation| annotation.identity)
+        .collect::<Vec<_>>();
     let type_parameter_bodies = message_bodies(body, 4, "property declaration")?;
     let (formals, type_parameters) =
         tables.type_parameters(&type_parameter_bodies, inherited, "property declaration")?;
@@ -1329,6 +1367,8 @@ fn semantic_property(
     let mut modern_flags = None;
     let mut receiver_body = None;
     let mut receiver_id = None;
+    let mut companion_receiver_body = None;
+    let mut companion_receiver_id = None;
     let mut context_receivers = Vec::new();
     let mut context_params = Vec::new();
     let mut constant = None;
@@ -1361,12 +1401,25 @@ fn semantic_property(
                 )?);
             }
             (18, 2) => {
-                let nested = cursor.length_delimited("property semantic type")?.0;
-                tables.ty(nested, &type_parameters, 0, "property semantic type")?;
+                if companion_receiver_body.is_some() {
+                    return Err(semantic_error(
+                        "property companion extension receiver has duplicate inline forms",
+                    ));
+                }
+                companion_receiver_body = Some(
+                    cursor
+                        .length_delimited("property companion extension receiver")?
+                        .0,
+                );
             }
             (19, 0) => {
-                let id = cursor.varint("property semantic type id")?;
-                tables.ty_by_id(id, &type_parameters, 0, "property semantic type")?;
+                if companion_receiver_id.is_some() {
+                    return Err(semantic_error(
+                        "property companion extension receiver has duplicate table forms",
+                    ));
+                }
+                companion_receiver_id =
+                    Some(cursor.varint("property companion extension receiver type id")?);
             }
             (13, 0) => {
                 let id = cursor.varint("property context receiver type id")?;
@@ -1437,12 +1490,36 @@ fn semantic_property(
         .or(compatibility_flags)
         .unwrap_or(crate::metadata::property_flags::DEFAULT);
     // The static bit exists only in the modern flag layout.
-    let is_static =
+    let static_flag =
         modern_flags.is_some_and(|flags| flags & crate::metadata::property_flags::IS_STATIC != 0);
-    let receiver = match (receiver_body, receiver_id) {
-        (None, None) => None,
-        (body, id) => Some(tables.type_ref(body, id, &type_parameters, "property receiver")?),
+    let has_ordinary_receiver = receiver_body.is_some() || receiver_id.is_some();
+    let has_companion_receiver =
+        companion_receiver_body.is_some() || companion_receiver_id.is_some();
+    if has_ordinary_receiver && has_companion_receiver {
+        return Err(semantic_error(
+            "property has both ordinary and companion extension receivers",
+        ));
+    }
+    let receiver = if has_ordinary_receiver {
+        Some(tables.type_ref(
+            receiver_body,
+            receiver_id,
+            &type_parameters,
+            "property receiver",
+        )?)
+    } else if has_companion_receiver {
+        Some(tables.type_ref(
+            companion_receiver_body,
+            companion_receiver_id,
+            &type_parameters,
+            "property companion extension receiver",
+        )?)
+    } else {
+        None
     };
+    // Property 18/19 is the companion-extension placement fact even when the producer omits the
+    // redundant modern static flag.
+    let is_static = static_flag || has_companion_receiver;
     // As for functions, a context parameter is also written as a legacy context receiver.
     let contexts = if context_params.is_empty() {
         context_receivers
@@ -1514,6 +1591,7 @@ fn semantic_property(
         param_defaults: Vec::new(),
         vararg: None,
         annotations: annotations.clone(),
+        annotation_applications,
         contract: None,
     };
     let property = metadata::KotlinProperty {
@@ -2164,6 +2242,140 @@ mod tests {
         assert!(package.functions[0].ret.nullable());
     }
 
+    #[test]
+    fn companion_extension_receiver_forms_are_the_semantic_receiver_contract() {
+        let (strings, qnames) = kotlin_types(&["Unit", "Float"]);
+        let unit = class_type(1);
+        let float = class_type(2);
+        let table = type_table(std::slice::from_ref(&float), None);
+
+        for (function_field, property_field, table_form) in [(14, 18, false), (15, 19, true)] {
+            let mut function = function_with_return(Some(&unit), None);
+            let mut property = property_with_return(0, &unit);
+            if table_form {
+                int_field(&mut function, function_field, 0);
+                int_field(&mut property, property_field, 0);
+            } else {
+                bytes_field(&mut function, function_field, &float);
+                bytes_field(&mut property, property_field, &float);
+            }
+            let mut package = package_with_function(&function, Some(&table));
+            bytes_field(&mut package, 4, &property);
+            let package = parse_package_fragment_checked(&fragment(&strings, &qnames, &package))
+                .expect("valid companion-extension receiver fixture");
+
+            assert_eq!(
+                package.functions[0]
+                    .receiver
+                    .as_ref()
+                    .and_then(crate::metadata::semantic::KotlinType::internal),
+                Some("kotlin/Float"),
+                "function receiver field {function_field}"
+            );
+            assert!(
+                package.functions[0].is_static,
+                "function companion receiver field {function_field} establishes associated placement"
+            );
+            assert_eq!(
+                package.properties[0]
+                    .receiver
+                    .as_ref()
+                    .and_then(crate::metadata::semantic::KotlinType::internal),
+                Some("kotlin/Float"),
+                "property receiver field {property_field}"
+            );
+            assert!(
+                package.properties[0].is_static,
+                "property companion receiver field {property_field} establishes associated placement"
+            );
+        }
+    }
+
+    #[test]
+    fn companion_extension_receiver_conflicts_are_exact_errors() {
+        let (strings, qnames) = kotlin_types(&["Unit", "Float"]);
+        let unit = class_type(1);
+        let float = class_type(2);
+        let table = type_table(std::slice::from_ref(&float), None);
+
+        let function_error = |function: Vec<u8>| {
+            exact_error(&fragment(
+                &strings,
+                &qnames,
+                &package_with_function(&function, Some(&table)),
+            ))
+        };
+        let mut function = function_with_return(Some(&unit), None);
+        bytes_field(&mut function, 5, &float);
+        bytes_field(&mut function, 14, &float);
+        assert_eq!(
+            function_error(function),
+            (
+                0,
+                "function has both ordinary and companion extension receivers".to_string()
+            )
+        );
+        let mut function = function_with_return(Some(&unit), None);
+        bytes_field(&mut function, 14, &float);
+        bytes_field(&mut function, 14, &float);
+        assert_eq!(
+            function_error(function),
+            (
+                0,
+                "function companion extension receiver has duplicate inline forms".to_string()
+            )
+        );
+        let mut function = function_with_return(Some(&unit), None);
+        bytes_field(&mut function, 14, &float);
+        int_field(&mut function, 15, 0);
+        assert_eq!(
+            function_error(function),
+            (
+                0,
+                "function companion extension receiver has conflicting inline and table type forms"
+                    .to_string()
+            )
+        );
+
+        let property_error = |property: Vec<u8>| {
+            let mut package = Vec::new();
+            bytes_field(&mut package, 4, &property);
+            bytes_field(&mut package, 30, &table);
+            exact_error(&fragment(&strings, &qnames, &package))
+        };
+        let mut property = property_with_return(0, &unit);
+        bytes_field(&mut property, 5, &float);
+        bytes_field(&mut property, 18, &float);
+        assert_eq!(
+            property_error(property),
+            (
+                0,
+                "property has both ordinary and companion extension receivers".to_string()
+            )
+        );
+        let mut property = property_with_return(0, &unit);
+        int_field(&mut property, 19, 0);
+        int_field(&mut property, 19, 0);
+        assert_eq!(
+            property_error(property),
+            (
+                0,
+                "property companion extension receiver has duplicate table forms".to_string()
+            )
+        );
+        let mut property = property_with_return(0, &unit);
+        bytes_field(&mut property, 18, &float);
+        int_field(&mut property, 19, 0);
+        assert_eq!(
+            property_error(property),
+            (
+                0,
+                "property companion extension receiver has conflicting inline and table type forms"
+                    .to_string()
+            )
+        );
+    }
+
     /// `.kotlin_builtins` writes a function's annotations to `BuiltInsProtoBuf` field 150, a KLIB
     /// to field 170; both decode to the annotation's qualified identity.
     #[test]
@@ -2196,6 +2408,67 @@ mod tests {
                 "annotation field {annotation_field}"
             );
         }
+    }
+
+    #[test]
+    fn function_annotations_keep_string_arguments_on_both_declaration_views() {
+        let strings = [
+            "f",
+            "p",
+            "kotlin",
+            "Unit",
+            "wasm",
+            "internal",
+            "WasmOp",
+            "name",
+            "I32_REINTERPRET_F32",
+            "Holder",
+        ];
+        let qnames = [
+            qname(2, None, 1),
+            qname(3, Some(0), 0),
+            qname(4, Some(0), 1),
+            qname(5, Some(2), 1),
+            qname(6, Some(3), 0),
+            qname(9, Some(0), 0),
+        ];
+        let mut value = Vec::new();
+        int_field(&mut value, 1, 8);
+        int_field(&mut value, 5, 8);
+        let mut argument = Vec::new();
+        int_field(&mut argument, 1, 7);
+        bytes_field(&mut argument, 2, &value);
+        let mut annotation = Vec::new();
+        int_field(&mut annotation, 1, 4);
+        bytes_field(&mut annotation, 2, &argument);
+        let mut function = function_with_return(Some(&class_type(1)), None);
+        bytes_field(&mut function, 170, &annotation);
+
+        let mut class = Vec::new();
+        int_field(&mut class, 3, 5);
+        bytes_field(&mut class, 9, &function);
+        let package =
+            parse_package_fragment_checked(&fragment_with_classes(&strings, &qnames, &[class]))
+                .expect("valid string-valued declaration annotation");
+        let class = &package.classes["kotlin/Holder"];
+        let expected = crate::metadata::semantic::AnnotationApplication {
+            identity: crate::types::type_name("kotlin/wasm/internal/WasmOp"),
+            arguments: vec![(
+                "name".to_owned(),
+                crate::metadata::semantic::AnnotationArgument::String(
+                    "I32_REINTERPRET_F32".to_owned(),
+                ),
+            )],
+        };
+        assert_eq!(
+            class.functions[0].annotation_applications,
+            [expected.clone()]
+        );
+        assert_eq!(class.members[0].annotation_applications, [expected]);
+        assert_eq!(
+            class.functions[0].annotations,
+            [crate::types::type_name("kotlin/wasm/internal/WasmOp")]
+        );
     }
 
     /// `.kotlin_builtins` field 150 belongs to the property declaration, not its getter. Decode it

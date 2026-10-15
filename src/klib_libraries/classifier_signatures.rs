@@ -63,6 +63,7 @@ pub(super) fn sign_package_classes(
     mut classes: HashMap<String, KotlinClass>,
     declared: &mut HashSet<(Option<String>, KlibPublicIdSignature)>,
     internal_friend: bool,
+    compiler_builtin_owner: bool,
     module: Option<&str>,
 ) -> Result<Vec<(TypeName, SignedClassifier)>, KlibLibraryError> {
     let prefix = if package.is_empty() {
@@ -200,6 +201,7 @@ pub(super) fn sign_package_classes(
                 Some(type_parameters.identities()),
                 internal_friend,
             )?;
+            signed.compiler_builtin_owner = compiler_builtin_owner;
             signed.module = module.map(str::to_owned);
             if !declared.insert((module.map(str::to_owned), signed.signature.clone())) {
                 continue;

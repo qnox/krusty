@@ -14,15 +14,21 @@ use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 /// Frozen dependency declarations by their exact module-qualified KLIB identity.
 #[derive(Default)]
 pub struct KlibCalleeFacts<'a> {
-    callables: HashMap<&'a KlibDependencyCallable, KlibCalleeFact<'a>>,
+    callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
 }
 
-/// What the table holds for one signature.
-#[derive(Clone, Copy)]
-pub(super) enum KlibCalleeFact<'a> {
-    Selected(KlibBodyCallable<'a>),
+enum IndexedKlibCallee<'a> {
+    Selected(Vec<KlibBodyCallable<'a>>),
     /// Two frozen declarations claim the signature. Each identity names one declaration, so the
     /// table answers for neither rather than picking one.
+    Ambiguous,
+}
+
+/// What one exact identity contributes to a lowering operation.
+#[derive(Clone, Copy)]
+pub(super) enum KlibCalleeFact<'facts, 'callable> {
+    /// One declaration selected through one or more exact call-edge singleton variants.
+    Selected(&'facts [KlibBodyCallable<'callable>]),
     Ambiguous,
 }
 
@@ -34,13 +40,32 @@ impl<'a> KlibCalleeFacts<'a> {
             facts
                 .callables
                 .entry(callable.identity())
-                .and_modify(|fact| *fact = KlibCalleeFact::Ambiguous)
-                .or_insert(KlibCalleeFact::Selected(callable));
+                .and_modify(|fact| match fact {
+                    IndexedKlibCallee::Selected(selected)
+                        if selected[0].same_declaration_contract(callable) =>
+                    {
+                        if !selected.iter().any(|selected| {
+                            selected.singleton_dispatch() == callable.singleton_dispatch()
+                        }) {
+                            selected.push(callable);
+                        }
+                    }
+                    fact => *fact = IndexedKlibCallee::Ambiguous,
+                })
+                .or_insert_with(|| IndexedKlibCallee::Selected(vec![callable]));
         }
         facts
     }
 
-    pub(super) fn get(&self, identity: &KlibDependencyCallable) -> Option<KlibCalleeFact<'a>> {
-        self.callables.get(identity).copied()
+    pub(super) fn get<'facts>(
+        &'facts self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<KlibCalleeFact<'facts, 'a>> {
+        match self.callables.get(identity)? {
+            IndexedKlibCallee::Selected(selected) => {
+                Some(KlibCalleeFact::Selected(selected.as_slice()))
+            }
+            IndexedKlibCallee::Ambiguous => Some(KlibCalleeFact::Ambiguous),
+        }
     }
 }

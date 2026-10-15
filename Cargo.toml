@@ -24,6 +24,9 @@ ahash = "0.8.12"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # Inflate zlib-compressed JDK jimage resources (JetBrains Runtime / `jlink --compress` images).
 flate2 = "1"
+# Exact KLIB provider snapshots retain a collision-resistant digest of the selected archive
+# contents. A stale equality here would reuse dependency bodies from a different compilation.
+sha2 = "0.11"
 # Kotlin identifier categories.
 unicode-general-category = "1"
 # Keep depth-bounded recursive compiler passes on the caller thread while supplying enough stack

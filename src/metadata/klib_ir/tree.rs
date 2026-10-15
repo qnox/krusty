@@ -85,6 +85,180 @@ impl KlibIrArena {
     pub fn function_at(&self, index: usize) -> &KlibIrFunction {
         &self.functions[index]
     }
+
+    /// Serialized call identities reachable from exactly `function`'s body. Nested declarations
+    /// share their top-level declaration's arena but are not part of the enclosing function's
+    /// expression graph, so their bodies are deliberately not traversed.
+    pub(crate) fn call_symbols_in_body<'a>(
+        &'a self,
+        function: &'a KlibIrFunction,
+    ) -> impl Iterator<Item = &'a KlibIrSymbol> {
+        let mut pending = Vec::new();
+        if let Some(KlibIrBody::Block(statements)) = &function.body {
+            push_statement_expressions(self, statements, &mut pending);
+        }
+        let mut calls = Vec::new();
+        while let Some(id) = pending.pop() {
+            let expression = self.expr(id);
+            push_child_expressions(self, &expression.kind, &mut pending);
+            if let KlibIrExprKind::Call { access, .. } = &expression.kind {
+                calls.push(&access.symbol);
+            }
+        }
+        calls.into_iter()
+    }
+
+    /// Whether exactly `function`'s body reads `symbol` as a value. Nested declarations share the
+    /// arena but are not part of the function's expression graph, matching `call_symbols_in_body`.
+    pub(crate) fn body_reads_value(
+        &self,
+        function: &KlibIrFunction,
+        symbol: &KlibIrSymbol,
+    ) -> bool {
+        let mut pending = Vec::new();
+        if let Some(KlibIrBody::Block(statements)) = &function.body {
+            push_statement_expressions(self, statements, &mut pending);
+        }
+        while let Some(id) = pending.pop() {
+            let expression = self.expr(id);
+            if matches!(
+                &expression.kind,
+                KlibIrExprKind::GetValue { symbol: read, .. } if read == symbol
+            ) {
+                return true;
+            }
+            push_child_expressions(self, &expression.kind, &mut pending);
+        }
+        false
+    }
+}
+
+fn push_access_arguments(access: &KlibIrMemberAccess, pending: &mut Vec<KlibIrExprId>) {
+    match &access.arguments {
+        KlibIrArguments::Flat(arguments) => pending.extend(arguments.iter().flatten().copied()),
+        KlibIrArguments::Split {
+            dispatch_receiver,
+            extension_receiver,
+            values,
+        } => {
+            pending.extend(dispatch_receiver.iter().copied());
+            pending.extend(extension_receiver.iter().copied());
+            pending.extend(values.iter().flatten().copied());
+        }
+    }
+}
+
+fn push_statement_expressions(
+    arena: &KlibIrArena,
+    statements: &[KlibIrStatement],
+    pending: &mut Vec<KlibIrExprId>,
+) {
+    for statement in statements {
+        match statement {
+            KlibIrStatement::Expression(expression) => pending.push(*expression),
+            KlibIrStatement::Variable(variable) => {
+                pending.extend(arena.variable(*variable).initializer.iter().copied());
+            }
+            KlibIrStatement::LocalDelegatedProperty(property) => {
+                if let Some(delegate) = property.delegate {
+                    pending.extend(arena.variable(delegate).initializer.iter().copied());
+                }
+            }
+            KlibIrStatement::Function(_)
+            | KlibIrStatement::Class(_)
+            | KlibIrStatement::TypeAlias(_) => {}
+        }
+    }
+}
+
+fn push_child_expressions(
+    arena: &KlibIrArena,
+    kind: &KlibIrExprKind,
+    pending: &mut Vec<KlibIrExprId>,
+) {
+    use KlibIrExprKind as K;
+    match kind {
+        K::SetValue { value, .. } | K::Return { value, .. } => pending.push(*value),
+        K::Call { access, .. }
+        | K::ConstructorCall { access, .. }
+        | K::DelegatingConstructorCall(access)
+        | K::EnumConstructorCall(access)
+        | K::FunctionReference { access, .. }
+        | K::PropertyReference { access, .. } => push_access_arguments(access, pending),
+        K::RichFunctionReference { bound_values, .. }
+        | K::RichPropertyReference { bound_values, .. }
+        | K::StringConcat(bound_values) => pending.extend(bound_values.iter().copied()),
+        K::Block { statements, .. }
+        | K::Composite { statements, .. }
+        | K::ReturnableBlock { statements, .. }
+        | K::InlinedFunctionBlock { statements, .. } => {
+            push_statement_expressions(arena, statements, pending);
+        }
+        K::When { branches, .. } => {
+            for branch in branches {
+                pending.push(branch.condition);
+                pending.push(branch.result);
+            }
+        }
+        K::TypeOperator { argument, .. } | K::GetClass(argument) | K::Throw(argument) => {
+            pending.push(*argument)
+        }
+        K::GetField { receiver, .. } => pending.extend(receiver.iter().copied()),
+        K::SetField {
+            receiver, value, ..
+        } => {
+            pending.extend(receiver.iter().copied());
+            pending.push(*value);
+        }
+        K::While(loop_) | K::DoWhile(loop_) => {
+            pending.push(loop_.condition);
+            pending.extend(loop_.body.iter().copied());
+        }
+        K::Try {
+            result,
+            catches,
+            finally,
+        } => {
+            pending.push(*result);
+            pending.extend(catches.iter().map(|catch| catch.result));
+            pending.extend(finally.iter().copied());
+        }
+        K::Vararg { elements, .. } => {
+            pending.extend(elements.iter().map(|element| match element {
+                KlibIrVarargElement::Expression(expression)
+                | KlibIrVarargElement::Spread(expression) => *expression,
+            }));
+        }
+        K::DynamicMember { receiver, .. } => pending.push(*receiver),
+        K::DynamicOperator {
+            receiver,
+            arguments,
+            ..
+        } => {
+            pending.push(*receiver);
+            pending.extend(arguments.iter().copied());
+        }
+        K::ErrorCall {
+            receiver,
+            arguments,
+            ..
+        } => {
+            pending.extend(receiver.iter().copied());
+            pending.extend(arguments.iter().copied());
+        }
+        K::Const(_)
+        | K::GetValue { .. }
+        | K::LocalDelegatedPropertyReference { .. }
+        | K::GetObject(_)
+        | K::ClassReference { .. }
+        | K::GetEnumValue(_)
+        | K::Break { .. }
+        | K::Continue { .. }
+        | K::InstanceInitializerCall(_)
+        | K::FunctionExpression { .. }
+        | K::Error { .. }
+        | K::Missing => {}
+    }
 }
 
 /// `IrType`.
@@ -554,4 +728,122 @@ pub struct KlibIrClass {
     pub members: Vec<KlibIrMember>,
     pub value_class_representation: Option<KlibIrValueClassRepresentation>,
     pub sealed_subclasses: Vec<KlibIrSymbol>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::klib_ir::KlibIrSymbolKind;
+
+    fn local(kind: KlibIrSymbolKind, slot: u32) -> KlibIrSymbol {
+        KlibIrSymbol {
+            kind,
+            signature: super::super::KlibIrSignature::FileLocal { file: 0, slot },
+        }
+    }
+
+    fn function(
+        symbol: KlibIrSymbol,
+        return_type: KlibIrTypeId,
+        expression: KlibIrExprId,
+    ) -> KlibIrFunction {
+        KlibIrFunction {
+            base: KlibIrDeclarationBase {
+                symbol,
+                origin: "DEFINED".to_owned(),
+                flags: 0,
+                annotations: Vec::new(),
+            },
+            name: "fixture".to_owned(),
+            constructor: false,
+            type_parameters: Vec::new(),
+            dispatch_receiver: None,
+            context_parameters: Vec::new(),
+            extension_receiver: None,
+            regular_parameters: Vec::new(),
+            return_type,
+            overridden: Vec::new(),
+            companion_extension_class: None,
+            prepared_inline_file: None,
+            body: Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(
+                expression,
+            )])),
+        }
+    }
+
+    #[test]
+    fn body_call_inventory_excludes_sibling_function_bodies_in_the_same_arena() {
+        let mut arena = KlibIrArena::default();
+        let ty = arena.push_type(KlibIrType::Error {
+            annotations: Vec::new(),
+        });
+        let selected_callee = local(KlibIrSymbolKind::Function, 1);
+        let sibling_callee = local(KlibIrSymbolKind::Function, 2);
+        let call = |symbol| KlibIrExprKind::Call {
+            access: KlibIrMemberAccess {
+                symbol,
+                arguments: KlibIrArguments::Flat(Vec::new()),
+                type_arguments: Vec::new(),
+                origin: None,
+            },
+            super_qualifier: None,
+        };
+        let selected_call = arena.push_expr(Some(ty), call(selected_callee.clone()));
+        let sibling_call = arena.push_expr(Some(ty), call(sibling_callee));
+        let selected = arena.push_function(function(
+            local(KlibIrSymbolKind::Function, 10),
+            ty,
+            selected_call,
+        ));
+        arena.push_function(function(
+            local(KlibIrSymbolKind::Function, 11),
+            ty,
+            sibling_call,
+        ));
+
+        assert_eq!(
+            arena
+                .call_symbols_in_body(arena.function(selected))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [selected_callee]
+        );
+    }
+
+    #[test]
+    fn body_value_reads_are_exact_to_the_selected_function_graph() {
+        let mut arena = KlibIrArena::default();
+        let ty = arena.push_type(KlibIrType::Error {
+            annotations: Vec::new(),
+        });
+        let selected_receiver = local(KlibIrSymbolKind::ReceiverParameter, 1);
+        let sibling_receiver = local(KlibIrSymbolKind::ReceiverParameter, 2);
+        let selected_read = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::GetValue {
+                symbol: selected_receiver.clone(),
+                origin: None,
+            },
+        );
+        let sibling_read = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::GetValue {
+                symbol: sibling_receiver.clone(),
+                origin: None,
+            },
+        );
+        let selected = arena.push_function(function(
+            local(KlibIrSymbolKind::Function, 10),
+            ty,
+            selected_read,
+        ));
+        arena.push_function(function(
+            local(KlibIrSymbolKind::Function, 11),
+            ty,
+            sibling_read,
+        ));
+
+        assert!(arena.body_reads_value(arena.function(selected), &selected_receiver));
+        assert!(!arena.body_reads_value(arena.function(selected), &sibling_receiver));
+    }
 }

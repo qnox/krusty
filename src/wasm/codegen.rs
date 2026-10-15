@@ -92,6 +92,10 @@ impl Backend for WasmBackend {
         }
     }
 
+    fn emits_dependency_support(&self) -> bool {
+        true
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -108,7 +112,10 @@ impl Backend for WasmBackend {
                 format!("{DECLINE_PREFIX}{construct} yet"),
             );
         };
-        let selected = self.entry.selected(&file.ir);
+        let selected = match file.kind {
+            crate::backend::CheckedIrUnitKind::Source => self.entry.selected(&file.ir),
+            crate::backend::CheckedIrUnitKind::DependencySupport => None,
+        };
         if selected.is_some_and(|(_, parameters)| {
             parameters == crate::backend::MainEntryParameters::Arguments
         }) {
@@ -123,8 +130,13 @@ impl Backend for WasmBackend {
         let started = state
             .started
             .get_or_insert_with(|| Started::new(self.target));
-        started.callables.enter_source_module(file.module_name);
-        started.properties.enter_source_module(file.module_name);
+        if file.kind == crate::backend::CheckedIrUnitKind::Source {
+            // A support unit has no source `CallableId`s. It is emitted immediately before the
+            // source file that selected it, so rotating the source registry here would discard
+            // cross-file reservations from the current source module.
+            started.callables.enter_source_module(file.module_name);
+            started.properties.enter_source_module(file.module_name);
+        }
         let lowered = match lower::lower_file(
             &file.ir,
             &properties,

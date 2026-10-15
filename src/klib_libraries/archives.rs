@@ -13,8 +13,11 @@ use crate::metadata::semantic::{
 
 use super::inventory::PackageInventory;
 use super::parameter_defaults::ParameterDefaults;
-use super::{KlibLibraries, KlibLibraryError};
-use crate::metadata::klib_ir::{read_declaration_trees_where, KlibIrDecodeError};
+use super::{
+    KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError, KlibLibraries,
+    KlibLibraryError,
+};
+use crate::metadata::klib_ir::{read_declaration_trees, KlibIrDecodeError};
 
 /// One compiler input KLIB and the authority the compilation assigned to it.
 pub struct KlibLibraryInput {
@@ -26,7 +29,40 @@ pub struct KlibLibraryInput {
 enum KlibLibraryRole {
     Dependency,
     Friend,
-    PlatformStdlib,
+    PlatformStdlib(KlibStdlibSemantics),
+}
+
+impl KlibLibraryRole {
+    const fn snapshot_role(self) -> crate::libraries::DependencyBodyProviderRole {
+        match self {
+            Self::Dependency => crate::libraries::DependencyBodyProviderRole::Dependency,
+            Self::Friend => crate::libraries::DependencyBodyProviderRole::Friend,
+            Self::PlatformStdlib(KlibStdlibSemantics::Native) => {
+                crate::libraries::DependencyBodyProviderRole::PlatformNative
+            }
+            Self::PlatformStdlib(KlibStdlibSemantics::Wasm) => {
+                crate::libraries::DependencyBodyProviderRole::PlatformWasm
+            }
+            Self::PlatformStdlib(KlibStdlibSemantics::Plain) => {
+                crate::libraries::DependencyBodyProviderRole::PlatformPlain
+            }
+        }
+    }
+}
+
+/// Compiler-owned semantics carried by the selected platform stdlib KLIB.
+///
+/// This is deliberately a KLIB input fact rather than a compilation target. Input assembly owns
+/// the mapping from its target to one of these closed semantic families; the provider therefore
+/// remains reusable without depending on target selection or admitting a non-KLIB target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KlibStdlibSemantics {
+    /// Kotlin/Native compiler-owned declarations.
+    Native,
+    /// Kotlin/Wasm compiler-owned declarations.
+    Wasm,
+    /// A KLIB platform stdlib with no compiler-owned intrinsic declarations realized here.
+    Plain,
 }
 
 impl KlibLibraryInput {
@@ -47,12 +83,22 @@ impl KlibLibraryInput {
     }
 
     /// The exact platform stdlib selected by compilation input assembly.
-    pub fn platform_stdlib(path: PathBuf) -> Self {
+    pub fn platform_stdlib(path: PathBuf, semantics: KlibStdlibSemantics) -> Self {
         Self {
             path,
-            role: KlibLibraryRole::PlatformStdlib,
+            role: KlibLibraryRole::PlatformStdlib(semantics),
         }
     }
+}
+
+/// One opened input before module authority selects the records visible to this compilation.
+struct LibraryRecord<'a> {
+    input: &'a KlibLibraryInput,
+    module: String,
+    archive: KlibArchive,
+    compiler_builtin_owner: bool,
+    internal_friend: bool,
+    intrinsic_platform: Option<super::target_intrinsics::TargetIntrinsicPlatform>,
 }
 
 /// Why the selected libraries could not be published.
@@ -75,8 +121,12 @@ pub enum KlibLibrariesOpenError {
     },
     /// A decoded declaration cannot be signed.
     Declaration(KlibLibraryError),
+    /// The selected archives cannot be indexed as one exact module-qualified body graph.
+    Bodies(KlibDeclarationBodiesError),
     /// A selected KLIB has no stable module identity for cross-archive joins.
     MissingUniqueName { library: PathBuf },
+    /// A selected KLIB's semantic channels changed after this open froze and decoded them.
+    ChangedDuringOpen { library: PathBuf },
 }
 
 impl std::fmt::Display for KlibLibrariesOpenError {
@@ -104,9 +154,15 @@ impl std::fmt::Display for KlibLibrariesOpenError {
                 library.display()
             ),
             Self::Declaration(error) => error.fmt(formatter),
+            Self::Bodies(error) => error.fmt(formatter),
             Self::MissingUniqueName { library } => write!(
                 formatter,
                 "KLIB {} has no manifest unique_name",
+                library.display()
+            ),
+            Self::ChangedDuringOpen { library } => write!(
+                formatter,
+                "KLIB {} changed while its declarations and bodies were being opened",
                 library.display()
             ),
         }
@@ -120,9 +176,9 @@ impl KlibLibraries {
     pub fn open(libraries: &[KlibLibraryInput]) -> Result<Self, KlibLibrariesOpenError> {
         let mut platform_stdlib = None;
         for input in libraries {
-            if input.role != KlibLibraryRole::PlatformStdlib {
+            let KlibLibraryRole::PlatformStdlib(_) = input.role else {
                 continue;
-            }
+            };
             if let Some(first) = platform_stdlib {
                 return Err(KlibLibrariesOpenError::MultiplePlatformStdlibs {
                     first,
@@ -131,59 +187,214 @@ impl KlibLibraries {
             }
             platform_stdlib = Some(input.path.clone());
         }
-        let mut packages = Vec::new();
-        let mut archives = Vec::with_capacity(libraries.len());
+        let mut records = Vec::with_capacity(libraries.len());
         for input in libraries {
             let library = &input.path;
             let archive = KlibArchive::open(library).map_err(KlibLibrariesOpenError::Archive)?;
-            let module = archive
+            let manifest = archive
                 .manifest()
-                .map_err(KlibLibrariesOpenError::Archive)?
-                .unique_name()
-                .map(str::to_owned)
-                .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
+                .map_err(KlibLibrariesOpenError::Archive)?;
+            let module = manifest.unique_name().map(str::to_owned).ok_or_else(|| {
+                KlibLibrariesOpenError::MissingUniqueName {
                     library: library.to_path_buf(),
-                })?;
+                }
+            })?;
             // Authority comes from compilation input assembly, which selected this exact archive
             // as the platform stdlib. Manifests are self-authored dependency data: Native, JS and
             // Wasm also stamp different values, so neither `unique_name` nor `builtins_platform`
             // can grant or revoke the compiler-owned role.
-            let compiler_builtin_owner = matches!(input.role, KlibLibraryRole::PlatformStdlib);
+            let intrinsic_platform = match input.role {
+                KlibLibraryRole::PlatformStdlib(semantics) => semantics.intrinsic_platform(),
+                KlibLibraryRole::Dependency | KlibLibraryRole::Friend => None,
+            };
+            let compiler_builtin_owner = matches!(input.role, KlibLibraryRole::PlatformStdlib(_));
             let internal_friend = matches!(input.role, KlibLibraryRole::Friend);
-            packages.extend(package_fragments(
-                library,
-                &archive,
+            records.push(LibraryRecord {
+                input,
+                module,
+                archive,
                 compiler_builtin_owner,
                 internal_friend,
-                &module,
-            )?);
-            archives.push((module, archive, compiler_builtin_owner));
+                intrinsic_platform,
+            });
         }
-        let mut inventory = PackageInventory::from_package_inputs(packages)
+        let platform_module = records
+            .iter()
+            .find(|record| matches!(record.input.role, KlibLibraryRole::PlatformStdlib(_)))
+            .map(|record| record.module.clone());
+        // Select archive authority once, before any declaration, default, intrinsic, body, or
+        // snapshot channel is published. The compilation-designated platform archive owns its
+        // manifest module identity; a dependency or friend cannot contribute another facet of
+        // that module merely because it appears before or after the platform input.
+        let records = records
+            .into_iter()
+            .filter(|record| {
+                platform_module.as_deref() != Some(record.module.as_str())
+                    || matches!(record.input.role, KlibLibraryRole::PlatformStdlib(_))
+            })
+            .collect::<Vec<_>>();
+        let mut packages = Vec::new();
+        for record in &records {
+            packages.extend(package_fragments(
+                &record.input.path,
+                &record.archive,
+                record.compiler_builtin_owner,
+                record.internal_friend,
+                &record.module,
+                record.intrinsic_platform,
+            )?);
+        }
+        let mut inventory = PackageInventory::from_target_package_inputs(packages)
             .map_err(KlibLibrariesOpenError::Declaration)?;
         // Only a declaration metadata marks as defaulted has a default to read from the IR.
         let wanted = inventory.default_selection();
         let mut defaults = ParameterDefaults::default();
-        for (input, (module, archive, compiler_builtin_owner)) in libraries.iter().zip(&archives) {
-            let library = &input.path;
+        let mut body_libraries = Vec::new();
+        let mut body_provider_snapshots = Vec::new();
+        for record in &records {
+            let library = &record.input.path;
+            let body_provider = body_provider_snapshot(record)?;
             // A metadata KLIB (`-Xmetadata-klib`) deliberately carries linkdata without an IR
             // channel. Its declaration-level default flags remain useful, but it publishes no
             // constant realization to attach. Once any IR entry exists, keep treating the channel
             // as an all-or-nothing serialized format so a partial/corrupt library is rejected.
-            if archive.ir_entries().is_empty() {
+            if record.archive.ir_entries().is_empty() {
+                // A metadata-only archive still owns its producer-declared dependency edges. Keep
+                // an empty graph node so body lookup can traverse through it to a reachable
+                // body-carrying provider without treating this archive itself as one.
+                let manifest = record
+                    .archive
+                    .manifest()
+                    .map_err(KlibLibrariesOpenError::Archive)?;
+                let body_library = KlibBodyLibrary::from_manifest(
+                    &manifest,
+                    crate::metadata::klib_ir::KlibIrModuleTrees::default(),
+                )
+                .ok_or_else(|| KlibLibrariesOpenError::MissingUniqueName {
+                    library: library.to_path_buf(),
+                })?;
+                body_libraries.push(body_library);
+                body_provider_snapshots.push((record.module.clone(), body_provider));
                 continue;
             }
-            let trees = read_declaration_trees_where(archive, |signature| {
-                wanted.contains(module, signature)
-            })
-            .map_err(|error| KlibLibrariesOpenError::Declarations {
-                library: library.to_path_buf(),
-                error,
+            let trees = read_declaration_trees(&record.archive).map_err(|error| {
+                KlibLibrariesOpenError::Declarations {
+                    library: library.to_path_buf(),
+                    error,
+                }
             })?;
-            defaults.add_library(module, &trees, &wanted, *compiler_builtin_owner);
+            inventory.attach_ir_intrinsics(&record.module, record.intrinsic_platform, &trees);
+            defaults.add_library(
+                &record.module,
+                &trees,
+                &wanted,
+                record.compiler_builtin_owner,
+            );
+            let manifest = record
+                .archive
+                .manifest()
+                .map_err(KlibLibrariesOpenError::Archive)?;
+            let body_library =
+                KlibBodyLibrary::from_manifest(&manifest, trees).ok_or_else(|| {
+                    KlibLibrariesOpenError::MissingUniqueName {
+                        library: library.to_path_buf(),
+                    }
+                })?;
+            body_libraries.push(body_library);
+            body_provider_snapshots.push((record.module.clone(), body_provider));
         }
         inventory.attach_defaults(&defaults);
-        Ok(Self::over(std::rc::Rc::new(inventory)))
+        let bodies = KlibDeclarationBodies::from_body_libraries(body_libraries)
+            .map_err(KlibLibrariesOpenError::Bodies)?;
+        let body_snapshot = platform_module.map(|platform_module| {
+            let reachable = bodies.body_provider_modules(&platform_module);
+            crate::libraries::DependencyBodySnapshot::new(
+                body_provider_snapshots
+                    .into_iter()
+                    .filter_map(|(module, snapshot)| {
+                        reachable.contains(&module).then_some(snapshot)
+                    })
+                    .collect(),
+            )
+        });
+        // Decoders read the immutable bytes frozen by `KlibArchive::open`, so they cannot combine
+        // channels from two generations. Before publishing those decoded facts, prove that the
+        // selected path still names that same semantic generation. A later module will make the
+        // same check independently and the session snapshot will join the two fingerprints.
+        for record in &records {
+            validate_current_generation(record)?;
+        }
+        Ok(Self::over_with_bodies_and_snapshot(
+            std::rc::Rc::new(inventory),
+            std::rc::Rc::new(bodies),
+            body_snapshot,
+        ))
+    }
+}
+
+fn validate_current_generation(record: &LibraryRecord<'_>) -> Result<(), KlibLibrariesOpenError> {
+    if !opened_generation_is_current(&record.input.path, &record.archive)? {
+        return Err(KlibLibrariesOpenError::ChangedDuringOpen {
+            library: record.input.path.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Compare the immutable generation an open decoded with a fresh census and snapshot of the path.
+/// Kept as one operation so the publication guard and its mutation regression exercise the same
+/// authority check.
+pub(super) fn opened_generation_is_current(
+    library: &Path,
+    opened: &KlibArchive,
+) -> Result<bool, KlibLibrariesOpenError> {
+    let opened = opened
+        .content_fingerprint()
+        .map_err(KlibLibrariesOpenError::Archive)?;
+    let current = KlibArchive::open(library)
+        .map_err(KlibLibrariesOpenError::Archive)?
+        .content_fingerprint()
+        .map_err(KlibLibrariesOpenError::Archive)?;
+    Ok(opened == current)
+}
+
+/// Snapshot one active body provider. Inactive same-module records never reach this channel.
+fn body_provider_snapshot(
+    record: &LibraryRecord<'_>,
+) -> Result<crate::libraries::DependencyBodyProviderSnapshot, KlibLibrariesOpenError> {
+    let canonical_library = std::fs::canonicalize(&record.input.path).map_err(|source| {
+        KlibLibrariesOpenError::Archive(KlibError::Io {
+            operation: "canonicalize",
+            path: record.input.path.clone(),
+            source,
+        })
+    })?;
+    let content_fingerprint = record
+        .archive
+        .content_fingerprint()
+        .map_err(KlibLibrariesOpenError::Archive)?;
+    let manifest = record
+        .archive
+        .manifest()
+        .map_err(KlibLibrariesOpenError::Archive)?;
+    Ok(crate::libraries::DependencyBodyProviderSnapshot::new(
+        canonical_library,
+        &record.module,
+        manifest.abi_version(),
+        manifest.compiler_version(),
+        manifest.metadata_version(),
+        content_fingerprint,
+        record.input.role.snapshot_role(),
+    ))
+}
+
+impl KlibStdlibSemantics {
+    const fn intrinsic_platform(self) -> Option<super::target_intrinsics::TargetIntrinsicPlatform> {
+        match self {
+            Self::Native => Some(super::target_intrinsics::TargetIntrinsicPlatform::Native),
+            Self::Wasm => Some(super::target_intrinsics::TargetIntrinsicPlatform::Wasm),
+            Self::Plain => None,
+        }
     }
 }
 
@@ -193,7 +404,18 @@ fn package_fragments(
     compiler_builtin_owner: bool,
     internal_friend: bool,
     module: &str,
-) -> Result<Vec<(Vec<String>, KotlinPackage, bool, bool, Option<String>)>, KlibLibrariesOpenError> {
+    intrinsic_platform: Option<super::target_intrinsics::TargetIntrinsicPlatform>,
+) -> Result<
+    Vec<(
+        Vec<String>,
+        KotlinPackage,
+        bool,
+        bool,
+        Option<String>,
+        Option<super::target_intrinsics::TargetIntrinsicPlatform>,
+    )>,
+    KlibLibrariesOpenError,
+> {
     archive
         .package_fragments()
         .into_iter()
@@ -223,6 +445,7 @@ fn package_fragments(
                 compiler_builtin_owner,
                 internal_friend,
                 Some(module.to_owned()),
+                intrinsic_platform,
             ))
         })
         .collect()

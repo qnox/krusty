@@ -11,13 +11,16 @@ use super::demo_package::{
 };
 use super::{base, local_symbol, lowered_body, public_symbol, validated};
 use crate::fir::ResolvedParameterIdentity;
-use crate::libraries::{ExternalCallableKind, KlibDependencyCallable};
+use crate::libraries::{
+    ExternalCallableKind, KlibDeclarationSignature, KlibDependencyCallable, SingletonDispatch,
+};
 use crate::metadata::id_signature::{
-    callable_signature, CallableShape, DeclarationContainer, KlibPublicIdSignature, Placement,
+    callable_signature, metadata_class_signature, CallableShape, DeclarationContainer,
+    KlibPublicIdSignature, MetadataClass, MetadataContainer, Placement,
 };
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrParameter,
-    KlibIrStatement,
+    KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrNullability,
+    KlibIrParameter, KlibIrStatement, KlibIrType,
 };
 use crate::metadata::klib_ir::{KlibIrDeclarationTree, KlibIrSymbolKind};
 use crate::metadata::semantic::KotlinType;
@@ -80,7 +83,7 @@ fn a_callee_no_checked_call_selected_is_declared_from_its_header() {
 }
 
 #[test]
-fn a_header_declared_callee_without_a_body_declines_by_its_own_reason() {
+fn an_unauthenticated_header_declared_callee_without_a_body_declines() {
     let demo = demo(&IDENTITY_AND_CALLER, |name, body| match name {
         "a" => identity_and_caller(name, body),
         _ => None,
@@ -123,6 +126,10 @@ impl Record {
             self.ret,
             &self.identities,
             0,
+            None,
+            None,
+            None,
+            None,
             Some(&self.identity),
         )
         .expect("signed")
@@ -236,25 +243,51 @@ fn function_tree(
 ) -> KlibIrDeclarationTree {
     let mut arena = KlibIrArena::default();
     let int = arena.push_type(T::Int.klib());
+    let demo_package = ["demo".to_owned()];
+    let box_classifier = metadata_class_signature(
+        MetadataContainer {
+            package: &demo_package,
+            classes: &[],
+            native_interop_library: false,
+        },
+        MetadataClass {
+            name: "Box",
+            type_params: &[],
+            expect: false,
+        },
+    );
+    let box_type = arena.push_type(KlibIrType::Simple {
+        classifier: public_symbol(KlibIrSymbolKind::Class, box_classifier),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: Vec::new(),
+        annotations: Vec::new(),
+        abbreviation: None,
+    });
+    assert_eq!(
+        super::super::klib_types::semantic_type(&arena, box_type)
+            .expect("the fixture's class type is semantic"),
+        Ty::obj_name(crate::types::type_name("demo/Box")),
+        "the fixture's serialized receiver is demo.Box"
+    );
     let nothing = arena.push_type(T::Nothing.klib());
     let mut slot = 9000;
-    let mut parameter = |kind, name: &str| {
+    let mut parameter = |kind, name: &str, ty| {
         slot += 1;
         KlibIrParameter {
             base: base(local_symbol(kind, slot)),
             name: name.to_owned(),
-            ty: int,
+            ty,
             vararg_element_type: None,
             default_value: None,
         }
     };
     let dispatch_receiver =
-        dispatch.then(|| parameter(KlibIrSymbolKind::ReceiverParameter, "<this>"));
+        dispatch.then(|| parameter(KlibIrSymbolKind::ReceiverParameter, "<this>", box_type));
     let context_parameters = (0..contexts)
-        .map(|_| parameter(KlibIrSymbolKind::ValueParameter, "c"))
+        .map(|_| parameter(KlibIrSymbolKind::ValueParameter, "c", int))
         .collect::<Vec<_>>();
     let regular_parameters = (0..values)
-        .map(|_| parameter(KlibIrSymbolKind::ValueParameter, "v"))
+        .map(|_| parameter(KlibIrSymbolKind::ValueParameter, "a", int))
         .collect::<Vec<_>>();
     let symbol = public_symbol(KlibIrSymbolKind::Function, signature);
     let returned = context_parameters
@@ -301,6 +334,7 @@ fn function_tree(
 }
 
 const CALLER: [Shape; 1] = [("a", &[T::Int], T::Int)];
+const MEMBER_CALLER: [Shape; 1] = [("a", &[T::DemoBox, T::Int], T::Int)];
 
 #[test]
 fn a_call_no_reachable_library_serializes_declines_by_name() {
@@ -341,6 +375,156 @@ fn a_member_call_declines_by_its_form() {
         unserialized.declined("a", &[]),
         "the KLIB body of `demo.a` \
          (it uses a call of a member no library serializes, such as a fake override)"
+    );
+}
+
+#[test]
+fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
+    let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
+    let demo = demo_with(
+        &MEMBER_CALLER,
+        vec![function_tree(member.clone(), "get", true, 0, 1)],
+        |_, body| {
+            let receiver = body.param(0);
+            let value = body.param(1);
+            let call = body.call_signature(member.clone(), vec![receiver, value], None, T::Int);
+            Some(vec![body.ret(call)])
+        },
+    );
+    let mut selected_record = demo.facts["a"].clone();
+    selected_record.name = "get".to_owned();
+    selected_record.kind = ExternalCallableKind::Member;
+    selected_record.params = vec![T::Int.semantic()];
+    selected_record.parameter_identities =
+        vec![ResolvedParameterIdentity::Source("a".into())].into_boxed_slice();
+    selected_record.singleton_dispatch = Some(SingletonDispatch {
+        classifier: crate::types::type_name("demo/Box"),
+    });
+    selected_record.declaration_signature = Some(KlibDeclarationSignature::Public(member.clone()));
+    selected_record.dependency_callable = Some(KlibDependencyCallable {
+        module: "demo".to_owned(),
+        declaration: KlibDeclarationSignature::Public(member),
+    });
+    let mut inherited_record = selected_record.clone();
+    inherited_record.singleton_dispatch = Some(SingletonDispatch {
+        classifier: crate::types::type_name("demo/OtherBox"),
+    });
+    let selected = selected_record
+        .klib_body_callable()
+        .expect("the selected member is signed");
+    let inherited = inherited_record
+        .klib_body_callable()
+        .expect("the inherited selection is signed to the same declaration");
+    let box_ty = Ty::obj_name(crate::types::type_name("demo/Box"));
+    assert_eq!(selected.singleton_dispatch(), Some(box_ty));
+    assert_eq!(
+        inherited.singleton_dispatch(),
+        Some(Ty::obj_name(crate::types::type_name("demo/OtherBox")))
+    );
+    let external = crate::fir::ExternalCallableId::from_raw(31);
+    let emitted = [(
+        selected.identity().clone(),
+        super::super::EmittedDependencyCallable::new(
+            external,
+            Some(box_ty),
+            Some(crate::types::type_name("demo/Box")),
+        ),
+    )]
+    .into_iter()
+    .collect();
+    let callees = KlibCalleeFacts::new([inherited, selected]);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        demo.callable("a"),
+        &demo.bodies,
+        &callees,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &emitted,
+    )
+    .expect("the serialized receiver selects the matching edge, independent of insertion order");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 1, "the member is not re-emitted");
+    let calls = unit
+        .ir()
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(expression, node)| match node {
+            crate::ir::IrExpr::Call {
+                callee: crate::ir::Callee::External { target, .. },
+                dispatch_receiver,
+                args,
+            } => Some((
+                crate::ir::ExprId::try_from(expression).expect("an expression id fits u32"),
+                *target,
+                *dispatch_receiver,
+                args.len(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(call, target, Some(receiver), 1)] = calls.as_slice() else {
+        panic!("expected one external singleton-member call, got {calls:?}");
+    };
+    assert_eq!(*target, external);
+    assert_eq!(
+        unit.ir().logical_types[receiver],
+        Ty::obj_name(crate::types::type_name("demo/Box"))
+    );
+    assert_eq!(
+        unit.ir().external_singleton_dispatches.get(call),
+        Some(&crate::types::type_name("demo/Box"))
+    );
+}
+
+#[test]
+fn a_root_group_publishes_the_singleton_variant_which_matches_its_header() {
+    let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
+    let demo = demo_with(
+        &CALLER,
+        vec![function_tree(member.clone(), "get", true, 0, 1)],
+        |_, body| {
+            let value = body.param(0);
+            Some(vec![body.ret(value)])
+        },
+    );
+    let mut selected_record = demo.facts["a"].clone();
+    selected_record.name = "get".to_owned();
+    selected_record.kind = ExternalCallableKind::Member;
+    selected_record.singleton_dispatch = Some(SingletonDispatch {
+        classifier: crate::types::type_name("demo/Box"),
+    });
+    selected_record.declaration_signature = Some(KlibDeclarationSignature::Public(member.clone()));
+    selected_record.dependency_callable = Some(KlibDependencyCallable {
+        module: "demo".to_owned(),
+        declaration: KlibDeclarationSignature::Public(member),
+    });
+    let mut inherited_record = selected_record.clone();
+    inherited_record.singleton_dispatch = Some(SingletonDispatch {
+        classifier: crate::types::type_name("demo/OtherBox"),
+    });
+    let selected = selected_record
+        .klib_body_callable()
+        .expect("the selected member is signed");
+    let inherited = inherited_record
+        .klib_body_callable()
+        .expect("the inherited selection is signed to the same declaration");
+    let callees = KlibCalleeFacts::new([inherited, selected]);
+    let externals = Default::default();
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_root_with_intrinsics_and_externals(
+        inherited,
+        &demo.bodies,
+        &callees,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &externals,
+    )
+    .expect("the root header selects the matching edge, independent of insertion order");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 1);
+    assert_eq!(
+        unit.authenticated_singleton_dispatch(selected.identity()),
+        Some(Ty::obj_name(crate::types::type_name("demo/Box")))
     );
 }
 
@@ -431,14 +615,15 @@ fn stdlib_calls_reach_header_declared_callees() {
     let Some(root) = super::distribution_root() else {
         return;
     };
-    let (libraries, bodies) = super::stdlib(&root);
+    let libraries = super::stdlib(&root);
+    let bodies = libraries.declaration_bodies();
     let mut reached = std::collections::BTreeMap::<String, usize>::new();
     let mut lowered_with_callees = Vec::new();
     let mut undeclared = Vec::new();
     for (package, record) in stdlib_records(&root, &libraries) {
         let mut unit = DependencyBodyUnit::default();
         let callable = record.klib_body_callable().expect("signed");
-        match unit.lower_function(callable, &bodies, &KlibCalleeFacts::default()) {
+        match unit.lower_function(callable, bodies, &KlibCalleeFacts::default()) {
             Ok(_) if unit.ir().functions.len() > 1 => {
                 lowered_with_callees.push(format!("{package}.{}", record.name));
             }
@@ -462,18 +647,37 @@ fn stdlib_calls_reach_header_declared_callees() {
     }
     assert_eq!(undeclared, Vec::<String>::new());
     assert_eq!(lowered_with_callees, Vec::<String>::new());
+    let expected =
+        if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
+            vec![
+                ("it declares a parameter default)", 19),
+                ("it uses a block of a compiler-introduced form)", 13),
+                ("it uses a call of a member function)", 39),
+                ("it uses a call through a property accessor signature)", 12),
+                ("it uses a constant of another type than its value's)", 2),
+                ("it uses a constructor call)", 2),
+                ("it uses a type with type arguments)", 6),
+                ("it uses an inline argument container of another shape)", 12),
+                ("it uses an inlined function body of another shape)", 6),
+                ("its library serializes none)", 37),
+            ]
+        } else {
+            vec![
+                ("it declares a parameter default)", 19),
+                ("it uses a block of a compiler-introduced form)", 34),
+                ("it uses a call of a member function)", 36),
+                ("it uses a call through a property accessor signature)", 12),
+                ("it uses a constructor call)", 2),
+                ("it uses a type with type arguments)", 6),
+                ("its library serializes none)", 51),
+            ]
+        };
     assert_eq!(
         reached.into_iter().collect::<Vec<_>>(),
-        [
-            ("it declares a parameter default)", 19),
-            ("it uses a block of a compiler-introduced form)", 34),
-            ("it uses a call of a file-private declaration)", 12),
-            ("it uses a call of a member function)", 36),
-            ("it uses a constructor call)", 2),
-            ("it uses a type with type arguments)", 6),
-            ("its library serializes none)", 51),
-        ]
-        .map(|(reason, count)| (reason.to_owned(), count))
+        expected
+            .into_iter()
+            .map(|(reason, count)| (reason.to_owned(), count))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -484,7 +688,8 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
     let Some(root) = super::distribution_root() else {
         return;
     };
-    let (libraries, bodies) = super::stdlib(&root);
+    let libraries = super::stdlib(&root);
+    let bodies = libraries.declaration_bodies();
     let string = kotlin("String");
     let chars = kotlin("CharSequence");
     let int = kotlin("Int");
@@ -519,7 +724,7 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
             let mut unit = DependencyBodyUnit::default();
             match unit.lower_function(
                 record.klib_body_callable().expect("signed"),
-                &bodies,
+                bodies,
                 &KlibCalleeFacts::default(),
             ) {
                 Ok(function) => lowered_body(&unit, function),

@@ -644,6 +644,7 @@ impl BodyLowering<'_> {
             }
             FirCallTarget::External {
                 declaration,
+                singleton_dispatch,
                 default_provider,
                 receiver,
                 declared_receiver,
@@ -661,6 +662,7 @@ impl BodyLowering<'_> {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
                 self.external_call(super::source_calls::ExternalCallRequest {
                     target: *declaration,
+                    singleton_dispatch: *singleton_dispatch,
                     default_provider: *default_provider,
                     receiver_ty: *receiver,
                     declared_receiver: *declared_receiver,
@@ -1393,6 +1395,12 @@ pub(super) fn lower_substitutions(values: &[FirTypeSubstitution]) -> Vec<IrCheck
 
 pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate::ir::IrIntrinsic {
     match operation {
+        crate::fir::FirIntrinsic::ReinterpretBits { from, to } => {
+            crate::ir::IrIntrinsic::ReinterpretBits {
+                from: from.get(),
+                to: to.get(),
+            }
+        }
         crate::fir::FirIntrinsic::Assert { mode } => crate::ir::IrIntrinsic::Assert { mode: *mode },
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,

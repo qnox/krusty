@@ -2,10 +2,8 @@ class kotlin.Byte: fun dec(): kotlin.Byte
 class kotlin.Byte: fun inc(): kotlin.Byte
 class kotlin.Char: fun dec(): kotlin.Char
 class kotlin.Char: fun inc(): kotlin.Char
-class kotlin.Double: fun bits(): kotlin.Long
 class kotlin.Double: fun dec(): kotlin.Double
 class kotlin.Double: fun inc(): kotlin.Double
-class kotlin.Float: fun bits(): kotlin.Int
 class kotlin.Float: fun dec(): kotlin.Float
 class kotlin.Float: fun inc(): kotlin.Float
 class kotlin.Int: fun dec(): kotlin.Int
@@ -304,8 +302,6 @@ package kotlin.text: fun kotlin.String.unsafeStringToUtf8OrThrow(kotlin.Int, kot
 package kotlin.text: fun longToString(kotlin.Long, kotlin.Int): kotlin.String
 package kotlin.text: fun unsafeStringFromCharArray(kotlin.CharArray, kotlin.Int, kotlin.Int): kotlin.String
 package kotlin.time: fun formatToExactDecimals(kotlin.Double, kotlin.Int): kotlin.String
-package kotlin: fun fromBits(kotlin.Int): kotlin.Float
-package kotlin: fun fromBits(kotlin.Long): kotlin.Double
 package kotlin: fun kotlin.Double.isInfinite(): kotlin.Boolean
 package kotlin: fun kotlin.Double.isNaN(): kotlin.Boolean
 package kotlin: fun kotlin.Float.isInfinite(): kotlin.Boolean
@@ -317,8 +313,6 @@ package kotlinx.cinterop.internal: fun detachObjCObject(kotlinx.cinterop.ObjCObj
 package kotlinx.cinterop.internal: fun interopCallMarker(T): T
 package kotlinx.cinterop: fun Block_copy(kotlin.native.internal.NativePtr): kotlin.native.internal.NativePtr
 package kotlinx.cinterop: fun T.initBy(T): T
-package kotlinx.cinterop: fun bitsToDouble(kotlin.Long): kotlin.Double
-package kotlinx.cinterop: fun bitsToFloat(kotlin.Int): kotlin.Float
 package kotlinx.cinterop: fun createKotlinObjectHolder(kotlin.Any?): kotlin.native.internal.NativePtr
 package kotlinx.cinterop: fun createObjCObjectHolder(kotlin.native.internal.NativePtr): kotlin.Any?
 package kotlinx.cinterop: fun createObjCSuperStruct(kotlin.native.internal.NativePtr, kotlin.native.internal.NativePtr): kotlin.native.internal.NativePtr

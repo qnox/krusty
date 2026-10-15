@@ -48,6 +48,9 @@ pub(super) struct SignedFunction {
     /// whose compiler-owned declarations may receive package-level intrinsic roles. Ordinary
     /// dependencies remain false even when their manifests and packages mimic that stdlib.
     pub(super) compiler_builtin_owner: bool,
+    /// Target-stdlib intrinsic semantics authenticated while the archive authority and complete
+    /// metadata declaration are still joined.
+    pub(super) target_intrinsic: Option<super::target_intrinsics::KlibIntrinsicShape>,
     /// This declaration's KLIB is a friend of the current compilation. Friendship is attached to
     /// the declaration while its archive identity is still known; package ownership cannot encode
     /// it because unrelated KLIBs may contribute declarations to the same package.
@@ -189,6 +192,7 @@ pub(super) fn sign_function(
         parameters,
         type_parameters,
         compiler_builtin_owner: false,
+        target_intrinsic: None,
         internal_friend,
         module: None,
         defaults: Vec::new(),

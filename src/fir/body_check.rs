@@ -1,7 +1,5 @@
 //! Transient AST to checked FIR construction.
-//!
-//! This module owns source-shape traversal only. Semantic types and selections come from the
-//! ordinary checker; unsupported migration seams are explicit errors rather than placeholder FIR.
+//! Owns source traversal; semantic facts come from the checker and migration seams fail explicitly.
 
 mod arguments;
 mod arrays;
@@ -22,6 +20,7 @@ mod calls;
 mod capture_order;
 #[cfg(test)]
 mod collection_literal_tests;
+mod compiler_intrinsics;
 #[cfg(test)]
 mod constructor_tests;
 mod constructors;

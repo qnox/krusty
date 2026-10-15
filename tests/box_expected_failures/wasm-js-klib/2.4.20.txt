@@ -2670,8 +2670,6 @@ fir/toLong.kt
 fp/addSubZeroInfinityDouble.kt
 fp/addSubZeroInfinityFloat.kt
 fp/atan2ZeroGuadrantsDouble.kt
-fp/denormalGradualDoubleBits.kt
-fp/denormalGradualFloatBits.kt
 fp/divZeroAndNanDouble.kt
 fp/divZeroAndNanFloat.kt
 fp/mulZeroInfinityDouble.kt
@@ -2684,8 +2682,6 @@ fp/remainderMixedIntFp.kt
 fp/remainderMixedLongFpLargeRatio.kt
 fp/remainderVsModDouble.kt
 fp/remainderVsModFloat.kt
-fp/toBitsZeroAndNanDouble.kt
-fp/toBitsZeroAndNanFloat.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt

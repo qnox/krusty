@@ -37,6 +37,7 @@ impl EmittedDependencyModule {
 pub struct EmissionSession<'a, B: Backend> {
     backend: &'a B,
     state: Option<B::State>,
+    dependency_support: super::dependency_body_emission::DependencySupportState,
     target_artifacts: Vec<Artifact>,
     failed: bool,
 }
@@ -46,6 +47,7 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
         Self {
             backend,
             state: Some(B::State::default()),
+            dependency_support: Default::default(),
             target_artifacts: Vec::new(),
             failed: false,
         }
@@ -93,6 +95,7 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
             state,
             module_name,
             diags,
+            &mut self.dependency_support,
             &mut |file, diags| {
                 file.dependency_exports = metadata.record_ir_file(file, &mut metadata_state, diags);
             },

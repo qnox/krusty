@@ -18,6 +18,7 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
         kind: FirExprKind::Call(FirCall {
             target: crate::fir::FirCallTarget::External {
                 declaration,
+                singleton_dispatch: None,
                 default_provider: None,
                 receiver: None,
                 declared_receiver: None,

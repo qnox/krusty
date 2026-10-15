@@ -1000,6 +1000,7 @@ impl BodyFirChecker<'_> {
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let ExternalReferenceDeclaration {
             declaration,
+            mut singleton_dispatch,
             default_provider,
             compiler_intrinsic,
             semantic_role,
@@ -1016,6 +1017,18 @@ impl BodyFirChecker<'_> {
         let span = self.file.expr_span(expression);
         let declaration = declaration
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
+        // A classifier-associated extension is exposed as an ordinary bound extension reference:
+        // its checked receiver is the resolved singleton value, while the provider declaration has
+        // no singleton dispatch. Freeze that exact edge before callable-reference lowering stages
+        // the receiver through a local; no later phase may infer it from spelling or local syntax.
+        if singleton_dispatch.is_none()
+            && extension_receiver_target
+            && binding == FirCallableReferenceBinding::Bound
+        {
+            singleton_dispatch = receiver.and_then(|expected| {
+                self.authenticated_singleton_receiver(extension_receiver.as_ref(), expected)
+            });
+        }
         let resolved = |ty| {
             ResolvedTy::new(ty)
                 .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
@@ -1091,6 +1104,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::CallableReference {
             target: FirCallableReferenceTarget::External {
                 declaration,
+                singleton_dispatch,
                 default_provider,
                 receiver: receiver.map(resolved).transpose()?,
                 declared_receiver: declared_receiver.map(resolved).transpose()?,
@@ -1461,6 +1475,7 @@ struct SelectedPropertyView<'a> {
 /// The selected dependency declaration a callable reference names, as the provider normalized it.
 struct ExternalReferenceDeclaration<'a> {
     declaration: Option<ExternalCallableId>,
+    singleton_dispatch: Option<crate::types::TypeName>,
     default_provider: Option<ExternalCallableId>,
     compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     semantic_role: Option<crate::types::SemanticCallRole>,
@@ -1483,6 +1498,10 @@ impl<'a> ExternalReferenceDeclaration<'a> {
     fn callable(callable: &'a crate::libraries::LibraryCallable, parameters: &'a [Ty]) -> Self {
         Self {
             declaration: callable.external_identity,
+            singleton_dispatch: callable
+                .singleton_dispatch
+                .as_deref()
+                .map(|singleton| singleton.classifier),
             default_provider: callable.external_default_provider,
             compiler_intrinsic: callable.compiler_intrinsic,
             semantic_role: callable.semantic_role,
@@ -1501,6 +1520,10 @@ impl<'a> ExternalReferenceDeclaration<'a> {
     fn member(member: &'a crate::libraries::LibraryMember) -> Self {
         Self {
             declaration: member.external_identity,
+            singleton_dispatch: member
+                .singleton_dispatch
+                .as_deref()
+                .map(|singleton| singleton.classifier),
             default_provider: member.external_default_provider,
             compiler_intrinsic: None,
             semantic_role: member.semantic_role,

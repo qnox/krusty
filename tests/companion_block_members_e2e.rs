@@ -402,9 +402,11 @@ fn block_property_initializes_with_its_class_not_the_file() {
         \x20   companion { val p = initialize() }\n\
         }\n\
         companion val Foo.greeting: String = \"hi\"\n\
+        companion fun Foo.salutation(): String = \"hello\"\n\
         fun box(): String {\n\
         \x20   if (Foo.greeting != \"hi\") return \"greeting\"\n\
-        \x20   if (initialized) return \"a companion extension initialized its classifier\"\n\
+        \x20   if (Foo.salutation() != \"hello\") return \"salutation\"\n\
+        \x20   if (initialized) return \"a companion extension qualifier initialized its classifier\"\n\
         \x20   Foo.p\n\
         \x20   return if (initialized) \"OK\" else \"reading a block property did not\"\n\
         }\n";

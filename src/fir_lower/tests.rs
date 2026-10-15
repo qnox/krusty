@@ -19,6 +19,7 @@ mod checked_hierarchy;
 mod checked_operand_types;
 mod checked_substitutions;
 mod external_references;
+mod inline_only;
 mod inline_plan_tests;
 mod integral_constants;
 mod lambda_return_flow;
@@ -565,6 +566,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
         kind: FirExprKind::Call(FirCall {
             target: FirCallTarget::External {
                 declaration,
+                singleton_dispatch: None,
                 default_provider: None,
                 receiver: None,
                 declared_receiver: None,

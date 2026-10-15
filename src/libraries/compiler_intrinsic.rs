@@ -7,6 +7,19 @@ use super::{PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic};
 /// grants intrinsic behavior from a coincidental source name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompilerIntrinsic {
+    /// Reinterpret one scalar's bits as the equal-width floating or integral scalar selected by
+    /// the authenticated declaration. Checked FIR/IR records both semantic endpoint types.
+    ReinterpretBits,
+    /// Native's exact `GCUnsafeCall` floating-point predicate declaration. The provider
+    /// authenticates the runtime entry and complete extension-receiver shape while it still owns
+    /// the platform KLIB; target lowering consumes only this operation and scalar type.
+    FloatingIsNaN {
+        operand: crate::types::Ty,
+    },
+    /// The corresponding exact infinity predicate declaration.
+    FloatingIsInfinite {
+        operand: crate::types::Ty,
+    },
     /// Exact Kotlin array-factory declaration whose implementation is supplied by the compiler.
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.

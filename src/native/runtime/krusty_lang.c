@@ -275,42 +275,6 @@ kt_double kt_abs_double(kt_double value) {
     return result;
 }
 
-/* `x.toRawBits()` / `Float.fromBits(n)`: the bits as they are, in both directions. A
-   reinterpretation and nothing else, which is why it is `memcpy` and not a cast — reading one type
-   through a pointer to another is not defined C, and the copy compiles to no instruction.
-
-   `toBits` differs from `toRawBits` in ONE respect: every NaN answers the canonical one, which is
-   the same collapse `equals` and `hashCode` make and the reason `kt_double_bits` exists. */
-kt_int kt_float_to_raw_bits(kt_float value) {
-    uint32_t bits;
-    memcpy(&bits, &value, sizeof bits);
-    return (kt_int)bits;
-}
-
-kt_long kt_double_to_raw_bits(kt_double value) {
-    uint64_t bits;
-    memcpy(&bits, &value, sizeof bits);
-    return (kt_long)bits;
-}
-
-kt_int kt_float_to_bits(kt_float value) { return (kt_int)kt_float_bits(value); }
-
-kt_long kt_double_to_bits(kt_double value) { return (kt_long)kt_double_bits(value); }
-
-kt_float kt_float_from_bits(kt_int bits) {
-    uint32_t raw = (uint32_t)bits;
-    kt_float value;
-    memcpy(&value, &raw, sizeof value);
-    return value;
-}
-
-kt_double kt_double_from_bits(kt_long bits) {
-    uint64_t raw = (uint64_t)bits;
-    kt_double value;
-    memcpy(&value, &raw, sizeof value);
-    return value;
-}
-
 #define KT_COMPARE(suffix, type)                                                                   \
     kt_int kt_compare_##suffix(type a, type b) { return a < b ? -1 : (a > b ? 1 : 0); }
 

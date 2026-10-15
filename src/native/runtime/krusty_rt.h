@@ -1180,16 +1180,6 @@ kt_long kt_abs_long(kt_long value);
 kt_float kt_abs_float(kt_float value);
 kt_double kt_abs_double(kt_double value);
 
-/* The bits of a floating-point value and back, a reinterpretation and nothing else. `toBits`
-   differs from `toRawBits` in one respect: every NaN answers the canonical one, the same collapse
-   `equals` and `hashCode` make. */
-kt_int kt_float_to_raw_bits(kt_float value);
-kt_long kt_double_to_raw_bits(kt_double value);
-kt_int kt_float_to_bits(kt_float value);
-kt_long kt_double_to_bits(kt_double value);
-kt_float kt_float_from_bits(kt_int bits);
-kt_double kt_double_from_bits(kt_long bits);
-
 /* `compareTo` on scalars. Separate functions rather than an emitted `a < b ? -1 : ...` so neither
    operand is evaluated twice, and so the floating-point cases can implement Kotlin's TOTAL order
    (NaN above everything, -0.0 below 0.0) rather than C's comparison operators. */

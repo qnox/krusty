@@ -83,6 +83,7 @@ fn function(
         context_count: 0,
         context_kinds: Vec::new(),
         annotations: Vec::new(),
+        annotation_applications: Vec::new(),
         return_value_status: Default::default(),
         contract: None,
     }
@@ -111,6 +112,7 @@ fn member(name: &str, params: Vec<KotlinType>, is_property: bool) -> KotlinMembe
         constant: None,
         vararg: None,
         annotations: Vec::new(),
+        annotation_applications: Vec::new(),
         contract: None,
     }
 }
