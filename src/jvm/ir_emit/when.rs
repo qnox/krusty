@@ -25,8 +25,9 @@ pub(super) fn discard_joined_value(keeps_value: bool, result_ty: Ty, code: &mut 
 
 /// Every live arrival at a value `when`'s end carries the entry operands and the joined value. The
 /// linear counter shows that only when the last arm falls through: after a throwing last arm (the
-/// implicit `NoWhenBranchMatchedException`, an `else throw`) it is back at the entry height, and a
-/// consumer that discards by the counter would leave the joined value behind.
+/// implicit `NoWhenBranchMatchedException`, an `else throw`, a safe call's throwing null path) it
+/// is back at the entry height, and a consumer that discards by the counter would leave the joined
+/// value behind.
 fn land_joined_value(is_stmt: bool, entry_height: u16, result_ty: Ty, code: &mut CodeBuilder) {
     if !is_stmt && !code.is_dead() {
         code.set_stack(entry_height + slot_words(result_ty));
@@ -193,6 +194,12 @@ impl Emitter<'_> {
         code.set_stack(emission.entry_height);
         let _ = emit_arm(self, null_result, selector_diverges, code);
         self.bind(emission.end, code);
+        land_joined_value(
+            emission.is_stmt,
+            emission.entry_height,
+            emission.result_ty,
+            code,
+        );
     }
 }
 
