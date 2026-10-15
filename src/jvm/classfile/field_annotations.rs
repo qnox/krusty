@@ -21,18 +21,26 @@ impl ClassWriter {
         if !self.nullability_annotations {
             return;
         }
-        let name = self.cp.utf8(name);
-        let desc = self.cp.utf8(desc);
+        // Looking for a field that has not reached the table must not itself change the pool. A
+        // late field carries this annotation into its own field-table visit instead.
+        let Some(name) = self.cp.lookup_utf8(name) else {
+            return;
+        };
+        let Some(desc) = self.cp.lookup_utf8(desc) else {
+            return;
+        };
+        let Some(index) = self
+            .fields
+            .iter()
+            .position(|field| field.name == name && field.desc == desc)
+        else {
+            return;
+        };
         let annotation_type = self.cp.utf8(ann_type);
         let annotation = vec![(annotation_type >> 8) as u8, annotation_type as u8, 0, 0];
-        if let Some(field) = self
-            .fields
-            .iter_mut()
-            .find(|field| field.name == name && field.desc == desc)
-        {
-            if !field.invisible_anns.contains(&annotation) {
-                field.invisible_anns.push(annotation);
-            }
+        let field = &mut self.fields[index];
+        if !field.invisible_anns.contains(&annotation) {
+            field.invisible_anns.push(annotation);
         }
     }
 }

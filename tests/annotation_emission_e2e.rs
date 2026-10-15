@@ -198,6 +198,7 @@ fn compile_without_class_metadata(name: &str, file: &str, src: &str, class: &str
     fs::write(&source, src).expect("write no-metadata annotation fixture");
     let result = std::process::Command::new(common::krusty_binary())
         .env("KRUSTY_NO_CLASS_METADATA", "1")
+        .arg("-no-reflect")
         .args(["-d", output.to_str().expect("UTF-8 output path")])
         .arg(&source)
         .output()
@@ -1561,6 +1562,45 @@ fn enum_annotations_survive_disabled_kotlin_metadata() {
     assert!(
         !annotations.contains("kotlin.Metadata"),
         "metadata diagnostic switch was ignored:\n{annotations}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The field-table visit still precedes a class's declared annotations when the diagnostic
+/// metadata switch removes the later `@Metadata` visit that would otherwise realize late fields.
+#[test]
+fn class_annotations_follow_deferred_fields_without_kotlin_metadata() {
+    let bytes = compile_without_class_metadata(
+        "class_annotation_pool_without_metadata",
+        "Holder.kt",
+        "package pool\n\
+         annotation class Marker\n\
+         @Marker class Holder {\n\
+         \x20   companion object {\n\
+         \x20       const val FIELD_TABLE_SENTINEL: Int = 47\n\
+         \x20   }\n\
+         }\n",
+        "pool/Holder",
+    );
+    let dir = common::scratch_dir().expect("allocate constant-pool fixture");
+    let class_file = dir.join("pool/Holder.class");
+    fs::create_dir_all(class_file.parent().expect("class output parent"))
+        .expect("create class output parent");
+    fs::write(&class_file, bytes).expect("write class fixture");
+    let pool = constant_pool(&dir, "pool/Holder");
+    let index = |entry: &str| {
+        pool.iter()
+            .position(|candidate| candidate == entry)
+            .unwrap_or_else(|| panic!("missing `{entry}` in constant pool:\n{pool:#?}"))
+    };
+    assert!(
+        index("Utf8               FIELD_TABLE_SENTINEL")
+            < index("Utf8               Lpool/Marker;"),
+        "the deferred field must intern before the class annotation:\n{pool:#?}"
+    );
+    assert!(
+        !pool.iter().any(|entry| entry.contains("Lkotlin/Metadata;")),
+        "metadata diagnostic switch was ignored:\n{pool:#?}"
     );
     let _ = fs::remove_dir_all(dir);
 }
