@@ -10710,8 +10710,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier declares it (`fun u(c: Class<out T>): Unit`). Known gaps: krusty checks abstract
   obligations only for a concrete class whose abstract superclass is emitted in another unit, so
   an interface-only or same-module obligation is still silent; Java-source parameter names are not
-  retained (`p0` where kotlinc shows `r`); and a Java wildcard is not retained yet
-  (`Class<Any!>!` for `Class<*>!`). Tests:
+  retained (`p0` where kotlinc shows `r`). Tests:
   `tests/override_candidate_rendering_e2e.rs`.
 - **A caller's type parameter in an extension receiver is a fixed type, not a wildcard.** Only the
   callee's own formals in its declared receiver bind at the call. In
@@ -10743,6 +10742,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `jvm::java_stub::tests::type_variables_erase_to_their_leftmost_bound` (javac's descriptors) and
   `tests/java_source_interop_e2e.rs::java_source_headers_erase_type_variables_to_their_bounds`
   (Kotlin first, then javac against krusty's output, then a run).
+- **A Java source wildcard keeps its variance in the header stub.** The erased descriptor still
+  omits generic arguments, but the JVM `Signature` attribute distinguishes `? extends T`,
+  `? super T`, and `?` with `+TT;`, `-TT;`, and `*`. The Java-source parser records that syntactic
+  kind beside the bound and the stub writer serializes it; later phases therefore consume the same
+  projected semantic type they read from a javac-built class instead of reconstructing Java
+  variance in common resolution. Kotlin overrides using `out`, `in`, and `*` then match, while the
+  opposite projections produce the two complete, ordered `NOTHING_TO_OVERRIDE` diagnostics. The
+  negative test pins separate exact ledgers because krusty still renders a nested Java type
+  variable as `T`, where kotlinc renders its platform flexibility as `T!`; wildcard kind, source
+  locations, order, and candidate signatures otherwise agree. Tests:
+  `jvm::java_stub::tests::java_source_wildcards_keep_their_signature_markers` and
+  `tests/java_abstract_override_e2e.rs`
+  (`kotlin_overrides_keep_java_source_wildcard_variance`,
+  `opposite_java_source_wildcard_variance_reports_exact_overrides`).
 - **A primary constructor may start on a later line, and its `return` maps there.** The grammar
   allows line breaks before a primary constructor (`class C` then `(val a: Int)` on the next line,
   also after a KDoc comment), so the parser skips them when `(` follows. kotlinc maps the

@@ -26,7 +26,7 @@ use super::classfile::{
 use crate::fx_hash::{HashMap, HashSet};
 use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx,
-    JavaConstant, Member, RawDecl, SrcType, STUB_DEFAULT,
+    JavaConstant, Member, RawDecl, SrcType, SrcWildcard, STUB_DEFAULT,
 };
 
 #[cfg(test)]
@@ -355,6 +355,16 @@ impl Resolver<'_> {
         }
         output.push('<');
         for argument in arguments {
+            // JVMS 4.7.9.1 writes variance before a bound and `*` for an unbounded wildcard.
+            match argument.wildcard {
+                Some(SrcWildcard::Unbounded) => {
+                    output.push('*');
+                    continue;
+                }
+                Some(SrcWildcard::Extends) => output.push('+'),
+                Some(SrcWildcard::Super) => output.push('-'),
+                None => {}
+            }
             output.push_str(&self.sig(argument, tparams)?);
         }
         output.push('>');
@@ -919,6 +929,31 @@ mod tests {
         assert_eq!(
             method.signature.as_deref(),
             Some("(Ljava/lang/String;)LOuter<TTO;>.Inner<TTI;>;")
+        );
+    }
+
+    #[test]
+    fn java_source_wildcards_keep_their_signature_markers() {
+        let out = stubs(
+            "interface Box<T> {}\n\
+             interface WildcardContract<T> {\n\
+             \u{20} void mix(Box<? extends T> upper, Box<? super T> lower, Box<?> star);\n\
+             }",
+            &["java/lang/Object"],
+        )
+        .expect("wildcard stub");
+        let contract = out
+            .iter()
+            .find(|(name, _)| name == "WildcardContract")
+            .map(|(_, bytes)| parse_class(bytes).expect("parse wildcard contract"))
+            .expect("WildcardContract stub");
+        let method = contract
+            .method("mix", "(LBox;LBox;LBox;)V")
+            .expect("erased wildcard method");
+
+        assert_eq!(
+            method.signature.as_deref(),
+            Some("(LBox<+TT;>;LBox<-TT;>;LBox<*>;)V")
         );
     }
 
