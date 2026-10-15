@@ -14,6 +14,12 @@
 //! spells a lambda among them as the bare number: `one$lambda$0$0`, `one$lambda$0$lf$1`. A local
 //! function does not: a lambda in `loc` takes the enclosing count, `one$loc$lambda$2`.
 //!
+//! A suspend lambda is no lifted method but a class of its own, whose `invokeSuspend` its body
+//! becomes before kotlinc lifts anything out of it. What it declares is lifted into that class and
+//! named after `invokeSuspend`, counted afresh: `invokeSuspend$lambda$0`, `invokeSuspend$local`,
+//! `invokeSuspend$lambda$0$0`. Those names hold only once the lambda is realized as its class, so
+//! they are kept apart ([`SuspendLambdaScopedNames`]) until [`realize`] knows that.
+//!
 //! kotlinc renames a function whose signature mentions a value class before it lifts anything out
 //! of it, so its JVM name is the outermost segment: `lamP_txdesME$lambda$0` in `lamP-txdesME`,
 //! `m_impl$lambda$0` in a value-class member, `constructor_impl$lambda$0` in a value class's `init`
@@ -23,13 +29,31 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrEnclosure, IrFile, IrLiftingRoot, IrLiftingSequence};
 
+/// The lifted names of the callables a suspend lambda declares, each with that lambda's function:
+/// the names its class gives them, which apply only when the lambda is realized as that class.
+#[derive(Default)]
+pub(crate) struct SuspendLambdaScopedNames {
+    names: HashMap<crate::ir::FunId, (crate::ir::FunId, String)>,
+}
+
 /// Number every lifting sequence of the file and record kotlinc's lifted name of each function
-/// lowered from a lambda or local function. A callable inside one that is not lifted (the body of a
-/// suspend lambda) gets none.
+/// lowered from a lambda or local function. A callable inside a suspend lambda, which is not
+/// lifted, is named within that lambda's class and returned apart.
 pub(crate) fn number(
     ir: &mut IrFile,
     helper_access: &super::local_delegate_accessors::HelperAccess,
-) {
+) -> SuspendLambdaScopedNames {
+    // The suspend lambdas: lambdas that take no place among the lifted callables, by the function
+    // each one is.
+    let class_scopes = ir
+        .lifted_functions
+        .iter()
+        .filter_map(|(&function, (sequence, site))| {
+            let step = site.path.last()?;
+            (step.kind == crate::lifting_provenance::LiftingCallableKind::Lambda && !site.lifted)
+                .then_some(((sequence, step.position), function))
+        })
+        .collect::<HashMap<_, _>>();
     let inline_delegate_sites = ir
         .lifted_functions
         .iter()
@@ -69,7 +93,11 @@ pub(crate) fn number(
                     let inline_delegate = entry.kind
                         == crate::lifting_provenance::LiftingCallableKind::LocalDelegatedPropertyAccessor
                         && inline_delegate_sites.contains(&(sequence, position));
-                    unnamed_segment(entry.scope, inline_delegate, next)
+                    // A suspend lambda's class numbers its callables as a declaration does.
+                    let scope = entry
+                        .scope
+                        .filter(|&scope| !class_scopes.contains_key(&(sequence, scope)));
+                    unnamed_segment(scope, inline_delegate, next)
                 }
                 crate::lifting_provenance::LiftingCallableKind::LocalFunction => {
                     let name = entry
@@ -86,40 +114,78 @@ pub(crate) fn number(
             segments.insert((sequence, position), segment);
         }
     }
-    let names = ir
-        .lifted_functions
-        .iter()
-        .filter_map(|(&function, (sequence, site))| {
-            let (mut name, start) = match helper_access.lambda_path_start(function) {
-                Some(start) => ("invoke".to_owned(), start),
-                None => (
-                    site.path
-                        .first()
-                        .and_then(|step| containers.get(&(sequence, step.position)))
-                        .cloned()
-                        .unwrap_or_else(|| segment_spelling(&site.container)),
-                    0,
-                ),
+    let mut names = HashMap::default();
+    let mut scoped = SuspendLambdaScopedNames::default();
+    for (&function, (sequence, site)) in &ir.lifted_functions {
+        let enclosing = site.path.split_last().map(|(_, enclosing)| enclosing);
+        let suspend_lambda = enclosing.and_then(|enclosing| {
+            enclosing
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, step)| {
+                    let lambda = class_scopes.get(&(sequence, step.position))?;
+                    Some((index, *lambda))
+                })
+        });
+        let (mut name, start) = match (suspend_lambda, helper_access.lambda_path_start(function)) {
+            (Some((index, _)), _) => ("invokeSuspend".to_owned(), index + 1),
+            (None, Some(start)) => ("invoke".to_owned(), start),
+            (None, None) => (
+                site.path
+                    .first()
+                    .and_then(|step| containers.get(&(sequence, step.position)))
+                    .cloned()
+                    .unwrap_or_else(|| segment_spelling(&site.container)),
+                0,
+            ),
+        };
+        let spelled = site.path[start..].iter().all(|step| {
+            let Some(segment) = segments.get(&(sequence, step.position)) else {
+                return false;
             };
-            for step in &site.path[start..] {
-                name.push('$');
-                name.push_str(segments.get(&(sequence, step.position))?);
+            name.push('$');
+            name.push_str(segment);
+            true
+        });
+        match (spelled, suspend_lambda) {
+            (false, _) => {}
+            (true, Some((_, lambda))) => {
+                scoped.names.insert(function, (lambda, name));
             }
-            Some((function, name))
-        })
-        .collect();
+            (true, None) => {
+                names.insert(function, name);
+            }
+        }
+    }
     ir.lifted_names = names;
+    scoped
 }
 
 /// Rename every function [`number`] named to its lifted name, once the functions are placed. One
 /// whose lifted name and descriptor another method of the same class already has keeps its name:
 /// kotlinc's names are distinct within the class it places them in, and a callable placed
-/// elsewhere must not collide.
+/// elsewhere must not collide. A callable a suspend lambda declares takes the name its class gives
+/// it when it is a method of that class, the lambda realized as kotlinc's `SuspendLambda`.
 pub(crate) fn realize(
     ir: &mut IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
+    scoped: &SuspendLambdaScopedNames,
+    machines: &crate::jvm::suspend::EmitTimeMachines,
 ) {
     let mut renames = ir.lifted_names.clone();
+    for (&function, (lambda, name)) in &scoped.names {
+        let in_lambda_class = ir.classes.iter().any(|class| {
+            class.methods.contains(&function)
+                && machines
+                    .suspend_lambda(class.fq_name_id())
+                    .is_some_and(|realized| realized.invoke_suspend == *lambda)
+        });
+        if in_lambda_class {
+            ir.lifted_names.insert(function, name.clone());
+            renames.insert(function, name.clone());
+        }
+    }
     let owners = ir
         .classes
         .iter()

@@ -200,6 +200,16 @@ Known gaps, both byte differences in the function's own method (the continuation
   whose nested lambda stays a plain lambda (too wide for a numbered function type) still keeps
   its lifted function, and that plain lambda's class takes the naming walk's name where it
   nests (`Kt$box$1$1`), never a sibling's.
+* A lambda whose body declares lambdas or local functions is taken too. kotlinc lifts them out of
+  `invokeSuspend` into the class: private statics named `invokeSuspend$lambda$N` and
+  `invokeSuspend$<name>`, numbered within the class, listed after the typed `invoke` and before the
+  bridge in kotlinc's lifting order. When the class is declared, every lambda and local function
+  lifted out of this lambda's body (and not out of a suspend lambda nested in it) moves into it
+  (`suspend_lambda::adopt_lifted_callables`); `lifted_names` names them once the class is known to
+  be realized. A lambda whose body builds a suspend lambda that itself keeps the lifted-function
+  path keeps it too, since the nested one's static must stay reachable from the facade. An inline suspend callee spliced into the body reads the lambda's continuation, `this`
+  cast to `Continuation`, where it loads it, as kotlinc's inliner does, instead of storing it ahead
+  of the suspension (`tests/suspend_lambda_nested_declarations_e2e.rs`).
 * The lambda is its own continuation: `coroutineContext` in its body is `this.getContext()`, and
   a `Unit` parameter (a `suspend Unit.() -> Unit` receiver) is the `Unit` object in `invoke`.
 * A receiver lambda names its receiver local `$this$<label>` after kotlinc's label of the literal
