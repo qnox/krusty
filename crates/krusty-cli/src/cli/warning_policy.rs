@@ -24,6 +24,13 @@ impl WarningName {
         if let Some(name) = krusty::diag::CompilerWarningName::parse(name) {
             let available = match name {
                 krusty::diag::CompilerWarningName::Deprecation => true,
+                krusty::diag::CompilerWarningName::InapplicableOperatorModifier => {
+                    FeatureTable::for_version(release).is_some_and(|table| {
+                        table
+                            .get("ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects")
+                            .is_some()
+                    })
+                }
                 krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters => {
                     FeatureTable::for_version(release).is_some_and(|table| {
                         table
@@ -251,6 +258,50 @@ mod tests {
                 current.compiler_disposition(Some(
                     CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
                 )),
+                expected_disposition,
+                "{level}"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_modifier_warning_name_follows_the_selected_release_catalog() {
+        const NAME: &str = "INAPPLICABLE_OPERATOR_MODIFIER_WARNING";
+        for release in [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10] {
+            assert_eq!(
+                WarningPolicy::default().configure(&format!("{NAME}:warning"), release),
+                Err(format!("warning with name \"{NAME}\" does not exist")),
+                "{release}"
+            );
+        }
+        for (level, expected_level, expected_disposition) in [
+            (
+                "disabled",
+                WarningLevel::Disabled,
+                WarningDisposition::Disabled,
+            ),
+            (
+                "warning",
+                WarningLevel::Warning,
+                WarningDisposition::Warning,
+            ),
+            ("error", WarningLevel::Error, WarningDisposition::Error),
+        ] {
+            let mut current = WarningPolicy::default();
+            assert_eq!(
+                current.configure(&format!("{NAME}:{level}"), KotlinVersion::V2_4_20),
+                Ok(())
+            );
+            assert_eq!(
+                current.configured_level(WarningName::Compiler(
+                    CompilerWarningName::InapplicableOperatorModifier,
+                )),
+                Some(expected_level),
+                "{level}"
+            );
+            assert_eq!(
+                current
+                    .compiler_disposition(Some(CompilerWarningName::InapplicableOperatorModifier,)),
                 expected_disposition,
                 "{level}"
             );

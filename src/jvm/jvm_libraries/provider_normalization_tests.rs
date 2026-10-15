@@ -395,6 +395,50 @@ fn concrete_java_collection_keeps_its_kotlin_interface_faces() {
 }
 
 #[test]
+fn mapped_any_equals_publishes_its_semantic_role() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib, jdk],
+    )));
+    let selected = crate::symbol_resolver::members_in_hierarchy(
+        &libraries,
+        Ty::obj_name(crate::types::wk::any()),
+        "equals",
+    );
+    let overloads = match selected {
+        crate::libraries::Callables::Functions(functions)
+        | crate::libraries::Callables::Both { functions, .. } => functions.overloads,
+        crate::libraries::Callables::None | crate::libraries::Callables::Properties(_) => {
+            Vec::new()
+        }
+    };
+    assert_eq!(overloads.len(), 1);
+    let equals = &overloads[0];
+    assert_eq!(equals.callable.owner, type_name("java/lang/Object"));
+    assert_eq!(
+        equals.callable.declaration_owner,
+        Some(crate::types::SemanticCallableOwner::Classifier(
+            crate::types::wk::any()
+        ))
+    );
+    assert_eq!(
+        equals.semantic_params().as_ref(),
+        &[Ty::nullable(Ty::obj_name(crate::types::wk::any()))]
+    );
+    assert_eq!(equals.callable.ret, Ty::Boolean);
+    assert!(equals.callable.external_identity.is_some());
+    assert_eq!(
+        equals.callable.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinAnyEquals)
+    );
+}
+
+#[test]
 fn comparable_compare_to_publishes_its_semantic_role() {
     let (Some(stdlib), Some(jdk)) = (
         crate::toolchain::stdlib_jar(),

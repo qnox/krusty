@@ -12,6 +12,24 @@ pub fn front_end_diagnostic_records_for(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&Path>,
 ) -> Vec<krusty::diag::Diagnostic> {
+    front_end_diagnostic_records_with_features_for(
+        target,
+        src,
+        cp_jars,
+        jdk_modules,
+        &krusty::features::LangFeatures::new(),
+    )
+}
+
+/// Complete front-end diagnostic records under an explicitly selected target and release-owned
+/// language feature set.
+pub fn front_end_diagnostic_records_with_features_for(
+    target: krusty::compilation_target::CompilationTarget,
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+    features: &krusty::features::LangFeatures,
+) -> Vec<krusty::diag::Diagnostic> {
     let cp = common::cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
@@ -21,7 +39,7 @@ pub fn front_end_diagnostic_records_for(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         common::with_native_plugins(target, platform),
-        &krusty::features::LangFeatures::new(),
+        features,
         |_, _| {},
         &mut diags,
     );

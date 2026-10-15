@@ -635,6 +635,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             annotations: Vec::new(),
             external_default_provider: None,
             external_property_identity: None,
+            compiler_core_declaration: None,
             declaration_owner: None,
             owner: TypeName::ROOT,
             name: name.to_owned(),

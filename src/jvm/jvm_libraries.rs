@@ -1559,20 +1559,19 @@ impl JvmLibraries {
                     dispatch_parameter || constructor_enclosing_prefix > 0,
                     continuation_parameter,
                 );
+                member.semantic_role = crate::libraries::builtin_declaration::semantic_call_role(
+                    crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                        owner: super::jvm_class_map::to_kotlin_type_name(internal_name),
+                        name: &member.name,
+                        params: &member.params,
+                        ret: member.ret,
+                        is_property: false,
+                        is_operator: declaration.is_some_and(|value| value.is_operator()),
+                        is_infix: declaration.is_some_and(|value| value.is_infix()),
+                        annotations: &member.annotations,
+                    },
+                );
                 if let Some(declaration) = declaration {
-                    member.semantic_role =
-                        crate::libraries::builtin_declaration::semantic_call_role(
-                            crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
-                                owner: internal_name,
-                                name: &member.name,
-                                params: &member.params,
-                                ret: member.ret,
-                                is_property: false,
-                                is_operator: declaration.is_operator(),
-                                is_infix: declaration.is_infix(),
-                                annotations: &member.annotations,
-                            },
-                        );
                     let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                         owner: internal_name,
                         name: &member.name,
