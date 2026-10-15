@@ -61,7 +61,72 @@ pub(super) fn derive_bridges(
         ir.classes[cid].bridges.extend(inherited);
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
+    finalize_special_collection_bridges(ir, classpath);
     Ok(())
+}
+
+/// A type-safe collection bridge is kotlinc's `BRIDGE_SPECIAL`: the erased root signature is
+/// final, so a subclass inherits it rather than publishing the same JVM method again. Bridge
+/// identity here is the JVM's `(name, descriptor)`, not the semantic `Ty` values that produced it.
+fn finalize_special_collection_bridges(
+    ir: &mut IrFile,
+    classpath: &crate::jvm::classpath::Classpath,
+) {
+    for class in &mut ir.classes {
+        for bridge in &mut class.bridges {
+            // A source interface's type-safe bridge stays abstract/overridable. The JVM forbids
+            // `final` interface methods, so only a class-owned bridge takes BRIDGE_SPECIAL.
+            if !class.is_interface
+                && bridge.kind == BridgeKind::Function
+                && bridge.collection_barrier.is_some()
+            {
+                bridge.special = true;
+            }
+        }
+    }
+
+    let module_specials = ir
+        .classes
+        .iter()
+        .map(|class| {
+            let methods = class
+                .bridges
+                .iter()
+                .filter(|bridge| bridge.special)
+                .map(|bridge| {
+                    (
+                        bridge.name.clone(),
+                        method_descriptor(&bridge.erased_params, bridge.erased_ret),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (class.fq_name, methods)
+        })
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+
+    for cid in 0..ir.classes.len() {
+        let mut inherited = crate::fx_hash::HashSet::default();
+        let mut next = ir.classes[cid].superclass;
+        while let Some(superclass) = ir.classes.iter().find(|class| class.fq_name == next) {
+            if let Some(methods) = module_specials.get(&superclass.fq_name) {
+                inherited.extend(methods.iter().cloned());
+            }
+            next = superclass.superclass;
+        }
+        let keep = ir.classes[cid]
+            .bridges
+            .iter()
+            .map(|bridge| {
+                let descriptor = method_descriptor(&bridge.erased_params, bridge.erased_ret);
+                !inherited.contains(&(bridge.name.clone(), descriptor.clone()))
+                    && !inherits_final_special_bridge(ir, cid, classpath, &bridge.name, &descriptor)
+            })
+            .collect::<Vec<_>>();
+        let mut keep = keep.into_iter();
+        ir.classes[cid]
+            .bridges
+            .retain(|_| keep.next().expect("one verdict per bridge"));
+    }
 }
 
 /// kotlinc's bridge lowering walks the class's declarations in order and adds each one's bridges
@@ -207,10 +272,10 @@ fn property_accessor(
     }
 }
 
-fn property_member<'a>(
-    ir: &'a IrFile,
+fn property_member(
+    ir: &IrFile,
     property: crate::fir::PropertyId,
-) -> Option<&'a crate::ir::IrProperty> {
+) -> Option<&crate::ir::IrProperty> {
     let checked = ir.checked_properties.get(&property)?;
     let class = ir.classes.get(checked.class? as usize)?;
     class

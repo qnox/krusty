@@ -3514,7 +3514,10 @@ fn emit_interface_class(
             }
         }
     }
-    // The synthetic accessors of private statics come first, then the `access$…$jd` bridges
+    // A collection special bridge follows the declared member it adapts and precedes the
+    // compatibility access bridge for that member (`size()` before `access$getSize$jd`).
+    bridge_emission::emit_bridges(ir, c, &mut cw, env);
+    // The synthetic accessors of private statics come next, then the `access$…$jd` bridges
     // (kotlinc's order): declared bodies first, then the republished surface for inherited
     // defaults this interface does not redeclare.
     static_accessors::emit(
