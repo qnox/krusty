@@ -420,15 +420,20 @@ impl Checker<'_> {
         properties: &[ScopedProperty],
         source: crate::libraries::SourceMember,
     ) {
-        if self.signature_defaults_only
-            || self.capture_scope.is_some()
-            || self.active_declarations.is_none()
-        {
+        if self.active_declarations.is_none() {
             return;
         }
         let Some(declaration) = self.active_source_member_declaration(source) else {
             return;
         };
+        if self.signature_defaults_only || self.capture_scope.is_some() {
+            if let Some((_, candidate)) =
+                self.body_local_method_candidate(scope, owner, function, source, declaration)
+            {
+                self.publish_body_local_operator_relation(declaration, &candidate);
+            }
+            return;
+        }
         if self.has_finalized_signature(Some(declaration)) {
             self.publish_finalized_body_local_method_candidate(owner, function, declaration);
             return;
@@ -450,6 +455,40 @@ impl Checker<'_> {
                 this_extension_receiver: self.this_extension_receiver,
             },
         );
+    }
+
+    fn publish_body_local_operator_relation(
+        &mut self,
+        declaration: crate::fir::DeclarationId,
+        candidate: &crate::libraries::FunctionInfo,
+    ) {
+        let selected = {
+            let Some(index) = self.resolved_index else {
+                return;
+            };
+            let source = self.fed_source();
+            crate::resolve::operator_override_relations::select_candidate(
+                index,
+                &source,
+                declaration,
+                candidate,
+            )
+        };
+        let Some(selected) = selected else {
+            return;
+        };
+        match self.checked_operator_equals_relations.entry(declaration) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(selected);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                assert_eq!(
+                    *entry.get(),
+                    selected,
+                    "one active local declaration must retain one exact Any.equals target"
+                );
+            }
+        }
     }
 
     /// Expose an already-finalized local method on the active local-class provider boundary. The
@@ -481,6 +520,7 @@ impl Checker<'_> {
             self.body_local_default_providers
                 .insert(declaration, provider);
         }
+        self.publish_body_local_operator_relation(declaration, &candidate);
         let candidates = self
             .checked_local_methods
             .entry(owner_name)
@@ -520,6 +560,7 @@ impl Checker<'_> {
             self.body_local_default_providers
                 .insert(declaration, provider);
         }
+        self.publish_body_local_operator_relation(declaration, &candidate);
         let candidates = self
             .checked_local_methods
             .entry(owner_name)

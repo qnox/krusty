@@ -2234,14 +2234,25 @@ fn publish_checked_local_signatures_selected(
             source.raw(),
             &local_classifiers,
         );
-        crate::resolve::function_type_parameters::publish_local_function_type_parameters(
-            index,
-            platform,
-            source.raw(),
-            &local_classifiers,
-        );
-        Ok(())
-    } else {
+        if let Err(declaration) =
+            crate::resolve::operator_override_relations::publish_checked_locals(
+                index,
+                &info.checked_operator_equals_relations,
+            )
+        {
+            failed.push(declaration);
+        }
+        if failed.is_empty() {
+            crate::resolve::function_type_parameters::publish_local_function_type_parameters(
+                index,
+                platform,
+                source.raw(),
+                &local_classifiers,
+            );
+            return Ok(());
+        }
+    }
+    {
         failed.sort_by_key(|declaration| declaration.raw());
         failed.dedup();
         crate::trace_compiler!(

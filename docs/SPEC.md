@@ -13222,6 +13222,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `value class V(val w: W<V>)` with `value class W<T>(val x: T)` is accepted. Common checking
     consumes the target-aware inline/full selection recorded during signature collection; it does
     not reinterpret `@JvmInline`. (`tests/value_class_parameters_e2e.rs`.)
+  - `ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: `operator fun equals` must be a member
+    whose resolved overridden-symbol relation reaches `kotlin.Any.equals`, reported at the
+    `operator` keyword. That relation retains the exact selected callable identity, owner and
+    semantic role separately from backend-valid override edges because
+    written-`override`, suspend and result-type failures are diagnosed independently. A
+    non-overriding declaration in an enum entry or anonymous object is
+    `INAPPLICABLE_OPERATOR_MODIFIER_WARNING` until the feature makes it the plain error. The
+    independent `CustomEqualsInValueClasses` feature also admits typed `equals(Self)` only when
+    the target-selected declaration is an inline value class, not a full/boxed value class.
+    (`tests/operator_equals_declarations_e2e.rs`.)
 - **Pre-release output.** As kotlinc's `LanguageVersionSettings.isPreRelease`, a compilation is
   pre-release when its language version is not stable in the release or any explicitly set feature (an
   `@Enables` argument, `-progressive`, `-XXLanguage`, or a `// LANGUAGE:` directive) is enabled and

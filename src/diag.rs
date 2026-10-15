@@ -28,6 +28,7 @@ pub enum Severity {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum CompilerWarningName {
     Deprecation,
+    InapplicableOperatorModifier,
     ValueClassCannotBeRecursiveViaTypeParameters,
 }
 
@@ -35,6 +36,7 @@ impl CompilerWarningName {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Deprecation => "DEPRECATION",
+            Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
             Self::ValueClassCannotBeRecursiveViaTypeParameters => {
                 "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING"
             }
@@ -44,11 +46,31 @@ impl CompilerWarningName {
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "DEPRECATION" => Self::Deprecation,
+            "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
             "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING" => {
                 Self::ValueClassCannotBeRecursiveViaTypeParameters
             }
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod warning_name_tests {
+    use super::CompilerWarningName;
+
+    #[test]
+    fn every_compiler_warning_name_round_trips_through_its_wire_spelling() {
+        let names = [
+            CompilerWarningName::Deprecation,
+            CompilerWarningName::InapplicableOperatorModifier,
+            CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+        ];
+        assert_eq!(
+            names.map(|name| CompilerWarningName::parse(name.as_str())),
+            names.map(Some)
+        );
+        assert_eq!(CompilerWarningName::parse("UNKNOWN_WARNING"), None);
     }
 }
 

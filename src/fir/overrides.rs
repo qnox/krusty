@@ -9,6 +9,8 @@ use super::{
     CallableId, DeclarationId, DeclarationKind, ExternalCallableId, PropertyId,
     ResolvedModuleIndex, ResolvedTy,
 };
+use crate::fx_hash::HashMap;
+use crate::libraries::CompilerCoreDeclaration;
 use crate::types::TypeName;
 
 /// Source identity or semantic compiler-generated role of a callable parameter. Target backends
@@ -145,6 +147,81 @@ pub enum ResolvedFunctionOverrideTarget {
     External(ExternalCallableId),
 }
 
+/// Exact overridden declaration selected for the `operator fun equals` convention check.
+///
+/// This relation is intentionally weaker than a backend-valid override edge: FIR selects the
+/// overridden symbol before separately diagnosing a missing `override`, suspend mismatch or
+/// incompatible result type. The selected identity and owner remain explicit so later checks do
+/// not reconstruct the relation from the source declaration's spelling or signature.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedOperatorEqualsOverride {
+    pub overridden: ResolvedOperatorEqualsTarget,
+    pub overridden_owner: TypeName,
+    pub overridden_semantic_role: Option<crate::types::SemanticCallRole>,
+    pub overridden_result: ResolvedTy,
+    pub overridden_suspend: bool,
+}
+
+/// Stable identity of the `Any.equals` declaration selected by the convention relation.
+///
+/// A target dependency assigns the ordinary opaque callable identity. The compiler-owned core
+/// declaration exists even when no stdlib artifact supplies a physical `kotlin.Any` declaration;
+/// its provider-normalized semantic role is therefore its exact declaration identity, not a
+/// spelling-derived substitute for one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolvedOperatorEqualsTarget {
+    Callable(ResolvedFunctionOverrideTarget),
+    CompilerCore(CompilerCoreDeclaration),
+}
+
+/// Frontend relations selected while declaration providers and finalized signatures coexist.
+/// These facts are weaker than backend-valid override plans and are consumed only by semantic
+/// declaration checks.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct OverrideRelations {
+    property: HashMap<DeclarationId, Box<[ResolvedPropertyOverride]>>,
+    function: HashMap<DeclarationId, Box<[ResolvedFunctionOverride]>>,
+    operator_equals: HashMap<DeclarationId, ResolvedOperatorEqualsOverride>,
+}
+
+impl OverrideRelations {
+    pub(super) fn is_empty(&self) -> bool {
+        self.property.is_empty() && self.function.is_empty() && self.operator_equals.is_empty()
+    }
+
+    pub(super) fn storage_bytes(&self) -> usize {
+        self.property.len()
+            * (std::mem::size_of::<DeclarationId>()
+                + std::mem::size_of::<Box<[ResolvedPropertyOverride]>>())
+            + self
+                .property
+                .values()
+                .map(|relations| relations.len() * std::mem::size_of::<ResolvedPropertyOverride>())
+                .sum::<usize>()
+            + self.function.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<Box<[ResolvedFunctionOverride]>>())
+            + self
+                .function
+                .values()
+                .map(|relations| {
+                    relations.len() * std::mem::size_of::<ResolvedFunctionOverride>()
+                        + relations
+                            .iter()
+                            .map(|edge| {
+                                (edge.declared_parameters.len()
+                                    + edge.applied_parameters.len()
+                                    + edge.implementation_parameters.len())
+                                    * std::mem::size_of::<ResolvedTy>()
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.operator_equals.len()
+                * std::mem::size_of::<(DeclarationId, ResolvedOperatorEqualsOverride)>()
+    }
+}
+
 /// One exact function override selected in Pass 1. All types are Kotlin semantic types; the
 /// declaration-side shape remains unapplied so each backend can perform its own erasure.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -202,15 +279,52 @@ pub struct ResolvedFunctionOverride {
 }
 
 impl ResolvedModuleIndex {
+    /// Exact overridden-symbol relation used for this source declaration's `equals` convention.
+    /// This is a frontend convention fact, not a backend override plan.
+    pub fn operator_equals_override(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<ResolvedOperatorEqualsOverride> {
+        self.override_relations
+            .operator_equals
+            .get(&declaration)
+            .copied()
+    }
+
+    pub(crate) fn publish_operator_equals_override(
+        &mut self,
+        declaration: DeclarationId,
+        selected: ResolvedOperatorEqualsOverride,
+    ) {
+        assert!(
+            self.declaration_header(declaration)
+                .is_some_and(|header| header.kind == DeclarationKind::Function),
+            "an operator equals relation belongs to a stable function declaration"
+        );
+        match self.override_relations.operator_equals.entry(declaration) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(selected);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                assert_eq!(
+                    *entry.get(),
+                    selected,
+                    "one source declaration must retain one exact Any.equals target"
+                );
+            }
+        }
+    }
+
     pub fn property_overrides(&self, classifier: DeclarationId) -> &[ResolvedPropertyOverride] {
-        self.property_overrides
+        self.override_relations
+            .property
             .get(&classifier)
             .map(Box::as_ref)
             .unwrap_or_default()
     }
 
     pub(crate) fn has_property_override_plan(&self, classifier: DeclarationId) -> bool {
-        self.property_overrides.contains_key(&classifier)
+        self.override_relations.property.contains_key(&classifier)
     }
 
     pub(crate) fn publish_property_overrides(
@@ -227,20 +341,24 @@ impl ResolvedModuleIndex {
         );
         let overrides = overrides.into_iter().collect::<Vec<_>>().into_boxed_slice();
         assert!(
-            self.property_overrides.insert(owner, overrides).is_none(),
+            self.override_relations
+                .property
+                .insert(owner, overrides)
+                .is_none(),
             "a source classifier or enum entry may publish property overrides only once"
         );
     }
 
     pub fn function_overrides(&self, classifier: DeclarationId) -> &[ResolvedFunctionOverride] {
-        self.function_overrides
+        self.override_relations
+            .function
             .get(&classifier)
             .map(Box::as_ref)
             .unwrap_or_default()
     }
 
     pub(crate) fn has_function_override_plan(&self, classifier: DeclarationId) -> bool {
-        self.function_overrides.contains_key(&classifier)
+        self.override_relations.function.contains_key(&classifier)
     }
 
     pub(crate) fn publish_function_overrides(
@@ -257,7 +375,10 @@ impl ResolvedModuleIndex {
         );
         let overrides = overrides.into_iter().collect::<Vec<_>>().into_boxed_slice();
         assert!(
-            self.function_overrides.insert(owner, overrides).is_none(),
+            self.override_relations
+                .function
+                .insert(owner, overrides)
+                .is_none(),
             "a source classifier or enum entry may publish function overrides only once"
         );
     }
