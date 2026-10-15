@@ -872,6 +872,8 @@ impl ClassWriter {
     /// attribute here, once, for every class kind. `@kotlin.Deprecated` on the classifier also
     /// stamps the zero-length JVM `Deprecated` attribute; its name interns after `SourceFile`.
     pub fn set_class_annotations(&mut self, annotations: &crate::ir::DeclarationAnnotations) {
+        // The field-table visit precedes the class-annotation window in kotlinc's writer.
+        self.intern_late_fields();
         if annotations.deprecated() {
             self.set_deprecated();
         }

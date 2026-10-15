@@ -3138,18 +3138,14 @@ fn emit_class(
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
         .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
-    // kotlinc visits a value class's generated field/method nullability before its class-level
-    // `@JvmInline`. Preserve that physical writer order without changing ordinary-class emission.
+    // A value class visits generated nullability before its class-level `@JvmInline`.
     let early_value_nullability =
         c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
     if early_value_nullability {
         attach_synth_nullability(ir, c, env.run, &mut cw);
+        cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     }
-    cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
-    // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
-    // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
-    // + @NotNull/@Nullable). NOTE: the constant-pool seeding (above) is still plain-class only, so a
-    // data class is not yet FULLY byte-identical (its pool order differs) — but the attributes match.
+    // Debug tables + nullability annotations follow a successfully computed `@Metadata` shape.
     if computed.is_some() && !is_coroutine_state_machine(c) {
         attach_synth_debug_tables(
             ir,
@@ -3170,6 +3166,9 @@ fn emit_class(
         if !early_value_nullability {
             attach_synth_nullability(ir, c, env.run, &mut cw);
         }
+    }
+    if !early_value_nullability {
+        cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     }
     if continuation_metadata.is_some() {
         let invoke_suspend = c
@@ -3583,9 +3582,6 @@ fn emit_interface_class(
         extra.push((holder, env.run.finish_class(di)));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
-    // A user annotation on an interface is emitted exactly as on a class — kotlinc writes it BEFORE the
-    // `@Metadata` entry, which is the order these queue in.
-    cw.set_class_annotations(&c.applied_annotations);
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
@@ -3603,6 +3599,8 @@ fn emit_interface_class(
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, env.run, &mut cw);
     }
+    // Class annotations follow all members and their debug/nullability attributes, before metadata.
+    cw.set_class_annotations(&c.applied_annotations);
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
     }
@@ -4393,9 +4391,6 @@ fn emit_enum_class(
             cw.set_method_lines("<clinit>", "()V", &clinit_lines);
         }
     }
-    // Deferred fields realize before class annotations: their generic signatures belong to the
-    // field-visit interning window even when Kotlin metadata emission is disabled.
-    cw.realize_late_fields();
     // A user annotation on an enum interns with the CLASS-ATTRIBUTE window, immediately before
     // `@Metadata` — kotlinc's order. It is independent of metadata emission: disabling Kotlin
     // metadata must not discard the class's declared annotations.
