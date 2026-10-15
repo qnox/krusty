@@ -117,14 +117,6 @@ impl ClassWriter {
         self.late_fields = trailing;
     }
 
-    /// Realize the deferred fields NOW rather than at `finish`. An enum's leading fields carry a
-    /// generic `Signature`, and kotlinc interns that string BEFORE the class's own annotation
-    /// descriptors — so the emitter forces the field visit before queuing those. Draining, so a
-    /// second call (from `finish`) is a no-op.
-    pub(in crate::jvm) fn realize_late_fields(&mut self) {
-        self.intern_late_fields();
-    }
-
     pub(super) fn intern_late_fields(&mut self) {
         let mut lead_at = 0usize;
         // Fields intern in table order, so the leading ones go first whenever they were declared.
